@@ -394,6 +394,8 @@ class SingBoxDriver(BaseCoreDriver):
     ) -> tuple[dict[str, Any] | None, UnsupportedRule | None]:
         m = rule.matcher
         native: dict[str, Any] = {}
+        if m.inbounds:
+            native["inbound"] = m.inbounds
         for src, dst in (
             ("domains", "domain"), ("domain_suffixes", "domain_suffix"),
             ("domain_keywords", "domain_keyword"), ("domain_regexes", "domain_regex"),
@@ -450,6 +452,24 @@ class SingBoxDriver(BaseCoreDriver):
                 reason="sing-box DNS overrides live in dns.rules, not route rules.",
             )
         return native, None
+
+    async def translate_routing_rules(
+        self, rules: list[RoutingRule], ctx: RouteContext
+    ) -> TranslatedRoute:
+        """Dry preview (no republish) used by the rule builder."""
+        native: list[dict[str, Any]] = []
+        applied: list[str] = []
+        unsupported: list[UnsupportedRule] = []
+        for rule in rules:
+            translated, gap = self._rule_to_native(rule, ctx)
+            if gap is not None:
+                unsupported.append(gap)
+            else:
+                native.append(translated)
+                applied.append(rule.name)
+        return TranslatedRoute(core_id=self.metadata.id, applied=applied,
+                               unsupported=unsupported,
+                               payload={"route": {"rules": native}})
 
     async def deploy_routing_rules(
         self, rules: list[RoutingRule], ctx: RouteContext

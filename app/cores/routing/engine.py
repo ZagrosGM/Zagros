@@ -53,6 +53,50 @@ class RoutingEngine:
         return sorted(active, key=lambda r: (r.priority, r.name))
 
     # ------------------------------------------------------------------ #
+    # dry preview (rule builder "Check coverage" — zero core mutations)
+    # ------------------------------------------------------------------ #
+    async def preview(
+        self,
+        rules: list[RoutingRule],
+        *,
+        core_ids: list[str] | None = None,
+        outbounds: list["Outbound"] | None = None,
+    ) -> RouteDeploymentReport:
+        """Translate the rule set per core WITHOUT applying anything.
+
+        Same report shape as :meth:`deploy` (per-core applied/unsupported
+        matrix), so the UI can show coverage before the operator commits.
+        """
+        normalized = self.validate(rules)
+        ctx = RouteContext(
+            available_outbounds=[o.name for o in (outbounds or [])],
+        )
+        targets = core_ids if core_ids is not None else self._cores.list_cores()
+
+        results: dict[str, TranslatedRoute] = {}
+        for core_id in targets:
+            try:
+                driver = self._cores.get(core_id)
+            except CoreNotFoundError:
+                continue
+            if not driver.supports(Capability.ROUTING):
+                results[core_id] = TranslatedRoute(
+                    core_id=core_id,
+                    unsupported=[
+                        UnsupportedRule(
+                            rule=r.name,
+                            reason=f"Core '{core_id}' has no routing support.",
+                        )
+                        for r in normalized
+                    ],
+                    notes=["routing rules are ignored by this core by design"],
+                )
+                continue
+            results[core_id] = await driver.translate_routing_rules(normalized, ctx)
+
+        return RouteDeploymentReport(results=results)
+
+    # ------------------------------------------------------------------ #
     # deployment
     # ------------------------------------------------------------------ #
     async def deploy(

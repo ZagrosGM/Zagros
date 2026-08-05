@@ -446,6 +446,8 @@ class XrayDriver(BaseCoreDriver):
     ) -> tuple[dict | None, UnsupportedRule | None]:
         m = rule.matcher
         native: dict[str, Any] = {"type": "field"}
+        if m.inbounds:
+            native["inboundTag"] = m.inbounds
         domains: list[str] = []
         domains += [f"full:{d}" for d in m.domains]
         domains += [f"domain:{d}" for d in m.domain_suffixes]
@@ -494,6 +496,25 @@ class XrayDriver(BaseCoreDriver):
             return None, UnsupportedRule(rule=rule.name, fields=["action"],
                                          reason="xray DNS overrides live in the dns module, not route rules.")
         return native, None
+
+    async def translate_routing_rules(
+        self, rules: list[RoutingRule], ctx: RouteContext
+    ) -> TranslatedRoute:
+        """Dry preview (no backend writes) used by the rule builder."""
+        native_rules: list[dict] = []
+        applied: list[str] = []
+        unsupported: list[UnsupportedRule] = []
+        for rule in rules:
+            native, gap = self._rule_to_native(rule, ctx)
+            if gap is not None:
+                unsupported.append(gap)
+            else:
+                native_rules.append(native)
+                applied.append(rule.name)
+        return TranslatedRoute(
+            core_id=self.metadata.id, applied=applied, unsupported=unsupported,
+            payload={"routing": {"rules": native_rules, "domainStrategy": "IPIfNonMatch"}},
+        )
 
     async def deploy_routing_rules(
         self, rules: list[RoutingRule], ctx: RouteContext

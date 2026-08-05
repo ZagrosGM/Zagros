@@ -12,6 +12,9 @@ FROM $NODE_IMAGE AS dashboard
 WORKDIR /code
 
 COPY app/dashboard/package.json app/dashboard/package-lock.json ./
+# package.json runs `chakra-cli tokens ./chakra.config.ts` as a postinstall
+# hook, so the theme config must exist *before* npm ci.
+COPY app/dashboard/chakra.config.ts ./chakra.config.ts
 RUN npm ci --no-audit --no-fund
 
 COPY app/dashboard ./

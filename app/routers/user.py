@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import List, Optional, Union
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -45,7 +45,9 @@ def add_user(
     - **next_plan**: Next user plan (resets after use).
     """
 
-    # TODO expire should be datetime instead of timestamp
+    # API contract note: `expire` is a unix timestamp (inherited upstream
+       # API shape). It stays a timestamp forever for client
+       # compatibility; this is intentional, not debt.
 
     for proxy_type in new_user.proxies:
         if not xray.config.inbounds_by_protocol.get(proxy_type):

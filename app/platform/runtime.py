@@ -72,7 +72,7 @@ class PlatformRuntime:
         self.studio_store = SQLStudioStore(self.session_factory)
 
         # multicore
-        self.core_manager = CoreManager(state_store=self.core_state)
+        self.core_manager = CoreManager(store=self.core_state)
         discover_builtin()
         self.routing_engine = RoutingEngine(self.core_manager)
         self.outbound_manager = OutboundManager(self.core_manager)

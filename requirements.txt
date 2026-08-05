@@ -6,7 +6,8 @@ certifi; python_version > "3.9"
 commentjson
 cryptography
 fastapi
-GRPC>=1.76.0
+grpcio>=1.60
+protobuf>=4.25
 itsdangerous
 Jinja2
 jose
@@ -18,7 +19,7 @@ python-dotenv
 python-multipart
 python-telegram-bot
 requests
-SQLAlchemy>=2.0<3
+SQLAlchemy>=2.0,<3
 telebot
 uvicorn[standard]
 watchfiles
@@ -29,10 +30,16 @@ PySocks
 qrcode
 python-jose
 passlib
+bcrypt>=4.2,<5  # passlib 1.7.x hard-fails with bcrypt 5.x (72-byte probe); 4.2.x is verified working
 sshtunnel
-cryptography
 pyOpenSSL
 numpy<3,>=1.26.2
 Pillow<12,>=10.3.0
+PyJWT>=2.8
+jdatetime>=4.1
+rpyc>=5.3
 websockets<16,>=15.0.1
 pillow_heif<2,>=0.16.0
+# Zagros deployment databases (installer-supported engine URLs)
+PyMySQL>=1.1
+psycopg[binary]>=3.1

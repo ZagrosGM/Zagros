@@ -120,6 +120,10 @@ class CoreHostModel(Base):
     security: Mapped[str | None] = mapped_column(String(32), nullable=True)
     alpn: Mapped[str | None] = mapped_column(String(128), nullable=True)
     fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # marzban-era per-host flags preserved on migration (inbound_tag,
+    # allowinsecure, is_disabled, mux_enable, random_user_agent); JSON so
+    # future host attributes never need another schema change.
+    extras: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     sort: Mapped[int] = mapped_column(Integer, default=0)
 
 

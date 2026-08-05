@@ -195,6 +195,12 @@ def test_import_dry_run_then_apply_then_reapply_idempotent() -> None:
         assert s.query(UserModel).count() == 2
         assert s.query(UserCoreAccountModel).count() == 5
         assert s.query(CoreHostModel).count() == 2
+        # marzban-era host attributes survive the migration (extras column)
+        hosts = {h.remark: h for h in s.query(CoreHostModel)}
+        assert hosts["CDN"].extras["is_disabled"] is True
+        assert hosts["CDN"].extras["mux_enable"] is False
+        assert hosts["CDN"].extras["inbound_tag"] == "VMESS_WS"
+        assert hosts["DE Reality"].extras["inbound_tag"] == "VLESS_TCP_REALITY"
 
     # unified quota ledger got the legacy counters
     import asyncio

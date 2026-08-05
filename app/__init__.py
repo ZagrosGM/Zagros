@@ -8,10 +8,34 @@ stack (fastapi/apscheduler/xray singletons) into their interpreter.
 """
 import logging
 
-__version__ = "1.0.0-alpha.2"  # Zagros begins a new version line after the rebrand
+__version__ = "1.0.0-alpha.3"  # Zagros begins a new version line after the rebrand
+
+
+_building = False
 
 
 def _build_app():
+    global _building
+    # Legacy sub-packages do `from app import app/scheduler` at their own
+    # import time; they must see REAL attributes (PEP-562 __getattr__ is only
+    # invoked for *missing* attributes), so construct + preseed first and
+    # guard against re-entrant builds (circular legacy imports).
+    if "app" in globals() and "scheduler" in globals():
+        return globals()["app"], globals()["scheduler"]
+    if _building:
+        raise RuntimeError(
+            "re-entrant Zagros app build aborted (circular legacy import); "
+            "attributes app/scheduler are preseeded before sub-imports, "
+            "so this should never happen — report it."
+        )
+    _building = True
+    try:
+        return _build_app_inner()
+    finally:
+        _building = False
+
+
+def _build_app_inner():
     from apscheduler.schedulers.background import BackgroundScheduler
     from fastapi import FastAPI, Request, status
     from fastapi.encoders import jsonable_encoder
@@ -41,6 +65,14 @@ def _build_app():
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Preseed BEFORE importing the legacy sub-packages (dashboard, jobs,
+    # routers, telegram): they execute `from app import app` / `from app
+    # import scheduler` at import time and must find real attributes,
+    # otherwise a second nested _build_app() call would crash on partially
+    # initialised modules (import cycle).
+    globals()["app"] = app
+    globals()["scheduler"] = scheduler
 
     from app import dashboard, jobs, routers, telegram  # noqa: F401
     from app.routers import api_router
@@ -109,7 +141,19 @@ def _build_app():
 
     @app.on_event("startup")
     def on_startup():
-        paths = [f"{r.path}/" for r in app.routes]
+        # Newer Starlette wraps included routers in _IncludedRouter objects
+        # (no .path). Walk the route tree defensively instead of assuming
+        # every entry is a plain route.
+        def _all_paths(routes):
+            for route in routes:
+                pth = getattr(route, "path", None)
+                if pth:
+                    yield pth
+                nested = getattr(route, "routes", None)
+                if nested:
+                    yield from _all_paths(nested)
+
+        paths = [f"{p}/" for p in _all_paths(app.routes)]
         paths.append("/api/")
         if f"/{XRAY_SUBSCRIPTION_PATH}/" in paths:
             raise ValueError(

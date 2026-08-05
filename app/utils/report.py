@@ -2,8 +2,8 @@ from datetime import datetime as dt
 from typing import Optional
 
 from app import telegram
-from app.db import Session, create_notification_reminder, get_admin_by_id, GetDB
-from app.db.models import UserStatus, User
+from app.db import Session, create_notification_reminder
+from app.db.models import UserStatus
 from app.models.admin import Admin
 from app.models.user import ReminderType, UserResponse
 from app.utils.notification import (Notification, ReachedDaysLeft,

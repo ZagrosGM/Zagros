@@ -23,7 +23,7 @@ from app.cores.outbounds.model import (
     TranslatedOutbound,
     UnsupportedOutbound,
 )
-from app.cores.types import Capability, ChainEndpoint
+from app.cores.types import Capability
 
 if TYPE_CHECKING:
     from app.cores.manager import CoreManager

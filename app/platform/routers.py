@@ -9,7 +9,6 @@ when the platform runtime is available):
 """
 from __future__ import annotations
 
-import base64
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request

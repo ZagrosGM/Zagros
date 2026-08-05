@@ -15,7 +15,6 @@ import subprocess
 from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
-from app.cores.exceptions import CoreError
 from app.cores.process import ManagedProcess
 from app.cores.types import CoreMetrics
 

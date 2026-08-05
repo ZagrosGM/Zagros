@@ -95,7 +95,6 @@ def report_user_modification(username: str, expire_date: int, data_limit: int, p
     data_limit=readable_size(data_limit) if data_limit else "Unlimited"
     expire_date=datetime.fromtimestamp(expire_date).strftime("%H:%M:%S %Y-%m-%d") if expire_date else "Never"
     proxies="" if not proxies else ", ".join([escape_html(proxy) for proxy in proxies])
-    protocols = proxies
 
     reportUserModification = {
         'content': '',

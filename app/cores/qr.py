@@ -426,9 +426,6 @@ def _penalty(modules: list[list[bool]]) -> int:
                 starts_dark = (i % 2 == 0) == (line[0] is True)
                 if not starts_dark:
                     continue
-                before = history[i - 1] if i > 0 else (size if i == 0 and line[0] is False else 0)
-                after = history[i + 5] if i + 5 < len(history) else (
-                    size if i + 5 == len(history) else 0)
                 # guard may be the quiet zone (edge of matrix) only when the
                 # pattern sits flush against the edge
                 guard = 0

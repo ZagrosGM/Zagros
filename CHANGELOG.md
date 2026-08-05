@@ -10,6 +10,156 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.3] — 2026-08-05
+
+**Status: ALPHA.** P6 delivers the Marzban-style one-command operations
+experience (installer + management CLI + automated release pipeline) for the
+Zagros platform — with its own implementation — and fixes several boot- and
+image-blocking defects discovered while hardening it.
+
+### Added
+
+* **`zagros-scripts` repository — one-command installer & management CLI.**
+  * `sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/main/zagros.sh)" -- install [--database sqlite|mysql|mariadb|postgresql]`
+    — installs Docker when missing, renders a self-contained compose stack
+    (host networking; managed MySQL 8.4 / MariaDB 11.5 / PostgreSQL 17 on
+    request, with the second `zagros_legacy` database auto-provisioned),
+    generates secrets server-side, pulls the GHCR image, waits for health,
+    verifies schema, installs the CLI.
+  * `zagros` CLI (self-contained, dependency-light: docker, compose, curl,
+    jq, openssl, tar) with 33+ commands: `install update restart stop start
+    up down status logs doctor health version backup backup-service restore
+    migrate rollback uninstall repair shell config reset-admin create-admin
+    update-core install-core uninstall-core list-cores reload reload-core
+    sync clean prune` (+ `help`).
+  * **Update** = automatic pre-backup → tag/digest resolution against live
+    GHCR → pull → `alembic upgrade head` → health gate → **automatic
+    rollback to the previous image/backup on failure** (`last-update.json`
+    audit trail). Manual `zagros rollback [--to <tag>]`.
+  * **Backup** = database (hot-consistent SQLite API / `mysqldump` /
+    `pg_dump -Fc`) + configuration + certificates + driver metadata +
+    runtime config + keys (+ logs with `--logs`) in one `manifest.meta` +
+    SHA-256 `manifest.json` archive; every exclusion (core binaries,
+    assets) is recorded. **Restore** verifies engine match + checksums,
+    takes a safety snapshot, applies, re-migrates, health-checks and
+    auto-rolls back on failure.
+  * **Doctor** reports Docker / containers / database & migration / cores /
+    nodes / certificates / disk / memory / CPU / network / DNS / panel port /
+    firewall / GHCR digest / release currency with exit-code semantics and
+    a pure-JSON `--json` mode. **Repair** applies safe automatic fixes
+    (dirs, env keys, image, container recreation, schema) and refuses to
+    invent a lost `ZAGROS_SECRET_KEY` over an existing database.
+  * Core commands are capability-driven through the in-container bridge —
+    no core name is special anywhere (`install-core xray|sing-box|
+    hysteria2|tuic|wireguard|openvpn|...`, `update-core`, `list-cores`
+    with state/enabled/health/version/capabilities).
+  * A Docker-emulating harness (`tests/`) drives the **real** CLI through
+    142 end-to-end assertions (install → backup → restore → update →
+    failure rollback → doctor/repair → uninstall/purge) on machines
+    without a Docker daemon; CI runs shellcheck + these tests.
+* **In-container ops bridge `app.platform.hostctl`** — one-JSON-line
+  contract (`{"ok": …, <payload>}` / `{"ok": false, error, code}`) with
+  explicit exit codes (0/1/2 usage/3 PANEL_OWNED/4 NOT_FOUND): `version
+  health db-check db-backup-sqlite cores-list cores-install
+  cores-uninstall cores-update cores-start/-stop/-restart
+  cores-enable/-disable cores-logs nodes-list sync admin-list admin-create
+  admin-reset`. It composes existing platform services only — no new HTTP
+  surface, no panel feature.
+* **`0002_legacy_schema` migration** — creates the legacy (upstream) schema
+  on the legacy engine from `SQLALCHEMY_DATABASE_URL`, finishing the
+  split-database design: the P3 platform stack and the legacy stack keep
+  their `admins`/`users`/`nodes` tables in **separate databases**
+  (`ZAGROS_DATABASE_URL` vs `SQLALCHEMY_DATABASE_URL`) so same-named tables
+  with different shapes never collide.
+* **Unified release workflow** (`.github/workflows/release.yml`): every
+  `v*` tag (stable / `-alpha` / `-beta` / `-rc`) runs tests → multi-arch
+  docker build (amd64 + arm64) → push to **GHCR only**
+  (`ghcr.io/zagrosgm/zagros`) → GitHub Release (prerelease flag follows the
+  tag channel; `latest` floats on stable only). The old Docker Hub /
+  `build.yml` + `build-dev.yml` workflows are removed.
+* **Self-contained Dockerfile dashboard stage** — the React dashboard is
+  built inside the image (`npm ci` + vite build + `404.html`), so CI and
+  local `docker build` produce identical assets.
+
+### Fixed (blockers shipped in alpha.2, found by P6 hardening)
+
+* `PlatformRuntime` crashed on every construction: `CoreManager(...)` was
+  called with a nonexistent `state_store=` keyword.
+* Cold imports of the application blew up: the lazy app bootstrap re-entered
+  itself through legacy modules (`ImportError: partially initialized module`).
+  The builder now pre-seeds `app`/`scheduler` before importing them.
+* `requirements.txt` was not even parseable by pip (`SQLAlchemy>=2.0<3` —
+  missing comma breaks all installs and image builds); `GRPC>=1.76.0`
+  referenced a nonexistent package (now `grpcio>=1.60`); added missing pins
+  (`protobuf`, `PyJWT`, `jdatetime`, `rpyc`, `PyMySQL`, `psycopg[binary]`
+  for the installer DB paths, `bcrypt>=4.2,<5` — passlib 1.7.x hard-fails
+  hash/verify with bcrypt 5.x, verified empirically; and removed a duplicate
+  `cryptography` line).
+* `XRayCore` ran `xray version` at singleton construction →
+  `FileNotFoundError` on any host without a pre-installed binary. It now
+  tolerates a missing binary (version `None` until the core self-installs).
+* Legacy tables were never created, which broke admin creation and every
+  legacy CRUD path.
+* CLI correctness bugs caught by the new harness (each with a regression
+  assertion): compose image tag was never interpolated (install pinned a
+  literal placeholder and `update` could never switch tags);
+  `reset-admin`/`update-core` returned exit code 1 on success;
+  `restore` aborted silently on manifests without an optional field;
+  `doctor --json` mixed human logs into stdout and the jq transform dropped
+  all but one check; `uninstall` missed its root guard; `update --version`
+  now accepts bare `x.y.z` (normalized to `v…`); CLI file installation
+  created its destination directory.
+* **Full-project audit fixes (this release, all verified live):**
+  * Startup crashed on newer Starlette: `app.routes` entries may be
+    `_IncludedRouter` objects without `.path` — the subscription-path guard
+    now walks the route tree defensively.
+  * A missing dashboard bundle aborted the whole panel
+    (`FileNotFoundError: build/index.html`). Non-DEBUG deployments now log a
+    warning, keep the API fully up, and answer `/dashboard*` with an honest
+    `503` JSON until assets exist (the Docker image ships the bundle built
+    in-image).
+  * The legacy schema was created **without the upstream singleton rows**
+    (`system`, `tls`, `jwt`), so the very first API login crashed in
+    `get_jwt_secret_key`. `0002_legacy_schema` now seeds them exactly like
+    the upstream migrations did (deployment-random 64-hex JWT key,
+    self-signed TLS pair, zeroed traffic counters) and never rotates or
+    overwrites them on re-runs (regression-tested).
+  * The Marzban→Zagros importer **silently dropped five per-host
+    attributes** (`inbound_tag`, `allowinsecure`, `is_disabled`,
+    `mux_enable`, `random_user_agent`): the plan built them, the apply path
+    never persisted them. New `core_hosts.extras` JSON column (model +
+    migration `0003_core_host_extras` with `{}` backfill) + the importer
+    now writes them on insert and update (regression-tested).
+  * `hostctl db-backup-sqlite` hand-rolled its SQLite URL parse; operator
+    typos (e.g. 5-slash `sqlite://///…`) produced a confusing
+    `invalid uri authority` error. It now parses with SQLAlchemy
+    `make_url` and normalizes the path (both forms regression-tested).
+  * `doctor`'s GHCR egress probe used HEAD against `/v2/`, which the
+    registry answers with 405 — a healthy system was reported WARN. The
+    check now compares status codes (200/401/405 = reachable).
+  * Lint sweep: unused imports/variables removed from runtime code (the
+    frozen upstream Alembic scripts under `app/db/migrations/` are
+    historical artifacts and intentionally untouched); the two inherited
+    `TODO` comments in legacy code were resolved into documented
+    design/known-limitation notes — no `TODO`/`FIXME` markers remain in
+    product code.
+  * New regression coverage: 3 Alembic-revision tests (seed presence,
+    no-rotation on re-seed, `0003` upgrade path + backfill) and host
+    `extras` persistence assertions. Suite totals:
+    **247 passed / 7 skipped**; E2E real-binary **6 passed / 1 skipped**;
+    CLI harness **142 assertions green**.
+
+### Changed
+
+* All images are published **exclusively to GHCR**; Docker Hub references
+  are gone from CI and docs.
+* README: the supported installation path is the one-command installer;
+  manual and development flows are clearly marked as such.
+
+[1.0.0-alpha.3]: https://github.com/ZagrosGM/Zagros/releases/tag/v1.0.0-alpha.3
+
+---
+
 ## [1.0.0-alpha.2] — 2026-08-05
 
 **Status: ALPHA.** Suitable for evaluation and lab testing. Not recommended for

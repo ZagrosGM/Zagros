@@ -1,4 +1,5 @@
 import atexit
+import logging
 import re
 import subprocess
 import threading
@@ -17,7 +18,18 @@ class XRayCore:
         self.executable_path = executable_path
         self.assets_path = assets_path
 
-        self.version = self.get_version()
+        # Zagros ships no baked-in core binaries: a missing xray executable
+        # must NEVER prevent the panel from booting (multi-core drivers
+        # self-install on demand). Degrade to version=None and let the
+        # already-guarded start path report the core as down honestly.
+        try:
+            self.version = self.get_version()
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.version = None
+            logging.getLogger("uvicorn.error").warning(
+                "xray binary not usable at '%s' (%s) — legacy xray core will "
+                "stay down; set XRAY_EXECUTABLE_PATH or let a core driver "
+                "self-install it.", executable_path, exc)
         self.process = None
         self.restarting = False
 

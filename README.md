@@ -107,6 +107,38 @@ Config Studio requires a running Zagros API (sudo-admin token).*
 
 ## Installation
 
+### One-command install (recommended)
+
+The supported path is the installer from the
+[zagros-scripts](https://github.com/ZagrosGM/zagros-scripts) repository. It
+installs Docker if needed, renders the compose stack (panel + optional managed
+database), generates secrets, pulls the GHCR image, waits for health, verifies
+the schema and installs the `zagros` management CLI:
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/main/zagros.sh)" -- install
+# SQLite (default), or pick a managed engine:
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/main/zagros.sh)" -- install --database postgresql
+# engines: sqlite | mysql | mariadb | postgresql
+```
+
+Then:
+
+```bash
+sudo zagros create-admin --sudo     # first sudo admin
+sudo zagros status                  # service, image, health, cores
+sudo zagros doctor                  # full diagnostic report
+sudo zagros install-core xray       # cores self-install their official binaries
+```
+
+Everyday operations — `zagros update` (auto-backup → pull → migrate → health →
+auto-rollback), `zagros backup` / `zagros restore`, `zagros doctor` /
+`zagros repair`, `zagros list-cores` / `install-core` / `update-core` … — are
+documented in the
+[zagros-scripts README](https://github.com/ZagrosGM/zagros-scripts#readme).
+
+### Manual (development) install
+
 Requirements: **Python ≥ 3.12**.
 
 ```bash
@@ -115,7 +147,7 @@ cd Zagros
 pip install -r requirements.txt
 
 cp .env.example .env        # set ZAGROS_SECRET_KEY (openssl rand -hex 32)
-alembic upgrade head        # create the Zagros schema
+alembic upgrade head        # create the Zagros schema (platform + legacy stacks)
 python3 zagros-cli.py admin create --sudo   # create the first sudo admin
 python main.py              # panel on http://127.0.0.1:8000
 ```
@@ -126,32 +158,42 @@ section) and `alembic upgrade head`.
 
 ## Docker
 
-Build the image from source (OCI images are not published to registries yet —
-see *Known Limitations* in the changelog):
+Release images are published to **GitHub Container Registry only**
+(multi-arch: linux/amd64, linux/arm64):
 
 ```bash
-docker build -t zagros:1.0.0-alpha.2 .
-docker run -d --name zagros \
-  --network host \
-  --env-file .env \
-  -v /var/lib/zagros:/var/lib/zagros \
-  zagros:1.0.0-alpha.2
+docker pull ghcr.io/zagrosgm/zagros:v1.0.0-alpha.3
+docker pull ghcr.io/zagrosgm/zagros:latest        # tracks stable releases
 ```
 
-A ready `docker-compose.yml` is included (`docker compose up -d`) — point its
-`image:` at your locally built tag or your own registry. Note: privileged
-cores (WireGuard/OpenVPN/SoftEther/SSH) additionally need
-`cap_add: NET_ADMIN` (and kernel support on the host).
+Every `v*` tag (stable, `-alpha`, `-beta`, `-rc`) triggers the release
+pipeline: tests → multi-arch build → GHCR push → GitHub Release
+(`.github/workflows/release.yml`). Docker Hub is not used.
+
+Building locally works too — the dashboard is built inside the image:
+
+```bash
+docker build -t zagros:dev .
+```
+
+Note: privileged cores (WireGuard/OpenVPN/SoftEther/SSH) additionally need
+`cap_add: NET_ADMIN` (and kernel support on the host). The installer stack
+(`zagros install`) uses host networking like the upstream ecosystem expects.
 
 ## Development
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests/                # unit + integration (229 tests)
+python -m pytest tests/                # unit + integration (247 tests)
 ZAGROS_E2E=1 python -m pytest tests/e2e -q -rs   # real-binary E2E (downloads official core binaries)
 alembic upgrade head                   # schema
 python main.py                         # run the panel
 ```
+
+The management CLI has its own end-to-end harness in the
+[zagros-scripts](https://github.com/ZagrosGM/zagros-scripts) repository
+(142 assertions over install/backup/restore/update/rollback/doctor/repair,
+plus shellcheck), runnable without a Docker daemon.
 
 The core test suites (`tests/cores`, `tests/crypto`, `tests/portal`,
 `tests/clientapi`, `tests/studio`, `tests/adminapi`) run dependency-free;

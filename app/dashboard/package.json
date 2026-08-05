@@ -1,7 +1,7 @@
 {
   "name": "zagros-dashboard",
   "private": true,
-  "version": "1.0.0-alpha.2",
+  "version": "1.0.0-alpha.3",
   "scripts": {
     "dev": "vite --port 3000",
     "build": "tsc && vite build",

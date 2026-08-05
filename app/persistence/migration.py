@@ -286,11 +286,11 @@ class LegacyImportService:
                         CoreHostModel.address == h["address"],
                     )
                 ).scalar_one_or_none()
-                extras = h.get("extras") or {}
                 values = dict(
                     port=h["port"], sni=h["sni"], host_header=h["host_header"],
                     path=h["path"], security=h["security"], alpn=h["alpn"],
-                    fingerprint=h["fingerprint"], sort=0,
+                    fingerprint=h["fingerprint"], extras=h.get("extras") or {},
+                    sort=0,
                 )
                 if exists is None:
                     s.add(CoreHostModel(core_id=h["core_id"], remark=h["remark"],

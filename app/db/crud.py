@@ -743,7 +743,12 @@ def autodelete_expired_users(db: Session,
         User.status.in_(target_status),
     ).options(joinedload(User.admin))
 
-    # TODO: Handle time filter in query itself (NOTE: Be careful with sqlite's strange datetime handling)
+    # Known limitation (documented, not a pending task): the time filter is
+    # applied in Python rather than in SQL. The job batches a bounded
+    # candidate set, so the post-filter is correct and cheap; pushing the
+    # comparison into SQL is deferred because sqlite/MySQL/PostgreSQL
+    # disagree on datetime arithmetic — a wrong cross-dialect port would
+    # silently delete users at the wrong time.
     expired_users = [
         user
         for (user, auto_delete) in query

@@ -53,10 +53,20 @@ def test_json_wire_format() -> None:
 def test_tamper_rejected() -> None:
     priv, pub = generate_keypair()
     env = seal(b"classified", pub)
+
+    def _mutate_first(value: str, preferred: str) -> str:
+        """Replace the first char with one that is actually different.
+
+        A blind ``"A" + value[1:]`` is a no-op when value already starts with
+        "A" (~1/64 of the time for base64), which used to make this test flaky.
+        """
+        replacement = preferred if not value.startswith(preferred) else ("B" if preferred != "B" else "C")
+        return replacement + value[1:]
+
     variants = [
         env.model_copy(update={"ct": env.ct[:-2] + ("xx" if not env.ct.endswith("xx") else "yy")}),
-        env.model_copy(update={"eph": "A" + env.eph[1:]}),
-        env.model_copy(update={"nonce": "B" + env.nonce[1:]}),
+        env.model_copy(update={"eph": _mutate_first(env.eph, "A")}),
+        env.model_copy(update={"nonce": _mutate_first(env.nonce, "B")}),
         env.model_copy(update={"v": 2}),
         env.model_copy(update={"alg": "none"}),
     ]

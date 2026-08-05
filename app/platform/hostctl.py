@@ -28,6 +28,14 @@ import json
 import sys
 import traceback
 
+# hostctl runs inside the panel container as its own process. Compose only
+# MOUNTS the panel's .env (nothing is injected into the environment), so
+# merge it here before ANY command reads os.environ (DB URLs, secrets, ...).
+# Idempotent and override-safe — real env vars always win.
+from app.env_loader import load_zagros_env  # noqa: E402
+
+load_zagros_env()
+
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2

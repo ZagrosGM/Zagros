@@ -1,7 +1,31 @@
 from decouple import config
-from dotenv import load_dotenv
 
-load_dotenv()
+from app.env_loader import load_zagros_env
+
+# Single source of truth: ``<project-root>/.env`` (see app/env_loader.py).
+# In docker deployments compose only MOUNTS that file into the container —
+# nothing is injected into the process environment — so editing the file +
+# restarting the container applies every setting, exactly like Marzban.
+load_zagros_env()
+
+
+# ─────────────────────────── Identity / Domain ─────────────────────────── #
+# DOMAIN is the public hostname of this panel (e.g. panel.example.com).
+# When set, PANEL_BASE_URL / APP_BASE_URL and absolute subscription links
+# are derived from it automatically — cheaper than Marzban's manual prefix.
+DOMAIN = config("DOMAIN", default="").strip()
+
+
+def _derive_base_url(domain: str) -> str:
+    if not domain:
+        return ""
+    if domain.startswith(("http://", "https://")):
+        return domain.rstrip("/")
+    return f"https://{domain}".rstrip("/")
+
+
+PANEL_BASE_URL = config("PANEL_BASE_URL", default=_derive_base_url(DOMAIN)).rstrip("/")
+APP_BASE_URL = config("APP_BASE_URL", default=PANEL_BASE_URL).rstrip("/")
 
 
 # ------------------------- Zagros platform (P3+) ------------------------- #
@@ -22,11 +46,22 @@ SQLALCHEMY_DATABASE_URL = config("SQLALCHEMY_DATABASE_URL", default="sqlite:///d
 SQLALCHEMY_POOL_SIZE = config("SQLALCHEMY_POOL_SIZE", cast=int, default=10)
 SQLIALCHEMY_MAX_OVERFLOW = config("SQLIALCHEMY_MAX_OVERFLOW", cast=int, default=30)
 
+# ───────────────────────── HTTP bind & TLS ─────────────────────────────── #
+# UVICORN_HOST is honored VERBATIM (nothing rewrites it at runtime).
+#
+# TLS_MODE controls how the panel terminates TLS:
+#   auto (default): TLS on when both UVICORN_SSL_CERTFILE/KEYFILE are set,
+#                   otherwise plain HTTP on UVICORN_HOST.
+#   on            : TLS REQUIRED — refuses to boot without cert+key.
+#   off           : force plain HTTP even if cert/key variables are set
+#                   (reverse-proxy / LAN setups terminating TLS upstream).
+TLS_MODE = config("TLS_MODE", default="auto").lower()
 UVICORN_HOST = config("UVICORN_HOST", default="0.0.0.0")
 UVICORN_PORT = config("UVICORN_PORT", cast=int, default=8000)
 UVICORN_UDS = config("UVICORN_UDS", default=None)
 UVICORN_SSL_CERTFILE = config("UVICORN_SSL_CERTFILE", default=None)
 UVICORN_SSL_KEYFILE = config("UVICORN_SSL_KEYFILE", default=None)
+UVICORN_SSL_CA_CERTFILE = config("UVICORN_SSL_CA_CERTFILE", default=None)
 UVICORN_SSL_CA_TYPE = config("UVICORN_SSL_CA_TYPE", default="public").lower()
 DASHBOARD_PATH = config("DASHBOARD_PATH", default="/dashboard/")
 
@@ -36,7 +71,12 @@ DOCS = config("DOCS", default=False, cast=bool)
 # Security review (Alpha): never default to "*" — especially not together
 # with allow_credentials=True in the app. Empty default = same-origin only;
 # operators opt in explicitly per trusted origin.
-ALLOWED_ORIGINS = [o for o in config("ALLOWED_ORIGINS", default="").split(",") if o]
+ALLOWED_ORIGINS = [o.strip() for o in config("ALLOWED_ORIGINS", default="").split(",") if o.strip()]
+
+# HTTP Host-header allow-list (Starlette TrustedHostMiddleware). Empty
+# default = the middleware is not installed at all (no behavior change);
+# when set, requests with an unlisted Host are rejected with 400.
+TRUSTED_HOSTS = [h.strip() for h in config("TRUSTED_HOSTS", default="").split(",") if h.strip()]
 
 VITE_BASE_API = f"http://127.0.0.1:{UVICORN_PORT}/api/" \
     if DEBUG and config("VITE_BASE_API", default="/api/") == "/api/" \
@@ -49,8 +89,24 @@ XRAY_FALLBACKS_INBOUND_TAG = config("XRAY_FALLBACKS_INBOUND_TAG", cast=str, defa
 XRAY_EXECUTABLE_PATH = config("XRAY_EXECUTABLE_PATH", default="/usr/local/bin/xray")
 XRAY_ASSETS_PATH = config("XRAY_ASSETS_PATH", default="/usr/local/share/xray")
 XRAY_EXCLUDE_INBOUND_TAGS = config("XRAY_EXCLUDE_INBOUND_TAGS", default='').split()
-XRAY_SUBSCRIPTION_URL_PREFIX = config("XRAY_SUBSCRIPTION_URL_PREFIX", default="").strip("/")
-XRAY_SUBSCRIPTION_PATH = config("XRAY_SUBSCRIPTION_PATH", default="sub").strip("/")
+
+# ─────────────────────────── Subscription ──────────────────────────────── #
+# Canonical names first; the legacy XRAY_* names stay accepted as fallbacks
+# so existing deployments keep booting unchanged.
+SUBSCRIPTION_URL_PREFIX = config(
+    "SUBSCRIPTION_URL_PREFIX",
+    default=config("XRAY_SUBSCRIPTION_URL_PREFIX", default=""),
+).strip("/")
+SUBSCRIPTION_PATH = config(
+    "SUBSCRIPTION_PATH",
+    default=config("XRAY_SUBSCRIPTION_PATH", default="sub"),
+).strip("/")
+
+# Legacy aliases — bound so every pre-existing import site keeps working.
+# When the operator only set DOMAIN (no explicit prefix), subscription
+# links become absolute against PANEL_BASE_URL automatically.
+XRAY_SUBSCRIPTION_URL_PREFIX = SUBSCRIPTION_URL_PREFIX or PANEL_BASE_URL
+XRAY_SUBSCRIPTION_PATH = SUBSCRIPTION_PATH
 
 TELEGRAM_API_TOKEN = config("TELEGRAM_API_TOKEN", default="")
 TELEGRAM_ADMIN_ID = config(
@@ -65,7 +121,12 @@ TELEGRAM_DEFAULT_VLESS_FLOW = config("TELEGRAM_DEFAULT_VLESS_FLOW", default="")
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES = config("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", cast=int, default=1440)
 
 CUSTOM_TEMPLATES_DIRECTORY = config("CUSTOM_TEMPLATES_DIRECTORY", default=None)
-SUBSCRIPTION_PAGE_TEMPLATE = config("SUBSCRIPTION_PAGE_TEMPLATE", default="subscription/index.html")
+# Canonical name first; legacy SUBSCRIPTION_PAGE_TEMPLATE stays accepted.
+SUBSCRIPTION_TEMPLATE = config(
+    "SUBSCRIPTION_TEMPLATE",
+    default=config("SUBSCRIPTION_PAGE_TEMPLATE", default="subscription/index.html"),
+)
+SUBSCRIPTION_PAGE_TEMPLATE = SUBSCRIPTION_TEMPLATE
 HOME_PAGE_TEMPLATE = config("HOME_PAGE_TEMPLATE", default="home/index.html")
 
 CLASH_SUBSCRIPTION_TEMPLATE = config("CLASH_SUBSCRIPTION_TEMPLATE", default="clash/default.yml")

@@ -8,7 +8,7 @@ stack (fastapi/apscheduler/xray singletons) into their interpreter.
 """
 import logging
 
-__version__ = "1.0.0-alpha.3"  # Zagros begins a new version line after the rebrand
+__version__ = "1.0.0-alpha.4"  # Zagros begins a new version line after the rebrand
 
 
 _building = False
@@ -61,10 +61,11 @@ def _build_app_inner():
     from fastapi.encoders import jsonable_encoder
     from fastapi.exceptions import RequestValidationError
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.middleware.trustedhost import TrustedHostMiddleware
     from fastapi.responses import JSONResponse
     from fastapi.routing import APIRoute
 
-    from config import ALLOWED_ORIGINS, DOCS, XRAY_SUBSCRIPTION_PATH
+    from config import ALLOWED_ORIGINS, DOCS, TRUSTED_HOSTS, XRAY_SUBSCRIPTION_PATH
 
     app = FastAPI(
         title="Zagros API",
@@ -83,6 +84,10 @@ def _build_app_inner():
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # Host-header allow-list stays opt-in: with an empty TRUSTED_HOSTS the
+    # middleware is simply not installed (zero behavior change).
+    if TRUSTED_HOSTS:
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
 
     # Preseed BEFORE importing the legacy sub-packages (dashboard, jobs,
     # routers, telegram): they execute `from app import app` / `from app

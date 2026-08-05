@@ -10,6 +10,69 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.4] — 2026-08-05
+
+**Status: ALPHA.** Complete redesign of the configuration system:
+`.env`-first (Marzban parity, but better), nothing hardcoded in the image,
+and the real root cause of the `UVICORN_HOST=0.0.0.0`-not-applied bug fixed
+and proven with a live bind test.
+
+### Fixed
+
+- **`UVICORN_HOST` is now honored verbatim — the 127.0.0.1 trap is gone.**
+  Root cause (upstream Marzban behavior): when no TLS files were configured,
+  `main.py` printed a warning and then *silently overwrote* the bind host
+  with `127.0.0.1`, ignoring the operator's `UVICORN_HOST` entirely. Zagros
+  replaces that silent security decision with a loud, detailed warning —
+  the configured host is applied in every mode. Verified live:
+  `ss -lntp` shows `0.0.0.0:8000` with `UVICORN_HOST=0.0.0.0` and no TLS.
+- `DEBUG=true` no longer overrides the bind host/UDS (it now only controls
+  reload + log level, as its name implies).
+- `.env` loading no longer depends on the process working directory.
+  `app.env_loader` resolves `<project-root>/.env` from the package location,
+  so `alembic upgrade head`, the panel, and `hostctl` all see the same file
+  regardless of CWD.
+
+### Added
+
+- **`.env` as the single configuration source of truth** (new module
+  `app.env_loader`, used by `config.py`, Alembic's env, the platform
+  runtime, and hostctl). Precedence: real process environment (tests/CI
+  only) > `.env` file > built-in defaults. Docker deployments only MOUNT
+  the file — edit `.env`, then `zagros restart` applies everything, exactly
+  like Marzban.
+- **Automatic legacy migration**: an existing `zagros.env` next to the
+  config location is migrated to `.env` on first boot (kept as
+  `zagros.env.migrated` for audit). The host CLI performs the same
+  migration before any command.
+- **`TLS_MODE`** (`auto` default / `on` / `off`): `auto` enables TLS when
+  both `UVICORN_SSL_CERTFILE`/`UVICORN_SSL_KEYFILE` are set; `on` *requires*
+  TLS and refuses to boot without it; `off` forces plain HTTP for reverse
+  proxy setups. A half-configured TLS pair now fails fast with a clear
+  message instead of silently binding plain HTTP. Optional
+  `UVICORN_SSL_CA_CERTFILE` is forwarded to uvicorn (`ssl_ca_certs`).
+- **Identity settings**: `DOMAIN`, `PANEL_BASE_URL`, `APP_BASE_URL`.
+  When only `DOMAIN` is set, panel/app base URLs *and* absolute
+  subscription links are derived automatically.
+- **Canonical subscription settings**: `SUBSCRIPTION_URL_PREFIX`,
+  `SUBSCRIPTION_PATH`, `SUBSCRIPTION_TEMPLATE`. Legacy names
+  (`XRAY_SUBSCRIPTION_URL_PREFIX`, `XRAY_SUBSCRIPTION_PATH`,
+  `SUBSCRIPTION_PAGE_TEMPLATE`) stay accepted as fallbacks — existing
+  deployments boot unchanged.
+- **`TRUSTED_HOSTS`**: opt-in HTTP Host-header allow-list
+  (`TrustedHostMiddleware`); empty default installs no middleware.
+- Complete grouped `.env.example` in Marzban style covering every setting
+  (identity, bind/TLS, database, security, subscription, drivers, nodes,
+  Telegram, webhooks, jobs; SMTP/OAuth documented honestly as reserved).
+
+### Changed
+
+- The repository's sample `docker-compose.yml` now mounts `./.env` into the
+  container (`/code/.env`) instead of injecting it via `env_file:`, matching
+  the installer-generated deployment, and points at the GHCR image.
+
+---
+
 ## [1.0.0-alpha.3] — 2026-08-05
 
 **Status: ALPHA.** P6 delivers the Marzban-style one-command operations

@@ -164,6 +164,10 @@ xray-core
 # ── Zagros platform ──────────────────────────────────────────────
 # React dashboard build output (rebuilt via build_dashboard.sh; not tracked)
 app/dashboard/build/
+# The dashboard's TypeScript sources live under app/dashboard/src/lib — negate
+# the generic Python-packaging `lib/` rule above so they stay tracked.
+!app/dashboard/src/lib/
+!app/dashboard/src/lib/**
 # Downloaded core binaries / runtime work dirs / driver bootstrap secrets
 .zagros-installed
 .bootstrap-secret

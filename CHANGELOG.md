@@ -146,11 +146,14 @@ image-blocking defects discovered while hardening it.
   * New regression coverage: 3 Alembic-revision tests (seed presence,
     no-rotation on re-seed, `0003` upgrade path + backfill) and host
     `extras` persistence assertions, 3 certificate-identity tests, and
-    two CI-found fixes: `websocket-client` restored to requirements
-    (masked locally by a preinstalled package; the in-container Alembic
-    subprocess hard-fails without it) and the `distutils`-based
-    subscription version-gating replaced with a stdlib-free comparator
-    (`distutils` is gone on Python ≥ 3.12). Suite totals:
+    CI-found fixes: `websocket-client`, `typer` and `python-dateutil`
+    restored to requirements plus an explicit `protobuf` pin (all were
+    masked locally by preinstalled site packages); the
+    `distutils`-based subscription version-gating replaced with a
+    stdlib-free comparator (`distutils` is gone on Python ≥ 3.12);
+    Dockerfile copies `chakra.config.ts` before `npm ci` (the
+    `gen:theme-typings` postinstall hook requires it). Dashboard build
+    verified end-to-end locally (`tsc && vite build` green). Suite totals:
     **250 passed / 7 skipped** (verified twice: system Python and a
     fresh venv with CI-identical dependency resolution); E2E real-binary
     **6 passed / 1 skipped**; CLI harness **142 assertions green**.

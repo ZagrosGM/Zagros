@@ -21,6 +21,8 @@ python-telegram-bot
 requests
 SQLAlchemy>=2.0,<3
 telebot
+typer>=0.12  # zagros-cli (imports typer._completion_shared for shell completion)
+python-dateutil>=2.9  # app/telegram handlers (relativedelta)
 uvicorn[standard]
 watchfiles
 websocket-client>=1.8  # app/xray/node.py REST-node transport (`from websocket import ...`)

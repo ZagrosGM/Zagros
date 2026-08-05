@@ -1,3 +1,5 @@
+# ruff: noqa: B008 — FastAPI idiom: Depends() in argument defaults is the
+# canonical router pattern used across this codebase.
 """Zagros unified-dashboard admin API — the panel's own management surface.
 
 Rule #1 of the frontend refactor: EVERYTHING the dashboard does goes through
@@ -29,7 +31,8 @@ from typing import Any
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.cores.outbounds.manager import OutboundManager, UnsupportedOutbound
+from app.cores.exceptions import CoreNotFoundError
+from app.cores.outbounds.manager import OutboundManager
 from app.cores.outbounds.model import Outbound, OutboundKind
 from app.cores.routing.model import RoutingRule
 from app.platform import certificates
@@ -187,8 +190,11 @@ async def cores_list(runtime=Depends(get_runtime)):
 @zagros_admin_router.get("/cores/{core_id}")
 async def cores_detail(core_id: str, runtime=Depends(get_runtime)):
     try:
-        status = (await asyncio.wait_for(
-            runtime.core_manager.get(core_id).status(), timeout=10))
+        driver = runtime.core_manager.get(core_id)
+    except CoreNotFoundError as exc:
+        raise HTTPException(404, f"core '{core_id}' is not installed or not managed") from exc
+    try:
+        status = await asyncio.wait_for(driver.status(), timeout=10)
     except Exception:  # noqa: BLE001
         status = None
     return await _core_view(runtime, core_id,
@@ -202,7 +208,7 @@ async def _manager_call(runtime, core_id: str, method: str, *args, **kwargs):
     fn = getattr(manager, method)
     try:
         return await fn(core_id, *args, **kwargs)
-    except Exception as exc:  # noqa: BLE001 - surface driver's real message
+    except Exception as exc:
         raise _err(exc) from exc
 
 
@@ -215,7 +221,7 @@ async def cores_install(core_id: str, body: CoreInstallBody, runtime=Depends(get
     try:
         state = await runtime.core_manager.install_core(
             core_id, body.settings, enabled=body.enabled)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise _err(exc) from exc
     return {"ok": True, "core": core_id, "state": state.value, "enabled": body.enabled}
 
@@ -236,7 +242,7 @@ async def cores_uninstall(core_id: str, body: CoreUninstallBody,
         if states.get(core_id, {}).get("state") == "running":
             await manager.stop_core(core_id)  # in-process: we CAN stop it first
         await manager.uninstall_core(core_id, purge=body.purge, force=True)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise _err(exc) from exc
     return {"ok": True, "core": core_id, "purged": body.purge}
 
@@ -288,7 +294,7 @@ async def cores_logs(core_id: str, lines: int = 200, runtime=Depends(get_runtime
     lines = max(10, min(lines, 2000))
     try:
         entries = await manager.get_logs(core_id, tail=lines)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise _err(exc) from exc
     return {"core": core_id, "lines": entries[-lines:], "count": len(entries[-lines:])}
 
@@ -320,10 +326,8 @@ async def _load_outbounds(runtime) -> list[Outbound]:
 
 def _sync_manager(manager: OutboundManager, stored: list[Outbound]) -> None:
     """Reconcile the in-memory registry with the persisted set (idempotent)."""
-    keep = {o.name: o for o in stored}
-    for name in manager.list():
-        if name.name not in keep:
-            manager.unregister(name.name)
+    for existing in list(manager.list()):
+        manager.unregister(existing.name)
     for outbound in stored:
         manager.register(outbound)
 
@@ -354,7 +358,7 @@ async def routing_save(body: RoutingSetBody, runtime=Depends(get_runtime)):
         normalized = await _save_rules(runtime, body.rules)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 (CoreError on duplicates)
+    except Exception as exc:
         raise HTTPException(422, str(exc)) from exc
     return {"ok": True, "count": len(normalized),
             "order": [r.name for r in normalized]}
@@ -372,7 +376,7 @@ async def routing_preview(body: RoutingBody, runtime=Depends(get_runtime)):
         outbounds = await _load_outbounds(runtime)
         report = await runtime.routing_engine.preview(
             normalized, core_ids=body.core_ids, outbounds=outbounds)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise _err(exc) from exc
     return report.model_dump(mode="json")
 
@@ -387,7 +391,7 @@ async def routing_deploy(body: RoutingBody, runtime=Depends(get_runtime)):
             normalized, core_ids=body.core_ids, outbounds=outbounds)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise _err(exc) from exc
     result = report.model_dump(mode="json")
     result["saved"] = True
@@ -446,7 +450,7 @@ async def _test_outbound(runtime, outbound: Outbound) -> dict[str, Any]:
                 "error": f"invalid server_port: {port!r}"}
     started = time.monotonic()
     try:
-        reader, writer = await asyncio.wait_for(
+        _reader, writer = await asyncio.wait_for(
             asyncio.open_connection(server, port), timeout=6)
     except Exception as exc:  # noqa: BLE001 - dial failure IS the answer
         return {"ok": False, "latency_ms": None, "error": f"{type(exc).__name__}: {exc}"}
@@ -455,7 +459,7 @@ async def _test_outbound(runtime, outbound: Outbound) -> dict[str, Any]:
     writer.close()
     try:
         await writer.wait_closed()
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110 - close is best-effort cleanup
         pass
     return {"ok": True, "latency_ms": latency, "detail": f"tcp {server}:{port} reachable"}
 
@@ -477,7 +481,7 @@ async def outbounds_deploy(body: OutboundDeployBody, runtime=Depends(get_runtime
         report = await runtime.outbound_manager.deploy(core_ids=body.core_ids)
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise _err(exc) from exc
     result = report.model_dump(mode="json")
     result["saved"] = True

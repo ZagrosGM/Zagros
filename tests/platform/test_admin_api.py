@@ -10,7 +10,6 @@ real-binary E2E suite).
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
 import subprocess
 import sys
@@ -46,7 +45,7 @@ def _migrate(env: dict[str, str]) -> None:
     r = subprocess.run(
         [sys.executable, "-m", "alembic", "-c", str(ROOT / "alembic.ini"),
          "upgrade", "head"], cwd=ROOT, env=env,
-        capture_output=True, text=True, timeout=300)
+        capture_output=True, text=True, timeout=300, check=False)
     assert r.returncode == 0, f"alembic upgrade failed:\n{r.stderr}"
 
 
@@ -54,7 +53,13 @@ def _register_fake_drivers() -> tuple[str, str]:
     """Two minimal REAL drivers through the real registry: a plain core and
     one with routing + a pure translator (for dry-preview tests)."""
     from app.cores.base import BaseCoreDriver
-    from app.cores.types import Capability, CoreMetadata, CoreState, CoreStatus, HealthStatus
+    from app.cores.types import (
+        Capability,
+        CoreMetadata,
+        CoreState,
+        CoreStatus,
+        HealthStatus,
+    )
 
     class FakePlain(BaseCoreDriver):
         metadata = CoreMetadata(id="admapi-fake", name="Admin API Fake",
@@ -119,18 +124,26 @@ def stack(tmp_path_factory):
                 "ZAGROS_SECRET_KEY", "ZAGROS_ALEMBIC_INI", "UVICORN_PORT"):
         os.environ[var] = env[var]
     _migrate(env)
-    plain_id, routing_id = _register_fake_drivers()
 
     # The legacy Admin model sits behind upstream's order-sensitive import
     # chain — warm the REAL app builder first (exactly what the panel and
     # hostctl's legacy path do), then the import resolves cleanly.
+    # Note: tests/adminapi installs a bare 'app' package stub into
+    # sys.modules and imports app.* submodules under it (their legacy-admin
+    # try/except then binds the fails-closed auth stub). Evict every stub-era
+    # module so the real package (with FastAPI app + real deps) loads fresh.
+    if not hasattr(sys.modules.get("app"), "app"):
+        for name in [n for n in sys.modules if n == "app" or n.startswith("app.")]:
+            sys.modules.pop(name, None)
     import app as _app_warm
 
-    getattr(_app_warm, "app")
+    _app_warm.app  # noqa: B018 - deliberate attribute touch to force warm-up
+
+    plain_id, routing_id = _register_fake_drivers()
 
     from app.models.admin import Admin
-    from app.platform.routers import zagros_admin_router
     from app.platform import admin_api  # noqa: F401 - registers endpoints
+    from app.platform.routers import zagros_admin_router
     from app.platform.runtime import PlatformRuntime
 
     rt = PlatformRuntime.from_env()
@@ -197,9 +210,13 @@ class TestCores:
         logs = client.get(f"/api/zagros/cores/{fake}/logs?lines=50").json()
         assert "fake core started" in logs["lines"]
 
+        # disable auto-stops a running core (manager contract)
         assert client.post(f"/api/zagros/cores/{fake}/disable").json()["enabled"] is False
+        assert client.get(f"/api/zagros/cores/{fake}").json()["state"] == "stopped"
         assert client.post(f"/api/zagros/cores/{fake}/enable").json()["enabled"] is True
 
+        r = client.post(f"/api/zagros/cores/{fake}/start")
+        assert r.json()["state"] == "running"
         r = client.post(f"/api/zagros/cores/{fake}/stop")
         assert r.json()["state"] == "stopped"
 
@@ -250,7 +267,8 @@ class TestRouting:
         r = client.put("/api/zagros/routing/rules",
                        json={"rules": [_rule("dup"), _rule("dup")]})
         assert r.status_code == 422
-        bad = _rule("empty", matcher={})  # model-level validation
+        bad = _rule("empty")
+        bad["matcher"] = {}  # model-level validation: matcher must not be empty
         r = client.put("/api/zagros/routing/rules", json={"rules": [bad]})
         assert r.status_code == 422
 
@@ -267,7 +285,7 @@ class TestRouting:
 
 class TestOutbounds:
     def test_registry_roundtrip_and_sync(self, stack):
-        client, rt = stack["client"], stack["rt"]
+        client = stack["client"]
         r = client.put("/api/zagros/outbounds", json={"outbounds": [
             {"name": "direct-out", "kind": "direct", "settings": {}, "enabled": True},
             {"name": "up-1080", "kind": "socks",
@@ -277,7 +295,7 @@ class TestOutbounds:
         listed = {o["name"] for o in client.get("/api/zagros/outbounds").json()["outbounds"]}
         assert listed >= {"direct-out", "up-1080"}
         # the manager registry was reconciled (routing previews see the names)
-        assert "direct-out" in [o.name for o in rt.outbound_manager.list()]
+        assert "direct-out" in [o.name for o in stack["rt"].outbound_manager.list()]
 
     def test_duplicate_names_rejected(self, stack):
         r = stack["client"].put("/api/zagros/outbounds", json={"outbounds": [
@@ -378,12 +396,12 @@ class TestCertificates:
         assert client.delete("/api/zagros/certificates/lab-cert").status_code == 404
 
     def test_import_rejects_mismatched_pair(self, stack, tmp_path):
-        client, rt = stack["client"], stack["rt"]
+        client = stack["client"]
         from app.platform import certificates
 
         data = str(tmp_path / "certs-import")
-        one = certificates.self_signed(data, "one", "one.example.com")
-        two = certificates.self_signed(data, "two", "two.example.com")
+        certificates.self_signed(data, "one", "one.example.com")
+        certificates.self_signed(data, "two", "two.example.com")
         cert_one = (tmp_path / "certs-import" / "certs" / "one" / "fullchain.pem").read_text()
         key_two = (tmp_path / "certs-import" / "certs" / "two" / "key.pem").read_text()
         r = client.post("/api/zagros/certificates/import", json={

@@ -30,6 +30,7 @@ class RuleAction(str, Enum):
 class RuleMatcher(BaseModel):
     """Field-level matchers; a rule matches when ALL non-empty fields match."""
 
+    inbounds: list[str] = Field(default_factory=list)            # inbound tags (e.g. "reality-in")
     domains: list[str] = Field(default_factory=list)            # exact hosts
     domain_suffixes: list[str] = Field(default_factory=list)    # example.com + *.example.com
     domain_keywords: list[str] = Field(default_factory=list)

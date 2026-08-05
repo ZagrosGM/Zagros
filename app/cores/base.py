@@ -233,6 +233,20 @@ class BaseCoreDriver(abc.ABC):
         self._require(Capability.ROUTING)
         raise NotImplementedError  # pragma: no cover
 
+    async def translate_routing_rules(
+        self, rules: list["RoutingRule"], ctx: "RouteContext"
+    ) -> "TranslatedRoute":
+        """DRY preview of :meth:`deploy_routing_rules` — same report shape,
+        zero core mutations. The default honestly marks preview as
+        unavailable; drivers with a pure translator override it."""
+        self._require(Capability.ROUTING)
+        from app.cores.routing.model import TranslatedRoute
+
+        return TranslatedRoute(
+            core_id=self.metadata.id,
+            notes=["dry preview is not implemented for this driver "
+                   "(deploy produces the authoritative apply report)"])
+
     # ------------------------------------------------------------------ #
     # outbound translation — capability gated (OUTBOUND_MANAGEMENT)
     # ------------------------------------------------------------------ #

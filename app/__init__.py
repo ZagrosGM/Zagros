@@ -114,6 +114,8 @@ def _build_app_inner():
     try:
         from app.platform.runtime import PlatformRuntime
         from app.platform.routers import zagros_admin_router, zagros_router
+        from app.platform import admin_api as _zagros_admin_api  # noqa: F401
+        # (registers the unified-dashboard admin endpoints on the same router)
 
         zagros_runtime = None
         try:
@@ -138,25 +140,10 @@ def _build_app_inner():
         logging.getLogger("uvicorn.error").critical(
             "Zagros product layer unavailable: %s", exc)
 
-    # Brand-new Zagros dashboard + Config Studio (self-contained UIs).
-    @app.get("/zagros/dashboard", include_in_schema=False)
-    def zagros_dashboard_page():
-        return _serve_ui("dashboard.html")
-
-    @app.get("/zagros/studio", include_in_schema=False)
-    def zagros_studio_page():
-        return _serve_ui("studio.html")
-
-    def _serve_ui(name: str):
-        from pathlib import Path
-
-        from fastapi.responses import FileResponse, PlainTextResponse
-
-        page = Path(__file__).resolve().parent.parent / "ui" / name
-        if page.is_file():
-            return FileResponse(page, media_type="text/html")
-        return PlainTextResponse(
-            f"Zagros UI asset (ui/{name}) is missing.", status_code=404)
+    # NOTE: the Zagros ops UI and Config Studio were separate pages in
+    # earlier alphas (/zagros/dashboard, /zagros/studio). As of 1.0.0-alpha.5
+    # there is exactly ONE management UI: the unified dashboard SPA served
+    # at /dashboard (Config Studio lives inside it as "Advanced Mode").
 
     for route in app.routes:
         if isinstance(route, APIRoute):

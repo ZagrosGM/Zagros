@@ -152,8 +152,13 @@ image-blocking defects discovered while hardening it.
     `distutils`-based subscription version-gating replaced with a
     stdlib-free comparator (`distutils` is gone on Python ≥ 3.12);
     Dockerfile copies `chakra.config.ts` before `npm ci` (the
-    `gen:theme-typings` postinstall hook requires it). Dashboard build
-    verified end-to-end locally (`tsc && vite build` green). Suite totals:
+    `gen:theme-typings` postinstall hook requires it); the lazy app builder
+    no longer constructs the FastAPI app when legacy modules touch
+    `from app import scheduler` at import time (`_ensure_scheduler` is now
+    an independent, single, process-wide instance) — this closes the
+    circular-import landmine that broke `zagros-cli` inside fresh
+    environments. Dashboard build verified end-to-end locally
+    (`tsc && vite build` green). Suite totals:
     **250 passed / 7 skipped** (verified twice: system Python and a
     fresh venv with CI-identical dependency resolution); E2E real-binary
     **6 passed / 1 skipped**; CLI harness **142 assertions green**.

@@ -14,6 +14,27 @@ __version__ = "1.0.0-alpha.3"  # Zagros begins a new version line after the rebr
 _building = False
 
 
+def _ensure_scheduler():
+    """Return the process-wide APScheduler instance, creating it on demand.
+
+    The scheduler is intentionally independent from the FastAPI app build:
+    legacy modules (``app.utils.system``, ``app.jobs.*``) touch
+    ``from app import scheduler`` at import time, and those imports can be
+    reached from inside a partially-imported ``app.db.models``. If touching
+    the scheduler built the whole app, job modules would then try to import
+    model classes from the partially-initialised module and crash — the
+    classic circular-import landmine. A bare ``BackgroundScheduler`` has no
+    app-level dependencies, so constructing it is always safe.
+    """
+    if "scheduler" not in globals():
+        from apscheduler.schedulers.background import BackgroundScheduler
+
+        globals()["scheduler"] = BackgroundScheduler(
+            {"apscheduler.job_defaults.max_instances": 20}, timezone="UTC"
+        )
+    return globals()["scheduler"]
+
+
 def _build_app():
     global _building
     # Legacy sub-packages do `from app import app/scheduler` at their own
@@ -36,7 +57,6 @@ def _build_app():
 
 
 def _build_app_inner():
-    from apscheduler.schedulers.background import BackgroundScheduler
     from fastapi import FastAPI, Request, status
     from fastapi.encoders import jsonable_encoder
     from fastapi.exceptions import RequestValidationError
@@ -54,9 +74,7 @@ def _build_app_inner():
         redoc_url="/redoc" if DOCS else None,
     )
 
-    scheduler = BackgroundScheduler(
-        {"apscheduler.job_defaults.max_instances": 20}, timezone="UTC"
-    )
+    scheduler = _ensure_scheduler()  # single process-wide instance
 
     app.add_middleware(
         CORSMiddleware,
@@ -184,9 +202,11 @@ def __getattr__(name: str):
         value = logging.getLogger("uvicorn.error")
         globals()["logger"] = value
         return value
-    if name in ("app", "scheduler"):
-        app_obj, scheduler_obj = _build_app()
+    if name == "scheduler":
+        # Independent of the app build on purpose (see _ensure_scheduler).
+        return _ensure_scheduler()
+    if name == "app":
+        app_obj, _ = _build_app()
         globals()["app"] = app_obj
-        globals()["scheduler"] = scheduler_obj
         return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

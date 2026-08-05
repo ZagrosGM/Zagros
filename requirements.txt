@@ -7,7 +7,7 @@ commentjson
 cryptography
 fastapi
 grpcio>=1.60
-protobuf>=4.25
+protobuf>=4.25  # generated xray-api stubs import google.protobuf at runtime
 itsdangerous
 Jinja2
 jose
@@ -23,7 +23,7 @@ SQLAlchemy>=2.0,<3
 telebot
 uvicorn[standard]
 watchfiles
-websockets
+websocket-client>=1.8  # app/xray/node.py REST-node transport (`from websocket import ...`)
 click
 pyopenssl
 PySocks

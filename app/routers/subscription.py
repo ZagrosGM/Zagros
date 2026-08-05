@@ -1,5 +1,4 @@
 import re
-from distutils.version import LooseVersion
 
 from fastapi import APIRouter, Depends, Header, Path, Request, Response
 from fastapi.responses import HTMLResponse
@@ -8,6 +7,22 @@ from app.db import Session, crud, get_db
 from app.dependencies import get_validated_sub, validate_dates
 from app.models.user import SubscriptionUserResponse, UserResponse
 from app.subscription.share import encode_title, generate_subscription
+
+
+def _version_tuple(version: str) -> tuple:
+    return tuple(int(part) for part in version.split("."))
+
+
+def _at_least(version: str, minimum: str) -> bool:
+    """Numeric dotted-version comparison ('1.8.29' >= '1.8.18').
+
+    Replaces distutils.LooseVersion (removed from the stdlib in Python 3.12).
+    The user-agent regexes below only capture ``\\d+(\\.\\d+)+`` shapes, so
+    zero-padded integer-tuple comparison is equivalent here.
+    """
+    left, right = _version_tuple(version), _version_tuple(minimum)
+    pad = max(len(left), len(right))
+    return left + (0,) * (pad - len(left)) >= right + (0,) * (pad - len(right))
 from app.templates import render_template
 from config import (
     SUB_PROFILE_TITLE,
@@ -96,7 +111,7 @@ def user_subscription(
 
     elif (USE_CUSTOM_JSON_DEFAULT or USE_CUSTOM_JSON_FOR_V2RAYN) and re.match(r'^v2rayN/(\d+\.\d+)', user_agent):
         version_str = re.match(r'^v2rayN/(\d+\.\d+)', user_agent).group(1)
-        if LooseVersion(version_str) >= LooseVersion("6.40"):
+        if _at_least(version_str, "6.40"):
             conf = generate_subscription(user=user, config_format="v2ray-json", as_base64=False, reverse=False)
             return Response(content=conf, media_type="application/json", headers=response_headers)
         else:
@@ -105,10 +120,10 @@ def user_subscription(
 
     elif (USE_CUSTOM_JSON_DEFAULT or USE_CUSTOM_JSON_FOR_V2RAYNG) and re.match(r'^v2rayNG/(\d+\.\d+\.\d+)', user_agent):
         version_str = re.match(r'^v2rayNG/(\d+\.\d+\.\d+)', user_agent).group(1)
-        if LooseVersion(version_str) >= LooseVersion("1.8.29"):
+        if _at_least(version_str, "1.8.29"):
             conf = generate_subscription(user=user, config_format="v2ray-json", as_base64=False, reverse=False)
             return Response(content=conf, media_type="application/json", headers=response_headers)
-        elif LooseVersion(version_str) >= LooseVersion("1.8.18"):
+        elif _at_least(version_str, "1.8.18"):
             conf = generate_subscription(user=user, config_format="v2ray-json", as_base64=False, reverse=True)
             return Response(content=conf, media_type="application/json", headers=response_headers)
         else:
@@ -125,7 +140,7 @@ def user_subscription(
 
     elif (USE_CUSTOM_JSON_DEFAULT or USE_CUSTOM_JSON_FOR_HAPP) and re.match(r'^Happ/(\d+\.\d+\.\d+)', user_agent):
         version_str = re.match(r'^Happ/(\d+\.\d+\.\d+)', user_agent).group(1)
-        if LooseVersion(version_str) >= LooseVersion("1.63.1"):
+        if _at_least(version_str, "1.63.1"):
             conf = generate_subscription(user=user, config_format="v2ray-json", as_base64=False, reverse=False)
             return Response(content=conf, media_type="application/json", headers=response_headers)
         else:

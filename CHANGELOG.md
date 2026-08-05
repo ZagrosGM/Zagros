@@ -145,9 +145,15 @@ image-blocking defects discovered while hardening it.
     product code.
   * New regression coverage: 3 Alembic-revision tests (seed presence,
     no-rotation on re-seed, `0003` upgrade path + backfill) and host
-    `extras` persistence assertions. Suite totals:
-    **247 passed / 7 skipped**; E2E real-binary **6 passed / 1 skipped**;
-    CLI harness **142 assertions green**.
+    `extras` persistence assertions, 3 certificate-identity tests, and
+    two CI-found fixes: `websocket-client` restored to requirements
+    (masked locally by a preinstalled package; the in-container Alembic
+    subprocess hard-fails without it) and the `distutils`-based
+    subscription version-gating replaced with a stdlib-free comparator
+    (`distutils` is gone on Python ≥ 3.12). Suite totals:
+    **250 passed / 7 skipped** (verified twice: system Python and a
+    fresh venv with CI-identical dependency resolution); E2E real-binary
+    **6 passed / 1 skipped**; CLI harness **142 assertions green**.
 
 ### Changed
 

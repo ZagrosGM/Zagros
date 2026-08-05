@@ -110,6 +110,14 @@ class PlatformRuntime:
     def from_env(cls) -> "PlatformRuntime":
         import os
 
+        # Compose only MOUNTS the .env file; merge it here so the runtime
+        # sees the file's values even though nothing is injected into the
+        # container environment (real env vars still win, file never
+        # overrides). Idempotent — see app/env_loader.py.
+        from app.env_loader import load_zagros_env
+
+        load_zagros_env()
+
         url = (os.environ.get("ZAGROS_DATABASE_URL")
                or os.environ.get("SQLALCHEMY_DATABASE_URL")
                or "sqlite:///zagros.db")

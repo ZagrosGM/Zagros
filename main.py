@@ -8,8 +8,9 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 
 from app import app as app, logger  # noqa: F401  (re-exported uvicorn target: `uvicorn main:app`)
-from config import (DEBUG, UVICORN_HOST, UVICORN_PORT, UVICORN_SSL_CERTFILE,
-                    UVICORN_SSL_KEYFILE, UVICORN_SSL_CA_TYPE, UVICORN_UDS)
+from app.platform.bindargs import BindArgsError, compute_bind_args
+from config import (DEBUG, TLS_MODE, UVICORN_HOST, UVICORN_PORT, UVICORN_SSL_CA_CERTFILE,
+                    UVICORN_SSL_CA_TYPE, UVICORN_SSL_CERTFILE, UVICORN_SSL_KEYFILE, UVICORN_UDS)
 
 
 def validate_cert_and_key(cert_file_path, key_file_path, ca_type):
@@ -44,53 +45,71 @@ Self-signed CAs are useful in testing or internal use cases, they’re not suita
         raise ValueError(f"Certificate verification failed: {e}")
 
 
+def _warn_plain_http(host: str, port: int):
+    """Loud advisory for plain-HTTP binds (replaces the old 127.0.0.1 trap).
+
+    The host is NEVER rewritten — the operator's UVICORN_HOST is honored
+    verbatim; this warning exists so an accidental plain-HTTP exposure is
+    impossible to miss in the logs.
+    """
+    loopback = host in ("127.0.0.1", "localhost", "::1")
+    if loopback:
+        hint = f"""
+The server is binding to {host} (loopback only). To reach the panel from your machine, use SSH port forwarding:
+
+{click.style(f'ssh -L {port}:localhost:{port} user@server', italic=True, fg="cyan")}
+
+Then, navigate to {click.style(f'http://127.0.0.1:{port}', bold=True)} on your computer. In this setup, subscription functionality will not work for your devices."""
+    else:
+        hint = f"""
+The server is binding to {click.style(host, bold=True, fg="yellow")} over PLAIN HTTP — the panel and subscription URLs will be reachable WITHOUT TLS encryption, which exposes admin credentials to anyone on the path. Only do this in trusted networks or behind a VPN.
+
+Recommended options:
+1. Set {click.style('UVICORN_SSL_CERTFILE', italic=True, fg="magenta")} and {click.style('UVICORN_SSL_KEYFILE', italic=True, fg="magenta")} in .env to enable TLS directly, or
+2. keep this host reachable only from a reverse proxy (Nginx/Caddy) that terminates SSL, or use VPN/SSH access.
+"""
+    logger.warning(f"""
+{click.style('IMPORTANT!', blink=True, bold=True, fg="yellow")}
+You're running Zagros without TLS (no {click.style('UVICORN_SSL_CERTFILE', italic=True, fg="magenta")} / {click.style('UVICORN_SSL_KEYFILE', italic=True, fg="magenta")} configured, or TLS_MODE=off).
+{hint}
+        """)
+
+
 if __name__ == "__main__":
     # Do NOT change workers count for now
     # multi-workers support isn't implemented yet for APScheduler and XRay module
 
-    bind_args = {}
     if UVICORN_SSL_CA_TYPE not in ["public", "private"]:
         UVICORN_SSL_CA_TYPE = "public"
 
-    if UVICORN_SSL_CERTFILE and UVICORN_SSL_KEYFILE and UVICORN_SSL_CA_TYPE:
+    try:
+        bind_args, tls_active = compute_bind_args(
+            host=UVICORN_HOST,
+            port=UVICORN_PORT,
+            uds=UVICORN_UDS,
+            tls_mode=TLS_MODE,
+            ssl_certfile=UVICORN_SSL_CERTFILE,
+            ssl_keyfile=UVICORN_SSL_KEYFILE,
+            ssl_ca_certfile=UVICORN_SSL_CA_CERTFILE,
+        )
+    except BindArgsError as exc:
+        logger.critical("invalid bind/TLS configuration: %s", exc)
+        raise SystemExit(2)
+
+    if tls_active:
         validate_cert_and_key(UVICORN_SSL_CERTFILE, UVICORN_SSL_KEYFILE, UVICORN_SSL_CA_TYPE)
-
-        bind_args['ssl_certfile'] = UVICORN_SSL_CERTFILE
-        bind_args['ssl_keyfile'] = UVICORN_SSL_KEYFILE
-
-        if UVICORN_UDS:
-            bind_args['uds'] = UVICORN_UDS
-        else:
-            bind_args['host'] = UVICORN_HOST
-            bind_args['port'] = UVICORN_PORT
-
+        if UVICORN_SSL_CA_CERTFILE and not os.path.isfile(UVICORN_SSL_CA_CERTFILE):
+            raise ValueError(
+                f"SSL CA certificate file '{UVICORN_SSL_CA_CERTFILE}' does not exist."
+            )
     else:
-        if UVICORN_UDS:
-            bind_args['uds'] = UVICORN_UDS
-        else:
-
-            logger.warning(f"""
-{click.style('IMPORTANT!', blink=True, bold=True, fg="yellow")}
-You're running Zagros without specifying {click.style('UVICORN_SSL_CERTFILE', italic=True, fg="magenta")} and {click.style('UVICORN_SSL_KEYFILE', italic=True, fg="magenta")}.
-The application will only be accessible through localhost. This means that {click.style('Zagros and subscription URLs will not be accessible externally', bold=True)}.
-
-If you need external access, please provide the SSL files to allow the server to bind to 0.0.0.0. Alternatively, you can run the server on localhost or a Unix socket and use a reverse proxy, such as Nginx or Caddy, to handle SSL termination and provide external access.
-
-If you wish to continue without SSL, you can use SSH port forwarding to access the application from your machine. note that in this case, subscription functionality will not work. 
-
-Use the following command:
-
-{click.style(f'ssh -L {UVICORN_PORT}:localhost:{UVICORN_PORT} user@server', italic=True, fg="cyan")}
-
-Then, navigate to {click.style(f'http://127.0.0.1:{UVICORN_PORT}', bold=True)} on your computer.
-            """)
-
-            bind_args['host'] = '127.0.0.1'
-            bind_args['port'] = UVICORN_PORT
-
-    if DEBUG:
-        bind_args['uds'] = None
-        bind_args['host'] = '0.0.0.0'
+        if (UVICORN_SSL_CA_CERTFILE and TLS_MODE != "off"):
+            logger.warning(
+                "UVICORN_SSL_CA_CERTFILE is set but TLS is not active — the CA file is ignored "
+                "(set UVICORN_SSL_CERTFILE/KEYFILE or check TLS_MODE)."
+            )
+        if "host" in bind_args:
+            _warn_plain_http(bind_args["host"], bind_args["port"])
 
     try:
         uvicorn.run(

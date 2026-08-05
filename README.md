@@ -149,12 +149,48 @@ pip install -r requirements.txt
 cp .env.example .env        # set ZAGROS_SECRET_KEY (openssl rand -hex 32)
 alembic upgrade head        # create the Zagros schema (platform + legacy stacks)
 python3 zagros-cli.py admin create --sudo   # create the first sudo admin
-python main.py              # panel on http://127.0.0.1:8000
+python main.py              # panel on http://0.0.0.0:8000 (UVICORN_HOST/PORT)
 ```
 
 Migrating from Marzban v0.8.x? The migration is idempotent and supports a
 dry-run report first — see `docs/MULTICORE-ARCHITECTURE.md` (persistence
 section) and `alembic upgrade head`.
+
+## Configuration
+
+Everything lives in **one `.env` file** — same operator model as Marzban,
+with a couple of sharp edges removed:
+
+| # | Contract |
+|---|----------|
+| 1 | The panel reads **only** `.env`. Nothing else (Dockerfile/compose/code) injects configuration. |
+| 2 | Compose **mounts** the file (`./.env:/code/.env:ro`) instead of baking it into the container environment. |
+| 3 | Edit the file (or `zagros config edit`) → `zagros restart` applies **every** setting. |
+| 4 | Legacy `zagros.env` files are migrated to `.env` automatically (kept as `zagros.env.migrated`). |
+
+Resolution order (highest first): real process environment (tests/CI only)
+→ `.env` file → built-in defaults. The file location is resolved from the
+package (CWD-independent), overridable via `ZAGROS_ENV_FILE`; the
+installer places it at `/opt/zagros/.env`. See
+[`.env.example`](.env.example) for the grouped reference of every setting.
+
+**Bind host is honored verbatim.** `UVICORN_HOST` is never rewritten at
+runtime (the historical "forced to 127.0.0.1 without TLS" trap is gone —
+verified live with `ss -lntp` showing `0.0.0.0:8000`). Plain-HTTP binds just
+print a loud warning. TLS is controlled by `TLS_MODE`:
+
+| `TLS_MODE` | Behavior |
+|------------|----------|
+| `auto` (default) | TLS when both `UVICORN_SSL_CERTFILE`/`UVICORN_SSL_KEYFILE` are set, otherwise plain HTTP |
+| `on` | TLS **required** — refuses to boot without cert+key |
+| `off` | force plain HTTP (reverse proxy terminates TLS upstream) |
+
+Identity settings: set `DOMAIN` once and `PANEL_BASE_URL`, `APP_BASE_URL`
+and absolute subscription links derive from it automatically
+(`SUBSCRIPTION_URL_PREFIX`, `SUBSCRIPTION_PATH`, `SUBSCRIPTION_TEMPLATE`
+are the canonical overrides; the legacy `XRAY_*` names stay accepted).
+`ALLOWED_ORIGINS` (CORS) and `TRUSTED_HOSTS` (Host-header allow-list) are
+opt-in and empty by default.
 
 ## Docker
 
@@ -162,7 +198,7 @@ Release images are published to **GitHub Container Registry only**
 (multi-arch: linux/amd64, linux/arm64):
 
 ```bash
-docker pull ghcr.io/zagrosgm/zagros:v1.0.0-alpha.3
+docker pull ghcr.io/zagrosgm/zagros:v1.0.0-alpha.4
 docker pull ghcr.io/zagrosgm/zagros:latest        # tracks stable releases
 ```
 
@@ -184,7 +220,7 @@ Note: privileged cores (WireGuard/OpenVPN/SoftEther/SSH) additionally need
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests/                # unit + integration (247 tests)
+python -m pytest tests/                # unit + integration (279 tests)
 ZAGROS_E2E=1 python -m pytest tests/e2e -q -rs   # real-binary E2E (downloads official core binaries)
 alembic upgrade head                   # schema
 python main.py                         # run the panel

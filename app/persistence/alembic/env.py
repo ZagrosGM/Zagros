@@ -13,6 +13,13 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+# Load the panel's .env BEFORE any os.environ lookups below: alembic runs
+# as its own process (e.g. `alembic upgrade head` at container boot) and
+# compose only MOUNTS the file, it is not injected into the environment.
+from app.env_loader import load_zagros_env  # noqa: E402
+
+load_zagros_env()
+
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

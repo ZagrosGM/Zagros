@@ -126,7 +126,7 @@ def test_deploy_covers_every_rule_on_every_core() -> None:
 
         # translations actually arrived at the (fake) cores
         assert len(xb.routing_rules) == 2                    # geo-block + ads
-        assert {o["tag"] for o in xb.outbounds} == {"mz-direct", "mz-block", "mz-dns"}
+        assert {o["tag"] for o in xb.outbounds} == {"zg-direct", "zg-block", "zg-dns"}
         sb_rules = sb.configs[-1]["route"]["rules"]
         # built-in DNS interception rule first, then the panel rules
         assert len(sb_rules) == 3 and sb_rules[0] == {"protocol": "dns", "action": "hijack-dns"}

@@ -65,7 +65,7 @@ class XrayBackend(Protocol):
         ...
 
     def set_outbounds(self, outbounds: list[dict[str, Any]]) -> None:
-        """Merge panel-managed outbounds (tags prefixed ``mz-``) into config."""
+        """Merge panel-managed outbounds (tags prefixed ``zg-``) into config."""
         ...
 
     def ensure_listener(self, protocol: str, port: int) -> None:
@@ -273,14 +273,14 @@ class LegacyXrayBackend:
         mod = self._x()
         existing = [
             ob for ob in (mod.config.get("outbounds") or [])
-            if not str(ob.get("tag", "")).startswith("mz-")
+            if not str(ob.get("tag", "")).startswith("zg-")
         ]
         mod.config["outbounds"] = existing + outbounds
         self._persist_and_maybe_restart()
 
     def ensure_listener(self, protocol: str, port: int) -> None:
         mod = self._x()
-        tag = f"mz-chain-{protocol}-{port}"
+        tag = f"zg-chain-{protocol}-{port}"
         inbounds = list(mod.config.get("inbounds") or [])
         if any(ib.get("tag") == tag for ib in inbounds):
             return

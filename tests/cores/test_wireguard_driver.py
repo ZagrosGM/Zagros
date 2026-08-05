@@ -396,7 +396,7 @@ def test_chain_ingress_real_peering_and_persistence() -> None:
             assert md["local_address"] == ["10.66.66.2/32"]
             assert md["allowed_ips"] == ["0.0.0.0/0", "::/0"]
             # chain peer was synced into the live config & persisted on disk
-            assert "_mz-chain" in backend.synced[-1]
+            assert "_zg-chain" in backend.synced[-1]
             assert os.path.exists(os.path.join(tmp, "chain-peers.json"))
 
             # panel restart → same chain peer/credentials (sources stay valid)

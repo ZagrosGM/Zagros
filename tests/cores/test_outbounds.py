@@ -76,7 +76,7 @@ def test_materialize_chain_endpoint_is_provisioned_and_resolved() -> None:
         assert concrete.settings["server"] == "127.0.0.1"
         assert isinstance(concrete.settings["server_port"], int) and concrete.settings["server_port"] > 0
         # endpoint was actually created on the sing-box (fake) backend
-        chain_inbounds = [i for i in sb.configs[-1]["inbounds"] if i["tag"].startswith("mz-chain-")]
+        chain_inbounds = [i for i in sb.configs[-1]["inbounds"] if i["tag"].startswith("zg-chain-")]
         assert chain_inbounds and chain_inbounds[0]["listen_port"] == concrete.settings["server_port"]
 
     asyncio.run(main())

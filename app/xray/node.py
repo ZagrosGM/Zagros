@@ -16,6 +16,7 @@ from requests.packages.urllib3.poolmanager import PoolManager
 from websocket import WebSocketConnectionClosedException, WebSocketTimeoutException, create_connection
 
 from app.xray.config import XRayConfig
+from app.utils.crypto import ssl_target_name_for_cert
 from xray_api import XRay as XRayAPI
 
 
@@ -140,7 +141,7 @@ class ReSTXRayNode:
                     address=self.address,
                     port=self.api_port,
                     ssl_cert=self._node_cert.encode(),
-                    ssl_target_name="Gozargah"
+                    ssl_target_name=ssl_target_name_for_cert(self._node_cert)
                 )
             else:
                 raise ConnectionError("Node is not started")
@@ -184,7 +185,7 @@ class ReSTXRayNode:
             address=self.address,
             port=self.api_port,
             ssl_cert=self._node_cert.encode(),
-            ssl_target_name="Gozargah"
+            ssl_target_name=ssl_target_name_for_cert(self._node_cert)
         )
 
         try:
@@ -217,7 +218,7 @@ class ReSTXRayNode:
             address=self.address,
             port=self.api_port,
             ssl_cert=self._node_cert.encode(),
-            ssl_target_name="Gozargah"
+            ssl_target_name=ssl_target_name_for_cert(self._node_cert)
         )
 
         try:
@@ -414,7 +415,7 @@ class RPyCXRayNode:
             address=self.address,
             port=self.api_port,
             ssl_cert=self._node_cert.encode(),
-            ssl_target_name="Gozargah"
+            ssl_target_name=ssl_target_name_for_cert(self._node_cert)
         )
         try:
             grpc.channel_ready_future(self._api._channel).result(timeout=5)

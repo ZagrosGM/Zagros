@@ -223,7 +223,7 @@ def test_chain_listener_lifecycle() -> None:
         assert await driver.get_chain_endpoints() == []
         ep = await driver.ensure_chain_listener("socks", 40001)
         assert (ep.host, ep.port, ep.protocol) == ("127.0.0.1", 40001, "socks")
-        listeners = [i for i in backend.configs[-1]["inbounds"] if i["tag"] == "mz-chain-socks-40001"]
+        listeners = [i for i in backend.configs[-1]["inbounds"] if i["tag"] == "zg-chain-socks-40001"]
         assert listeners and listeners[0]["listen_port"] == 40001
         # idempotent + visible
         assert await driver.ensure_chain_listener("socks", 40001) == ep

@@ -107,7 +107,7 @@ def test_usage_deltas_and_clamp() -> None:
         driver, backend = _driver()
         await driver.start()
         await driver.create_account(_account(1, "alice"))
-        backend._traffic = {"1_alice": (514, 4017), "_mz-chain": (10, 10)}  # core-side sanitized names (real server shape)
+        backend._traffic = {"1_alice": (514, 4017), "_zg-chain": (10, 10)}  # core-side sanitized names (real server shape)
         first = await driver.get_usage()
         assert len(first) == 1  # chain user never billed
         assert (first[0].uplink_bytes, first[0].downlink_bytes) == (514, 4017)
@@ -186,7 +186,7 @@ def test_chain_ingress_provision_and_contract() -> None:
         md = endpoint.metadata
         assert md["password"] and md["sni"] == "updates.microsoft.com"
         assert md["insecure"] is True     # self-signed default, honestly exposed
-        assert "_mz-chain" in backend.configs[-1]   # chain user rendered into config
+        assert "_zg-chain" in backend.configs[-1]   # chain user rendered into config
         assert (await driver.get_chain_endpoints())[0].metadata["password"] == md["password"]
 
     asyncio.run(run())

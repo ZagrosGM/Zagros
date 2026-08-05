@@ -59,7 +59,7 @@ _GOLDEN_V1_M2 = (
     "100000100010110011100",
     "111111101011100010110",
 )
-_GOLDEN_V3_M5_SHA = "c13450f0cc90d1b65e5a899c160d349b27b6f963c2aa67c55f1fd2fbcb2110f0"
+_GOLDEN_V3_M5_SHA = "8501b7d0b2822eb218acbb9121e375be550a9c8c6fe5054feb3d295e89ac92cb"
 _GOLDEN_V10_M4_SHA = "318bd79f1de34ac730209209b6ad31e7af6d2c1188478731295976a850488f9e"
 _GOLDEN_V36_L7_SHA = "a28c775c431d4fc22bcdc2f0df1011ec557ccb1b1dbf94e7ac57acfdefeafbc6"
 
@@ -86,7 +86,7 @@ def test_golden_v1_full_matrix() -> None:
 
 def test_golden_multi_version_digests() -> None:
     """Larger versions interleave ECC blocks and add alignment/version info."""
-    m3 = encode_matrix("Marzban/WireGuard peer cfg #1.alice",
+    m3 = encode_matrix("Zagros/WireGuard peer cfg #1.alice",
                        level=EccLevel.MEDIUM, version=3, mask=5)
     assert _digest(m3) == _GOLDEN_V3_M5_SHA
     m10 = encode_matrix(b"y" * 200, level=EccLevel.MEDIUM, version=10, mask=4)

@@ -37,6 +37,15 @@ python main.py
 
 Документация: `docs/MULTICORE-ARCHITECTURE.md`
 
+## Сообщество
+
+* **Telegram-канал (анонсы):** <https://t.me/zagrosgm>
+* **Telegram-группа (обсуждение и поддержка):** <https://t.me/zagrosgm_group>
+* **Репозиторий GitHub:** <https://github.com/ZagrosGM/Zagros>
+* **Установщик и CLI:** <https://github.com/ZagrosGM/zagros-scripts>
+
+Как помочь проекту: см. `CONTRIBUTING.md` в основном репозитории.
+
 ## Лицензия
 
 AGPL-3.0 — с полным сохранением прав авторов Marzban.

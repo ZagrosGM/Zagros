@@ -422,7 +422,7 @@ class Hysteria2Driver(BaseCoreDriver):
     # chain ingress — real hysteria2 upstream for sing-box outbounds
     # ------------------------------------------------------------------ #
     async def get_chain_endpoints(self) -> list[ChainEndpoint]:
-        if "_mz-chain" not in self._chain_users:
+        if "_zg-chain" not in self._chain_users:
             return []
         return [self._chain_endpoint()]
 
@@ -432,12 +432,12 @@ class Hysteria2Driver(BaseCoreDriver):
                 f"Hysteria2 cannot host a '{protocol}' chain endpoint — chains "
                 f"into this core use the native hysteria2 outbound."
             )
-        if "_mz-chain" not in self._chain_users:
+        if "_zg-chain" not in self._chain_users:
             import secrets
             import string
 
             alphabet = string.ascii_letters + string.digits
-            self._chain_users["_mz-chain"] = "".join(
+            self._chain_users["_zg-chain"] = "".join(
                 secrets.choice(alphabet) for _ in range(24)
             )
             await self._publish()
@@ -454,7 +454,7 @@ class Hysteria2Driver(BaseCoreDriver):
             network="udp",
             requires_credentials=True,
             metadata={
-                "password": self._chain_users["_mz-chain"],
+                "password": self._chain_users["_zg-chain"],
                 "sni": s["advertise_sni"] or s["cert_common_name"],
                 "insecure": own_cert,
             },

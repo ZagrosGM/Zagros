@@ -131,7 +131,7 @@ def _accounts(user: int, name: str) -> dict[str, UserAccount]:
 
 def test_scenario_1_provision_one_user_on_all_cores() -> None:
     async def run() -> None:
-        with tempfile.TemporaryDirectory(prefix="mz-sc1-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="zg-sc1-") as tmp:
             mgr, xray, sing, ovpn, wg = await _cluster(tmp)
             accounts = _accounts(1, "alice")
             results = await mgr.provision_user(accounts)
@@ -162,7 +162,7 @@ def test_scenario_1_provision_one_user_on_all_cores() -> None:
 
 def test_scenario_2_unified_quota_exactly_10_gb_no_double_counting() -> None:
     async def run() -> None:
-        with tempfile.TemporaryDirectory(prefix="mz-sc2-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="zg-sc2-") as tmp:
             mgr, xray, sing, ovpn, wg = await _cluster(tmp)
             wg_pub = wg._accounts  # populated on create
             accounts = _accounts(1, "alice")
@@ -245,7 +245,7 @@ def test_scenario_2b_multinode_records_counted_once_each() -> None:
 
 def test_scenario_3_4_5_suspend_resume_delete_simultaneously() -> None:
     async def run() -> None:
-        with tempfile.TemporaryDirectory(prefix="mz-sc345-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="zg-sc345-") as tmp:
             mgr, xray, sing, ovpn, wg = await _cluster(tmp)
             accounts = _accounts(1, "alice")
             await mgr.provision_user(accounts)
@@ -290,7 +290,7 @@ def test_scenario_3_4_5_suspend_resume_delete_simultaneously() -> None:
 
 def test_global_device_limit_counts_one_device_per_ip_across_cores() -> None:
     async def run() -> None:
-        with tempfile.TemporaryDirectory(prefix="mz-dev-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="zg-dev-") as tmp:
             mgr, xray, sing, ovpn, wg = await _cluster(tmp)
             accounts = _accounts(1, "alice")
             await mgr.provision_user(accounts)
@@ -340,7 +340,7 @@ def test_global_device_limit_counts_one_device_per_ip_across_cores() -> None:
 
 def test_session_manager_tracks_open_and_close_with_duration() -> None:
     async def run() -> None:
-        with tempfile.TemporaryDirectory(prefix="mz-sess-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="zg-sess-") as tmp:
             mgr, xray, sing, ovpn, wg = await _cluster(tmp)
             accounts = _accounts(1, "alice")
             await mgr.provision_user(accounts)
@@ -404,7 +404,7 @@ def test_fanout_fault_isolation_one_core_fails_others_succeed() -> None:
 
 def test_concurrent_provisioning_and_quota_stress() -> None:
     async def run() -> None:
-        with tempfile.TemporaryDirectory(prefix="mz-stress-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="zg-stress-") as tmp:
             mgr, xray, sing, ovpn, wg = await _cluster(tmp)
             started = time.perf_counter()
 

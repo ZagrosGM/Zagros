@@ -105,7 +105,7 @@ class FakeBackend:
     def set_outbounds(self, outbounds): self.outbounds = list(outbounds)
 
     def ensure_listener(self, protocol, port):
-        tag = f"mz-chain-{protocol}-{port}"
+        tag = f"zg-chain-{protocol}-{port}"
         self._inbounds.setdefault(tag, {"protocol": protocol, "port": port, "network": "tcp"})
 
 

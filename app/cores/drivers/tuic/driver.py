@@ -310,7 +310,7 @@ class TUICDriver(BaseCoreDriver):
     # chain ingress — real tuic upstream for sing-box outbounds
     # ------------------------------------------------------------------ #
     async def get_chain_endpoints(self) -> list[ChainEndpoint]:
-        if "_mz-chain" not in self._chain_users:
+        if "_zg-chain" not in self._chain_users:
             return []
         return [self._chain_endpoint()]
 
@@ -320,14 +320,14 @@ class TUICDriver(BaseCoreDriver):
                 f"TUIC cannot host a '{protocol}' chain endpoint — chains into "
                 f"this core use the native tuic outbound."
             )
-        if "_mz-chain" not in self._chain_users:
-            self._chain_users["_mz-chain"] = (str(uuid_mod.uuid4()), uuid_mod.uuid4().hex[:16])
+        if "_zg-chain" not in self._chain_users:
+            self._chain_users["_zg-chain"] = (str(uuid_mod.uuid4()), uuid_mod.uuid4().hex[:16])
             await self._publish()
         return self._chain_endpoint()
 
     def _chain_endpoint(self) -> ChainEndpoint:
         s = self.settings
-        uuid_, password = self._chain_users["_mz-chain"]
+        uuid_, password = self._chain_users["_zg-chain"]
         return ChainEndpoint(
             core_id=self.metadata.id,
             protocol="tuic",

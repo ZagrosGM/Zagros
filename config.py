@@ -4,6 +4,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+# ------------------------- Zagros platform (P3+) ------------------------- #
+# New canonical names live under the ZAGROS_* namespace; legacy names stay
+# accepted as fallbacks so existing deployments keep booting.
+ZAGROS_DATABASE_URL = config(
+    "ZAGROS_DATABASE_URL",
+    default=config("SQLALCHEMY_DATABASE_URL", default="sqlite:///zagros.db"),
+)
+ZAGROS_SECRET_KEY = config("ZAGROS_SECRET_KEY", default="")
+ZAGROS_CLIENT_AUTH_MODE = config(
+    "ZAGROS_CLIENT_AUTH_MODE", default="subscription_link"
+).lower()
+ZAGROS_PORTAL_TITLE = config("ZAGROS_PORTAL_TITLE", default="اشتراک من")
+ZAGROS_APP_NAME = config("ZAGROS_APP_NAME", default="Zagros")
+
 SQLALCHEMY_DATABASE_URL = config("SQLALCHEMY_DATABASE_URL", default="sqlite:///db.sqlite3")
 SQLALCHEMY_POOL_SIZE = config("SQLALCHEMY_POOL_SIZE", cast=int, default=10)
 SQLIALCHEMY_MAX_OVERFLOW = config("SQLIALCHEMY_MAX_OVERFLOW", cast=int, default=30)
@@ -19,7 +33,10 @@ DASHBOARD_PATH = config("DASHBOARD_PATH", default="/dashboard/")
 DEBUG = config("DEBUG", default=False, cast=bool)
 DOCS = config("DOCS", default=False, cast=bool)
 
-ALLOWED_ORIGINS = config("ALLOWED_ORIGINS", default="*").split(",")
+# Security review (Alpha): never default to "*" — especially not together
+# with allow_credentials=True in the app. Empty default = same-origin only;
+# operators opt in explicitly per trusted origin.
+ALLOWED_ORIGINS = [o for o in config("ALLOWED_ORIGINS", default="").split(",") if o]
 
 VITE_BASE_API = f"http://127.0.0.1:{UVICORN_PORT}/api/" \
     if DEBUG and config("VITE_BASE_API", default="/api/") == "/api/" \

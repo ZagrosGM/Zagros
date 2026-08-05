@@ -12,7 +12,7 @@ from app.db.models import User
 T = TypeVar("T")
 
 rich_console = Console()
-PASSWORD_ENVIRON_NAME = "MARZBAN_ADMIN_PASSWORD"
+PASSWORD_ENVIRON_NAME = "ZAGROS_ADMIN_PASSWORD"
 
 FLAGS: Dict[str, tuple] = {
     "username": ("--username", "-u"),

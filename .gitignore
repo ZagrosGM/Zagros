@@ -160,3 +160,19 @@ xray-core
 *-dev.yml
 *-dev.yaml
 *-debug.*
+
+# ── Zagros platform ──────────────────────────────────────────────
+# React dashboard build output (rebuilt via build_dashboard.sh; not tracked)
+app/dashboard/build/
+# Downloaded core binaries / runtime work dirs / driver bootstrap secrets
+.zagros-installed
+.bootstrap-secret
+*.bootstrap-secret
+# Local runtime data & backups
+*.db-wal
+*.db-shm
+zagros.db*
+backups/
+# Local credentials & tokens (never commit real secrets)
+.env.local
+*.local.env

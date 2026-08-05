@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zagros — داشبورد مدیریت</title>
+<!--
+  Zagros Admin Dashboard — self-contained UI (no build step, no external
+  assets). Talks to GET /api/zagros/dashboard/snapshot; when the API is
+  unreachable it renders built-in demo data with a clearly visible badge,
+  so the design can be evaluated offline without pretending to be live.
+-->
+<style>
+:root{
+  --zg-primary:#4f7cff;--zg-primary-deep:#3b5fd9;--zg-accent:#22c59e;
+  --zg-bg:#f4f7fc;--zg-card:#ffffff;--zg-card2:#eef2f9;--zg-text:#0f172a;
+  --zg-muted:#64748b;--zg-border:#e2e8f0;--zg-danger:#ef4444;--zg-warn:#f59e0b;
+  --zg-ok:#22c59e;--zg-shadow:0 6px 24px rgba(15,23,42,.08);--zg-radius:18px;
+}
+[data-theme="dark"]{
+  --zg-bg:#0b1220;--zg-card:#121c30;--zg-card2:#182742;
+  --zg-text:#e7edf7;--zg-muted:#8ea0bd;--zg-border:#233252;
+  --zg-shadow:0 8px 28px rgba(0,0,0,.45);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Vazirmatn,Tahoma,"Segoe UI",system-ui,sans-serif;background:var(--zg-bg);
+  color:var(--zg-text);min-height:100vh;line-height:1.7;transition:background .25s,color .25s}
+a{color:var(--zg-primary);text-decoration:none}
+.wrap{max-width:1280px;margin:0 auto;padding:22px 18px 64px}
+header.top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;font-weight:900;font-size:22px;letter-spacing:.4px}
+.brand svg{width:34px;height:34px}
+.spacer{flex:1}
+.iconbtn{cursor:pointer;border:1px solid var(--zg-border);background:var(--zg-card);
+  color:var(--zg-text);border-radius:12px;padding:8px 12px;font-size:14px;transition:border-color .2s}
+.iconbtn:hover{border-color:var(--zg-primary)}
+nav.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
+nav.tabs a{border:1px solid var(--zg-border);border-radius:999px;padding:6px 14px;font-size:13px;
+  color:var(--zg-muted);background:var(--zg-card);font-weight:600}
+nav.tabs a:hover{color:var(--zg-primary);border-color:var(--zg-primary)}
+.hero{background:linear-gradient(135deg,var(--zg-primary),var(--zg-primary-deep));
+  border-radius:var(--zg-radius);padding:26px 22px;color:#fff;box-shadow:var(--zg-shadow);
+  position:relative;overflow:hidden;margin-top:16px}
+.hero:after{content:"";position:absolute;inset-inline-end:-70px;top:-70px;width:220px;height:220px;
+  border-radius:50%;background:rgba(255,255,255,.12)}
+.hero h1{font-size:22px;font-weight:900}
+.hero p{opacity:.92;font-size:14px;margin-top:4px}
+.badge{display:inline-block;font-size:11px;font-weight:800;border-radius:999px;padding:3px 10px;
+  background:rgba(255,255,255,.2);color:#fff;margin-inline-start:8px;vertical-align:middle}
+.badge.demo{background:var(--zg-warn);color:#1b1300}
+.grid{display:grid;gap:14px;margin-top:18px}
+.grid.kpi{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.grid.cols2{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+.card{background:var(--zg-card);border:1px solid var(--zg-border);border-radius:var(--zg-radius);
+  box-shadow:var(--zg-shadow);padding:20px}
+.card h2{font-size:15px;font-weight:800;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.card h2 .dot{width:9px;height:9px;border-radius:50%;background:var(--zg-primary)}
+.stat{background:var(--zg-card);border:1px solid var(--zg-border);border-radius:var(--zg-radius);
+  box-shadow:var(--zg-shadow);padding:16px 18px}
+.stat .k{font-size:12px;color:var(--zg-muted);font-weight:700}
+.stat .v{font-size:26px;font-weight:900;margin-top:4px;font-variant-numeric:tabular-nums}
+.stat .sub{font-size:11px;color:var(--zg-muted);margin-top:2px}
+.row{display:flex;align-items:center;gap:10px;justify-content:space-between;padding:10px 0;
+  border-bottom:1px solid var(--zg-border)}
+.row:last-child{border-bottom:none}
+.pill{font-size:10px;font-weight:800;border-radius:999px;padding:2px 9px;white-space:nowrap}
+.pill.ok{background:color-mix(in srgb,var(--zg-ok) 16%,transparent);color:var(--zg-ok)}
+.pill.warn{background:color-mix(in srgb,var(--zg-warn) 18%,transparent);color:var(--zg-warn)}
+.pill.bad{background:color-mix(in srgb,var(--zg-danger) 14%,transparent);color:var(--zg-danger)}
+.pill.mute{background:var(--zg-card2);color:var(--zg-muted)}
+.bar{height:9px;background:var(--zg-card2);border-radius:999px;overflow:hidden;flex:1;min-width:80px}
+.bar>div{height:100%;border-radius:999px;background:linear-gradient(90deg,var(--zg-accent),var(--zg-primary));
+  transition:width .5s}
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;direction:ltr;unicode-bidi:embed;font-size:12px}
+.muted{color:var(--zg-muted);font-size:12px}
+canvas.chart{width:100%;height:64px;display:block}
+table.t{width:100%;border-collapse:collapse;font-size:13px}
+table.t th{color:var(--zg-muted);font-size:11px;text-align:start;padding:6px 4px;border-bottom:1px solid var(--zg-border)}
+table.t td{padding:9px 4px;border-bottom:1px solid var(--zg-border);vertical-align:middle}
+table.t tr:last-child td{border-bottom:none}
+.alert{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--zg-border);
+  border-radius:12px;padding:10px 12px;margin-top:8px;background:var(--zg-card2)}
+.alert .sev{font-size:10px;font-weight:900;border-radius:8px;padding:2px 8px;white-space:nowrap;margin-top:2px}
+.sev.critical{background:var(--zg-danger);color:#fff}
+.sev.warning{background:var(--zg-warn);color:#1b1300}
+.sev.info{background:var(--zg-primary);color:#fff}
+.foot{margin-top:36px;text-align:center;color:var(--zg-muted);font-size:12px}
+.foot b{color:var(--zg-text)}
+@media(max-width:640px){.hero h1{font-size:18px}.stat .v{font-size:22px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
+        <rect width="64" height="64" rx="16" fill="#4f7cff"/>
+        <path d="M14 44 L28 20 L37 34 L43 26 L52 44 Z" fill="#fff" opacity=".95"/>
+        <circle cx="45" cy="18" r="4" fill="#22c59e"/>
+      </svg>
+      <span>Zagros</span>
+    </div>
+    <span class="muted" data-i18n="tagline">پلتفرم سازمانی مدیریت VPN چندهسته‌ای</span>
+    <div class="spacer"></div>
+    <button class="iconbtn" id="langBtn">EN</button>
+    <button class="iconbtn" id="themeBtn">◐</button>
+  </header>
+
+  <nav class="tabs">
+    <a href="#overview" data-i18n="nav_overview">نمای کلی</a>
+    <a href="/zagros/studio" data-i18n="nav_studio">Config Studio</a>
+    <a href="#cores" data-i18n="nav_cores">هسته‌ها</a>
+    <a href="#nodes" data-i18n="nav_nodes">نودها</a>
+    <a href="#usage" data-i18n="nav_usage">مصرف</a>
+    <a href="#deploy" data-i18n="nav_deploy">Routing / Outbound</a>
+    <a href="#alerts" data-i18n="nav_alerts">هشدارها</a>
+  </nav>
+
+  <section class="hero" id="overview">
+    <h1><span data-i18n="hero_title">داشبورد Zagros</span><span class="badge demo" id="demoBadge" hidden>داده نمایشی</span></h1>
+    <p id="heroSub"></p>
+  </section>
+
+  <div class="card" id="authBox" hidden style="margin-top:16px">
+    <h2><span class="dot"></span><span data-i18n="auth_title">ورود مدیر</span></h2>
+    <div class="muted" data-i18n="auth_hint">توکن ادمین sudo را وارد کنید (از <span class="mono">POST /api/admin/token</span> یا swagger).</div>
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+      <input id="tkInp" type="password" placeholder="Bearer token" style="flex:1;min-width:220px;border:1px solid var(--zg-border);border-radius:10px;padding:9px 12px;background:var(--zg-card2);color:var(--zg-text)">
+      <button class="btn" id="tkBtn" data-i18n="auth_save" style="cursor:pointer;border:none;border-radius:10px;padding:9px 16px;background:linear-gradient(135deg,var(--zg-primary),var(--zg-primary-deep));color:#fff;font-weight:800">ذخیره</button>
+      <button class="iconbtn" id="tkClear" data-i18n="auth_clear">پاک‌سازی</button>
+    </div>
+  </div>
+
+  <div class="grid kpi">
+    <div class="stat"><div class="k" data-i18n="k_online">کاربران آنلاین</div><div class="v" id="kOnline">—</div><div class="sub" id="kActiveSub"></div></div>
+    <div class="stat"><div class="k" data-i18n="k_users">کل کاربران</div><div class="v" id="kUsers">—</div></div>
+    <div class="stat"><div class="k" data-i18n="k_usage">مصرف کل</div><div class="v" id="kUsage">—</div><div class="sub" data-i18n="k_usage_sub">از ابتدای راه‌اندازی</div></div>
+    <div class="stat"><div class="k" data-i18n="k_sessions">Sessionهای فعال</div><div class="v" id="kSessions">—</div><div class="sub" id="kDevicesSub"></div></div>
+    <div class="stat"><div class="k" data-i18n="k_cores">هسته‌های سالم</div><div class="v" id="kCores">—</div></div>
+  </div>
+
+  <div class="grid cols2">
+    <div class="card">
+      <h2><span class="dot"></span><span data-i18n="live_usage">مصرف لحظه‌ای (نمودار زنده)</span></h2>
+      <canvas class="chart" id="spark" width="560" height="64"></canvas>
+      <div class="row"><span class="muted" data-i18n="throughput">نرخ فعلی انتقال</span><b class="mono" id="rate">—</b></div>
+    </div>
+    <div class="card" id="usage">
+      <h2><span class="dot"></span><span data-i18n="usage_by_core">مصرف هر Core</span></h2>
+      <div id="usageByCore"></div>
+    </div>
+  </div>
+
+  <div class="grid cols2">
+    <div class="card" id="cores">
+      <h2><span class="dot"></span><span data-i18n="core_health">سلامت Coreها</span></h2>
+      <div id="coreList"></div>
+    </div>
+    <div class="card" id="nodes">
+      <h2><span class="dot"></span><span data-i18n="node_health">سلامت Nodeها</span></h2>
+      <table class="t"><thead><tr>
+        <th data-i18n="th_name">نام</th><th data-i18n="th_addr">آدرس</th>
+        <th data-i18n="th_status">وضعیت</th><th data-i18n="th_seen">آخرین اتصال</th>
+      </tr></thead><tbody id="nodeRows"></tbody></table>
+    </div>
+  </div>
+
+  <div class="grid cols2" id="deploy">
+    <div class="card">
+      <h2><span class="dot"></span><span data-i18n="routing_status">وضعیت Routing</span></h2>
+      <div id="routingBox"></div>
+    </div>
+    <div class="card">
+      <h2><span class="dot"></span><span data-i18n="outbound_status">وضعیت Outbound</span></h2>
+      <div id="outboundBox"></div>
+    </div>
+  </div>
+
+  <div class="card" id="alerts" style="margin-top:18px">
+    <h2><span class="dot"></span><span data-i18n="alerts">هشدارها</span></h2>
+    <div id="alertList"></div>
+  </div>
+
+  <p class="foot"><b>Zagros</b> — Enterprise Multi-Core VPN Management Platform ·
+    <span data-i18n="foot_api">منبع داده:</span> <span class="mono" id="apiState">…</span></p>
+</div>
+
+<script>
+"use strict";
+const API_URL = "/api/zagros/dashboard/snapshot";
+const $ = id => document.getElementById(id);
+/* admin auth: sudo bearer token (issued via POST /api/admin/token) */
+function adminToken(){ return localStorage.getItem("zagros-admin-token") || ""; }
+function authHeaders(){
+  const tk = adminToken();
+  return tk ? {"Authorization": "Bearer " + tk, "Accept": "application/json"}
+            : {"Accept": "application/json"};
+}
+
+/* ---------------- i18n ---------------- */
+const T = {
+  fa: {tagline:"پلتفرم سازمانی مدیریت VPN چندهسته‌ای",nav_overview:"نمای کلی",nav_studio:"Config Studio",nav_cores:"هسته‌ها",
+    nav_nodes:"نودها",nav_usage:"مصرف",nav_deploy:"Routing / Outbound",nav_alerts:"هشدارها",
+    hero_title:"داشبورد Zagros",hero_sub:"آخرین به‌روزرسانی: {t}",
+    k_online:"کاربران آنلاین",k_users:"کل کاربران",k_usage:"مصرف کل",k_usage_sub:"از ابتدای راه‌اندازی",
+    k_sessions:"Sessionهای فعال",k_cores:"هسته‌های سالم",k_active_sub:"کاربر فعال",
+    k_devices_sub:"Device فعال",live_usage:"مصرف لحظه‌ای (نمودار زنده)",throughput:"نرخ فعلی انتقال",
+    usage_by_core:"مصرف هر Core",core_health:"سلامت Coreها",node_health:"سلامت Nodeها",
+    routing_status:"وضعیت Routing",outbound_status:"وضعیت Outbound",alerts:"هشدارها",
+    th_name:"نام",th_addr:"آدرس",th_status:"وضعیت",th_seen:"آخرین اتصال",
+    no_alerts:"هشداری وجود ندارد — همه‌چیز پایدار است. ✅",no_nodes:"هیچ Nodeی ثبت نشده است.",
+    unsupported:"بدون پشتیبانی این قابلیت",up:"آپلود",down:"دانلود",accounts:"اکانت",sessions:"سشن",
+    deployed:"اعمال‌شده",per_core_rules:"rule",foot_api:"منبع داده:",live:"API زنده",demo:"نمایشی (آفلاین)",
+    auth_title:"ورود مدیر",auth_hint:"توکن ادمین sudo را وارد کنید (از POST /api/admin/token یا swagger).",auth_save:"ذخیره",auth_clear:"پاک‌سازی",healthy:"سالم",degraded:"ناکام/ضعیف",unhealthy:"ناسالم",never:"هرگز"},
+  en: {tagline:"Enterprise Multi-Core VPN Management Platform",nav_overview:"Overview",nav_studio:"Config Studio",nav_cores:"Cores",
+    nav_nodes:"Nodes",nav_usage:"Usage",nav_deploy:"Routing / Outbounds",nav_alerts:"Alerts",
+    hero_title:"Zagros Dashboard",hero_sub:"Last updated: {t}",
+    k_online:"Online users",k_users:"Total users",k_usage:"Total usage",k_usage_sub:"since start",
+    k_sessions:"Active sessions",k_cores:"Healthy cores",k_active_sub:"active users",
+    k_devices_sub:"active devices",live_usage:"Live usage (real-time chart)",throughput:"Current throughput",
+    usage_by_core:"Usage per core",core_health:"Core health",node_health:"Node health",
+    routing_status:"Routing status",outbound_status:"Outbound status",alerts:"Alerts",
+    th_name:"Name",th_addr:"Address",th_status:"Status",th_seen:"Last seen",
+    no_alerts:"No alerts — everything is stable. ✅",no_nodes:"No nodes registered.",
+    unsupported:"capability unsupported",up:"Up",down:"Down",accounts:"accounts",sessions:"sessions",
+    deployed:"deployed",per_core_rules:"rules",foot_api:"Data source:",live:"live API",demo:"demo (offline)",
+    auth_title:"Admin sign-in",auth_hint:"Paste a sudo admin token (from POST /api/admin/token or Swagger).",auth_save:"Save",auth_clear:"Clear",healthy:"healthy",degraded:"degraded",unhealthy:"unhealthy",never:"never"}
+};
+let lang = localStorage.getItem("zagros-lang") || "fa";
+function t(k, sub){ let s = (T[lang] && T[lang][k]) || T.en[k] || k; if(sub) s = s.replace("{t}", sub); return s; }
+function applyLang(){
+  document.documentElement.lang = lang;
+  document.documentElement.dir = lang === "fa" ? "rtl" : "ltr";
+  document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
+  $("langBtn").textContent = lang === "fa" ? "EN" : "فا";
+}
+$("langBtn").onclick = () => { lang = lang === "fa" ? "en" : "fa"; localStorage.setItem("zagros-lang", lang); applyLang(); render(lastSnap, lastIsDemo); };
+
+/* ---------------- theme ---------------- */
+function setTheme(v){ document.documentElement.dataset.theme = v; localStorage.setItem("zagros-theme", v); }
+setTheme(localStorage.getItem("zagros-theme") ||
+  (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
+$("themeBtn").onclick = () =>
+  setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+
+/* ---------------- demo data (honest offline fallback) ---------------- */
+const DEMO = {
+  generated_at: new Date().toISOString(),
+  users_total: 128, users_online: 31, users_active: 96,
+  usage_total_bytes: 2389076545536,
+  usage_by_core: [
+    {core_id:"xray", uplink_bytes: 402653184000, downlink_bytes: 1610612736000, total_bytes: 2013265920000},
+    {core_id:"sing-box", uplink_bytes: 53687091200, downlink_bytes: 214748364800, total_bytes: 268435456000},
+    {core_id:"wireguard", uplink_bytes: 16106127360, downlink_bytes: 75161927680, total_bytes: 91268055040},
+    {core_id:"openvpn", uplink_bytes: 2147483648, downlink_bytes: 13958643712, total_bytes: 16106127360}
+  ],
+  cores: [
+    {core_id:"xray", name:"Xray", state:"running", health:"healthy", enabled:true, version:"25.3.6", uptime_seconds: 412300, active_accounts: 87, active_sessions: 24},
+    {core_id:"sing-box", name:"sing-box", state:"running", health:"healthy", enabled:true, version:"1.11.0", uptime_seconds: 398120, active_accounts: 22, active_sessions: 6},
+    {core_id:"wireguard", name:"WireGuard", state:"running", health:"healthy", enabled:true, version:"1.0.20210914", uptime_seconds: 410900, active_accounts: 12, active_sessions: 1},
+    {core_id:"openvpn", name:"OpenVPN", state:"running", health:"degraded", enabled:true, version:"2.6.12", uptime_seconds: 120440, active_accounts: 7, active_sessions: 0, message:"management interface reconnecting"}
+  ],
+  nodes: [
+    {node_id:1, name:"Frankfurt-1", address:"10.10.0.11", status:"connected", last_seen:new Date().toISOString()},
+    {node_id:2, name:"Amsterdam-1", address:"10.10.0.12", status:"connecting", last_seen:new Date(Date.now()-64000).toISOString()},
+    {node_id:3, name:"Istanbul-1", address:"10.10.0.13", status:"error", last_seen:new Date(Date.now()-600000).toISOString()}
+  ],
+  devices_active: 44, sessions_active: 31,
+  routing_status: {deployed_at_available:true, per_core:{xray:{rules:14, deployed:true}, "sing-box":{rules:14, deployed:true}, wireguard:{unsupported:true}}, unsupported_total:1},
+  outbound_status: {deployed_at_available:true, per_core:{xray:{outbounds:6, deployed:true}, "sing-box":{outbounds:6, deployed:true}, openvpn:{unsupported:true}}, unsupported_total:1},
+  alerts: [
+    {severity:"critical", code:"node.offline", message:"Node Istanbul-1 is in error state", target:"node:3"},
+    {severity:"warning", code:"core.degraded", message:"OpenVPN management interface reconnecting", target:"core:openvpn"},
+    {severity:"info", code:"quota.near_limit", message:"8 users above 90% of their data limit", target:null}
+  ]
+};
+
+/* ---------------- formatting ---------------- */
+function fmtBytes(n){
+  n = Number(n) || 0;
+  const u = ["B","KB","MB","GB","TB","PB"]; let i = 0;
+  while (n >= 1024 && i < u.length-1){ n /= 1024; i++; }
+  return (i ? n.toFixed(n >= 100 ? 0 : n >= 10 ? 1 : 2) : n) + " " + u[i];
+}
+function fmtInt(n){ return (Number(n)||0).toLocaleString("en-US"); }
+function fmtWhen(iso){
+  if(!iso) return t("never");
+  const d = new Date(iso);
+  return d.toLocaleString(lang === "fa" ? "fa-IR" : "en-GB", {hour12:false});
+}
+function esc(s){ return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function healthPill(h){
+  const map = {healthy:"ok", running:"ok", connected:"ok", degraded:"warn", connecting:"warn",
+               unhealthy:"bad", error:"bad", disabled:"mute", stopped:"mute"};
+  const label = t(h) !== h ? t(h) : h;
+  return `<span class="pill ${map[h] || "mute"}">${esc(label)}</span>`;
+}
+
+/* ---------------- sparkline ---------------- */
+const history = [];   // total bytes samples (max 60)
+function drawSpark(){
+  const c = $("spark"), ctx = c.getContext("2d");
+  const W = c.width, H = c.height;
+  ctx.clearRect(0,0,W,H);
+  if (history.length < 2){
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--zg-muted");
+    ctx.font = "11px sans-serif"; ctx.fillText("…", W/2, H/2); return;
+  }
+  const deltas = [];
+  for (let i = 1; i < history.length; i++) deltas.push(Math.max(0, history[i] - history[i-1]));
+  const max = Math.max(...deltas, 1);
+  const step = W / (deltas.length - 1 || 1);
+  const grad = ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0,"rgba(79,124,255,.55)"); grad.addColorStop(1,"rgba(79,124,255,.02)");
+  ctx.beginPath(); ctx.moveTo(0,H);
+  deltas.forEach((d,i) => ctx.lineTo(i*step, H - 4 - (d/max)*(H-10)));
+  ctx.lineTo((deltas.length-1)*step, H); ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+  ctx.beginPath();
+  deltas.forEach((d,i) => { const x=i*step, y=H - 4 - (d/max)*(H-10); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+  ctx.strokeStyle = "#4f7cff"; ctx.lineWidth = 2; ctx.stroke();
+}
+
+/* ---------------- render ---------------- */
+let lastSnap = null, lastIsDemo = false;
+function gaugeTotal(g){ return g.total_bytes ?? ((g.uplink_bytes||0) + (g.downlink_bytes||0)); }
+
+function render(snap, isDemo){
+  if(!snap) return;
+  lastSnap = snap; lastIsDemo = isDemo;
+  $("demoBadge").hidden = !isDemo;
+  $("apiState").textContent = isDemo ? t("demo") : t("live");
+  $("heroSub").textContent = t("hero_sub", fmtWhen(snap.generated_at));
+
+  $("kOnline").textContent = fmtInt(snap.users_online);
+  $("kActiveSub").textContent = fmtInt(snap.users_active) + " " + t("k_active_sub");
+  $("kUsers").textContent = fmtInt(snap.users_total);
+  $("kUsage").textContent = fmtBytes(snap.usage_total_bytes);
+  $("kSessions").textContent = fmtInt(snap.sessions_active);
+  $("kDevicesSub").textContent = fmtInt(snap.devices_active) + " " + t("k_devices_sub");
+  const healthyCores = (snap.cores||[]).filter(c => c.health === "healthy" && c.enabled).length;
+  $("kCores").textContent = healthyCores + "/" + (snap.cores||[]).length;
+
+  // sparkline
+  history.push(Number(snap.usage_total_bytes) || 0);
+  if (history.length > 60) history.shift();
+  if (history.length >= 2){
+    const delta = Math.max(0, history[history.length-1] - history[history.length-2]);
+    $("rate").textContent = fmtBytes(delta / POLL_S) + "/s";
+  }
+  drawSpark();
+
+  // usage by core
+  const gs = snap.usage_by_core || [];
+  const mx = Math.max(...gs.map(gaugeTotal), 1);
+  $("usageByCore").innerHTML = gs.length ? gs.map(g => `
+    <div class="row">
+      <b class="mono">${esc(g.core_id)}</b>
+      <span class="bar"><span style="display:block;width:${Math.round(gaugeTotal(g)/mx*100)}%"></span></span>
+      <span class="mono" style="min-width:84px;text-align:end">${fmtBytes(gaugeTotal(g))}</span>
+    </div>
+    <div class="muted" style="margin:-6px 0 6px">⬆ ${fmtBytes(g.uplink_bytes)} · ⬇ ${fmtBytes(g.downlink_bytes)}</div>`
+  ).join("") : `<p class="muted">—</p>`;
+
+  // cores
+  $("coreList").innerHTML = (snap.cores||[]).map(c => `
+    <div class="row">
+      <div><b>${esc(c.name || c.core_id)}</b> <span class="muted mono">${esc(c.version||"")}</span>
+        ${c.message ? `<div class="muted">⚠ ${esc(c.message)}</div>` : ""}</div>
+      <div style="text-align:end">
+        ${healthPill(c.health)}
+        <div class="muted">${fmtInt(c.active_accounts)} ${t("accounts")} · ${fmtInt(c.active_sessions)} ${t("sessions")}</div>
+      </div>
+    </div>`).join("") || `<p class="muted">—</p>`;
+
+  // nodes
+  $("nodeRows").innerHTML = (snap.nodes||[]).length ? snap.nodes.map(n => `
+    <tr><td><b>${esc(n.name)}</b></td><td class="mono">${esc(n.address)}</td>
+      <td>${healthPill(n.status)}</td><td class="muted">${esc(fmtWhen(n.last_seen))}</td></tr>`).join("")
+    : `<tr><td colspan="4" class="muted">${t("no_nodes")}</td></tr>`;
+
+  // routing / outbound
+  const dep = (d, unit) => {
+    const cores = Object.entries(d.per_core || {});
+    if (!cores.length) return `<p class="muted">—</p>`;
+    return cores.map(([cid, info]) => `
+      <div class="row"><b class="mono">${esc(cid)}</b>
+        ${info.unsupported
+          ? `<span class="pill mute">${t("unsupported")}</span>`
+          : `<span class="muted">${fmtInt(info.rules ?? info.outbounds ?? 0)} ${unit} · ${t("deployed")} ${info.deployed ? "✓" : "✗"}</span>`}
+      </div>`).join("") +
+      (d.unsupported_total ? `<div class="muted" style="margin-top:8px">Σ ${t("unsupported")}: ${fmtInt(d.unsupported_total)}</div>` : "");
+  };
+  $("routingBox").innerHTML = dep(snap.routing_status || {}, t("per_core_rules"));
+  $("outboundBox").innerHTML = dep(snap.outbound_status || {}, "outbounds");
+
+  // alerts
+  const alerts = snap.alerts || [];
+  $("alertList").innerHTML = alerts.length ? alerts.map(a => `
+    <div class="alert">
+      <span class="sev ${esc(a.severity)}">${esc(a.severity)}</span>
+      <div><b class="mono">${esc(a.code)}</b>${a.target ? ` <span class="muted mono">→ ${esc(a.target)}</span>` : ""}
+        <div class="muted">${esc(a.message)}</div></div>
+    </div>`).join("") : `<p class="muted">${t("no_alerts")}</p>`;
+}
+
+/* ---------------- polling ---------------- */
+const POLL_S = 5;
+async function poll(){
+  let snap = null, isDemo = false;
+  try{
+    const r = await fetch(API_URL, {headers:authHeaders()});
+    if (r.status === 401 || r.status === 403){ showAuth(); return; }
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    hideAuth();
+    snap = await r.json();
+  }catch(e){ snap = DEMO; isDemo = true; }
+  if (isDemo){ // keep the demo feeling alive without lying about it
+    DEMO.generated_at = new Date().toISOString();
+    DEMO.usage_total_bytes += Math.floor(Math.random()*4e6);
+    DEMO.usage_by_core[0].total_bytes += Math.floor(Math.random()*3e6);
+    DEMO.usage_by_core[0].downlink_bytes += Math.floor(Math.random()*2.5e6);
+    DEMO.usage_by_core[0].uplink_bytes += Math.floor(Math.random()*5e5);
+  }
+  render(snap, isDemo);
+}
+function showAuth(){ $("authBox").hidden = false; }
+function hideAuth(){ $("authBox").hidden = true; }
+$("tkBtn").onclick = () => {
+  const v = $("tkInp").value.trim();
+  if (v){ localStorage.setItem("zagros-admin-token", v); $("tkInp").value=""; hideAuth(); poll(); }
+};
+$("tkClear").onclick = () => { localStorage.removeItem("zagros-admin-token"); };
+applyLang();
+poll();
+setInterval(poll, POLL_S * 1000);
+</script>
+</body>
+</html>

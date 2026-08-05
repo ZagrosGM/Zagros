@@ -1,43 +1,34 @@
-# Zagros Dashboard
+# Zagros Dashboard (unified panel)
 
-The React + TypeScript administration dashboard for
-[Zagros](https://github.com/ZagrosGM/Zagros) (Chakra UI + Vite).
+The **single** management interface of Zagros — a React 18 + TypeScript SPA
+written from scratch for the multi-core platform (`v1.0.0-alpha.5`).
 
-## Requirements
+- **Stack:** React 18, Vite 5, Tailwind CSS 3 (design-token driven),
+  react-router 6 (hash routing — works on every deployment shape),
+  TanStack Query + Virtual, lucide icons, hand-rolled SVG charts
+  (no analytics SDK), dnd-kit for routing-rule reordering.
+- **Surfaces:** Overview, Users, Subscriptions, Nodes, Cores (full
+  lifecycle), Routing (graphical Rule Builder, drag & drop, dry preview,
+  deploy), Outbounds, Inbounds (per-protocol wizard), DNS, Certificates,
+  Sessions, Devices, Logs, Marketplace (honest roadmap), Settings, and
+  **Advanced Mode** (in-panel Config Studio — the only JSON surface).
+- **Theming:** dark + light via CSS custom properties; RTL (فارسی) + LTR.
+- **Backend:** legacy admin API (`/api/*`) plus the unified Zagros admin
+  API (`/api/zagros/*`) — no mocks, no placeholders, everything wired.
 
-Node.js ≥ 16.17 (the project is built with npm; `package-lock.json` is
-tracked).
+## Development
 
-## Install
+```bash
+npm ci
+VITE_BASE_API=http://127.0.0.1:8000/api/ npm run dev
+```
 
-    git clone https://github.com/ZagrosGM/Zagros.git
-    cd Zagros/app/dashboard
-    npm ci
+## Build (what the Dockerfile and the backend fallback builder run)
 
-### Configure app
+```bash
+npm run build   # tsc + vite build → build/ (index.html + 404.html + statics/)
+```
 
-Copy `example.env` to `.env` then set the backend api address:
-
-    VITE_BASE_API=https://somewhere.com/
-
-#### Environment variables
-
-| Name          | Description                                                                 |
-| ------------- | --------------------------------------------------------------------------- |
-| VITE_BASE_API | The api url of the deployed backend ([Zagros](https://github.com/ZagrosGM/Zagros)) |
-
-## Start development server
-
-    npm run dev
-
-## Build for production
-
-    npm run build
-
-In production the panel serves the bundle from `app/dashboard/build/` (the
-Docker image builds it in a dedicated stage; see the repository-root
-`Dockerfile`).
-
-## Contribution
-
-See [`CONTRIBUTING.md`](../../CONTRIBUTING.md) at the repository root.
+`build/` is git-ignored: CI and `docker build` produce the bundle
+deterministically; the backend mounts `build/` at `DASHBOARD_PATH`
+(`/dashboard/` by default) and `build/statics` at `/statics/`.

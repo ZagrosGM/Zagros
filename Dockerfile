@@ -1,7 +1,7 @@
 ARG PYTHON_VERSION=3.12
-# Dashboard toolchain pinned to the node line the dashboard's vite 3 stack
-# was built and verified with.
-ARG NODE_IMAGE=node:16.20.2-bullseye-slim
+# Dashboard toolchain for the unified Zagros panel (React 18 + vite 5 +
+# Tailwind) — node 20 LTS, multi-arch (amd64 + arm64).
+ARG NODE_IMAGE=node:20.19.0-bookworm-slim
 
 # --------------------------------------------------------------------------
 # Stage 1: dashboard frontend (React + vite). Self-contained: CI and local
@@ -12,15 +12,13 @@ FROM $NODE_IMAGE AS dashboard
 WORKDIR /code
 
 COPY app/dashboard/package.json app/dashboard/package-lock.json ./
-# package.json runs `chakra-cli tokens ./chakra.config.ts` as a postinstall
-# hook, so the theme config must exist *before* npm ci.
-COPY app/dashboard/chakra.config.ts ./chakra.config.ts
 RUN npm ci --no-audit --no-fund
 
 COPY app/dashboard ./
 ENV VITE_BASE_API=/api/
-RUN npm run build --if-present -- --outDir build --assetsDir statics \
-    && cp ./build/index.html ./build/404.html
+# The build script itself pins --outDir/--assetsDir and writes 404.html for
+# SPA deep links (scripts/postbuild.mjs).
+RUN npm run build
 
 # --------------------------------------------------------------------------
 # Stage 2: python dependencies

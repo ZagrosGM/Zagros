@@ -198,7 +198,7 @@ Release images are published to **GitHub Container Registry only**
 (multi-arch: linux/amd64, linux/arm64):
 
 ```bash
-docker pull ghcr.io/zagrosgm/zagros:v1.0.0-alpha.4
+docker pull ghcr.io/zagrosgm/zagros:v1.0.0-alpha.5
 docker pull ghcr.io/zagrosgm/zagros:latest        # tracks stable releases
 ```
 

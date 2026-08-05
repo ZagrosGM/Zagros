@@ -1,148 +1,67 @@
-import {
-  Alert,
-  AlertDescription,
-  AlertIcon,
-  Box,
-  Button,
-  chakra,
-  FormControl,
-  FormLabel,
-  HStack,
-  Text,
-  VStack,
-} from "@chakra-ui/react";
-import { ArrowRightOnRectangleIcon } from "@heroicons/react/24/outline";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { FC, useEffect, useState } from "react";
-import { FieldValues, useForm } from "react-hook-form";
-import { useLocation, useNavigate } from "react-router-dom";
-import { z } from "zod";
-import { Footer } from "components/Footer";
-import { Input } from "components/Input";
-import { fetch } from "service/http";
-import { removeAuthToken, setAuthToken } from "utils/authStorage";
-import { ReactComponent as Logo } from "assets/logo.svg";
-import { useTranslation } from "react-i18next";
-import { Language } from "components/Language";
+// Login — legacy JWT (POST /api/admin/token), same contract as Marzban.
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { motion } from "framer-motion";
+import { Loader2, Mountain } from "lucide-react";
+import { ApiError, auth } from "../lib/api";
+import { useT } from "../lib/i18n";
+import { Button, Input } from "../components/ui";
 
-const schema = z.object({
-  username: z.string().min(1, "login.fieldRequired"),
-  password: z.string().min(1, "login.fieldRequired"),
-});
-
-export const LogoIcon = chakra(Logo, {
-  baseStyle: {
-    strokeWidth: "10px",
-    w: 12,
-    h: 12,
-  },
-});
-
-const LoginIcon = chakra(ArrowRightOnRectangleIcon, {
-  baseStyle: {
-    w: 5,
-    h: 5,
-    strokeWidth: "2px",
-  },
-});
-
-export const Login: FC = () => {
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+export default function Login() {
+  const t = useT();
   const navigate = useNavigate();
-  const { t } = useTranslation();
-  let location = useLocation();
-  const {
-    register,
-    formState: { errors },
-    handleSubmit,
-  } = useForm({
-    resolver: zodResolver(schema),
-  });
-  useEffect(() => {
-    removeAuthToken();
-    if (location.pathname !== "/login") {
-      navigate("/login", { replace: true });
-    }
-  }, []);
-  const login = (values: FieldValues) => {
-    setError("");
-    const formData = new FormData();
-    formData.append("username", values.username);
-    formData.append("password", values.password);
-    formData.append("grant_type", "password");
-    setLoading(true);
-    fetch("/admin/token", { method: "post", body: formData })
-      .then(({ access_token: token }) => {
-        setAuthToken(token);
-        navigate("/");
-      })
-      .catch((err) => {
-        setError(err.response._data.detail);
-      })
-      .finally(setLoading.bind(null, false));
-  };
-  return (
-    <VStack justifyContent="space-between" minH="100vh" p="6" w="full">
-      <Box w="full">
-        <HStack justifyContent="end" w="full">
-          <Language />
-        </HStack>
-        <HStack w="full" justifyContent="center" alignItems="center">
-          <Box w="full" maxW="340px" mt="6">
-            <VStack alignItems="center" w="full">
-              <LogoIcon />
-              <Text fontSize="2xl" fontWeight="semibold">
-                {t("login.loginYourAccount")}
-              </Text>
-              <Text color="gray.600" _dark={{ color: "gray.400" }}>
-                {t("login.welcomeBack")}
-              </Text>
-            </VStack>
-            <Box w="full" maxW="300px" m="auto" pt="4">
-              <form onSubmit={handleSubmit(login)}>
-                <VStack mt={4} rowGap={2}>
-                  <FormControl>
-                    <Input
-                      w="full"
-                      placeholder={t("username")}
-                      {...register("username")}
-                      error={t(errors?.username?.message as string)}
-                    />
-                  </FormControl>
-                  <FormControl>
-                    <Input
-                      w="full"
-                      type="password"
-                      placeholder={t("password")}
-                      {...register("password")}
-                      error={t(errors?.password?.message as string)}
-                    />
-                  </FormControl>
-                  {error && (
-                    <Alert status="error" rounded="md">
-                      <AlertIcon />
-                      <AlertDescription>{error}</AlertDescription>
-                    </Alert>
-                  )}
-                  <Button
-                    isLoading={loading}
-                    type="submit"
-                    w="full"
-                    colorScheme="primary"
-                  >
-                    {<LoginIcon marginRight={1} />}
-                    {t("login")}
-                  </Button>
-                </VStack>
-              </form>
-            </Box>
-          </Box>
-        </HStack>
-      </Box>
-      <Footer />
-    </VStack>
-  );
-};
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
 
-export default Login;
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true); setError("");
+    try {
+      await auth.login(username, password);
+      navigate("/", { replace: true });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : t("login.failed"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="grid min-h-dvh place-items-center bg-surface p-4">
+      <motion.div
+        initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }}
+        transition={{ type: "spring", stiffness: 200, damping: 22 }}
+        className="card w-full max-w-sm p-8"
+      >
+        <div className="mb-8 flex flex-col items-center gap-3 text-center">
+          <img src="./zagros.svg" alt="" className="h-14 w-14 rounded-2xl shadow-pop" />
+          <div>
+            <h1 className="text-lg font-bold tracking-tight">{t("login.title")}</h1>
+            <p className="mt-1 text-xs text-content-3">{t("login.subtitle")}</p>
+          </div>
+        </div>
+        <form onSubmit={submit} className="space-y-4" autoComplete="off">
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-content-2" htmlFor="u">{t("login.username")}</label>
+            <Input id="u" value={username} onChange={(e) => setUsername(e.target.value)} autoFocus required />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-content-2" htmlFor="p">{t("login.password")}</label>
+            <Input id="p" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+          </div>
+          {error && (
+            <p role="alert" className="rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">
+              {error}
+            </p>
+          )}
+          <Button type="submit" disabled={busy} className="w-full" size="md">
+            {busy ? <Loader2 size={15} className="animate-spin" /> : <Mountain size={15} />}
+            {t("login.submit")}
+          </Button>
+        </form>
+      </motion.div>
+    </div>
+  );
+}

@@ -176,7 +176,7 @@ class SingBoxDriver(BaseCoreDriver):
         for (protocol, port), _ep in sorted(self._chain_listeners.items()):
             inbounds.append({
                 "type": protocol,
-                "tag": f"mz-chain-{protocol}-{port}",
+                "tag": f"zg-chain-{protocol}-{port}",
                 "listen": "127.0.0.1",
                 "listen_port": port,
             })
@@ -213,7 +213,7 @@ class SingBoxDriver(BaseCoreDriver):
                         "inbounds": [
                             f"{ib['tag']}"
                             for ib in inbounds
-                            if not ib["tag"].startswith("mz-chain-")
+                            if not ib["tag"].startswith("zg-chain-")
                         ],
                         "outbounds": ["direct"],
                         "users": sorted(self._accounts),

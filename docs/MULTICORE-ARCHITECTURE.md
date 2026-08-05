@@ -1,11 +1,16 @@
-# معماری پلتفرم مدیریت چند Core — Marzban Multi-Core (CoreHub)
+# معماری پلتفرم مدیریت چند Core — Zagros Multi-Core
 
-> نسخه ۰.۱ — سند معماری و نقشه راه
-> هدف: تبدیل Marzban از «پنل مدیریت Xray» به «پلتفرم مدیریت چندین VPN Core» به‌صورت Plugin-Based.
+> نسخه ۰.۱ — سند معماری و نقشه راهِ پروژه **Zagros**
+> هدف: تبدیل کدبیس فورک‌شده از «پنل مدیریت Xray» به «پلتفرم مدیریت چندین VPN Core» به‌صورت Plugin-Based.
+>
+> **یادداشت Provenance:** بخش ۱ این سند تحلیل تاریخیِ کدبیس upstream‏ (Marzban
+> master@v0.8.4) است که فورک از آنجا آغاز شد؛ نام محصول نهایی **Zagros** است و
+> هرجای سند که به پیاده‌سازی فعلی اشاره می‌شود، نام‌ها (Entry-Point،
+> ساختار پوشه‌ها، …) متناظر با کد زاگروس هستند.
 
 ---
 
-## ۱. تحلیل وضعیت موجود Marzban (master@v0.8.4)
+## ۱. تحلیل وضعیت موجود کدبیس upstream (Marzban master@v0.8.4 — مرجع تاریخی فورک)
 
 ### ۱.۱ پشته فناوری
 
@@ -95,7 +100,7 @@
 ## ۴. ساختار پوشه‌های پیشنهادی
 
 ```
-marzban/
+zagros/
 ├── app/
 │   ├── api/                        # ← جدید: روترها در دو سطح مجزا
 │   │   ├── admin/                  # پنل ادمین (/api/*)
@@ -174,7 +179,7 @@ class BaseCoreDriver(ABC):
 
 - **Auto-Registration:** هر subclass مشخص (غیرانتزاعی) به‌محض تعریف، از طریق `__init_subclass__` در Registry ثبت می‌شود.
 - **Built-in Discovery:** `discover_builtin()` ماژول‌های `app/cores/drivers/*` را import می‌کند.
-- **Entry Points:** `load_entry_points(group="marzban.core_drivers")` → افزودن Core با `pip install` یک پکیج خارجی، بدون هیچ تغییری در کد پروژه.
+- **Entry Points:** `load_entry_points(group="zagros.core_drivers")` → افزودن Core با `pip install` یک پکیج خارجی، بدون هیچ تغییری در کد پروژه (پیاده‌سازی فعلی: `app/cores/registry.py`).
 
 ### ۵.۳ چرخه‌حیات State Machine
 

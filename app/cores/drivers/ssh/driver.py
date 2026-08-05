@@ -1,7 +1,7 @@
 """SSHTunnelDriver — OpenSSH (system sshd) as a first-class panel core.
 
 Real capabilities used:
-  * **User management** = real unix accounts (panel-namespaced ``mz-*``),
+  * **User management** = real unix accounts (panel-namespaced ``zg-*``),
     created/locked/deleted with the standard tools (useradd/usermod/userdel
     + chpasswd). Locking applies instantly — no sshd restart (HOT_RELOAD).
   * **Suspend** = ``usermod --lock`` + killing the user's sshd session
@@ -221,7 +221,7 @@ class SSHTunnelDriver(BaseCoreDriver):
 
     async def sync_accounts(self, accounts: list[UserAccount]) -> None:
         # reconcile: (re)create desired accounts; delete panel accounts that
-        # are no longer desired (only mz-* names are ever touched)
+        # are no longer desired (only zg-* names are ever touched)
         desired = {a.account_id for a in accounts if a.settings.get("password")}
         for account in accounts:
             if account.account_id in desired:
@@ -297,7 +297,7 @@ class SSHTunnelDriver(BaseCoreDriver):
     # chain ingress — native ssh outbounds (xray ssh outbound)
     # ------------------------------------------------------------------ #
     async def get_chain_endpoints(self) -> list[ChainEndpoint]:
-        if "_mz-chain" not in self._chain_users:
+        if "_zg-chain" not in self._chain_users:
             return []
         return [self._chain_endpoint()]
 
@@ -307,10 +307,10 @@ class SSHTunnelDriver(BaseCoreDriver):
                 f"SSH cannot host a '{protocol}' chain endpoint — chains into "
                 f"this core use the native ssh outbound."
             )
-        if "_mz-chain" not in self._chain_users:
+        if "_zg-chain" not in self._chain_users:
             import uuid as uuid_mod
 
-            name = "mz-chain"
+            name = "zg-chain"
             password = uuid_mod.uuid4().hex[:16]
             if not await asyncio.to_thread(self._backend.user_exists, name):
                 await asyncio.to_thread(
@@ -319,12 +319,12 @@ class SSHTunnelDriver(BaseCoreDriver):
                 )
             else:
                 await asyncio.to_thread(self._backend.set_password, name, password)
-            self._chain_users["_mz-chain"] = (name, password)
+            self._chain_users["_zg-chain"] = (name, password)
         return self._chain_endpoint()
 
     def _chain_endpoint(self) -> ChainEndpoint:
         s = self.settings
-        name, password = self._chain_users["_mz-chain"]
+        name, password = self._chain_users["_zg-chain"]
         return ChainEndpoint(
             core_id=self.metadata.id,
             protocol="ssh",

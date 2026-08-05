@@ -40,6 +40,15 @@ python main.py
 
 مستندات کامل: `docs/MULTICORE-ARCHITECTURE.md`
 
+## انجمن
+
+* **کانال تلگرام (اطلاع‌رسانی):** <https://t.me/zagrosgm>
+* **گروه تلگرام (گفت‌وگو و پشتیبانی):** <https://t.me/zagrosgm_group>
+* **مخزن گیت‌هاب:** <https://github.com/ZagrosGM/Zagros>
+* **نصب‌کننده و CLI مدیریت:** <https://github.com/ZagrosGM/zagros-scripts>
+
+مشارکت: `CONTRIBUTING.md` را در مخزن اصلی ببینید.
+
 ## مجوز
 
 AGPL-3.0 — با حفظ کامل حق نشر توسعه‌دهندگان Marzban.

@@ -171,7 +171,7 @@ def test_registry_unique_and_metadata_sane() -> None:
 
 
 def test_capability_method_coherence() -> None:
-    with tempfile.TemporaryDirectory(prefix="mz-contract-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="zg-contract-") as tmp:
         for core_id in _DRIVERS:
             driver, _ = _build(core_id, tmp)
             for capability, method in _REQUIRED_OVERRIDES.items():
@@ -192,7 +192,7 @@ def test_capability_method_coherence() -> None:
 
 def test_lifecycle_and_user_lifecycle() -> None:
     async def run() -> None:
-        with tempfile.TemporaryDirectory(prefix="mz-contract-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="zg-contract-") as tmp:
             failures: list[str] = []
             for core_id in _DRIVERS:
                 driver, _ = _build(core_id, tmp)
@@ -251,7 +251,7 @@ def test_lifecycle_and_user_lifecycle() -> None:
 
 def test_client_configs_never_leak_secrets() -> None:
     async def run() -> None:
-        with tempfile.TemporaryDirectory(prefix="mz-contract-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="zg-contract-") as tmp:
             for core_id in _DRIVERS:
                 driver, _ = _build(core_id, tmp)
                 if not driver.supports(Capability.CLIENT_CONFIG):
@@ -285,7 +285,7 @@ def test_client_configs_never_leak_secrets() -> None:
 
 def test_provisioning_throughput_smoke() -> None:
     async def run() -> None:
-        with tempfile.TemporaryDirectory(prefix="mz-contract-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="zg-contract-") as tmp:
             for core_id in _DRIVERS:
                 driver, _ = _build(core_id, tmp)
                 try:

@@ -36,7 +36,7 @@ alice      4209    125 sshd: alice [priv] [net]
 alice      4210    125 sshd: alice@notty
 alice      4300     40 sshd: alice@pts/0
 bob        4400   1000 sshd: bob@notty
-marzban   5000  80000 -bash
+carol     5000  80000 -bash
 """
 
 
@@ -93,11 +93,11 @@ def test_parse_ps_real_shape() -> None:
 
 
 def test_username_sanitization() -> None:
-    assert sanitize_username("1.alice") == "mz-1-alice"
-    assert sanitize_username("42.Bob_Smith") == "mz-42-bob_smith"
-    assert sanitize_username("a" * 64).startswith("mz-")
+    assert sanitize_username("1.alice") == "zg-1-alice"
+    assert sanitize_username("42.Bob_Smith") == "zg-42-bob_smith"
+    assert sanitize_username("a" * 64).startswith("zg-")
     assert len(sanitize_username("a" * 64)) == 32
-    assert sanitize_username("mz-chain") == "mz-chain"
+    assert sanitize_username("zg-chain") == "zg-chain"
 
 
 def test_user_lifecycle_commands() -> None:
@@ -106,13 +106,13 @@ def test_user_lifecycle_commands() -> None:
         await driver.start()
         account = _account(1, "alice")
         await driver.create_account(account)
-        assert backend.users["mz-1-alice"] == "s3cret"
-        assert "mz-1-alice" not in backend.locked
+        assert backend.users["zg-1-alice"] == "s3cret"
+        assert "zg-1-alice" not in backend.locked
 
         # password change → set_password + session kill (force re-auth)
         await driver.update_account(_account(1, "alice", password="n3wpass"))
-        assert backend.users["mz-1-alice"] == "n3wpass"
-        assert "mz-1-alice" in backend.killed
+        assert backend.users["zg-1-alice"] == "n3wpass"
+        assert "zg-1-alice" in backend.killed
 
         # missing password is a real error, not a silent skip
         try:
@@ -129,22 +129,22 @@ def test_user_lifecycle_commands() -> None:
 def test_suspend_locks_and_kills_resume_unlocks() -> None:
     async def run():
         backend = FakeSSHBackend(sessions=[
-            SSHSession(user="mz-1-alice", pid=4210, elapsed_seconds=125, terminal="notty")])
+            SSHSession(user="zg-1-alice", pid=4210, elapsed_seconds=125, terminal="notty")])
         driver, _ = _driver(backend)
         await driver.start()
         await driver.create_account(_account(1, "alice"))
         await driver.suspend_account("1.alice")
-        assert "mz-1-alice" in backend.locked
+        assert "zg-1-alice" in backend.locked
         assert backend.sessions() == []                # live tunnel killed
         sessions = await driver.get_online_devices()
         assert sessions == []
 
         await driver.resume_account(_account(1, "alice"))
-        assert "mz-1-alice" not in backend.locked
+        assert "zg-1-alice" not in backend.locked
 
         await driver.delete_account("1.alice")
-        assert "mz-1-alice" in backend.deleted
-        assert "mz-1-alice" not in backend.users
+        assert "zg-1-alice" in backend.deleted
+        assert "zg-1-alice" not in backend.users
 
     asyncio.run(run())
 
@@ -152,8 +152,8 @@ def test_suspend_locks_and_kills_resume_unlocks() -> None:
 def test_online_sessions_report_terminal_kind() -> None:
     async def run():
         backend = FakeSSHBackend(sessions=[
-            SSHSession(user="mz-1-alice", pid=4210, elapsed_seconds=125, terminal="notty"),
-            SSHSession(user="mz-1-alice", pid=4300, elapsed_seconds=40, terminal="pts/0"),
+            SSHSession(user="zg-1-alice", pid=4210, elapsed_seconds=125, terminal="notty"),
+            SSHSession(user="zg-1-alice", pid=4300, elapsed_seconds=40, terminal="pts/0"),
             SSHSession(user="someone-else", pid=5000, elapsed_seconds=9, terminal="notty"),
         ])
         driver, _ = _driver(backend)
@@ -189,8 +189,8 @@ def test_chain_account_and_no_usage_honesty() -> None:
         await driver.start()
         endpoint = await driver.ensure_chain_listener("ssh", 0)
         md = endpoint.metadata
-        assert md["username"] == "mz-chain" and len(md["password"]) == 16
-        assert backend.users["mz-chain"] == md["password"]
+        assert md["username"] == "zg-chain" and len(md["password"]) == 16
+        assert backend.users["zg-chain"] == md["password"]
         endpoint2 = await driver.ensure_chain_listener("ssh", 0)
         assert endpoint2.metadata["password"] == md["password"]
 
@@ -213,7 +213,7 @@ def test_client_config_sealed_payload() -> None:
         await driver.create_account(_account(1, "alice"))
         config = await driver.build_client_config(driver._accounts["1.alice"])
         assert config.payload["format"] == "ssh"
-        assert config.payload["username"] == "mz-1-alice"
+        assert config.payload["username"] == "zg-1-alice"
         assert "s3cret" not in repr(config)
 
     asyncio.run(run())

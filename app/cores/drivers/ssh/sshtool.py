@@ -26,7 +26,7 @@ _SSHD_SESSION = re.compile(r"sshd:\s(?P<user>[^@\s\[]+)@(?P<tty>\S+)")
 def sanitize_username(account_id: str) -> str:
     """Map a panel account id to a safe, panel-namespaced unix username."""
     clean = re.sub(r"[^a-z0-9_\-]", "-", account_id.lower())
-    candidate = clean if clean.startswith("mz-") else "mz-" + clean
+    candidate = clean if clean.startswith("zg-") else "zg-" + clean
     candidate = candidate[:32]
     if not _SAFE_USER.match(candidate):
         raise ValueError(f"cannot derive a safe unix username from '{account_id}'")

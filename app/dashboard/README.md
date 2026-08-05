@@ -1,19 +1,18 @@
-# Dashboard UI for zagros
+# Zagros Dashboard
+
+The React + TypeScript administration dashboard for
+[Zagros](https://github.com/ZagrosGM/Zagros) (Chakra UI + Vite).
 
 ## Requirements
 
-For development, you will only need Node.js installed on your environement.
-
-### Node
-
-[Node](http://nodejs.org/) is really easy to install & now include [NPM](https://npmjs.org/).
-This project has been developed on the Nodejs v16.17.0 so if you faced any issue during installation that may related to the node version, install Node with version >= v16.17.0.
+Node.js ≥ 16.17 (the project is built with npm; `package-lock.json` is
+tracked).
 
 ## Install
 
-    git clone https://github.com/gozargah/marz-manager.git
-    cd marz-manager
-    yarn install
+    git clone https://github.com/ZagrosGM/Zagros.git
+    cd Zagros/app/dashboard
+    npm ci
 
 ### Configure app
 
@@ -23,18 +22,22 @@ Copy `example.env` to `.env` then set the backend api address:
 
 #### Environment variables
 
-| Name          | Description                                                                          |
-| ------------- | ------------------------------------------------------------------------------------ |
-| VITE_BASE_API | The api url of the deployed backend ([Zagros](https://github.com/gozargah/Zagros)) |
+| Name          | Description                                                                 |
+| ------------- | --------------------------------------------------------------------------- |
+| VITE_BASE_API | The api url of the deployed backend ([Zagros](https://github.com/ZagrosGM/Zagros)) |
 
 ## Start development server
 
-    yarn dev
+    npm run dev
 
-## Simple build for production
+## Build for production
 
-    yarn build
+    npm run build
+
+In production the panel serves the bundle from `app/dashboard/build/` (the
+Docker image builds it in a dedicated stage; see the repository-root
+`Dockerfile`).
 
 ## Contribution
 
-Feel free to contribute. Go on and fork the project. After commiting the changes, make a PR. It means a lot to us.
+See [`CONTRIBUTING.md`](../../CONTRIBUTING.md) at the repository root.

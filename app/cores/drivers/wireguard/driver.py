@@ -525,8 +525,8 @@ class WireGuardDriver(BaseCoreDriver):
         try:
             with open(path, encoding="utf-8") as fh:
                 state = json.load(fh)
-            self._chain_peers["_mz-chain"] = DesiredPeer(
-                comment="_mz-chain",
+            self._chain_peers["_zg-chain"] = DesiredPeer(
+                comment="_zg-chain",
                 public_key=state["public_key"],
                 allowed_ips=tuple(state["allowed_ips"]),
             )
@@ -542,7 +542,7 @@ class WireGuardDriver(BaseCoreDriver):
         import logging
         import os
 
-        peer = self._chain_peers.get("_mz-chain")
+        peer = self._chain_peers.get("_zg-chain")
         if peer is None:
             return
         path = self._chain_state_path()
@@ -564,9 +564,9 @@ class WireGuardDriver(BaseCoreDriver):
             )
 
     async def get_chain_endpoints(self) -> list[ChainEndpoint]:
-        if self._server_public is None or "_mz-chain" not in self._chain_peers:
+        if self._server_public is None or "_zg-chain" not in self._chain_peers:
             return []
-        peer = self._chain_peers["_mz-chain"]
+        peer = self._chain_peers["_zg-chain"]
         return [self._chain_endpoint_for(peer)]
 
     async def ensure_chain_listener(self, protocol: str, port: int) -> ChainEndpoint:
@@ -575,19 +575,19 @@ class WireGuardDriver(BaseCoreDriver):
                 f"WireGuard cannot host a '{protocol}' chain endpoint — it only "
                 f"accepts real wireguard peers (protocol='wireguard')."
             )
-        existing = self._chain_peers.get("_mz-chain")
+        existing = self._chain_peers.get("_zg-chain")
         if existing is None:
             import asyncio
 
             private, public = await asyncio.to_thread(self._backend.generate_keypair)
             address = allocate_address(self.settings["subnet"], self._taken_addresses())
             existing = DesiredPeer(
-                comment="_mz-chain",
+                comment="_zg-chain",
                 public_key=public,
                 allowed_ips=(address,),
                 preshared_key=None,
             )
-            self._chain_peers["_mz-chain"] = existing
+            self._chain_peers["_zg-chain"] = existing
             self._chain_private = private
             self._persist_chain_state()
             await self._publish()

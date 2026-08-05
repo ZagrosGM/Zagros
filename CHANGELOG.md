@@ -155,6 +155,34 @@ image-blocking defects discovered while hardening it.
   are gone from CI and docs.
 * README: the supported installation path is the one-command installer;
   manual and development flows are clearly marked as such.
+* **Full rebranding sweep (final Marzban-era remnants removed):**
+  * New original brand assets: the Zagros mountain mark replaces the
+    inherited logo in `app/dashboard/src/assets/logo.svg`, the complete
+    favicon set (`favicon.ico`, 16/32/180/192/512 px PNGs, mstile,
+    `safari-pinned-tab.svg`), and `site.webmanifest` now names the app
+    "Zagros" (its icon paths were also wrong and are fixed).
+  * Panel-generated TLS certificates now use `CN=Zagros`; node connections
+    derive the expected TLS identity **from the peer certificate actually
+    served by the node** (`ssl_target_name_for_cert`), so legacy
+    Marzban-era node certs (`CN=Gozargah`) keep working without a single
+    hardcoded brand name anywhere.
+  * Panel-namespaced artifacts renamed `mz-*` → `zg-*` (SSH unix accounts,
+    hysteria2/TUIC/SSH chain users, WireGuard chain peer comments, xray &
+    sing-box chain inbound/outbound tags, xray base outbounds
+    `zg-direct`/`zg-block`/`zg-dns`). All are Zagros-generated, so no
+    migration concern exists.
+  * `CONTRIBUTING.md` rewritten end-to-end for Zagros (forking, branch
+    naming, coding style, commit convention, PR rules, driver development
+    guide, multi-core architecture rules, testing, documentation, security
+    policy, review process); `cli/README.md` and `app/dashboard/README.md`
+    rebadged; dashboard README had a stale upstream clone URL.
+  * README gained Community (Telegram channel/group, GitHub repos) and
+    Contributors sections; the same Community block was added to the
+    Persian/Russian/Chinese READMEs.
+  * Remaining Marzban mentions exist only where they belong: `LICENSE`,
+    provenance/attribution notes, migration code & docs (the importer
+    reads Marzban v0.8.x databases by design), historical design/analysis
+    documents, and changelog history.
 
 [1.0.0-alpha.3]: https://github.com/ZagrosGM/Zagros/releases/tag/v1.0.0-alpha.3
 

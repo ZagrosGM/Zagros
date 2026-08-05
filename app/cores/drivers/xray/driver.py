@@ -439,7 +439,7 @@ class XrayDriver(BaseCoreDriver):
     # routing translation (ROUTING + GEO_ROUTING)
     # ------------------------------------------------------------------ #
     #: base outbounds the driver keeps alive for rule actions
-    _BASE_OUTBOUNDS = {"direct": "mz-direct", "block": "mz-block", "dns": "mz-dns"}
+    _BASE_OUTBOUNDS = {"direct": "zg-direct", "block": "zg-block", "dns": "zg-dns"}
 
     def _rule_to_native(
         self, rule: RoutingRule, ctx: RouteContext
@@ -618,7 +618,7 @@ class XrayDriver(BaseCoreDriver):
         inbounds = await self._inbounds()
         endpoints: list[ChainEndpoint] = []
         for tag, info in inbounds.items():
-            if tag.startswith("mz-chain-"):
+            if tag.startswith("zg-chain-"):
                 endpoints.append(ChainEndpoint(
                     core_id=self.metadata.id,
                     protocol=str(info.get("protocol", "socks")),

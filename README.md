@@ -16,7 +16,7 @@ one driver among many, with no special status anywhere in the codebase.
 
 ## ⚠️ Alpha Warning
 
-**Current release: `1.0.0-alpha.2` — this is an ALPHA build.**
+**Current release: `1.0.0-alpha.3` — this is an ALPHA build.**
 
 * Suitable for evaluation, testing and feedback — **not recommended for
   production** unless you fully understand the limitations.
@@ -222,14 +222,36 @@ for core behavior.
 * `docs/REFERENCE-ANALYSIS.md` — documented idea-level analysis of Marzban,
   3x-ui, vpn-ui and PasarGuard (accept/reject with reasons).
 
+## Community
+
+* **Telegram channel (announcements):** <https://t.me/zagrosgm>
+* **Telegram group (discussion & support):** <https://t.me/zagrosgm_group>
+* **GitHub repository:** <https://github.com/ZagrosGM/Zagros>
+* **Installer & management CLI:** <https://github.com/ZagrosGM/zagros-scripts>
+
+Want to help? Read [`CONTRIBUTING.md`](CONTRIBUTING.md) — driver development,
+architecture rules, testing requirements and the review process are all
+documented there.
+
 ## Roadmap
 
 * Chain & Policy dedicated Studio wizards (post-alpha).
 * Rate limiting on the legacy admin token endpoint.
 * Privileged-core & multi-node real-binary E2E in CI.
-* Published OCI images (Docker Hub + GHCR) and signed release artifacts.
+* Signed release artifacts and provenance attestations for GHCR images.
 * KMS/HSM master-key management.
 * `1.0.0-beta.1` once the above exit criteria are met.
+
+## Contributors
+
+Zagros is built by the **Zagros Core Team** together with **community
+contributors** — and this could be you: **future contributors** are welcome
+in code, drivers, documentation, translations and testing. Everyone who
+opens a merged pull request joins the project history.
+
+Zagros stands on the shoulders of the upstream Marzban project; its authors
+are credited through the preserved copyright and `LICENSE` notices (they are
+not Zagros contributors — see the Provenance note at the top).
 
 ## License
 

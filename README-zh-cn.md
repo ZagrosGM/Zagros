@@ -35,6 +35,15 @@ python main.py
 
 文档：`docs/MULTICORE-ARCHITECTURE.md`
 
+## 社区
+
+* **Telegram 频道（公告）：** <https://t.me/zagrosgm>
+* **Telegram 群组（讨论与支持）：** <https://t.me/zagrosgm_group>
+* **GitHub 仓库：** <https://github.com/ZagrosGM/Zagros>
+* **安装器与管理 CLI：** <https://github.com/ZagrosGM/zagros-scripts>
+
+参与贡献请见主仓库的 `CONTRIBUTING.md`。
+
 ## 许可证
 
 AGPL-3.0 — 完整保留 Marzban 原作者的版权。

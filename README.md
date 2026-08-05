@@ -228,8 +228,9 @@ python main.py                         # run the panel
 
 The management CLI has its own end-to-end harness in the
 [zagros-scripts](https://github.com/ZagrosGM/zagros-scripts) repository
-(142 assertions over install/backup/restore/update/rollback/doctor/repair,
-plus shellcheck), runnable without a Docker daemon.
+(189 assertions over install/config/backup/restore/update/rollback/doctor/
+repair plus the .env mount contract & legacy migration, plus shellcheck),
+runnable without a Docker daemon.
 
 The core test suites (`tests/cores`, `tests/crypto`, `tests/portal`,
 `tests/clientapi`, `tests/studio`, `tests/adminapi`) run dependency-free;

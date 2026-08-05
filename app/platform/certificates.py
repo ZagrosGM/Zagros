@@ -26,9 +26,9 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9\\-_.]{0,63}$", re.IGNORECASE)
+_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$", re.IGNORECASE)
 
 
 class CertificateInfo(BaseModel):
@@ -97,6 +97,8 @@ def scan(data_dir: str, *, max_depth: int = 5) -> list[CertificateInfo]:
         return []
     out: list[CertificateInfo] = []
     seen: set[Path] = set()
+    emitted: set[str] = set()
+    certs_root = _certs_root(data_dir)
     for pattern in ("*.crt", "*.pem"):
         for path in sorted(root.rglob(pattern)):
             try:
@@ -109,9 +111,11 @@ def scan(data_dir: str, *, max_depth: int = 5) -> list[CertificateInfo]:
                 info = _info_from(path, _parse_cert(path))
             except ValueError:
                 continue  # PEM-shaped files that aren't certs (keys, bundles)
-            if path.parent.name == "certs":  # managed layout: certs/<name>/*
-                info.name = path.parent.relative_to(_certs_root(data_dir)).as_posix().split("/")[0] \
-                    if str(path.parent).startswith(str(_certs_root(data_dir))) else info.name
+            if path.parent.parent == certs_root:  # managed layout: certs/<name>/<file>
+                info.name = path.parent.name
+            if info.name in emitted:
+                continue  # one row per name (fullchain/ca variants collapse)
+            emitted.add(info.name)
             out.append(info)
     # deterministic order: soonest-to-expire first (actionable)
     out.sort(key=lambda c: (c.expired is False, c.days_left, c.name))

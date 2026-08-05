@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="zg" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#34d3eb"/>
+      <stop offset="1" stop-color="#0e7fa8"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="#0b0f14"/>
+  <rect x="4" y="4" width="56" height="56" rx="14" stroke="url(#zg)" stroke-width="2.5"/>
+  <!-- the Zagros ridgeline -->
+  <path d="M14 42 L26 20 L33 33 L40 24 L50 42"
+        stroke="url(#zg)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <circle cx="47" cy="20" r="3" fill="#34d3eb"/>
+</svg>

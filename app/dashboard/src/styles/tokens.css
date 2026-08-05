@@ -1,0 +1,100 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+   Zagros design tokens — one source of truth for both themes.
+   Identity: deep graphite surfaces + cyan-teal "glacier" brand, tuned for
+   dense ops UIs. PasarGuard-inspired *pattern language*, original palette.
+--------------------------------------------------------------------------- */
+:root {
+  --brand: #17b8d8;
+  --brand-strong: #0e9dbd;
+  --brand-soft: rgb(23 184 216 / 0.14);
+  --brand-content: #04151c;
+
+  --ok: #22c55e;
+  --ok-soft: rgb(34 197 94 / 0.14);
+  --warn: #f59e0b;
+  --warn-soft: rgb(245 158 11 / 0.16);
+  --danger: #ef4444;
+  --danger-soft: rgb(239 68 68 / 0.14);
+  --info: #60a5fa;
+  --info-soft: rgb(96 165 250 / 0.14);
+}
+
+html.dark {
+  color-scheme: dark;
+  --surface: #0b0f14;
+  --surface-1: #10161e;
+  --surface-2: #151d27;
+  --surface-3: #1b2530;
+  --border: #232e3b;
+  --border-strong: #314052;
+  --content: #e7eef6;
+  --content-2: #9fb0c2;
+  --content-3: #64748b;
+}
+
+html.light, html:not(.dark) {
+  color-scheme: light;
+  --surface: #f4f6f9;
+  --surface-1: #ffffff;
+  --surface-2: #eef2f7;
+  --surface-3: #e4eaf2;
+  --border: #dbe3ec;
+  --border-strong: #c3cfdd;
+  --content: #14202e;
+  --content-2: #4c5f75;
+  --content-3: #8a99ab;
+}
+
+@layer base {
+  html { @apply antialiased; }
+  body { @apply bg-surface text-content font-sans text-sm; }
+  * { @apply border-border; }
+  ::selection { background: var(--brand-soft); }
+
+  *:focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 8px;
+    border: 2px solid var(--surface);
+  }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+}
+
+@layer components {
+  .glass {
+    background: color-mix(in srgb, var(--surface-1) 78%, transparent);
+    backdrop-filter: blur(14px) saturate(1.35);
+    -webkit-backdrop-filter: blur(14px) saturate(1.35);
+  }
+  .card {
+    @apply rounded-2xl border bg-surface-1 shadow-card;
+  }
+  .skeleton {
+    @apply relative overflow-hidden rounded-md bg-surface-3;
+  }
+  .skeleton::after {
+    content: "";
+    @apply absolute inset-0 -translate-x-full;
+    background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.07), transparent);
+    animation: shimmer 1.6s infinite;
+  }
+  .kbd {
+    @apply inline-flex h-5 min-w-5 items-center justify-center rounded border border-border-strong
+           bg-surface-2 px-1 font-mono text-[10px] text-content-2;
+  }
+}
+
+[dir="rtl"] body { letter-spacing: 0; }

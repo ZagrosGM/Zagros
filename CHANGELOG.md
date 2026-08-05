@@ -10,6 +10,74 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.5] — 2026-08-05
+
+**Status: ALPHA.** **The single-panel milestone** — the two-panel architecture
+is gone for good. Exactly one management interface exists now: the new
+Zagros dashboard at `/dashboard/`, a React 18 SPA designed and written from
+scratch (860+ KB → ~210 KB initial gzip with per-page lazy chunks).
+
+### Added
+
+- **Unified Zagros dashboard (new, from scratch).** Replaces the inherited
+  Marzban React/Chakra application entirely: custom design-token system
+  (dark + light), full RTL (فارسی) and LTR with instant switch, command
+  palette (⌘/Ctrl+K), skeleton loading, empty states, toast system, modern
+  dialogs/drawers, glass topbar, hand-rolled SVG live charts (no chart lib),
+  memoized pages, route-level code splitting and a virtualized users table.
+- **Cores page** — complete in-panel lifecycle over `/api/zagros`:
+  catalog (driver registry), schema-driven install (no hardcoded settings
+  forms), start/stop/restart/enable/disable/update/uninstall(-purge),
+  live status/metrics cards and a streaming logs drawer. No CLI needed for
+  daily core operations.
+- **Routing page** — graphical Rule Builder (matchers as chip fields:
+  inbounds/domains/geosite/country/CIDR/ports/protocol/network/process;
+  actions incl. route-to-outbound), drag & drop reordering with automatic
+  priority renumbering, dry **preview** per core and one-click **deploy**.
+- **Outbounds, Inbounds, DNS, Certificates pages** — outbound cards with
+  health latency tests (real TCP dials), clone/edit/enable; protocol-shape
+  inbound wizard (Reality/VLESS/VMess/Trojan/SS2022/Hysteria2/TUIC/WireGuard)
+  rendered against the studio service; structured DNS resolver editor with
+  health hints and templates; certificate inventory with *validated* PEM
+  import (key-pair match enforced), self-signed generation and delete.
+  ACME is explicitly labeled Roadmap.
+- **Sessions / Devices / Nodes / Subscriptions / Settings pages** — live
+  core sessions plus app sign-in (refresh-token) revoke, device inventory
+  with forget, node CRUD + reconnect, portal identity & access-mode settings,
+  admins CRUD and the **Advanced Mode** gate.
+- **Advanced Mode (in-panel Config Studio)** — the only place JSON is shown:
+  raw per-core document editing or RFC-6902 patch-builder with schema
+  validation + unified diff preview before apply.
+- **Users page** — advanced filters (status/owner), bulk enable/disable/
+  delete, inline status toggle, create/edit dialog covering data limit /
+  expiry / protocols (from live inbounds) / access mode (**Subscription
+  link vs Application login**: app username + Telegram ID) / note, quick
+  actions (copy sub link, revoke subscription, reset usage).
+- **Backend admin API (`/api/zagros`)** powering all of the above: cores
+  registry+lifecycle, routing rules CRUD/validate/dry-preview/deploy,
+  outbounds CRUD + manager sync + real connection test + deploy, sessions +
+  app sessions + devices inventory, certificate scan/import/self-signed/delete,
+  panel info. Routing model gained inbound-tag matching with xray
+  (`inboundTag`) and sing-box (`inbound`) translations.
+
+### Removed
+
+- **The inherited Marzban dashboard** (`app/dashboard` React/Chakra SPA,
+  ~2.7 MB vendor bundle) — deleted and rewritten, per the one-panel rule.
+- **Standalone `/zagros/dashboard` and `/zagros/studio` HTML pages** and the
+  repo-root `ui/` directory — Config Studio is now Advanced Mode *inside*
+  the single dashboard; no second management surface exists.
+- JSON-forced operator flows — JSON appears only inside Advanced Mode.
+
+### Fixed
+
+- Certificate name regex (a dash inside the character class was parsed as a
+  range), certificate scan managed-layout naming and per-name dedupe.
+- Outbound manager sync is now a true rebuild (idempotent across saves).
+- `GET /api/zagros/cores/{id}` returns 404 for unknown cores instead of 500.
+
+---
+
 ## [1.0.0-alpha.4] — 2026-08-05
 
 **Status: ALPHA.** Complete redesign of the configuration system:

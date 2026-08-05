@@ -1,0 +1,206 @@
+"""Process & config boundary for the sing-box driver.
+
+sing-box has no per-user management API, so this backend does the two things
+that *are* possible, well: (1) atomically render & validate the JSON config
+(``sing-box check``) and (2) own the process lifecycle via the shared
+:class:`ManagedProcess` primitive. Tests inject a fake — no binary needed.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import subprocess
+from collections.abc import Sequence
+from typing import Any, Protocol, runtime_checkable
+
+from app.cores.exceptions import CoreError
+from app.cores.process import ManagedProcess
+from app.cores.types import CoreMetrics
+
+logger = logging.getLogger("zagros.cores.drivers.singbox")
+
+
+@runtime_checkable
+class SingBoxBackend(Protocol):
+    def apply_config(self, config: dict[str, Any]) -> None:
+        """Validate (when possible) + atomically persist the rendered config."""
+        ...
+
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    def restart(self) -> None: ...
+    def is_running(self) -> bool: ...
+    def version(self) -> str | None: ...
+    def metrics(self) -> CoreMetrics: ...
+    def logs(self, tail: int = 200) -> Sequence[str]: ...
+
+
+@runtime_checkable
+class TrafficStatsSource(Protocol):
+    """Per-user cumulative counters from sing-box's experimental v2ray API.
+
+    sing-box (built with the `with_v2ray_api` tag, as official releases are)
+    serves the v2fly StatsService; users are enumerable counters of the form
+    ``user>>><name>>>>traffic>>>uplink``. The vendored xray_api package is
+    reused here purely as a *protocol client* — this is not a dependency on
+    the Xray core.
+    """
+
+    def query_user_counters(self) -> dict[str, tuple[int, int]]:
+        """Return ``{user_name: (uplink_bytes, downlink_bytes)}`` cumulative."""
+        ...
+
+
+class V2RayStatsSource:
+    """Production TrafficStatsSource over gRPC (lazy-imports xray_api)."""
+
+    def __init__(self, address: str):
+        host, _, port = address.rpartition(":")
+        self._address = (host or "127.0.0.1", int(port))
+
+    def query_user_counters(self) -> dict[str, tuple[int, int]]:
+        try:
+            from xray_api import XRay
+        except ImportError as exc:  # pragma: no cover - packaging guard
+            raise CoreError(
+                "xray_api (gRPC stats client) is not available — sing-box "
+                "per-user accounting needs the v2ray StatsService client."
+            ) from exc
+        try:
+            client = XRay(*self._address)
+            counters: dict[str, tuple[int, int]] = {}
+            for stat in client.get_users_stats():
+                if stat.type != "user":
+                    continue
+                up, down = counters.get(stat.name, (0, 0))
+                if stat.link == "uplink":
+                    up = int(stat.value)
+                else:
+                    down = int(stat.value)
+                counters[stat.name] = (up, down)
+            return counters
+        except Exception as exc:
+            raise CoreError(f"sing-box stats API unreachable: {exc}") from exc
+
+
+class LocalSingBoxBackend:
+    """Production backend: config renderer + :class:`ManagedProcess`."""
+
+    def __init__(self, settings: dict[str, Any]):
+        self.settings = settings
+        self.executable = settings.get("executable_path", "sing-box")
+        self.work_dir = settings.get("work_dir", ".")
+        self.config_path = settings.get(
+            "config_path", os.path.join(self.work_dir, "sing-box.json")
+        )
+        os.makedirs(self.work_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(self.config_path)), exist_ok=True)
+        self._log_buffer = int(settings.get("log_buffer", 200))
+        self._proc = self._make_proc()
+
+    def _make_proc(self) -> ManagedProcess:
+        return ManagedProcess(
+            [self.executable, "run", "-c", self.config_path],
+            cwd=self.work_dir,
+            log_buffer=self._log_buffer,
+        )
+
+    def install_binary(self) -> str:
+        """Install sing-box; bare executable names are resolved inside
+        work_dir (CWD is not on PATH, so a relative target would leave the
+        process unstartable). Rebuilds the managed process afterwards so
+        argv picks up the real path.
+
+        Installs the **pinned** release from settings (``release_version``,
+        default below) — reproducible and immune to GitHub API rate limits;
+        set it empty to track the latest release instead."""
+        from app.cores.github_install import host_arch, host_os, install_from_github
+
+        system, arch = host_os(), host_arch()
+        suffix = ".zip" if system == "windows" else ".tar.gz"
+        bare = os.path.basename(self.executable) == self.executable
+        target = (os.path.join(os.path.abspath(self.work_dir), self.executable)
+                  if bare else self.executable)
+        version = self.settings.get("release_version", "1.12.4") or None
+        pinned = None
+        if version:
+            asset = f"sing-box-{version}-{system}-{arch}{suffix}"
+            pinned = (f"v{version}", asset)
+        tag = install_from_github(
+            repo="SagerNet/sing-box",
+            target_executable=target,
+            asset_match=lambda name: f"-{system}-{arch}" in name and name.endswith(suffix),
+            member_match=lambda name: name.endswith("sing-box.exe") if system == "windows"
+            else (name.endswith("/sing-box") or name == "sing-box"),
+            pinned=pinned,
+        )
+        if target != self.executable:
+            self.executable = target
+            if not self._proc.is_running:
+                self._proc = self._make_proc()
+        return tag
+
+    # ------------------------------------------------------------------ #
+    # config
+    # ------------------------------------------------------------------ #
+    def apply_config(self, config: dict[str, Any]) -> None:
+        tmp_path = f"{self.config_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(config, fh, indent=2, ensure_ascii=False)
+        if self._binary_available():
+            proc = subprocess.run(
+                [self.executable, "check", "-c", tmp_path],
+                capture_output=True, text=True, timeout=30,
+            )
+            if proc.returncode != 0:
+                os.unlink(tmp_path)
+                # sing-box reports config errors on stderr, sometimes stdout
+                detail = (proc.stderr or proc.stdout or "").strip()
+                raise CoreError(f"sing-box rejected the rendered config: {detail}")
+        os.replace(tmp_path, self.config_path)
+
+    def _binary_available(self) -> bool:
+        try:
+            subprocess.run([self.executable, "version"], capture_output=True, timeout=10)
+            return True
+        except (FileNotFoundError, subprocess.SubprocessError):
+            return False
+
+    # ------------------------------------------------------------------ #
+    # process (delegated)
+    # ------------------------------------------------------------------ #
+    def start(self) -> None:
+        if not self._binary_available():
+            raise CoreError(
+                f"sing-box binary not found at '{self.executable}' — "
+                f"run install() first or fix core settings."
+            )
+        self._proc.start()
+        logger.warning("sing-box started (pid=%s)", self._proc.pid)
+
+    def stop(self) -> None:
+        self._proc.stop()
+
+    def restart(self) -> None:
+        self._proc.restart()
+
+    def is_running(self) -> bool:
+        return self._proc.is_running
+
+    def version(self) -> str | None:
+        try:
+            out = subprocess.check_output(
+                [self.executable, "version"], text=True, timeout=10
+            )
+            match = re.search(r"sing-box version ([\d.]+)", out)
+            return match.group(1) if match else None
+        except (subprocess.SubprocessError, FileNotFoundError):
+            return None
+
+    def metrics(self) -> CoreMetrics:
+        return self._proc.metrics()
+
+    def logs(self, tail: int = 200) -> Sequence[str]:
+        return self._proc.logs(tail)

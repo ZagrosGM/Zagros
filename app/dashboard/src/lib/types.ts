@@ -3,7 +3,24 @@
 export interface Token { access_token: string; token_type: string }
 
 export interface Admin { username: string; is_sudo: boolean }
-export interface AdminUser { id: number; username: string; is_sudo: boolean; telegram_id?: number | null; discord_webhook?: string | null; enabled?: boolean }
+
+// alpha.7 governance fields ride the same /admin(s) models.
+export interface AdminUser {
+  username: string;
+  is_sudo: boolean;
+  telegram_id?: number | null;
+  discord_webhook?: string | null;
+  users_usage?: number | null;
+  created_at?: string | null;
+  max_users?: number | null;
+  expire_at?: string | null;
+  traffic_alloc_limit?: number | null;
+  traffic_consume_limit?: number | null;
+  /** aggregates attached by the list endpoint */
+  users_count?: number | null;
+  users_lifetime_usage?: number | null;
+  users_allocated_traffic?: number | null;
+}
 
 export type UserStatus = "active" | "disabled" | "limited" | "expired" | "on_hold";
 
@@ -19,6 +36,10 @@ export interface User {
   data_limit_reset_strategy?: string;
   note?: string | null;
   sub_url?: string;
+  /** the field the legacy API actually sends — a RELATIVE /sub/... path */
+  subscription_url?: string;
+  /** global device limit (all cores combined); null/0 = unlimited */
+  device_limit?: number | null;
   sub_updated_at?: string | null;
   sub_last_user_agent?: string | null;
   online_at?: string | null;
@@ -30,6 +51,8 @@ export interface User {
   proxies?: Record<string, Record<string, unknown>>;
   inbounds?: Record<string, string[]>;
   excluded_inbounds?: Record<string, string[]>;
+  /** multi-core grants: core_id → inbound tags (alpha.7) */
+  core_access?: Record<string, string[]> | null;
 }
 
 export interface UsersResponse { users: User[]; total: number }
@@ -77,17 +100,36 @@ export interface UserTemplate {
   username_prefix: string | null;
   username_suffix: string | null;
   inbounds: Record<string, string[]>;
+  /** multi-core grants: core_id → inbound tags (alpha.7) */
+  core_access?: Record<string, string[]> | null;
+}
+
+/** Unified inbound catalog — one selectable tree across ALL cores. */
+export interface InboundCatalogEntry { tag: string; protocol: string | null; port: number | null; }
+export interface InboundCatalogGroup {
+  core_id: string; name: string; enabled: boolean;
+  inbounds: InboundCatalogEntry[];
 }
 
 // ---------------- Zagros admin API ----------------
 
-export interface CoreMetrics { cpu_percent?: number; memory_bytes?: number; rx_bytes?: number; tx_bytes?: number; active_accounts?: number; active_sessions?: number }
+export interface CoreMetrics {
+  cpu_percent?: number;
+  memory_bytes?: number;
+  /** real backend keys (app.cores.types.CoreMetrics) */
+  network_rx_bytes?: number;
+  network_tx_bytes?: number;
+  active_accounts?: number;
+  active_sessions?: number;
+}
 
 export interface CoreView {
   id: string;
   name: string;
   state: string; // installed|running|stopped|error|...
   enabled: boolean;
+  /** panel-owned engine (xray): cannot be uninstalled/disabled/reinstalled */
+  builtin?: boolean;
   health?: string | null;
   core_version?: string | null;
   pid?: number | null;
@@ -95,7 +137,8 @@ export interface CoreView {
   message?: string | null;
   metrics?: CoreMetrics | null;
   binary_path?: string | null;
-  settings_masked?: Record<string, string>;
+  /** masked by the backend ("set (N chars)" for secrets) — display only */
+  settings?: Record<string, unknown>;
   protocols: string[];
   capabilities: string[];
   config_schema?: Record<string, unknown> | null;
@@ -149,6 +192,38 @@ export interface Outbound {
 }
 
 export interface OutboundTest { ok: boolean; latency_ms: number | null; error?: string; detail?: string }
+
+// alpha.7: schema-driven outbound forms (/zagros/outbounds/schema)
+export interface OutboundField {
+  type?: string;
+  title?: string;
+  description?: string;
+  default?: unknown;
+  enum?: string[];
+  minimum?: number;
+  maximum?: number;
+  "x-group"?: "basic" | "auth" | "transport" | "security";
+  "x-widget"?: "text" | "password" | "textarea" | "number" | "select" | "toggle";
+}
+export interface OutboundKindSchema {
+  type: string;
+  description?: string;
+  properties: Record<string, OutboundField>;
+  required?: string[];
+}
+export type OutboundSchemas = Record<string, OutboundKindSchema>;
+
+export interface ParsedShareURL {
+  kind: Outbound["kind"];
+  settings: Record<string, unknown>;
+  name_hint?: string;
+  protocol?: string;
+  transport?: string;
+  security?: string;
+  supported_schemes: string[];
+}
+
+export interface CoreRelease { tag: string; name?: string; prerelease: boolean; published_at?: string | null }
 
 export interface SessionRecord {
   key: string; user_id: number; core_id: string; account_id: string; ip?: string | null;

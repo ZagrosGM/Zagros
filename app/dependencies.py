@@ -3,7 +3,7 @@ from app.models.admin import AdminInDB, AdminValidationResult, Admin
 from app.models.user import UserResponse, UserStatus
 from app.db import Session, crud, get_db
 from config import SUDOERS
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, status
 from datetime import datetime, timezone, timedelta
 from app.utils.jwt import get_subscription_payload
 
@@ -14,6 +14,14 @@ def validate_admin(db: Session, username: str, password: str) -> Optional[AdminV
         return AdminValidationResult(username=username, is_sudo=True)
 
     dbadmin = crud.get_admin(db, username)
+    if dbadmin and crud.admin_is_expired(dbadmin):
+        # Governance (alpha.7+): an expired admin must not be able to log
+        # in at all — fail with a precise reason, not a generic 401.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin account expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     if dbadmin and AdminInDB.model_validate(dbadmin).verify_password(password):
         return AdminValidationResult(username=dbadmin.username, is_sudo=dbadmin.is_sudo)
 

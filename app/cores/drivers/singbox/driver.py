@@ -110,6 +110,7 @@ class SingBoxDriver(BaseCoreDriver):
             "stats_api": "127.0.0.1:19091",
         },
         homepage="https://github.com/SagerNet/sing-box",
+        release_repo="SagerNet/sing-box",
         studio_inbounds_path="/inbounds",
     )
 

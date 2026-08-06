@@ -114,6 +114,28 @@ class BaseCoreDriver(abc.ABC):
         raise NotImplementedError  # pragma: no cover
         yield  # pragma: no cover - keeps this an async generator
 
+    # ---- usage-tracker restart safety (recorder job persists baselines) ----
+    def usage_tracker_snapshot(self, account_ids: list[str] | None = None) -> dict:
+        """Baselines of the driver-internal usage tracker, for the recorder
+        job to persist. Empty dict when the driver has no tracker."""
+        tracker = getattr(self, "_usage", None)
+        if hasattr(tracker, "baseline_snapshot"):
+            try:
+                return dict(tracker.baseline_snapshot(account_ids))
+            except Exception:  # noqa: BLE001 — persistence must never break reads
+                return {}
+        return {}
+
+    def restore_usage_baselines(self, baselines: dict) -> None:
+        """Boot-time restore of persisted cumulative baselines — prevents
+        the "panel restart re-emits the whole counter" double-count."""
+        tracker = getattr(self, "_usage", None)
+        if hasattr(tracker, "restore") and baselines:
+            try:
+                tracker.restore(baselines)
+            except Exception:  # noqa: BLE001
+                pass
+
     # ------------------------------------------------------------------ #
     # user management — abstract core of the contract
     # ------------------------------------------------------------------ #

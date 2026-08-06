@@ -255,3 +255,53 @@ if __name__ == "__main__":
             traceback.print_exc()
     print(f"\n{len(tests) - failed}/{len(tests)} passed")
     sys.exit(1 if failed else 0)
+
+
+# --------------------------------------------------------------------- #
+# multi-core link bundle (non-browser subscription clients)
+# --------------------------------------------------------------------- #
+
+def test_build_links_aggregates_link_artifacts_across_cores() -> None:
+    service, _ = _service(_user(), drivers=[_FakeDriverOk()])
+    bundle = asyncio.run(service.build_links(7))
+    assert bundle is not None
+    links, notes = bundle
+    assert links == [f"vless://{_SECRET}@h.example.com:443?security=tls#x"]
+    assert notes == []  # FILE/FIELDS artifacts are portal-only, not fabricated
+
+
+def test_build_links_skips_disabled_accounts_and_reports_broken_cores() -> None:
+    class _Broken:
+        class _Meta:
+            id = "brokenbox"
+            name = "BrokenBox"
+        metadata = _Meta()
+
+        async def describe_delivery(self, account, context=None):
+            raise CoreError("backend down")
+
+    service, provider = _service(_user(), drivers=[_FakeDriverOk(), _Broken()])
+    page = asyncio.run(service.build_page(7))
+    assert page is not None  # portal keeps working with a broken core (honest note)
+    bundle = asyncio.run(service.build_links(7))
+    links, notes = bundle
+    assert len(links) == 1  # the healthy core's link survives
+    assert any("temporarily unavailable" in n for n in notes)
+
+
+def test_build_links_empty_for_app_login_mode_and_unknown_user() -> None:
+    service, _ = _service(_user(client_auth_mode=ClientAuthMode.APPLICATION_LOGIN),
+                          drivers=[_FakeDriverOk()])
+    # application-login users get NO configuration material — mode gate must
+    # hold on the raw link list exactly like on the portal page.
+    bundle = asyncio.run(service.build_links(7))
+    assert bundle == ([], [])
+    _page = asyncio.run(service.build_page(7))
+    assert _page is not None and _page.kind is PageKind.APP_DOWNLOAD
+
+    class _MissingProvider:
+        async def get_subscription_context(self, user_id):
+            return None
+
+    service2 = PortalService(_MissingProvider(), InMemorySettingsStore(PortalSettings()))
+    assert asyncio.run(service2.build_links(999)) is None

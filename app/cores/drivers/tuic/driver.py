@@ -106,6 +106,7 @@ class TUICDriver(BaseCoreDriver):
             "release_version": "tuic-server-1.0.0",
         },
         homepage="https://github.com/EAimTY/tuic",
+        release_repo="EAimTY/tuic",
         provides=set(),
         requires=set(),
     )

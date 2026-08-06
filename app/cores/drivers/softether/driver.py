@@ -58,7 +58,7 @@ class SoftEtherDriver(BaseCoreDriver):
             "native per-user traffic counters, expiry-based suspend, "
             "session kick, L2TP/IPsec + OpenVPN-clone + SSTP transports."
         ),
-        protocols=["l2tp", "sstp", "ovpn"],
+        protocols=["l2tp", "sstp", "pptp", "ovpn"],
         capabilities={
             Capability.USER_MANAGEMENT,
             Capability.SUSPEND_RESUME,
@@ -292,10 +292,82 @@ class SoftEtherDriver(BaseCoreDriver):
         self._ensure_supported(account.protocol)
         self._ensure_credentials(account)
         s = self.settings
+        server = s.get("advertise_host")
+        password = str(account.settings["password"])
+        if account.protocol == "sstp":
+            if not server:
+                raise CoreError(
+                    "SSTP client config requires settings.advertise_host — clients "
+                    "dial the SSTP TLS endpoint by hostname."
+                )
+            return ClientConfig(
+                core_id=self.metadata.id,
+                protocol="sstp",
+                engine="sstp",
+                payload={
+                    "format": "sstp",
+                    "server": server,
+                    "port": 443,
+                    "username": account.account_id,
+                    "password": password,
+                    "hub": s["hub"],
+                    "note": "SSTP listener must be enabled on the SoftEther server "
+                            "(SecureNAT/Listener 443 or your SSTP port).",
+                },
+                display_name="VPN (SSTP)",
+            )
+        if account.protocol == "pptp":
+            if not server:
+                raise CoreError(
+                    "PPTP client config requires settings.advertise_host — clients "
+                    "dial the PPTP endpoint by address."
+                )
+            return ClientConfig(
+                core_id=self.metadata.id,
+                protocol="pptp",
+                engine="pptp",
+                payload={
+                    "format": "pptp",
+                    "server": server,
+                    "port": 1723,
+                    "username": account.account_id,
+                    "password": password,
+                    "hub": s["hub"],
+                    "note": "PPTP is served by SoftEther's L2TP/PPTP compatible mode; "
+                            "enable it in the server's IPsec/L2TP settings.",
+                },
+                display_name="VPN (PPTP)",
+            )
+        if account.protocol == "ovpn":
+            if not server:
+                raise CoreError(
+                    "OpenVPN-clone client config requires settings.advertise_host."
+                )
+            return ClientConfig(
+                core_id=self.metadata.id,
+                protocol="ovpn",
+                engine="openvpn-clone",
+                payload={
+                    "format": "openvpn-clone",
+                    "server": server,
+                    "port": 1194,
+                    "username": account.account_id,
+                    "password": password,
+                    "hub": s["hub"],
+                    "note": "SoftEther's OpenVPN-clone listener (default 1194) — "
+                            "import with any OpenVPN client.",
+                },
+                display_name="VPN (OpenVPN clone)",
+            )
+        # l2tp (default) — IPsec/L2TP needs the hub's pre-shared key
         if not s.get("ipsec_psk"):
             raise CoreError(
                 "L2TP/IPsec client config requires settings.ipsec_psk — set the "
                 "hub's IPsec pre-shared key first (IPsecEnable)."
+            )
+        if not server:
+            raise CoreError(
+                "L2TP/IPsec client config requires settings.advertise_host."
             )
         psk = s["ipsec_psk"]
         return ClientConfig(
@@ -304,10 +376,10 @@ class SoftEtherDriver(BaseCoreDriver):
             engine="l2tp-ipsec",
             payload={
                 "format": "l2tp-ipsec",
-                "server": s["advertise_host"],
+                "server": server,
                 "ipsec_psk": psk,
                 "username": account.account_id,
-                "password": str(account.settings["password"]),
+                "password": password,
                 "hub": s["hub"],
             },
             display_name="VPN (L2TP/IPsec)",

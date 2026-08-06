@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional, Union
 
 import typer
@@ -59,6 +60,7 @@ def list_admins(
         admins: list[Admin] = crud.get_admins(db, offset=offset, limit=limit, username=username)
         utils.print_table(
             table=Table("Username", 'Usage', 'Reseted usage', "Users Usage", "Is sudo",
+                        "Max users", "Expire at", "Alloc limit", "Consume limit",
                         "Created at", "Telegram ID", "Discord Webhook"),
             rows=[
                 (str(admin.username),
@@ -66,6 +68,10 @@ def list_admins(
                  calculate_admin_reseted_usage(admin.id),
                  readable_size(admin.users_usage),
                  "✔️" if admin.is_sudo else "✖️",
+                 str(admin.max_users or "♾️"),
+                 utils.readable_datetime(admin.expire_at) if admin.expire_at else "♾️",
+                 readable_size(admin.traffic_alloc_limit) if admin.traffic_alloc_limit else "♾️",
+                 readable_size(admin.traffic_consume_limit) if admin.traffic_consume_limit else "♾️",
                  utils.readable_datetime(admin.created_at),
                  str(admin.telegram_id or "✖️"),
                  str(admin.discord_webhook or "✖️"))
@@ -96,6 +102,26 @@ def delete_admin(
             utils.error("Operation aborted!")
 
 
+def validate_expire_at(value: Union[str, None]) -> Union[datetime, None]:
+    """Parse an admin expiry: ISO date/datetime, or empty for 'no expiry'."""
+    if not value:
+        return None
+    text = value.strip()
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        raise typer.BadParameter(
+            "Expiry must be an ISO date/datetime, e.g. 2026-12-31 or "
+            "2026-12-31T23:59:59 (empty = never expires).")
+    return parsed
+
+
+def _gib_to_bytes(value: Union[float, None]) -> Union[int, None]:
+    if value is None or value <= 0:
+        return None
+    return int(value * (1024 ** 3))
+
+
 @app.command(name="create")
 def create_admin(
     username: str = typer.Option(..., *utils.FLAGS["username"], show_default=False, prompt=True),
@@ -106,6 +132,18 @@ def create_admin(
                                     show_default=False, callback=validate_telegram_id),
     discord_webhook: str = typer.Option('', *utils.FLAGS["discord_webhook"], prompt=True,
                                         show_default=False, callback=validate_discord_webhook),
+    max_users: Optional[int] = typer.Option(None, "--max-users",
+                                            help="Cap on users this admin may own (0/omit = unlimited)"),
+    expire_at: Optional[str] = typer.Option(None, "--expire-at", callback=validate_expire_at,
+                                            help="ISO date/datetime after which the admin cannot log in "
+                                                 "or manage anything (omit = never)"),
+    traffic_alloc_limit_gb: Optional[float] = typer.Option(None, "--traffic-alloc-limit-gb",
+                                                           help="Cap (GiB) on the SUM of users' data limits "
+                                                                "(omit = unlimited)"),
+    traffic_consume_limit_gb: Optional[float] = typer.Option(None, "--traffic-consume-limit-gb",
+                                                             help="Cap (GiB) on the SUM of users' lifetime "
+                                                                  "usage; crossing it suspends all of the "
+                                                                  "admin's users (omit = unlimited)"),
 ):
     """
     Creates an admin
@@ -118,7 +156,11 @@ def create_admin(
                                               password=password,
                                               is_sudo=is_sudo,
                                               telegram_id=telegram_id,
-                                              discord_webhook=discord_webhook))
+                                              discord_webhook=discord_webhook,
+                                              max_users=max_users or None,
+                                              expire_at=expire_at,
+                                              traffic_alloc_limit=_gib_to_bytes(traffic_alloc_limit_gb),
+                                              traffic_consume_limit=_gib_to_bytes(traffic_consume_limit_gb)))
             utils.success(f'Admin "{username}" created successfully.')
         except IntegrityError:
             utils.error(f'Admin "{username}" already exists!')
@@ -154,12 +196,53 @@ def update_admin(username: str = typer.Option(..., *utils.FLAGS["username"], pro
                                             default=admin.discord_webhook or "")
         discord_webhook = validate_discord_webhook(discord_webhook)
 
-        return AdminPartialModify(
-            is_sudo=is_sudo,
-            password=new_password,
-            telegram_id=telegram_id,
-            discord_webhook=discord_webhook
-        )
+        # ---- governance prompts (alpha.7+) ---- #
+        def _ask_limit(label: str, current) -> Union[int, None, str]:
+            """'' = keep, '0' = clear, positive number = set (bytes shown as GiB)."""
+            shown = "" if current is None else (
+                f"{current / (1024 ** 3):g}" if current > 1024 else str(current))
+            raw = typer.prompt(
+                f"{label} (GiB; Enter = keep, 0 = clear)", default=shown, show_default=False)
+            if raw == "":
+                return _KEEP
+            try:
+                num = float(raw)
+            except ValueError:
+                raise typer.BadParameter(f"{label} must be a number of GiB.")
+            return 0 if num <= 0 else int(num * (1024 ** 3))
+
+        _KEEP = "__keep__"
+        max_users_raw = typer.prompt(
+            "Max users (Enter = keep, 0 = clear)",
+            default="" if admin.max_users is None else str(admin.max_users), show_default=False)
+        max_users: Union[int, str, None] = _KEEP
+        if max_users_raw != "":
+            if not max_users_raw.isdigit():
+                raise typer.BadParameter("max users must be a non-negative integer.")
+            max_users = int(max_users_raw)
+
+        alloc_v = _ask_limit("Traffic allocation limit", admin.traffic_alloc_limit)
+        consume_v = _ask_limit("Traffic consumption limit", admin.traffic_consume_limit)
+        expire_raw = typer.prompt(
+            "Expire at (ISO date; Enter = keep, 0 = clear)",
+            default="" if admin.expire_at is None else admin.expire_at.strftime("%Y-%m-%d"),
+            show_default=False)
+        expire_at: Union[datetime, str, None] = _KEEP
+        if expire_raw != "":
+            expire_at = None if expire_raw == "0" else validate_expire_at(expire_raw)
+
+        patch = dict(is_sudo=is_sudo, password=new_password,
+                     telegram_id=telegram_id, discord_webhook=discord_webhook)
+        if max_users is not _KEEP:
+            patch["max_users"] = max_users or None
+        if alloc_v is not _KEEP:
+            patch["traffic_alloc_limit"] = alloc_v or None
+        if consume_v is not _KEEP:
+            patch["traffic_consume_limit"] = consume_v or None
+        if expire_at is not _KEEP:
+            patch["expire_at"] = expire_at
+
+        return AdminPartialModify(**patch)
 
     with GetDB() as db:
         admin: Union[Admin, None] = crud.get_admin(db, username=username)
@@ -167,6 +250,9 @@ def update_admin(username: str = typer.Option(..., *utils.FLAGS["username"], pro
             utils.error(f"There's no admin with username \"{username}\"!")
 
         crud.partial_update_admin(db, admin, _get_modify_model(admin))
+        # Changing governance caps re-evaluates them immediately (revive or
+        # suspend the admin's users as needed).
+        crud.enforce_admin_consumption(db, admin)
         utils.success(f'Admin "{username}" updated successfully.')
 
 

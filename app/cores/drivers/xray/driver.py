@@ -12,6 +12,9 @@ the legacy singletons (env-based), exactly as Zagros works today.
 from __future__ import annotations
 
 import asyncio
+import random
+import secrets
+from collections import defaultdict
 from collections.abc import AsyncIterator, Mapping
 from datetime import datetime, timezone
 from typing import Any, ClassVar
@@ -90,6 +93,7 @@ class XrayDriver(BaseCoreDriver):
             "config_path": "xray_config.json",
         },
         homepage="https://github.com/XTLS/Xray-core",
+        release_repo="XTLS/Xray-core",
         studio_inbounds_path="/inbounds",
     )
 
@@ -295,6 +299,80 @@ class XrayDriver(BaseCoreDriver):
     # ------------------------------------------------------------------ #
     # client config (sealed delivery only)
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # legacy template variables ({SERVER_IP}/{USERNAME}/... + '*' salting)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    async def _format_variables(account: UserAccount) -> dict:
+        """The legacy share-generator variable set, resolved for THIS user.
+
+        Marzban-parity: host remarks/addresses may embed ``{SERVER_IP}``,
+        ``{USERNAME}``, ``{DATA_USAGE}``, ``{DAYS_LEFT}``… — the legacy sub
+        link resolves them per user; the platform delivery path must render
+        the SAME values or the two links diverge (a literal ``{SERVER_IP}``
+        reached clients before this existed). When the legacy stack is not
+        importable (bare driver unit tests) we degrade to the minimal set —
+        never an exception into delivery rendering.
+        """
+        username = account.username or ""
+        extra: dict[str, Any] = {"username": username, "used_traffic": 0}
+
+        def _load() -> dict | None:
+            from app.db import GetDB
+            from app.db.crud import get_user as _get_user
+
+            with GetDB() as db:
+                row = _get_user(db, username)
+            if row is None:
+                return None
+            return {
+                "username": row.username,
+                "status": row.status,
+                "expire": row.expire,
+                "used_traffic": row.used_traffic or 0,
+                "data_limit": row.data_limit,
+                "on_hold_expire_duration": row.on_hold_expire_duration,
+            }
+
+        try:
+            loaded = await asyncio.to_thread(_load)
+            if loaded is not None:
+                extra = loaded
+        except Exception:  # noqa: BLE001 — DB-less context: keep the defaults
+            pass
+
+        try:
+            from app.subscription.share import setup_format_variables
+
+            return setup_format_variables(extra)
+        except Exception:  # noqa: BLE001 — legacy stack stubbed/unavailable
+            return defaultdict(lambda: "<missing>", {
+                "SERVER_IP": "", "SERVER_IPV6": "", "USERNAME": username,
+                "DATA_USAGE": "0", "DATA_LIMIT": "∞", "DATA_LEFT": "∞",
+                "DAYS_LEFT": "∞", "EXPIRE_DATE": "∞", "JALALI_EXPIRE_DATE": "∞",
+                "TIME_LEFT": "∞", "STATUS_EMOJI": "", "STATUS_TEXT": "",
+            })
+
+    @staticmethod
+    def _render_host_value(value: str | None, variables: Mapping[str, Any],
+                           *, wild: bool = False) -> str | None:
+        if not value:
+            return value
+        if wild:
+            value = value.replace("*", secrets.token_hex(8))
+        return value.format_map(variables)
+
+    @staticmethod
+    def _protocol_display(protocol: str) -> str:
+        """Legacy remarks use the ENUM name (``Shadowsocks``), we only carry
+        the value string — map back so both links are byte-equivalent."""
+        try:
+            from app.models.proxy import ProxyTypes
+
+            return ProxyTypes(protocol).name
+        except Exception:  # noqa: BLE001 — unknown protocol: honest fallback
+            return protocol
+
     def _compose_outbound(
         self,
         protocol: str,
@@ -302,21 +380,30 @@ class XrayDriver(BaseCoreDriver):
         tag: str,
         inbound: dict[str, Any],
         host: dict[str, Any],
+        variables: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build the sing-box-shaped outbound fragment for one (inbound, host).
 
-        Pure/deterministic — shared by :meth:`build_client_config` (first
-        target) and :meth:`describe_delivery` (every target × host).
+        Host fields go through the SAME template resolution as the legacy
+        share generator: ``random.choice`` per render, ``*`` → random salt,
+        ``{VAR}`` → per-user value (remark/address/path get format_map, sni/
+        ws-Host get the salt only — exactly what /sub/ produces).
         """
+        if variables is None:
+            variables = defaultdict(lambda: "<missing>")
         settings = self._apply_flow_policy(settings, inbound)
         addresses = host.get("address") or []
-        snis = host.get("sni") or inbound.get("sni") or []
+        server = (self._render_host_value(random.choice(addresses), variables, wild=True)
+                  if addresses else None)
+        sni_list = host.get("sni") or inbound.get("sni") or []
+        sni = (self._render_host_value(random.choice(sni_list), variables, wild=True)
+               if sni_list else None)
         tls_level = host.get("tls") or inbound.get("tls", "none")
 
         outbound: dict[str, Any] = {
             "type": protocol,
             "tag": tag,
-            "server": addresses[0] if addresses else None,
+            "server": server,
             "server_port": host.get("port") or inbound.get("port"),
         }
         if protocol in ("vless", "vmess"):
@@ -334,7 +421,7 @@ class XrayDriver(BaseCoreDriver):
         if tls_level in ("tls", "reality"):
             outbound["tls"] = {
                 "enabled": True,
-                "server_name": snis[0] if snis else None,
+                "server_name": sni,
                 "alpn": [a for a in (host.get("alpn") or "").split(",") if a] or None,
                 "utls": {
                     "enabled": bool(host.get("fingerprint")),
@@ -353,9 +440,17 @@ class XrayDriver(BaseCoreDriver):
         network = inbound.get("network", "tcp")
         transport: dict[str, Any] = {"type": network}
         if network == "ws":
-            hostnames = host.get("host") or []
+            hostnames = host.get("host") or inbound.get("host") or []
+            req_host = (self._render_host_value(random.choice(hostnames), variables, wild=True)
+                        if hostnames else None)
+            if host.get("use_sni_as_host") and sni:
+                req_host = sni
+            if host.get("path") is not None:
+                path = (host["path"] or "").format_map(variables)
+            else:
+                path = (inbound.get("path") or "/").format_map(variables)
             transport.update(
-                {"path": host.get("path") or "/", "headers": {"Host": hostnames[0]} if hostnames else {}}
+                {"path": path, "headers": {"Host": req_host} if req_host else {}}
             )
         outbound["transport"] = transport
         return outbound
@@ -373,14 +468,21 @@ class XrayDriver(BaseCoreDriver):
         tag, inbound = next(iter(targets.items()))
         hosts = await asyncio.to_thread(self._backend.host_options, tag)
         host = hosts[0] if hosts else {}
-        outbound = self._compose_outbound(protocol, settings, tag, inbound, host)
+        variables = defaultdict(lambda: "<missing>",
+                                await self._format_variables(account))
+        variables["PROTOCOL"] = self._protocol_display(protocol)
+        variables["TRANSPORT"] = inbound.get("network", "")
+        outbound = self._compose_outbound(protocol, settings, tag, inbound,
+                                          host, variables)
+        remark = self._render_host_value(
+            host.get("remark") or f"{protocol} · {tag}", variables)
 
         return ClientConfig(
             core_id=self.metadata.id,
             protocol=protocol,
             engine="sing-box",
             payload={"outbounds": [outbound]},
-            display_name=host.get("remark") or f"{protocol} · {tag}",
+            display_name=remark,
         )
 
     async def describe_delivery(
@@ -415,12 +517,19 @@ class XrayDriver(BaseCoreDriver):
             ))
             return DeliveryProfile(core_id=self.metadata.id, sections=[section])
 
+        base_variables = await self._format_variables(account)
         for tag, inbound in targets.items():
             hosts = await asyncio.to_thread(self._backend.host_options, tag) or [{}]
+            # per-(protocol, inbound) variables — same two the legacy
+            # generator refreshes inside its loop
+            variables = defaultdict(lambda: "<missing>", base_variables)
+            variables["PROTOCOL"] = self._protocol_display(protocol)
+            variables["TRANSPORT"] = inbound.get("network", "")
             for host in hosts:
-                remark = host.get("remark") or f"{protocol} · {tag}"
+                remark = self._render_host_value(
+                    host.get("remark") or f"{protocol} · {tag}", variables)
                 outbound = self._compose_outbound(
-                    protocol, dict(settings), tag, inbound, host
+                    protocol, dict(settings), tag, inbound, host, variables
                 )
                 try:
                     link = share_url_for_outbound(outbound, remark)
@@ -691,12 +800,19 @@ def _install_xray(settings: dict[str, Any]) -> str:
             "geoip.dat": os.path.join(assets_dir, "geoip.dat"),
             "geosite.dat": os.path.join(assets_dir, "geosite.dat"),
         }
+    # Optional exact-version pin (Simple install dialog version picker):
+    # skips the REST API entirely and pulls /releases/download/<tag>/<asset>.
+    pinned = None
+    version = str(settings.get("release_version") or "").strip()
+    if version:
+        pinned = (version if version.startswith("v") else f"v{version}", asset)
     tag = install_from_github(
         repo="XTLS/Xray-core",
         target_executable=executable,
         asset_match=lambda name: name == asset,
         member_match=lambda m: m.rsplit("/", 1)[-1] in ("xray", "xray.exe"),
         direct_asset=asset,
+        pinned=pinned,
         extra_members=extras,
     )
     with open(executable + _MARKER, "w", encoding="utf-8") as fh:

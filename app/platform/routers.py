@@ -12,8 +12,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
+import base64 as _base64
 
 from app.clientapi.errors import ClientApiError
 from app.clientapi.models import AppCredentials, AuthTokens, ConnectOffer
@@ -145,8 +146,10 @@ async def client_config(body: ConfigBody, runtime=Depends(get_runtime)):
 # ---------------------------------------------------------------------- #
 
 @zagros_router.get("/zagros/sub/{token}", response_class=HTMLResponse)
-async def subscription_portal(token: str, runtime=Depends(get_runtime),
-                              accept_language: str | None = Header(default=None)):
+async def subscription_portal(token: str, request: Request,
+                              runtime=Depends(get_runtime),
+                              accept_language: str | None = Header(default=None),
+                              user_agent: str | None = Header(default=None)):
     try:
         payload = runtime.tokens.verify(token, expected_type="sub")
     except TokenError as exc:
@@ -156,13 +159,75 @@ async def subscription_portal(token: str, runtime=Depends(get_runtime),
     current_jti = await runtime.kv.get_value(f"portal.sub_jti.{user_id}")
     if current_jti is None or payload.get("jti") != current_jti:
         raise HTTPException(404, "subscription not found")
+
+    # Content negotiation: subscription CLIENTS (v2rayNG, Streisand, sing-box,
+    # Nekoray...) fetch the link list (base64 body, Marzban convention);
+    # BROWSERS get the rich multi-core portal page.
+    accept = request.headers.get("accept", "")
+    ua = (user_agent or "").lower()
+    # explicit ?format= always wins (browser may fetch clash/sing-box configs)
+    explicit_fmt = (request.query_params.get("format") or "").lower().strip()
+    is_browser = (not explicit_fmt) and "text/html" in accept and any(
+        k in ua for k in ("mozilla", "chrome", "safari", "firefox", "edge"))
     lang = None
     if accept_language:
         lang = accept_language.split(",")[0].strip()[:5]
-    page = await runtime.portal.build_page(user_id, lang=lang)
-    if page is None:
+
+    if is_browser:
+        page = await runtime.portal.build_page(user_id, lang=lang)
+        if page is None:
+            raise HTTPException(404, "subscription not found")
+        return HTMLResponse(render_page_html(page))
+
+    bundle = await runtime.portal.build_links(user_id)
+    if bundle is None:
         raise HTTPException(404, "subscription not found")
-    return HTMLResponse(render_page_html(page))
+    links, notes = bundle
+
+    # Client-specific formats (spec §8): ONE merged multi-core link set,
+    # rendered for whatever is fetching. ``?format=`` overrides UA sniffing.
+    from app.platform.sub_formats import dedupe_links, to_clash_meta, to_sing_box
+
+    fmt = explicit_fmt or _format_for_ua(ua)
+    if fmt in ("clash", "clash-meta", "meta", "stash", "yaml"):
+        body, _fmt_notes = to_clash_meta(links, notes)
+        return PlainTextResponse(
+            body, media_type="text/yaml; charset=utf-8",
+            headers={
+                "profile-update-interval": "6",
+                "content-disposition": "attachment; filename=\"zagros.yaml\"",
+            },
+        )
+    if fmt in ("sing-box", "singbox", "json"):
+        body, _fmt_notes = to_sing_box(links, notes)
+        return PlainTextResponse(
+            body, media_type="application/json; charset=utf-8",
+            headers={
+                "profile-update-interval": "6",
+                "content-disposition": "attachment; filename=\"zagros.json\"",
+            },
+        )
+
+    links = dedupe_links(links)
+    body_lines = [f"# {n}" for n in notes] + links
+    encoded = _base64.b64encode("\n".join(body_lines).encode()).decode()
+    return PlainTextResponse(
+        encoded,
+        headers={
+            "subscription-userinfo": "",
+            "profile-update-interval": "6",
+            "content-disposition": "attachment; filename=\"zagros-subscription\"",
+        },
+    )
+
+
+def _format_for_ua(ua: str) -> str:
+    """User-Agent → subscription format (Marzban-style sniffing, multi-core)."""
+    if any(k in ua for k in ("clash", "mihomo", "flclash", "stash")):
+        return "clash-meta"
+    if any(k in ua for k in ("sing-box", "singbox", "sfa", "sfi", "sfm")):
+        return "sing-box"
+    return ""
 
 
 @zagros_admin_router.post("/users/{user_id}/subscription-token")
@@ -173,6 +238,17 @@ async def issue_subscription_token(user_id: int, runtime=Depends(get_runtime)):
     payload = runtime.tokens.verify(token, expected_type="sub")
     await runtime.kv.set_value(f"portal.sub_jti.{user_id}", payload["jti"])
     return {"token": token, "path": f"/zagros/sub/{token}"}
+
+
+@zagros_admin_router.post("/users/by-username/{username}/subscription-token")
+async def issue_subscription_token_by_username(username: str, runtime=Depends(get_runtime)):
+    """Same as by-id, for the dashboard which identifies users by username."""
+    import asyncio as _asyncio
+
+    row = await _asyncio.to_thread(runtime.users.get_user_by_username, username)
+    if row is None:
+        raise HTTPException(404, f"user '{username}' not found")
+    return await issue_subscription_token(row.id, runtime)
 
 
 # ---------------------------------------------------------------------- #

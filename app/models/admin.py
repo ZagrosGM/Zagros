@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
@@ -24,7 +25,32 @@ class Admin(BaseModel):
     telegram_id: Optional[int] = None
     discord_webhook: Optional[str] = None
     users_usage: Optional[int] = None
+    created_at: Optional[datetime] = None
+    # --------------------------------------------------------- #
+    # Admin governance (alpha.7+). None = unlimited / no expiry.
+    #   * max_users — hard cap on owned users
+    #   * expire_at — admin account expiry (login + API both die)
+    #   * traffic_alloc_limit — cap on SUM(users' data_limit)
+    #   * traffic_consume_limit — cap on SUM(users' lifetime traffic)
+    # The last two are computed aggregates (list endpoint only).
+    # --------------------------------------------------------- #
+    max_users: Optional[int] = None
+    expire_at: Optional[datetime] = None
+    traffic_alloc_limit: Optional[int] = None
+    traffic_consume_limit: Optional[int] = None
+    users_count: Optional[int] = None
+    users_lifetime_usage: Optional[int] = None
+    users_allocated_traffic: Optional[int] = None
     model_config = ConfigDict(from_attributes=True)
+
+    @property
+    def is_expired(self) -> bool:
+        if self.expire_at is None:
+            return False
+        expiry = self.expire_at
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        return expiry <= datetime.now(timezone.utc)
 
     @field_validator("users_usage",  mode='before')
     def cast_to_int(cls, v):
@@ -54,6 +80,16 @@ class Admin(BaseModel):
                 return
             if dbadmin.password_reset_at > payload.get("created_at"):
                 return
+
+        # Admin governance: an expired admin's token is dead. Login,
+        # creating users, editing — everything goes through this gate, so
+        # expiring the account suspends ALL of the admin's powers at once.
+        if crud.admin_is_expired(dbadmin):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Admin account expired",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
         return cls.model_validate(dbadmin)
 
@@ -111,6 +147,13 @@ class AdminModify(BaseModel):
     is_sudo: bool
     telegram_id: Optional[int] = None
     discord_webhook: Optional[str] = None
+    # Governance fields. Presence is tracked via model_fields_set so the
+    # CRUD layer can distinguish "keep the current value" (field absent)
+    # from "clear the limit" (field present with null/0).
+    max_users: Optional[int] = None
+    expire_at: Optional[datetime] = None
+    traffic_alloc_limit: Optional[int] = None
+    traffic_consume_limit: Optional[int] = None
 
     @property
     def hashed_password(self):
@@ -126,7 +169,20 @@ class AdminModify(BaseModel):
 
 
 class AdminPartialModify(AdminModify):
-    __annotations__ = {k: Optional[v] for k, v in AdminModify.__annotations__.items()}
+    """PATCH-style variant: every field optional (absent = keep current).
+
+    Fields are redeclared with ``None`` defaults — merely re-annotating
+    them ``Optional`` would still leave them REQUIRED to pydantic, which
+    previously forced callers to pass every key explicitly.
+    """
+    password: Optional[str] = None
+    is_sudo: Optional[bool] = None
+    telegram_id: Optional[int] = None
+    discord_webhook: Optional[str] = None
+    max_users: Optional[int] = None
+    expire_at: Optional[datetime] = None
+    traffic_alloc_limit: Optional[int] = None
+    traffic_consume_limit: Optional[int] = None
 
 
 class AdminInDB(Admin):

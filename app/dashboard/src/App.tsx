@@ -7,6 +7,8 @@ import { Skeleton } from "./components/ui";
 // Every page is lazy-loaded — the shell boots fast, pages stream in.
 const Overview = lazy(() => import("./pages/Overview"));
 const Users = lazy(() => import("./pages/Users"));
+const Admins = lazy(() => import("./pages/Admins"));
+const Templates = lazy(() => import("./pages/Templates"));
 const Subscriptions = lazy(() => import("./pages/Subscriptions"));
 const Nodes = lazy(() => import("./pages/Nodes"));
 const Cores = lazy(() => import("./pages/Cores"));
@@ -42,6 +44,8 @@ export default function App() {
         <Route element={<AppLayout />}>
           <Route index element={<Suspense fallback={<PageFallback />}><Overview /></Suspense>} />
           <Route path="users" element={<Suspense fallback={<PageFallback />}><Users /></Suspense>} />
+          <Route path="admins" element={<Suspense fallback={<PageFallback />}><Admins /></Suspense>} />
+          <Route path="templates" element={<Suspense fallback={<PageFallback />}><Templates /></Suspense>} />
           <Route path="subscriptions" element={<Suspense fallback={<PageFallback />}><Subscriptions /></Suspense>} />
           <Route path="nodes" element={<Suspense fallback={<PageFallback />}><Nodes /></Suspense>} />
           <Route path="cores" element={<Suspense fallback={<PageFallback />}><Cores /></Suspense>} />

@@ -33,6 +33,18 @@ class DeltaTracker:
     def forget(self, key: object) -> None:
         self._baseline.pop(key, None)
 
+    # ---- restart-safety (recorder job persists these) ----
+    def baseline_snapshot(self, keys: list[object] | None = None) -> dict[object, tuple[int, int]]:
+        """Current cumulative baselines — saved by the recorder so a panel
+        restart resumes accounting instead of re-emitting full counters."""
+        if keys is None:
+            return dict(self._baseline)
+        return {k: v for k, v in self._baseline.items() if k in keys}
+
+    def restore(self, baseline: dict[object, tuple[int, int]]) -> None:
+        """Hand back a persisted snapshot (boot-time, before the first read)."""
+        self._baseline.update(baseline)
+
 
 @dataclass(frozen=True, slots=True)
 class _SessionState:
@@ -55,6 +67,13 @@ class SessionUsageTracker:
         )
         self._sessions[key] = _SessionState(max(uplink, last.uplink), max(downlink, last.downlink))
         return delta
+
+    # ---- restart-safety (interim session counters) ----
+    def session_snapshot(self) -> dict[object, tuple[int, int]]:
+        return {k: (v.uplink, v.downlink) for k, v in self._sessions.items()}
+
+    def restore_sessions(self, snapshot: dict[object, tuple[int, int]]) -> None:
+        self._sessions.update({k: _SessionState(*v) for k, v in snapshot.items()})
 
     def close(self, key: object, final_uplink: int, final_downlink: int) -> tuple[int, int]:
         """Final delta at disconnect; removes the session baseline.

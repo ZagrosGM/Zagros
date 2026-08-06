@@ -113,6 +113,7 @@ async def cores_registry(runtime=Depends(get_runtime)):
 
 
 async def _core_view(runtime, core_id: str, status_by_id: dict) -> dict:
+    from app.cores.manager import BUILTIN_CORE_IDS
     from app.cores.types import CoreState, HealthStatus
 
     manager = runtime.core_manager
@@ -154,6 +155,7 @@ async def _core_view(runtime, core_id: str, status_by_id: dict) -> dict:
         "config_schema": meta.config_schema,
         "state": state_value or "installed",
         "enabled": bool(enabled),
+        "builtin": core_id in BUILTIN_CORE_IDS,
         "settings": _mask_settings(driver.settings),
         "binary_path": binary_path,
         "health": None,
@@ -247,6 +249,30 @@ async def cores_uninstall(core_id: str, body: CoreUninstallBody,
     return {"ok": True, "core": core_id, "purged": body.purge}
 
 
+@zagros_admin_router.post("/cores/{core_id}/reinstall")
+async def cores_reinstall(core_id: str, runtime=Depends(get_runtime)):
+    """Reinstall preserving EVERYTHING server-side: settings snapshot (the
+    full unmasked one — the UI can never round-trip secrets), data dir
+    (purge=False) and the running state. Binary is re-fetched by the
+    driver's own install()."""
+    manager = runtime.core_manager
+    if core_id not in manager.list_cores():
+        raise HTTPException(404, f"core '{core_id}' is not installed")
+    settings = dict(manager.get(core_id).settings)
+    enabled = manager.is_enabled(core_id)
+    states = await runtime.core_state.load()
+    was_running = states.get(core_id, {}).get("state") == "running"
+    try:
+        await manager.uninstall_core(core_id, purge=False, force=True)
+        state = await manager.install_core(core_id, settings, enabled=enabled)
+        if was_running:
+            await manager.start_core(core_id)
+    except Exception as exc:
+        raise _err(exc) from exc
+    return {"ok": True, "core": core_id, "state": state.value,
+            "restarted": was_running}
+
+
 @zagros_admin_router.post("/cores/{core_id}/start")
 async def cores_start(core_id: str, runtime=Depends(get_runtime)):
     status = await _manager_call(runtime, core_id, "start_core")
@@ -284,6 +310,38 @@ async def cores_update(core_id: str, body: CoreUpdateBody, runtime=Depends(get_r
     running = states.get(core_id, {}).get("state") == "running"
     return {"ok": True, "core": core_id, "version": version,
             "restart_required": running}
+
+
+_VERSION_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_VERSION_CACHE_TTL = 600.0
+
+
+@zagros_admin_router.get("/cores/{core_id}/versions")
+async def cores_versions(core_id: str, limit: int = 10, runtime=Depends(get_runtime)):
+    """Recent upstream release tags for a GitHub-managed core (drives the
+    version picker in Simple install mode). Sourced from the DRIVER's own
+    metadata (release_repo), never hardcoded. Cached 10 min in-process."""
+    from app.cores.github_install import fetch_recent_releases
+    from app.cores.registry import available_drivers, get_driver_class
+
+    if core_id not in available_drivers():
+        raise HTTPException(404, f"unknown core '{core_id}'")
+    repo = get_driver_class(core_id).metadata.release_repo
+    if not repo:
+        raise HTTPException(
+            404, f"core '{core_id}' is not GitHub-release managed — "
+                 "no version list is available (install uses the OS package)")
+    now = time.monotonic()
+    cached = _VERSION_CACHE.get(core_id)
+    if cached and now - cached[0] < _VERSION_CACHE_TTL:
+        releases = cached[1]
+    else:
+        try:
+            releases = await asyncio.to_thread(fetch_recent_releases, repo, limit=limit)
+        except Exception as exc:
+            raise HTTPException(502, str(exc)) from exc
+        _VERSION_CACHE[core_id] = (now, releases)
+    return {"core": core_id, "repo": repo, "releases": releases[: max(1, min(limit, 30))]}
 
 
 @zagros_admin_router.get("/cores/{core_id}/logs")
@@ -340,6 +398,21 @@ async def _save_outbounds(runtime, outbounds: list[Outbound]) -> list[Outbound]:
         _OUTBOUNDS_KEY, [o.model_dump(mode="json") for o in outbounds])
     _sync_manager(runtime.outbound_manager, outbounds)
     return outbounds
+
+
+@zagros_admin_router.get("/inbounds")
+async def unified_inbound_catalog(runtime=Depends(get_runtime)):
+    """Every selectable inbound across ALL enabled cores (multi-core picker).
+
+    Studio cores contribute their live config inbounds; service cores
+    (openvpn/wireguard/ssh/softether) contribute entries derived from their
+    real settings — the User dialog / Templates consume this as the grant
+    source for ``core_access``.
+    """
+    from app.platform.inbounds import catalog as _catalog
+
+    groups = await _catalog(runtime)
+    return {"groups": [g.as_dict() for g in groups]}
 
 
 @zagros_admin_router.get("/routing/rules")
@@ -467,6 +540,88 @@ async def _test_outbound(runtime, outbound: Outbound) -> dict[str, Any]:
 @zagros_admin_router.post("/outbounds/test")
 async def outbounds_test(body: Outbound, runtime=Depends(get_runtime)):
     return await _test_outbound(runtime, body)
+
+
+# --------------------------------------------------------------------- #
+# outbounds schema + share-url import + ovpn export (alpha.7)
+# --------------------------------------------------------------------- #
+
+@zagros_admin_router.get("/outbounds/schema")
+async def outbounds_schema(runtime=Depends(get_runtime)):
+    """Per-kind field schemas — the SPA builds its forms from THIS, never
+    from a hardcoded template (transports + security matrices included)."""
+    from app.cores.outbounds.profile_schema import outbound_schemas
+
+    return {"schemas": outbound_schemas()}
+
+
+class ShareURLBody(BaseModel):
+    url: str = Field(min_length=1)
+
+
+@zagros_admin_router.post("/utils/parse-share-url")
+async def parse_share_url_endpoint(body: ShareURLBody, runtime=Depends(get_runtime)):
+    """"Import URL": paste vless://, vmess://, trojan://, ss://,
+    hysteria2://, tuic:// → every form field filled automatically."""
+    from app.utils.shareurl import SUPPORTED_SCHEMES, ShareURLError, parse_share_url
+
+    try:
+        parsed = parse_share_url(body.url)
+    except ShareURLError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {**parsed.model_dump(mode="json"), "supported_schemes": SUPPORTED_SCHEMES}
+
+
+def _render_ovpn(name: str, settings: dict[str, Any]) -> str:
+    """Synthesize a client .ovpn profile from stored settings (or pass
+    through an uploaded one verbatim)."""
+    inline = str(settings.get("ovpn_content") or "").strip()
+    if inline:
+        return inline if inline.endswith("\n") else inline + "\n"
+    server = settings.get("server")
+    port = int(settings.get("server_port") or 1194)
+    if not server:
+        raise ValueError(f"outbound '{name}': no server configured")
+    proto = str(settings.get("proto") or "udp")
+    lines = [
+        "client", "dev tun", f"proto {proto}",
+        f"remote {server} {port}",
+        "resolv-retry infinite", "nobind", "persist-key", "persist-tun",
+        "remote-cert-tls server", "verb 3",
+    ]
+    if settings.get("cipher"):
+        lines.append(f"cipher {settings['cipher']}")
+    if settings.get("auth"):
+        lines.append(f"auth {settings['auth']}")
+    if settings.get("username"):
+        lines.append("auth-user-pass")
+    for key, tag in (("ca_pem", "ca"), ("cert_pem", "cert"), ("key_pem", "key")):
+        pem = str(settings.get(key) or "").strip()
+        if pem:
+            lines += [f"<{tag}>", pem, f"</{tag}>"]
+    lines.append("")
+    return "\n".join(lines)
+
+
+@zagros_admin_router.get("/outbounds/export")
+async def outbounds_export(name: str, runtime=Depends(get_runtime)):
+    """Re-export an OpenVPN outbound as a ready .ovpn client profile."""
+    from fastapi.responses import PlainTextResponse
+
+    outbounds = {o.name: o for o in await _load_outbounds(runtime)}
+    outbound = outbounds.get(name)
+    if outbound is None:
+        raise HTTPException(404, f"outbound '{name}' not found")
+    if outbound.kind is not OutboundKind.OPENVPN:
+        raise HTTPException(422, "only openvpn outbounds export a .ovpn profile")
+    try:
+        content = _render_ovpn(name, outbound.settings)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return PlainTextResponse(
+        content,
+        media_type="application/x-openvpn-profile",
+        headers={"Content-Disposition": f'attachment; filename="{name}.ovpn"'})
 
 
 class OutboundDeployBody(BaseModel):

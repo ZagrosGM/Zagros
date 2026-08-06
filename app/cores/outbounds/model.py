@@ -43,7 +43,10 @@ class Outbound(BaseModel):
     ``server_port`` and protocol-specific credentials in ``settings``.
     """
 
-    name: str = Field(pattern=r"^[a-z0-9][a-z0-9\-_.]{1,63}$")
+    # Case-insensitive start-any-alnum: uppercase letters are legitimate in
+    # outbound names (bug fix alpha.7 — the previous lowercase-only pattern
+    # rejected names like "Warp-EU" with no good reason). Length 2..64.
+    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9\-_.]{1,63}$")
     kind: OutboundKind
     settings: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True

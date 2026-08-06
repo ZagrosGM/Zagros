@@ -130,6 +130,7 @@ class Hysteria2Driver(BaseCoreDriver):
             "obfs_password": "",
         },
         homepage="https://v2.hysteria.network/",
+        release_repo="apernet/hysteria",
         provides=set(),
         requires=set(),
     )

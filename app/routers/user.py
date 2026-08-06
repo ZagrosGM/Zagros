@@ -1,7 +1,8 @@
+import asyncio
 from datetime import datetime
 from typing import List, Optional, Union
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy.exc import IntegrityError
 
 from app import logger, xray
@@ -22,10 +23,58 @@ from app.utils import report, responses
 router = APIRouter(tags=["User"], prefix="/api", responses={401: responses._401})
 
 
+def _platform_runtime(request: Request):
+    return getattr(request.app.state, "zagros", None)
+
+
+def _bridge_sync(request: Request, dbuser, grants) -> int | None:
+    """Converge the platform projection + per-core accounts for a legacy user.
+
+    The platform runtime is optional (tests/minimal installs); when no grants
+    were requested we degrade to a no-op quietly — but when the admin DID ask
+    for multi-core access and the runtime is down, failing loudly (503) is the
+    only honest answer: never pretend accounts exist.
+    """
+    runtime = _platform_runtime(request)
+    if runtime is None:
+        if grants is not None:
+            raise HTTPException(status_code=503,
+                                detail="Zagros platform runtime is not initialized; core access cannot be provisioned")
+        return None
+    from app.platform import provisioning
+
+    try:
+        return asyncio.run(provisioning.sync_user(runtime, dbuser, grants))
+    except provisioning.GrantError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+def _bridge_grants(request: Request, username: str) -> dict | None:
+    runtime = _platform_runtime(request)
+    if runtime is None:
+        return None
+    from app.platform import provisioning
+
+    return asyncio.run(provisioning.grants_of(runtime, username))
+
+
+def _bridge_remove(request: Request, username: str) -> None:
+    runtime = _platform_runtime(request)
+    if runtime is None:
+        return
+    from app.platform import provisioning
+
+    try:
+        asyncio.run(provisioning.remove_user(runtime, username))
+    except Exception as exc:  # noqa: BLE001 — legacy delete must still proceed
+        logger.warning(f"platform cleanup for '{username}' failed (local rows are removed anyway): {exc}")
+
+
 @router.post("/user", response_model=UserResponse, responses={400: responses._400, 409: responses._409})
 def add_user(
     new_user: UserCreate,
     bg: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
     admin: Admin = Depends(Admin.get_current),
 ):
@@ -60,20 +109,41 @@ def add_user(
         dbuser = crud.create_user(
             db, new_user, admin=crud.get_admin(db, admin.username)
         )
+    except crud.AdminLimitError as exc:
+        db.rollback()
+        # Governance cap hit (max users / allocation budget) — tell the
+        # caller exactly which cap and why.
+        raise HTTPException(status_code=403, detail=str(exc))
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=409, detail="User already exists")
 
     bg.add_task(xray.operations.add_user, dbuser=dbuser)
+    try:
+        _bridge_sync(request, dbuser, new_user.core_access)
+    except HTTPException:
+        # Provisioning failed AFTER the legacy row committed — roll the whole
+        # create back so the caller never gets a half-created user, and say
+        # exactly which core rejected the grant.
+        _bridge_remove(request, dbuser.username)
+        try:
+            crud.remove_user(db, dbuser)
+        except Exception:
+            db.rollback()
+        raise
     user = UserResponse.model_validate(dbuser)
+    user.core_access = _bridge_grants(request, dbuser.username) or new_user.core_access
     report.user_created(user=user, user_id=dbuser.id, by=admin, user_admin=dbuser.admin)
     logger.info(f'New user "{dbuser.username}" added')
     return user
 
 
 @router.get("/user/{username}", response_model=UserResponse, responses={403: responses._403, 404: responses._404})
-def get_user(dbuser: UserResponse = Depends(get_validated_user)):
+def get_user(request: Request, dbuser: UserResponse = Depends(get_validated_user)):
     """Get user information"""
+    grants = _bridge_grants(request, dbuser.username)
+    if grants is not None:
+        dbuser.core_access = grants
     return dbuser
 
 
@@ -81,6 +151,7 @@ def get_user(dbuser: UserResponse = Depends(get_validated_user)):
 def modify_user(
     modified_user: UserModify,
     bg: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
     dbuser: UsersResponse = Depends(get_validated_user),
     admin: Admin = Depends(Admin.get_current),
@@ -111,8 +182,18 @@ def modify_user(
             )
 
     old_status = dbuser.status
-    dbuser = crud.update_user(db, dbuser, modified_user)
+    try:
+        dbuser = crud.update_user(db, dbuser, modified_user)
+    except crud.AdminLimitError as exc:
+        db.rollback()
+        raise HTTPException(status_code=403, detail=str(exc))
     user = UserResponse.model_validate(dbuser)
+
+    # Converge the platform projection + per-core accounts. An explicit
+    # core_access mapping applies a grant diff; omitted keeps grants and only
+    # syncs status/limits/enabled flags.
+    _bridge_sync(request, dbuser, modified_user.core_access)
+    user.core_access = _bridge_grants(request, dbuser.username)
 
     if user.status in [UserStatus.active, UserStatus.on_hold]:
         bg.add_task(xray.operations.update_user, dbuser=dbuser)
@@ -142,11 +223,13 @@ def modify_user(
 @router.delete("/user/{username}", responses={403: responses._403, 404: responses._404})
 def remove_user(
     bg: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
     dbuser: UserResponse = Depends(get_validated_user),
     admin: Admin = Depends(Admin.get_current),
 ):
     """Remove a user"""
+    _bridge_remove(request, dbuser.username)
     crud.remove_user(db, dbuser)
     bg.add_task(xray.operations.remove_user, dbuser=dbuser)
 
@@ -161,12 +244,14 @@ def remove_user(
 @router.post("/user/{username}/reset", response_model=UserResponse, responses={403: responses._403, 404: responses._404})
 def reset_user_data_usage(
     bg: BackgroundTasks,
+    request: Request,
     db: Session = Depends(get_db),
     dbuser: UserResponse = Depends(get_validated_user),
     admin: Admin = Depends(Admin.get_current),
 ):
     """Reset user data usage"""
     dbuser = crud.reset_user_data_usage(db=db, dbuser=dbuser)
+    _bridge_sync(request, dbuser, None)  # keep the portal quota baseline honest
     if dbuser.status in [UserStatus.active, UserStatus.on_hold]:
         bg.add_task(xray.operations.add_user, dbuser=dbuser)
 
@@ -203,6 +288,7 @@ def revoke_user_subscription(
 
 @router.get("/users", response_model=UsersResponse, responses={400: responses._400, 403: responses._403, 404: responses._404})
 def get_users(
+    request: Request,
     offset: int = None,
     limit: int = None,
     username: List[str] = Query(None),
@@ -236,6 +322,19 @@ def get_users(
         admins=owner if admin.is_sudo else [admin.username],
         return_with_count=True,
     )
+
+    # attach multi-core grants (page-size batch via the platform projections)
+    runtime = getattr(request.app.state, "zagros", None)
+    if runtime is not None and users:
+        from app.platform import provisioning
+
+        for u in users:
+            try:
+                grants = asyncio.run(provisioning.grants_of(runtime, u.username))
+                if grants:
+                    u.core_access = grants  # ORM attr; serialized via response model
+            except Exception:  # noqa: BLE001 — listing must never 500 on grants
+                continue
 
     return {"users": users, "total": count}
 

@@ -120,6 +120,11 @@ class LocalHysteria2Backend:
         system, arch = host_os(), host_arch()
         target = os.path.join(self.work_dir, f"hysteria-{system}-{arch}")
         if os.path.basename(self.executable) == self.executable and not shutil.which(self.executable):
+            asset = f"hysteria-{system}-{arch}" + (".exe" if system == "windows" else "")
+            pinned = None
+            version = str(self.settings.get("release_version") or "").strip()
+            if version:
+                pinned = (version if version.startswith("v") else f"v{version}", asset)
             tag = install_from_github(
                 repo="apernet/hysteria",
                 target_executable=target,
@@ -128,6 +133,7 @@ class LocalHysteria2Backend:
                     or name == f"hysteria-{system}-{arch}.exe"
                 ),
                 direct_asset=f"hysteria-{system}-{arch}",
+                pinned=pinned,
             )
             self.executable = target
             if not self._proc.is_running:

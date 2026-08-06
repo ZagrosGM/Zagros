@@ -4,17 +4,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Ban, Check, ChevronDown, Copy, ExternalLink, Filter, Link2, MoreHorizontal,
-  Plus, QrCode, RefreshCcw, Search, Trash2, UserPlus, Users as UsersIcon,
+  Plus, RefreshCcw, Search, Trash2, UserPlus, Users as UsersIcon,
 } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { DataTable, type Column } from "../components/DataTable";
 import { toast } from "../components/feedback";
 import { ConfirmDialog, Dialog } from "../components/overlays";
 import { Badge, Button, Card, EmptyState, Field, Input, Progress, Select, StatusDot, Switch, cn } from "../components/ui";
+import CoreAccessPicker from "../components/CoreAccessPicker";
 import { api, ApiError } from "../lib/api";
 import { useDigits, formatBytes, formatDate, formatRelative, usagePercent } from "../lib/format";
 import { useT } from "../lib/i18n";
-import type { User, UsersResponse, UserStatus } from "../lib/types";
+import type { User, UsersResponse, UserStatus, UserTemplate , InboundCatalogGroup } from "../lib/types";
 
 const STATUS_TONE: Record<UserStatus, "ok" | "muted" | "warn" | "danger" | "info"> = {
   active: "ok", disabled: "muted", limited: "warn", expired: "danger", on_hold: "info",
@@ -26,18 +27,32 @@ interface UserForm {
   note: string;
   status: UserStatus;
   dataLimitGB: string;
+  /** global device limit as text ("" / "0" = unlimited), all cores combined */
+  deviceLimit: string;
   expireDate: string;
-  protocols: Record<string, boolean>;
-  authMode: "subscription" | "app";
-  appUsername: string;
+  /** alpha.7: creation mode — from a template, or manual inbound picking */
+  mode: "template" | "manual";
+  templateId: number | null;
+  /** protocol -> selected tags ([] = every inbound of the protocol) */
+  inbounds: Record<string, string[]>;
+  /** multi-core grants: core_id -> inbound tags ([] revokes that core) */
+  coreAccess: Record<string, string[]>;
   telegramId: string;
 }
 
-const emptyForm = (protocols: string[]): UserForm => ({
-  username: "", note: "", status: "active", dataLimitGB: "", expireDate: "",
-  protocols: Object.fromEntries(protocols.map((p) => [p, false])),
-  authMode: "subscription", appUsername: "", telegramId: "",
-});
+const emptyForm: UserForm = {
+  username: "", note: "", status: "active", dataLimitGB: "", deviceLimit: "", expireDate: "",
+  mode: "manual", templateId: null, inbounds: {}, coreAccess: {}, telegramId: "",
+};
+
+/** The legacy API sends subscription_url as a RELATIVE /sub/... path (never
+ * as the `sub_url` the older UI code read — that mismatch silently broke the
+ * copy action). Make it absolute against the serving origin. */
+function absolutizeSub(path: string | null | undefined): string | null {
+  if (!path) return null;
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${window.location.origin}${path.startsWith("/") ? path : `/${path}`}`;
+}
 
 export default function Users() {
   const t = useT();
@@ -64,11 +79,17 @@ export default function Users() {
     },
     placeholderData: (prev) => prev,
   });
-  // legacy API: inbounds grouped by protocol → we consume the protocol keys
+  // legacy API: inbounds grouped by protocol (tag-level picking in the dialog)
+  type InboundsGrouped = Record<string, { tag: string; port?: number | string; protocol?: string }[]>;
   const inboundsQ = useQuery({
     queryKey: ["inbounds"],
-    queryFn: () => api.get<Record<string, unknown[]>>("/inbounds"),
+    queryFn: () => api.get<InboundsGrouped>("/inbounds"),
     retry: false, staleTime: 60000,
+  });
+  const templatesQ = useQuery({
+    queryKey: ["user_templates"],
+    queryFn: () => api.get<UserTemplate[]>("/user_template"),
+    staleTime: 30000,
   });
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["users"] });
@@ -95,8 +116,12 @@ export default function Users() {
 
   const users = useMemo(() => data?.users ?? [], [data]);
   const owners = useMemo(() => [...new Set(users.map((u) => u.admin).filter(Boolean))] as string[], [users]);
-  // grouped response: Record<protocol, inbound[]> — we only need the protocol keys
-  const protocols = useMemo(() => Object.keys(inboundsQ.data ?? {}), [inboundsQ.data]);
+  const inboundsGrouped = useMemo(() => inboundsQ.data ?? {}, [inboundsQ.data]);
+  const catalogQ = useQuery({
+    queryKey: ["zagros", "inbounds-catalog"],
+    queryFn: () => api.get<{ groups: InboundCatalogGroup[] }>("/zagros/inbounds"),
+  });
+  const templates = useMemo(() => templatesQ.data ?? [], [templatesQ.data]);
 
   const bulk = async (action: "activate" | "disable" | "delete") => {
     const names = [...selected];
@@ -114,8 +139,9 @@ export default function Users() {
   };
 
   const copySub = (u: User) => {
-    if (!u.sub_url) return toast.error("no subscription link");
-    navigator.clipboard.writeText(u.sub_url).then(() => toast.ok(t("common.copied")), () => toast.error(t("common.error")));
+    const link = absolutizeSub(u.subscription_url ?? u.sub_url);
+    if (!link) return toast.error("no subscription link");
+    navigator.clipboard.writeText(link).then(() => toast.ok(t("common.copied")), () => toast.error(t("common.error")));
   };
 
   const allChecked = users.length > 0 && users.every((u) => selected.has(u.username));
@@ -145,6 +171,13 @@ export default function Users() {
               <span className="truncate font-medium">{u.username}</span>
               {u.app_username && <Badge tone="info">app</Badge>}
             </div>
+            {u.core_access && Object.keys(u.core_access).length > 0 && (
+              <div className="mt-0.5 flex flex-wrap gap-1">
+                {Object.entries(u.core_access).map(([core, tags]) => (
+                  <Badge key={core} tone="brand">{core} · {tags.length}</Badge>
+                ))}
+              </div>
+            )}
             {u.note && <p className="truncate text-[11px] text-content-3">{u.note}</p>}
           </div>
         </div>
@@ -283,7 +316,9 @@ export default function Users() {
         <UserDialog
           mode={dialog.mode}
           user={"user" in dialog ? dialog.user : undefined}
-          protocols={protocols}
+          inbounds={inboundsGrouped}
+          catalog={catalogQ.data?.groups ?? []}
+          templates={templates}
           onClose={() => setDialog(null)}
           onSaved={() => { setDialog(null); invalidate(); }}
         />
@@ -314,61 +349,146 @@ function MenuItem({ icon, label, onClick, danger }: { icon: React.ReactNode; lab
 
 // ---------------------------------------------------------------- dialog ---
 
-function UserDialog({ mode, user, protocols, onClose, onSaved }: {
-  mode: "create" | "edit"; user?: User; protocols: string[];
+type InboundsGrouped = Record<string, { tag: string; port?: number | string; protocol?: string }[]>;
+
+function PortalLinkSection({ username }: { username: string }) {
+  const t = useT();
+  const [link, setLink] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const info = useQuery({
+    queryKey: ["zagros", "panel-info"],
+    queryFn: () => api.get<{ panel_base_url?: string | null; domain?: string | null }>("/zagros/panel/info"),
+  });
+  const issue = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post<{ path: string }>(`/zagros/users/by-username/${encodeURIComponent(username)}/subscription-token`, {});
+      const base = (info.data?.panel_base_url || (info.data?.domain ? `https://${info.data.domain}` : "")) || window.location.origin;
+      setLink(`${base}${r.path}`);
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : t("common.error"));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="sm:col-span-2 rounded-xl border border-brand/30 bg-brand-soft/20 p-3">
+      <p className="mb-1.5 text-[11px] font-medium text-brand">
+        multi-core subscription portal — every core, one link (issuing rotates the old link)
+      </p>
+      <div className="flex items-center gap-2">
+        {link ? (
+          <>
+            <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-content-2" dir="ltr">{link}</code>
+            <Button variant="secondary" size="sm" onClick={() => navigator.clipboard.writeText(link).then(() => toast.ok(t("common.copied")))}>
+              <Copy size={13} /> {t("common.copy")}
+            </Button>
+          </>
+        ) : (
+          <Button variant="secondary" size="sm" onClick={issue} loading={busy}>
+            <Link2 size={13} /> issue portal link
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function UserDialog({ mode, user, inbounds, catalog, templates, onClose, onSaved }: {
+  mode: "create" | "edit"; user?: User;
+  inbounds: InboundsGrouped; catalog: InboundCatalogGroup[]; templates: UserTemplate[];
   onClose: () => void; onSaved: () => void;
 }) {
   const t = useT();
-  const digit = useDigits();
   const [form, setForm] = useState<UserForm>(() => {
     if (mode === "edit" && user) {
-      const userProtos = user.proxies ? Object.keys(user.proxies) : [];
       return {
+        ...emptyForm,
         username: user.username, note: user.note ?? "", status: user.status,
         dataLimitGB: user.data_limit ? String(user.data_limit / 1024 ** 3) : "",
+        deviceLimit: user.device_limit ? String(user.device_limit) : "",
         expireDate: user.expire ? new Date(user.expire * 1000).toISOString().slice(0, 10) : "",
-        protocols: Object.fromEntries(protocols.map((p) => [p, userProtos.includes(p)])),
-        authMode: user.app_username ? "app" : "subscription",
-        appUsername: user.app_username ?? "",
+        inbounds: user.proxies
+          ? Object.fromEntries(Object.keys(user.proxies).map((p) => [p, user.inbounds?.[p] ?? []]))
+          : {},
+        coreAccess: structuredClone(user.core_access ?? {}),
         telegramId: user.telegram_id ? String(user.telegram_id) : "",
       };
     }
-    return emptyForm(protocols);
+    return emptyForm;
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const qc = useQueryClient();
 
-  const chosen = Object.entries(form.protocols).filter(([, v]) => v).map(([k]) => k);
+  const protocols = Object.keys(inbounds);
+  const chosen = Object.keys(form.inbounds);
+  const subUrl = absolutizeSub(user?.subscription_url ?? user?.sub_url);
 
-  const subUrl = user?.sub_url ?? null;
+  // Template pre-fill (mode 1): data limit, expiry, username affixes and
+  // the template's inbound sets flow into the form in one click.
+  const applyTemplate = (id: number | null) => {
+    const tp = templates.find((x) => x.id === id);
+    if (!tp) return setForm({ ...form, templateId: id });
+    setForm({
+      ...form,
+      templateId: id,
+      dataLimitGB: tp.data_limit ? String(tp.data_limit / 1024 ** 3) : "",
+      expireDate: tp.expire_duration
+        ? new Date(Date.now() + tp.expire_duration * 1000).toISOString().slice(0, 10)
+        : "",
+      inbounds: structuredClone(tp.inbounds ?? {}),
+      coreAccess: { ...form.coreAccess, ...structuredClone(tp.core_access ?? {}) },
+    });
+  };
+
+  const toggleProtocol = (p: string) => {
+    const next = { ...form.inbounds };
+    if (p in next) delete next[p];
+    else next[p] = []; // [] = every inbound of that protocol
+    setForm({ ...form, inbounds: next });
+  };
+  const toggleTag = (p: string, tag: string) => {
+    const cur = new Set(form.inbounds[p] ?? []);
+    cur.has(tag) ? cur.delete(tag) : cur.add(tag);
+    setForm({ ...form, inbounds: { ...form.inbounds, [p]: [...cur] } });
+  };
 
   const save = async () => {
     setBusy(true); setError("");
     const data_limit = form.dataLimitGB ? Math.round(parseFloat(form.dataLimitGB) * 1024 ** 3) : null;
+    const device_limit = form.deviceLimit ? Math.max(0, parseInt(form.deviceLimit, 10) || 0) : null;
     const expire = form.expireDate ? Math.floor(new Date(form.expireDate + "T23:59:59").getTime() / 1000) : null;
     const proxySettings: Record<string, Record<string, unknown>> = {};
-    for (const p of chosen) proxySettings[p] = {};
+    const inboundSel: Record<string, string[]> = {};
+    for (const p of chosen) {
+      proxySettings[p] = {};
+      inboundSel[p] = form.inbounds[p] ?? [];
+    }
     try {
       if (mode === "create") {
         await api.post("/user", {
           username: form.username.trim(), status: form.status,
-          data_limit, expire,
+          data_limit, device_limit, expire,
           note: form.note || null,
           proxies: proxySettings,
-          inbounds: {},
+          inbounds: inboundSel,
           data_limit_reset_strategy: "no_reset",
           telegram_id: form.telegramId ? Number(form.telegramId) : null,
-          app_username: form.authMode === "app" && form.appUsername ? form.appUsername : null,
+          ...(Object.values(form.coreAccess).some((tags) => tags.length)
+            ? { core_access: Object.fromEntries(Object.entries(form.coreAccess).filter(([, tags]) => tags.length)) }
+            : {}),
         });
         toast.ok(`${form.username} created`);
       } else if (user) {
         const body: Record<string, unknown> = {
-          status: form.status, data_limit, expire, note: form.note || null,
+          status: form.status, data_limit, device_limit, expire, note: form.note || null,
           telegram_id: form.telegramId ? Number(form.telegramId) : null,
         };
-        if (chosen.length) body.proxies = proxySettings;
-        if (form.authMode === "app" && form.appUsername) body.app_username = form.appUsername;
+        if (chosen.length) { body.proxies = proxySettings; body.inbounds = inboundSel; }
+        if (Object.keys(form.coreAccess).length || Object.keys(user.core_access ?? {}).length) {
+          body.core_access = form.coreAccess;
+        }
         await api.put(`/user/${user.username}`, body);
         toast.ok(t("common.saved"));
       }
@@ -389,7 +509,8 @@ function UserDialog({ mode, user, protocols, onClose, onSaved }: {
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
-          <Button onClick={save} loading={busy} disabled={mode === "create" && !form.username.trim()}>
+          <Button onClick={save} loading={busy}
+            disabled={(mode === "create" && !form.username.trim()) || chosen.length === 0}>
             {t("common.save")}
           </Button>
         </>
@@ -409,69 +530,111 @@ function UserDialog({ mode, user, protocols, onClose, onSaved }: {
           <Input id="dataLimit" type="number" min="0" step="0.1" value={form.dataLimitGB}
             onChange={(e) => setForm({ ...form, dataLimitGB: e.target.value })} />
         </Field>
+        <Field label={t("users.deviceLimit")} hint={t("users.deviceLimitHint")}>
+          <Input id="deviceLimit" type="number" min="0" step="1" value={form.deviceLimit}
+            onChange={(e) => setForm({ ...form, deviceLimit: e.target.value })} />
+        </Field>
         <Field label={t("users.expire")} hint="empty = never">
           <Input type="date" value={form.expireDate}
             onChange={(e) => setForm({ ...form, expireDate: e.target.value })} />
         </Field>
 
-        <div className="sm:col-span-2">
-          <Field label={t("users.protocols")} hint={protocols.length === 0 ? "no inbounds configured yet" : `${chosen.length || 0}/${protocols.length}`}>
-            <div className="flex flex-wrap gap-2 rounded-xl border border-border p-3">
-              {protocols.length === 0 && <span className="text-xs text-content-3">—</span>}
-              {protocols.map((p) => (
-                <button
-                  key={p} type="button"
-                  onClick={() => setForm({ ...form, protocols: { ...form.protocols, [p]: !form.protocols[p] } })}
-                  className={cn(
-                    "rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors",
-                    form.protocols[p]
-                      ? "border-brand bg-brand-soft text-brand"
-                      : "border-border-strong text-content-2 hover:border-brand/50",
-                  )}
-                >
-                  {p}
-                </button>
-              ))}
-            </div>
-          </Field>
-        </div>
-
-        <div className="sm:col-span-2">
-          <Field label={t("users.authMode")}>
-            <div className="grid grid-cols-2 gap-2">
-              {(["subscription", "app"] as const).map((m) => (
-                <button
-                  key={m} type="button"
-                  onClick={() => setForm({ ...form, authMode: m })}
-                  className={cn(
-                    "rounded-xl border px-3 py-2.5 text-start transition-colors",
-                    form.authMode === m ? "border-brand bg-brand-soft" : "border-border hover:border-border-strong",
-                  )}
-                >
-                  <span className="flex items-center gap-2 text-[13px] font-medium">
-                    {m === "subscription" ? <Link2 size={14} /> : <QrCode size={14} />}
-                    {m === "subscription" ? t("users.authMode.sub") : t("users.authMode.app")}
-                  </span>
-                  <span className="mt-1 block text-[11px] text-content-3">
-                    {m === "subscription"
-                      ? "client apps import a tokenized link"
-                      : "the Zagros app signs in with credentials"}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </Field>
-        </div>
-
-        {form.authMode === "app" && (
-          <Field label={t("users.appUsername")}>
-            <Input value={form.appUsername} onChange={(e) => setForm({ ...form, appUsername: e.target.value })} />
-          </Field>
+        {mode === "create" && (
+          <div className="sm:col-span-2">
+            <Field label={t("users.template")}>
+              <div className="grid grid-cols-2 gap-2">
+                {(["template", "manual"] as const).map((m) => (
+                  <button key={m} type="button"
+                    onClick={() => setForm({ ...form, mode: m, templateId: m === "manual" ? null : form.templateId })}
+                    className={cn("rounded-xl border px-3 py-2.5 text-start transition-colors",
+                      form.mode === m ? "border-brand bg-brand-soft" : "border-border hover:border-border-strong")}>
+                    <span className="block text-[13px] font-medium">
+                      {m === "template" ? t("users.mode.template") : t("users.mode.manual")}
+                    </span>
+                    <span className="mt-1 block text-[11px] text-content-3">
+                      {m === "template"
+                        ? "pre-filled limits + inbound sets"
+                        : t("users.mode.manualHint")}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </Field>
+          </div>
         )}
+
+        {mode === "create" && form.mode === "template" && (
+          <div className="sm:col-span-2">
+            <Field label={t("users.template")} required hint={templates.length === 0 ? "no templates yet — create one in Templates" : undefined}>
+              <Select value={form.templateId ?? ""} onChange={(e) => applyTemplate(e.target.value ? Number(e.target.value) : null)}>
+                <option value="">— choose a template —</option>
+                {templates.map((tp) => (
+                  <option key={tp.id} value={tp.id}>
+                    {tp.name} · {tp.data_limit ? `${(tp.data_limit / 1024 ** 3).toFixed(0)}GB` : "∞"} · {tp.expire_duration ? `${Math.round(tp.expire_duration / 86400)}d` : "no expiry"}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+        )}
+
+        <div className="sm:col-span-2">
+          <Field label={t("users.protocols")}
+            hint={protocols.length === 0 ? "no inbounds configured yet" : `${chosen.length}/${protocols.length} protocols`}>
+            <div className="space-y-2.5 rounded-xl border border-border p-3">
+              {protocols.length === 0 && <span className="text-xs text-content-3">—</span>}
+              {protocols.map((p) => {
+                const enabled = p in form.inbounds;
+                const tags = inbounds[p] ?? [];
+                const selected = new Set(form.inbounds[p] ?? []);
+                return (
+                  <div key={p} className={cn("rounded-xl border p-2.5 transition-colors",
+                    enabled ? "border-brand/50 bg-brand-soft/30" : "border-border")}>
+                    <button type="button" onClick={() => toggleProtocol(p)}
+                      className={cn("flex w-full items-center justify-between text-[13px] font-medium",
+                        enabled ? "text-brand" : "text-content-2 hover:text-content")}>
+                      <span className="inline-flex items-center gap-2">
+                        <span className={cn("h-2 w-2 rounded-full", enabled ? "bg-brand" : "bg-content-3")} />
+                        {p}
+                      </span>
+                      <span className="text-[11px] font-normal text-content-3">
+                        {enabled ? (selected.size ? `${selected.size}/${tags.length} tags` : "all tags") : `${tags.length} tags`}
+                      </span>
+                    </button>
+                    {enabled && tags.length > 1 && (
+                      <div className="mt-2 flex flex-wrap gap-1.5 border-t border-border pt-2">
+                        {tags.map((tag) => {
+                          const on = selected.has(tag.tag);
+                          return (
+                            <button key={tag.tag} type="button" onClick={() => toggleTag(p, tag.tag)}
+                              className={cn("rounded-lg border px-2.5 py-1 text-[11px] transition-colors",
+                                on ? "border-brand bg-brand-soft text-brand"
+                                   : "border-border-strong text-content-2 hover:border-brand/50")}>
+                              {tag.tag}{tag.port ? ` :${tag.port}` : ""}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </Field>
+
+          <Field label="other cores — assign inbounds from ANY core to this user"
+            hint="these are real accounts on each selected core, sharing this user's quota, expiry and status">
+            <CoreAccessPicker
+              groups={catalog}
+              value={form.coreAccess}
+              onChange={(next) => setForm({ ...form, coreAccess: next })}
+            />
+          </Field>
+        </div>
+
         <Field label={t("users.telegramId")}>
           <Input type="number" value={form.telegramId} onChange={(e) => setForm({ ...form, telegramId: e.target.value })} />
         </Field>
-
         <div className="sm:col-span-2">
           <Field label={t("users.note")}>
             <Input value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
@@ -480,7 +643,7 @@ function UserDialog({ mode, user, protocols, onClose, onSaved }: {
 
         {mode === "edit" && subUrl && (
           <div className="sm:col-span-2 rounded-xl border border-border bg-surface-2 p-3">
-            <p className="mb-1.5 text-[11px] font-medium text-content-3">{t("users.qr")}</p>
+            <p className="mb-1.5 text-[11px] font-medium text-content-3">{t("users.qr")} — legacy (xray only)</p>
             <div className="flex items-center gap-2">
               <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-content-2" dir="ltr">{subUrl}</code>
               <Button variant="secondary" size="sm" onClick={() => navigator.clipboard.writeText(subUrl).then(() => toast.ok(t("common.copied")))}>
@@ -489,6 +652,8 @@ function UserDialog({ mode, user, protocols, onClose, onSaved }: {
             </div>
           </div>
         )}
+
+        {mode === "edit" && user && <PortalLinkSection username={user.username} />}
       </div>
       {error && <p role="alert" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
     </Dialog>

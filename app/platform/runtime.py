@@ -14,6 +14,9 @@ missing (run ``alembic upgrade head`` first).
 from __future__ import annotations
 
 import hashlib
+import logging
+
+logger = logging.getLogger(__name__)
 
 from app.adminapi.dashboard import DashboardService
 from app.clientapi.service import ClientApiService
@@ -127,6 +130,50 @@ class PlatformRuntime:
     async def boot_cores(self) -> None:
         await self.core_manager.boot()
         await self.core_manager.start_enabled()
+        await self._attach_builtin_xray()
+
+    async def _attach_builtin_xray(self) -> None:
+        """Attach the panel's built-in xray engine as a protected core.
+
+        Without this the platform CoreManager simply did not know "xray":
+        every ``user_core_accounts`` mirror row the legacy bridge writes was
+        discarded at materialization time ("core not enabled/loaded"), which
+        made the multi-core portal & subscription come out EMPTY for the very
+        protocols most users have. Attaching the real XrayDriver (legacy
+        backend) makes xray first-class in delivery, catalog, status and
+        routing — while the manager guard marks it non-removable and the
+        usage recorder skips it (the legacy stack already accounts xray
+        traffic; folding it again would double-count).
+
+        Attached AFTER ``start_enabled`` on purpose: the legacy lifespan owns
+        xray's boot-time process start; the manager must never auto-start it.
+        An operator-persisted xray entry always wins over the auto-attach.
+        """
+        from app.cores.manager import BUILTIN_CORE_IDS
+
+        for core_id in BUILTIN_CORE_IDS:
+            if core_id in self.core_manager.list_cores():
+                continue
+            if core_id == "xray":
+                from app.cores.drivers.xray.driver import XrayDriver
+
+                driver = XrayDriver()
+            else:  # pragma: no cover - future built-ins declare their driver here
+                continue
+            from app.cores.types import CoreState
+
+            state = CoreState.STOPPED
+            try:
+                status = await driver.status()
+                state = status.state
+            except Exception:  # noqa: BLE001 — legacy stack not importable here
+                logger.warning(
+                    "built-in core '%s': status probe failed at boot; attaching "
+                    "as STOPPED (delivery keeps working, health stays honest)",
+                    core_id,
+                )
+            self.core_manager.attach(core_id, driver, enabled=True, state=state)
+            logger.info("built-in core '%s' attached (state=%s).", core_id, state.value)
 
     def verify_schema(self) -> None:
         from sqlalchemy import inspect

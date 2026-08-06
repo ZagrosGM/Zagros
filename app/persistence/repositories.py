@@ -118,18 +118,37 @@ class SQLQuotaStore:
 
     async def add(self, user_id: int, uplink: int, downlink: int) -> QuotaEntry:
         def _sync() -> QuotaEntry:
-            with self._sf() as s:
-                row = s.get(UserUsageModel, user_id)
-                if row is None:
-                    row = UserUsageModel(user_id=user_id, uplink_bytes=uplink,
-                                         downlink_bytes=downlink)
-                    s.add(row)
-                else:
-                    row.uplink_bytes += uplink
-                    row.downlink_bytes += downlink
-                s.commit()
-                return QuotaEntry(user_id=row.user_id, uplink_bytes=row.uplink_bytes,
-                                  downlink_bytes=row.downlink_bytes)
+            # Race-safe: a plain get-then-increment loses concurrent folds
+            # (last writer wins). The increment happens IN SQL (single
+            # statement, DB write lock) and the create-vs-increment race is
+            # resolved by retrying: the loser's INSERT hits the UNIQUE pk and
+            # the next attempt takes the UPDATE path. Exactly-once per call.
+            from sqlalchemy import update
+            from sqlalchemy.exc import IntegrityError
+
+            for _attempt in range(4):
+                try:
+                    with self._sf() as s:
+                        res = s.execute(
+                            update(UserUsageModel)
+                            .where(UserUsageModel.user_id == user_id)
+                            .values(
+                                uplink_bytes=UserUsageModel.uplink_bytes + uplink,
+                                downlink_bytes=UserUsageModel.downlink_bytes + downlink,
+                            )
+                        )
+                        if res.rowcount == 0:
+                            s.add(UserUsageModel(
+                                user_id=user_id, uplink_bytes=uplink,
+                                downlink_bytes=downlink))
+                        s.commit()
+                        row = s.get(UserUsageModel, user_id)
+                        return QuotaEntry(
+                            user_id=row.user_id, uplink_bytes=row.uplink_bytes,
+                            downlink_bytes=row.downlink_bytes)
+                except IntegrityError:  # concurrent INSERT won — retry as UPDATE
+                    continue
+            raise RuntimeError("quota add failed repeatedly under contention")  # unreachable-ish
         return await asyncio.to_thread(_sync)
 
     async def all(self) -> list[QuotaEntry]:
@@ -179,15 +198,30 @@ class SQLBaselineStore:
     async def set_many(self, values: dict[str, tuple[int, int]]) -> None:
         if not values:
             return
+
         def _sync() -> None:
-            with self._sf() as s:
-                for key, (up, down) in values.items():
-                    row = s.get(UsageBaselineModel, key)
-                    if row is None:
-                        s.add(UsageBaselineModel(key=key, uplink_base=up, downlink_base=down))
-                    else:
-                        row.uplink_base, row.downlink_base = up, down
-                s.commit()
+            # Race-safe per-key upsert: under concurrent passes a naive
+            # SELECT→INSERT hits the UNIQUE key; retry then takes the UPDATE
+            # branch. Baselines are cumulative snapshots — convergent writes.
+            from sqlalchemy.exc import IntegrityError
+
+            for key, (up, down) in values.items():
+                for _attempt in range(4):
+                    try:
+                        with self._sf() as s:
+                            row = s.get(UsageBaselineModel, key)
+                            if row is None:
+                                s.add(UsageBaselineModel(
+                                    key=key, uplink_base=up, downlink_base=down))
+                            else:
+                                row.uplink_base, row.downlink_base = up, down
+                            s.commit()
+                        break
+                    except IntegrityError:
+                        continue
+                else:
+                    raise RuntimeError(  # unreachable-ish under retry
+                        f"baseline upsert failed repeatedly for {key}")
         await asyncio.to_thread(_sync)
 
     async def drop(self, key: str) -> None:
@@ -654,13 +688,22 @@ class SQLSettingsKV:
 
     async def set_value(self, key: str, value: Any) -> None:
         def _sync() -> None:
-            with self._sf() as s:
-                row = s.get(SettingModel, key)
-                if row is None:
-                    s.add(SettingModel(key=key, value_json=value))
-                else:
-                    row.value_json = value
-                s.commit()
+            # Retry-on-conflict upsert (same discipline as the baseline store)
+            # — concurrent token rotations must never crash on the UNIQUE pk.
+            from sqlalchemy.exc import IntegrityError
+
+            for _attempt in range(4):
+                try:
+                    with self._sf() as s:
+                        row = s.get(SettingModel, key)
+                        if row is None:
+                            s.add(SettingModel(key=key, value_json=value))
+                        else:
+                            row.value_json = value
+                        s.commit()
+                    return
+                except IntegrityError:
+                    continue
         return await asyncio.to_thread(_sync)
 
 

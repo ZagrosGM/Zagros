@@ -41,6 +41,13 @@ multi-core platform line.
   missing from the SPA's contract).
 * Live bandwidth chart no longer emits an invalid SVG path for an
   empty/degenerate series (baseline line instead).
+* **Contract guard added:** `tests/platform/test_snapshot_contract.py` pins
+  the SPA↔backend snapshot/panel-info agreement at HTTP and Pydantic-model
+  level — a breaking rename (another invented/removed field) now fails CI
+  instead of white-screening the panel again. The real-browser smoke
+  (Playwright: login, 5-min soak, all 16 pages, reloads, logout/login, zero
+  console/pageerror) is wired into the real-VPS E2E workflow
+  (zagros-scripts `tests/browser-smoke.mjs`).
 
 ### Changed — `zagros uninstall` is now a full uninstall (Blocker #2)
 

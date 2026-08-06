@@ -94,7 +94,7 @@ export default function Advanced() {
         </h1>
         <Select value={effectiveCore} onChange={(e) => setCoreId(e.target.value)} className="w-40" aria-label="core">
           {(cores.data?.cores ?? []).map((c) => <option key={c.id} value={c.id}>{c.id}</option>)}
-          {!cores.data?.cores.length && <option value="">— install a core —</option>}
+          {!cores.data?.cores?.length && <option value="">— install a core —</option>}
         </Select>
         <Select value={mode} onChange={(e) => setMode(e.target.value as "raw" | "ops")} className="w-40" aria-label="edit mode">
           <option value="raw">raw document</option>

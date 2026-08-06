@@ -6,7 +6,7 @@ import { Link } from "react-router-dom";
 import { AreaChart } from "../components/charts";
 import { Badge, Card, CardHeader, Progress, Skeleton, Stat, StatusDot, cn } from "../components/ui";
 import { api } from "../lib/api";
-import { useDigits, formatBytes, formatDuration, formatNumber, formatSpeed } from "../lib/format";
+import { useDigits, formatBytes, formatNumber, formatSpeed } from "../lib/format";
 import { useT } from "../lib/i18n";
 import type { CoreView, Node, Snapshot, SystemStats } from "../lib/types";
 
@@ -62,10 +62,10 @@ export default function Overview() {
         {loading ? Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-[76px]" />) : (
           <>
             <Stat icon={<UsersIcon size={19} />} label={t("overview.users")}
-              value={formatNumber(sys?.total_user ?? snapshot.data?.totals.users ?? 0, digits)}
-              sub={`${t("overview.activeUsers")}: ${formatNumber(sys?.users_active ?? snapshot.data?.totals.active_users ?? 0, digits)}`} />
+              value={formatNumber(sys?.total_user ?? snapshot.data?.users_total ?? 0, digits)}
+              sub={`${t("overview.activeUsers")}: ${formatNumber(sys?.users_active ?? snapshot.data?.users_active ?? 0, digits)}`} />
             <Stat icon={<UserCheck size={19} />} tone="ok" label={t("overview.onlineNow")}
-              value={formatNumber(snapshot.data?.totals.online_users ?? 0, digits)} />
+              value={formatNumber(sys?.online_users ?? snapshot.data?.users_online ?? 0, digits)} />
             <Stat icon={<ArrowDown size={19} />} tone="default" label={t("overview.incoming")}
               value={formatSpeed(sys?.incoming_bandwidth_speed ?? 0, digits)}
               sub={formatBytes(sys?.incoming_bandwidth ?? 0, digits)} />
@@ -108,8 +108,10 @@ export default function Overview() {
                 <Progress value={sys?.cpu_usage ?? 0} tone="warn" />
               </div>
               <div className="flex items-center justify-between border-t border-border pt-3 text-[11px] text-content-3">
-                <span>{t("overview.version")}: <span className="font-medium text-content">{sys?.version ?? snapshot.data?.version ?? "—"}</span></span>
-                <span>{t("overview.uptime")}: <span className="text-content tabular-nums">{formatDuration(snapshot.data?.uptime_seconds, digits)}</span></span>
+                <span>{t("overview.version")}: <span className="font-medium text-content">{sys?.version ?? "—"}</span></span>
+                <span>{t("overview.live")}: <span className="text-content tabular-nums">
+                  {t("overview.sessionsShort")} {formatNumber(snapshot.data?.sessions_active ?? 0, digits)} · {t("overview.devicesShort")} {formatNumber(snapshot.data?.devices_active ?? 0, digits)}
+                </span></span>
               </div>
             </div>
           )}
@@ -123,7 +125,7 @@ export default function Overview() {
             actions={<Link to="/cores"><Badge tone="brand">manage</Badge></Link>} />
           {cores.isLoading ? <Skeleton className="h-20" /> : cores.isError ? (
             <p className="py-6 text-center text-xs text-content-3">Core inventory requires a sudo admin.</p>
-          ) : !cores.data?.cores.length ? (
+          ) : !cores.data?.cores?.length ? (
             <p className="py-6 text-center text-xs text-content-3">No cores installed — install one from the Cores page.</p>
           ) : (
             <ul className="divide-y divide-border">

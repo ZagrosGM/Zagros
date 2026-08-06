@@ -45,7 +45,7 @@ export default function Logs() {
         </h1>
         <Select value={effectiveCore} onChange={(e) => setCoreId(e.target.value)} className="w-40" aria-label="core">
           {(cores.data?.cores ?? []).map((c) => <option key={c.id} value={c.id}>{c.id}</option>)}
-          {!cores.data?.cores.length && <option value="">— install a core —</option>}
+          {!cores.data?.cores?.length && <option value="">— install a core —</option>}
         </Select>
         <Select value={String(lines)} onChange={(e) => setLines(Number(e.target.value))} className="w-28" aria-label="lines">
           {[100, 300, 500, 1000].map((n) => <option key={n} value={n}>{n}</option>)}

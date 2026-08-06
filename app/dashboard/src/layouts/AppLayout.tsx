@@ -10,6 +10,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { CommandPalette, useCommands } from "../components/CommandPalette";
+import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Toaster, toast } from "../components/feedback";
 import { auth, getToken } from "../lib/api";
 import { useT } from "../lib/i18n";
@@ -67,7 +68,14 @@ export default function AppLayout() {
 
   useEffect(() => { setMobileNav(false); }, [location.pathname]);
 
-  if (!getToken()) { navigate("/login", { replace: true }); }
+  // Auth guard — navigate() is a state update and must NEVER run during
+  // render (React throws / can loop). Redirect goes in an effect; while the
+  // redirect is pending we render nothing (never a partial shell).
+  const token = getToken();
+  useEffect(() => {
+    if (!token) navigate("/login", { replace: true });
+  }, [token, navigate]);
+  if (!token) return null;
 
   const sidebar = (
     <div className="flex h-full flex-col">
@@ -192,10 +200,14 @@ export default function AppLayout() {
           </div>
         </header>
 
-        {/* page body */}
+        {/* page body — page-level ErrorBoundary: if ONE page crashes, the
+            shell/sidebar stay alive and other pages keep working.
+            The key resets the boundary on every navigation. */}
         <main className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto w-full max-w-[1400px] p-4 sm:p-6">
-            <Outlet />
+            <ErrorBoundary scope={`page:${location.pathname}`} key={location.pathname}>
+              <Outlet />
+            </ErrorBoundary>
           </div>
         </main>
       </div>

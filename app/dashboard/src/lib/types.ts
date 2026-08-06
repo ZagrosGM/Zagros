@@ -23,7 +23,8 @@ export interface User {
   sub_last_user_agent?: string | null;
   online_at?: string | null;
   created_at: string;
-  admin?: string | null;
+  /** legacy API returns the admin object on some deployments, the username on others */
+  admin?: string | { username?: string } | null;
   telegram_id?: number | null;
   app_username?: string | null;
   proxies?: Record<string, Record<string, unknown>>;
@@ -57,6 +58,7 @@ export interface SystemStats {
   cpu_cores: number;
   cpu_usage: number;
   total_user: number;
+  online_users: number;
   users_active: number;
   incoming_bandwidth: number;
   outgoing_bandwidth: number;
@@ -185,13 +187,35 @@ export interface PortalSettings {
   subscription_path: string; subscription_url_prefix?: string | null;
 }
 
+// Mirror of app/adminapi/dashboard.py DashboardSnapshot — flat fields,
+// everything except the top counters optional (sudo surface; payloads may be
+// minimal on degraded runtimes).
+export interface DeployStatusView {
+  deployed_at_available: boolean;
+  per_core: Record<string, Record<string, unknown>>;
+  unsupported_total: number;
+}
+export interface SnapshotCore {
+  core_id: string; name: string; state: string; health: string; enabled: boolean;
+  version?: string | null; uptime_seconds?: number | null;
+  active_accounts?: number; active_sessions?: number; message?: string | null;
+}
+export interface SnapshotNode { node_id: number; name: string; address: string; status: string; last_seen?: string | null }
+export interface SnapshotAlert { severity?: string; title?: string; message?: string; detail?: string; target?: string }
 export interface Snapshot {
-  version: string;
-  uptime_seconds: number;
-  totals: { users: number; active_users: number; online_users: number; devices: number; sessions: number };
-  cores: { id: string; state: string; health?: string | null }[];
-  alerts: { severity: string; title: string; detail?: string }[];
-  bandwidth: { rx_bytes: number; tx_bytes: number };
+  generated_at: string;
+  users_total: number;
+  users_online: number;
+  users_active?: number;
+  usage_total_bytes: number;
+  usage_by_core?: { core_id: string; uplink_bytes: number; downlink_bytes: number }[];
+  cores?: SnapshotCore[];
+  nodes?: SnapshotNode[];
+  devices_active?: number;
+  sessions_active?: number;
+  routing_status?: DeployStatusView;
+  outbound_status?: DeployStatusView;
+  alerts?: SnapshotAlert[];
 }
 
 export interface StudioPatchOp { op: string; path: string; value?: unknown }

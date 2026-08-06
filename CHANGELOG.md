@@ -10,6 +10,79 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.6] — 2026-08-06 — Release-blocker fixes only (no new features)
+
+### Fixed — panel went white seconds after load (Blocker #1)
+
+* **Root cause (verified in a real headless-browser repro against a live app,
+  not guessed):** the SPA's `Snapshot` type declared fields the backend has
+  never sent — `totals.users / totals.online_users / version / uptime_seconds`,
+  while `/api/zagros/dashboard/snapshot` returns flat fields
+  (`users_total`, `users_online`, …). The first render of **Overview** hit
+  `undefined.online_users`, and with **no ErrorBoundary anywhere** in the tree
+  React unmounted the entire app — white screen on every load and every
+  refresh. Types now mirror the backend contract exactly; Overview reads the
+  real fields (version comes from `/api/system`).
+* **Structural guarantee:** new global `ErrorBoundary` (main.tsx) plus a
+  per-page boundary around the router `<Outlet/>` (keyed by pathname). A crash
+  in one page can never white-screen the panel again — the shell stays alive
+  and a recovery card (reload / back to overview + technical detail) is shown.
+  Verified live: a real render error was caught and the rest of the panel
+  kept working.
+* `AppLayout` no longer calls `navigate("/login")` during render (illegal in
+  React Router v6 — the unauthenticated redirect now happens in an effect).
+* Users table no longer renders the raw `admin` value (the API returns an
+  admin **object**, which React refuses to render — error #31); owner cell
+  handles `{username}` objects and plain strings.
+* Fixed `GET /api/user_template` path (was wrongly requested plural
+  `/api/user_templates` → 404 on the Settings page). Verified zero HTTP ≥ 400
+  across all 16 pages.
+* Added `online_users` to the `SystemStats` type (present since Marzban,
+  missing from the SPA's contract).
+* Live bandwidth chart no longer emits an invalid SVG path for an
+  empty/degenerate series (baseline line instead).
+
+### Changed — `zagros uninstall` is now a full uninstall (Blocker #2)
+
+* **There is no `--purge` anymore.** The single `zagros uninstall` command
+  destroys everything Zagros created and then verifies the system is clean:
+  containers (`zagros`, `zagros-db`, any `zagros-*`), panel images
+  (`ghcr.io/zagrosgm/zagros:*`), DB images the installer provisioned
+  (`mysql`/`mariadb`/`postgres`), named volumes `zagros-*`, networks
+  `zagros-*`, `/opt/zagros` (compose, `.env`, state), `/var/lib/zagros`
+  (SQLite file, MySQL/PostgreSQL data dirs, cores, certificates, TLS keys,
+  runtime data, logs, backups, CLI cache), `/etc/zagros` leftovers and the CLI
+  binary itself. External databases the installer did not provision are
+  untouched by design. (CLI change in the `zagros-scripts` repo.)
+* A **removal summary** (counts of containers / images / volumes / networks /
+  databases / configurations / certificates / runtime data / logs / backups)
+  is printed **before** anything is deleted and asks for confirmation.
+* After deletion an automatic **verification sweep** re-checks
+  `docker ps -a`, `docker images`, `docker volume ls`, `docker network ls` and
+  the three directories; any leftover is force-removed and re-checked, and an
+  incomplete uninstall fails loudly instead of claiming success.
+
+### Verification (all run for real, no claimed greens)
+
+* Headless-Chromium scenario against the real FastAPI app: fresh visit →
+  login via the UI form → all 16 pages with per-page **full reload**, SPA
+  navigation chain, logout/login cycle, 6× refresh storm, UI-driven user
+  creation (dialog → POST → persists), theme & RTL/LTR toggles, command
+  palette, and a **5-minute continuous soak (36 navigation+reload cycles)** —
+  **0 page errors, 0 HTTP ≥ 400**, white screen gone.
+* Panel Python suite: **294 passed / 7 skipped** (unchanged).
+* CLI suite: **222 assertions passed** (new full-uninstall coverage: docker
+  objects + stray volumes/networks + leftover files + `/etc` + reinstall).
+* ShellCheck v0.10.0 clean on `zagros`, `zagros.sh`, `tests/test_cli.sh`.
+* Real-VPS E2E workflow extended to the full checklist: install → admin →
+  login → create user → install sing-box (+xray best-effort) → dashboard
+  probes → refresh storm → 5-minute watch → backup → restore → full uninstall
+  → spotless-system verification (docker ps/images/volumes/networks,
+  systemctl, crontab, /opt /var/lib /etc /usr/local/bin) → **reinstall on the
+  wiped system** → 200 again.
+
+---
+
 ## [1.0.0-alpha.5] — 2026-08-05
 
 **Status: ALPHA.** **The single-panel milestone** — the two-panel architecture

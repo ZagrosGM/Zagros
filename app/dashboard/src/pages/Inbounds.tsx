@@ -106,7 +106,7 @@ export default function Inbounds() {
         <Field label="core">
           <Select value={effectiveCore} onChange={(e) => setCoreId(e.target.value)} className="w-40">
             {(cores.data?.cores ?? []).map((c) => <option key={c.id} value={c.id}>{c.id}</option>)}
-            {!cores.data?.cores.length && <option value="">—</option>}
+            {!cores.data?.cores?.length && <option value="">—</option>}
           </Select>
         </Field>
         <Button size="sm" onClick={() => setWizard(true)} disabled={!effectiveCore}><Wand2 size={13} /> add inbound</Button>

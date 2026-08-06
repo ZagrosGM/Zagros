@@ -34,7 +34,7 @@ export default function Nodes() {
     onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
   });
 
-  const usageOf = (id: number) => usage.data?.usages.find((u) => u.node_id === id);
+  const usageOf = (id: number) => usage.data?.usages?.find((u) => u.node_id === id);
 
   return (
     <div className="space-y-4 animate-fade-up">

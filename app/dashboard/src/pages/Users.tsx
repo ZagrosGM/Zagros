@@ -179,7 +179,10 @@ export default function Users() {
       },
     },
     { id: "expire", header: t("users.expire"), width: "130px", cell: (u) => <span className="text-[12px] tabular-nums text-content-2">{formatDate(u.expire, digits)}</span> },
-    { id: "owner", header: t("users.admin"), width: "110px", cell: (u) => <span className="text-[12px] text-content-2">{u.admin ?? "—"}</span> },
+    { id: "owner", header: t("users.admin"), width: "110px", cell: (u) => {
+        const owner = u.admin == null ? "—" : typeof u.admin === "string" ? u.admin : u.admin.username ?? "—";
+        return <span className="text-[12px] text-content-2">{owner}</span>;
+      } },
     { id: "online", header: t("users.lastOnline"), width: "120px", cell: (u) => <span className="text-[12px] text-content-3">{formatRelative(u.online_at, digits)}</span> },
     {
       id: "actions", header: "", width: "44px",
@@ -394,7 +397,7 @@ function UserDialog({ mode, user, protocols, onClose, onSaved }: {
     >
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="username" required>
-          <Input value={form.username} disabled={mode === "edit"}
+          <Input id="username" value={form.username} disabled={mode === "edit"} autoComplete="off"
             onChange={(e) => setForm({ ...form, username: e.target.value })} />
         </Field>
         <Field label={t("common.status")}>
@@ -403,7 +406,7 @@ function UserDialog({ mode, user, protocols, onClose, onSaved }: {
           </Select>
         </Field>
         <Field label={`${t("users.limit")} (GB)`} hint="empty = unlimited">
-          <Input type="number" min="0" step="0.1" value={form.dataLimitGB}
+          <Input id="dataLimit" type="number" min="0" step="0.1" value={form.dataLimitGB}
             onChange={(e) => setForm({ ...form, dataLimitGB: e.target.value })} />
         </Field>
         <Field label={t("users.expire")} hint="empty = never">

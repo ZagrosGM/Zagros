@@ -86,7 +86,7 @@ export default function Cores() {
       {tab === "installed" && (
         cores.isLoading ? (
           <div className="grid gap-4 md:grid-cols-2">{[1, 2].map((i) => <Skeleton key={i} className="h-56" />)}</div>
-        ) : !cores.data?.cores.length ? (
+        ) : !cores.data?.cores?.length ? (
           <Card>
             <EmptyState
               title="No cores installed"

@@ -29,6 +29,14 @@ export function AreaChart({ series, height = 120, colors = ["var(--brand)", "var
           ))}
         </defs>
         {series.map((s, i) => {
+          if (s.length < 2) {
+            // Empty/degenerate series: a calm baseline, no invalid path data.
+            return (
+              <g key={i}>
+                <line x1={0} y1={height - 6} x2={w} y2={height - 6} stroke={colors[i % colors.length]} strokeWidth="2" opacity="0.35" />
+              </g>
+            );
+          }
           const { line, area } = pathFor(s);
           return (
             <g key={i}>

@@ -18,7 +18,7 @@ export default function Settings() {
 
   const info = useQuery({ queryKey: ["zagros", "panel-info"], queryFn: () => api.get<PanelInfo>("/zagros/panel/info"), retry: false });
   const admins = useQuery({ queryKey: ["admins"], queryFn: () => api.get<AdminUser[]>("/admins"), retry: false });
-  const templates = useQuery({ queryKey: ["user_templates"], queryFn: () => api.get<UserTemplate[]>("/user_templates"), retry: false });
+  const templates = useQuery({ queryKey: ["user_templates"], queryFn: () => api.get<UserTemplate[]>("/user_template"), retry: false });
 
   const [adminDialog, setAdminDialog] = useState(false);
   const [deleteAdmin, setDeleteAdmin] = useState<AdminUser | null>(null);

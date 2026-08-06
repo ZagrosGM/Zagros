@@ -79,6 +79,10 @@ class CoreMetadata(BaseModel):
     default_settings: dict[str, Any] = Field(default_factory=dict)
     driver_version: str = "1.0.0"
     homepage: str | None = None
+    #: "owner/repo" when this core's binary is fetched from GitHub releases
+    #: (drives the version picker in the install dialog; None = the binary
+    #: comes from the OS / elsewhere and the picker honestly hides itself).
+    release_repo: str | None = None
     #: shared system features this core OFFERS to others (idea: vpn-ui feats)
     provides: set[str] = Field(default_factory=set)   # e.g. {"strongswan", "pppd"}
     #: shared features this core NEEDS (satisfied by another core's provides,

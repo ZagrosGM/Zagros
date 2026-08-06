@@ -46,6 +46,22 @@ class Admin(Base):
     discord_webhook = Column(String(1024), nullable=True, default=None)
     users_usage = Column(BigInteger, nullable=False, default=0)
     usage_logs = relationship("AdminUsageLogs", back_populates="admin")
+    # ------------------------------------------------------------- #
+    # Admin governance (Zagros alpha.7+). All four are optional; NULL
+    # means "no limit". Enforced transaction-safely in crud.
+    #   * max_users — hard cap on users this admin may own.
+    #   * expire_at — account expiry: login + every admin action dies.
+    #   * traffic_alloc_limit — cap on the SUM of users' data_limit
+    #     (allocation budget, in bytes).
+    #   * traffic_consume_limit — cap on the SUM of users' LIFETIME
+    #     usage (used_traffic + reset logs). Crossing it suspends all
+    #     of the admin's users (never deletes); raising the limit
+    #     re-activates exactly the users we suspended.
+    # ------------------------------------------------------------- #
+    max_users = Column(Integer, nullable=True, default=None)
+    expire_at = Column(DateTime, nullable=True, default=None)
+    traffic_alloc_limit = Column(BigInteger, nullable=True, default=None)
+    traffic_consume_limit = Column(BigInteger, nullable=True, default=None)
 
 
 class AdminUsageLogs(Base):
@@ -94,6 +110,18 @@ class User(Base):
 
     edit_at = Column(DateTime, nullable=True, default=None)
     last_status_change = Column(DateTime, default=datetime.utcnow, nullable=True)
+    # Alpha.7+: set when Zagros disabled this user because the owning admin
+    # crossed their traffic-consumption cap. Only these users are
+    # re-activated automatically — users an operator disabled by hand are
+    # never touched by the reconciler.
+    admin_limit_disabled = Column(Boolean, nullable=False, default=False)
+    # Global device limit (ALL cores combined): max distinct devices
+    # (IP-union across cores; cores without an IP view count as one online
+    # presence). ``device_limit_disabled`` mirrors the admin-cap flag
+    # contract: only users Zagros itself limited for device overflow are
+    # auto-revived when the count drops back under the limit.
+    device_limit = Column(Integer, nullable=True, default=None)
+    device_limit_disabled = Column(Boolean, nullable=False, default=False)
 
     next_plan = relationship(
         "NextPlan",
@@ -182,6 +210,9 @@ class UserTemplate(Base):
     expire_duration = Column(BigInteger, default=0)  # in seconds
     username_prefix = Column(String(20), nullable=True)
     username_suffix = Column(String(20), nullable=True)
+    # Multi-core access grants (Zagros): {core_id: [inbound tags]} — templates
+    # may span cores, exactly like a user's own grants.
+    core_access = Column(JSON, nullable=True)
 
     inbounds = relationship(
         "ProxyInbound", secondary=template_inbounds_association

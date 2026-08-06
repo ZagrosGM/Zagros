@@ -1,24 +1,27 @@
-// Advanced Mode (in-panel Config Studio) — the ONLY place JSON is visible.
-// Raw document editing with schema validation + diff preview + apply, plus a
-// structured patch-op builder for surgical edits.
+// Advanced Mode (in-panel Config Studio) — VISUAL by default (alpha.7):
+// the tree editor covers objects/arrays/scalars without ever showing raw
+// JSON; "raw document" and "patch operations" stay available as explicit
+// pro modes. Schema validation + diff preview + apply are shared by all.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, Eye, Plus, Rocket, Save, TerminalSquare, Trash2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Eye, Plus, Rocket, TerminalSquare, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { JsonTree } from "../components/JsonTree";
 import { toast } from "../components/feedback";
-import { Badge, Button, Card, CardHeader, Field, Input, Select, Textarea, cn } from "../components/ui";
+import { Badge, Button, Card, CardHeader, Input, Select, Textarea, cn } from "../components/ui";
 import { api, ApiError } from "../lib/api";
 import { useT } from "../lib/i18n";
 import { useUI } from "../stores/ui";
 import type { CoreView, StudioPatchOp } from "../lib/types";
 
 interface PreviewOut { core_id: string; valid: boolean; errors: string[]; diff: string; document?: unknown }
+type EditMode = "tree" | "raw" | "ops";
 
 export default function Advanced() {
   const t = useT();
   const qc = useQueryClient();
   const { advancedMode } = useUI();
   const [coreId, setCoreId] = useState("");
-  const [mode, setMode] = useState<"raw" | "ops">("raw");
+  const [mode, setMode] = useState<EditMode>("tree");
   const [rawText, setRawText] = useState("");
   const [ops, setOps] = useState<StudioPatchOp[]>([]);
   const [dirty, setDirty] = useState(false);
@@ -89,16 +92,17 @@ export default function Advanced() {
       <div className="flex flex-wrap items-center gap-2">
         <h1 className="me-auto flex items-center gap-2 text-lg font-bold tracking-tight">
           <TerminalSquare size={18} className="text-brand" /> {t("nav.advanced")}
-          <Badge tone="warn" dot>JSON zone</Badge>
+          <Badge tone={mode === "tree" ? "ok" : "warn"} dot>{mode === "tree" ? "visual" : "pro — JSON"}</Badge>
           {dirty && <Badge tone="info" dot>modified</Badge>}
         </h1>
         <Select value={effectiveCore} onChange={(e) => setCoreId(e.target.value)} className="w-40" aria-label="core">
           {(cores.data?.cores ?? []).map((c) => <option key={c.id} value={c.id}>{c.id}</option>)}
           {!cores.data?.cores?.length && <option value="">— install a core —</option>}
         </Select>
-        <Select value={mode} onChange={(e) => setMode(e.target.value as "raw" | "ops")} className="w-40" aria-label="edit mode">
-          <option value="raw">raw document</option>
-          <option value="ops">patch operations</option>
+        <Select value={mode} onChange={(e) => setMode(e.target.value as EditMode)} className="w-44" aria-label="edit mode">
+          <option value="tree">visual tree (default)</option>
+          <option value="raw">raw document — pro</option>
+          <option value="ops">patch operations — pro</option>
         </Select>
         <Button variant="secondary" size="sm" onClick={() => run((o) => doPreview.mutate(o))} loading={doPreview.isPending} disabled={!effectiveCore}>
           <Eye size={13} /> validate & diff
@@ -110,7 +114,24 @@ export default function Advanced() {
 
       <div className="grid gap-4 xl:grid-cols-2">
         <Card className="p-3">
-          {mode === "raw" ? (
+          {mode === "tree" ? (() => {
+            let doc: unknown = null;
+            let parseError: string | null = null;
+            try { doc = JSON.parse(rawText); } catch (e) { parseError = (e as Error).message; }
+            return parseError ? (
+              <div className="p-2 text-[12px] text-danger">
+                <p className="mb-2 font-medium">the document isn't valid JSON right now — fix it in raw mode:</p>
+                <code className="text-[11px]">{parseError}</code>
+              </div>
+            ) : (
+              <div className="h-[66vh] overflow-auto">
+                <JsonTree
+                  document={doc as never}
+                  onChange={(next) => { setRawText(JSON.stringify(next, null, 2)); setDirty(true); }}
+                />
+              </div>
+            );
+          })() : mode === "raw" ? (
             <Textarea
               value={rawText}
               onChange={(e) => { setRawText(e.target.value); setDirty(true); }}

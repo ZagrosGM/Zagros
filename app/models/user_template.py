@@ -19,6 +19,10 @@ class UserTemplate(BaseModel):
 
     inbounds: Dict[ProxyTypes, List[str]] = {}
 
+    # Multi-core access grants (Zagros): core_id → inbound tags selected
+    # from that core (e.g. {"sing-box": ["hy2-in"], "wireguard": ["wg0"]}).
+    core_access: Optional[Dict[str, List[str]]] = Field(None, nullable=True)
+
 
 class UserTemplateCreate(UserTemplate):
     model_config = ConfigDict(json_schema_extra={

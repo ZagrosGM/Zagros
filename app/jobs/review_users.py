@@ -17,6 +17,28 @@ if TYPE_CHECKING:
     from app.db.models import User
 
 
+def _bridge_platform_status(user: "User") -> None:
+    """Status changes inside jobs (expiry/limit/on-hold) must converge onto the
+    platform projection too — otherwise a core account keeps working after the
+    legacy user dies. Best-effort: a broken bridge never blocks the review."""
+    try:
+        import app as _app
+
+        runtime = getattr(_app.app.state, "zagros", None)
+    except Exception:  # noqa: BLE001 — never crash the review job
+        return
+    if runtime is None:
+        return
+    try:
+        import asyncio
+
+        from app.platform import provisioning
+
+        asyncio.run(provisioning.sync_user(runtime, user, None))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"platform status sync failed for {user.username}: {exc}")
+
+
 def add_notification_reminders(db: Session, user: "User", now: datetime = datetime.utcnow()) -> None:
     if user.data_limit:
         usage_percent = calculate_usage_percent(user.used_traffic, user.data_limit)
@@ -51,10 +73,45 @@ def reset_user_by_next_report(db: Session, user: "User"):
     report.user_data_reset_by_next(user=UserResponse.model_validate(user), user_admin=user.admin)
 
 
+def review_admin_consumption(db: Session) -> None:
+    """Alpha.7 governance: enforce every admin's traffic-consumption cap.
+
+    Over the cap -> the admin's active users are suspended (flagged);
+    back under (cap raised/removed) -> exactly those users revive.
+    Core sync happens once at the end if anything changed.
+    """
+    from app.db.models import Admin
+
+    needs_core_sync = False
+    admins = db.query(Admin).all()
+    from app.db import crud
+    for dbadmin in admins:
+        if dbadmin.traffic_consume_limit is None:
+            # no cap: only repair dangling flags from a removed cap
+            if not any(u.admin_limit_disabled for u in (dbadmin.users or [])):
+                continue
+        changed = crud.enforce_admin_consumption(db, dbadmin)
+        needs_core_sync = needs_core_sync or bool(
+            changed["suspended"] or changed["reactivated"])
+        for username in [u.username for u in changed["suspended"]]:
+            logger.info(f'User "{username}" suspended — admin '
+                        f'"{dbadmin.username}" crossed the consumption cap')
+        for username in [u.username for u in changed["reactivated"]]:
+            logger.info(f'User "{username}" re-activated — admin '
+                        f'"{dbadmin.username}" is back under the consumption cap')
+    if needs_core_sync:
+        startup_config = xray.config.include_db_users()
+        xray.core.restart(startup_config)
+
+
 def review():
     now = datetime.utcnow()
     now_ts = now.timestamp()
     with GetDB() as db:
+        try:
+            review_admin_consumption(db)
+        except Exception as exc:  # noqa: BLE001 — never kill the review loop
+            logger.error(f"admin consumption review failed: {exc}")
         for user in get_users(db, status=UserStatus.active):
 
             limited = user.data_limit and user.used_traffic >= user.data_limit
@@ -85,6 +142,7 @@ def review():
 
             report.status_change(username=user.username, status=status,
                                  user=UserResponse.model_validate(user), user_admin=user.admin)
+            _bridge_platform_status(user)
 
             logger.info(f"User \"{user.username}\" status changed to {status}")
 
@@ -111,6 +169,7 @@ def review():
 
             report.status_change(username=user.username, status=status,
                                  user=UserResponse.model_validate(user), user_admin=user.admin)
+            _bridge_platform_status(user)
 
             logger.info(f"User \"{user.username}\" status changed to {status}")
 

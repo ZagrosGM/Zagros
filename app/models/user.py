@@ -65,6 +65,11 @@ class User(BaseModel):
     data_limit_reset_strategy: UserDataLimitResetStrategy = (
         UserDataLimitResetStrategy.no_reset
     )
+    # Global device limit — ALL cores combined (distinct IPs; cores without
+    # a per-IP view count as one online presence each). None/0 = unlimited.
+    device_limit: Optional[int] = Field(
+        None, ge=0,
+        description="max simultaneous devices across every core; 0/None = unlimited")
     inbounds: Dict[ProxyTypes, List[str]] = {}
     note: Optional[str] = Field(None, nullable=True)
     sub_updated_at: Optional[datetime] = Field(None, nullable=True)
@@ -76,6 +81,28 @@ class User(BaseModel):
     auto_delete_in_days: Optional[int] = Field(None, nullable=True)
 
     next_plan: Optional[NextPlanModel] = Field(None, nullable=True)
+
+    # Multi-core access grants (Zagros): core_id → selected inbound tags.
+    # One dashboard user may hold protocols from MANY cores (vless on xray,
+    # hysteria2 on sing-box, wireguard, openvpn, ...). Absent (None) keeps the
+    # current grants; an explicit mapping applies a diff per listed core.
+    core_access: Optional[Dict[str, List[str]]] = Field(
+        None, description="per-core inbound grants: {core_id: [tag, ...]}")
+
+    @field_validator("core_access", mode="before")
+    def validate_core_access(cls, v):
+        if v is None:
+            return v
+        if not isinstance(v, dict):
+            raise ValueError("core_access must be an object {core_id: [tags]}")
+        out: dict[str, list[str]] = {}
+        for core_id, tags in v.items():
+            if not isinstance(core_id, str) or not core_id:
+                raise ValueError("core_access keys must be core ids")
+            if not isinstance(tags, (list, tuple)):
+                raise ValueError(f"core_access['{core_id}'] must be a list of inbound tags")
+            out[core_id] = [str(t) for t in tags]
+        return out
 
     @field_validator('data_limit', mode='before')
     def cast_to_int(cls, v):
@@ -124,6 +151,14 @@ class User(BaseModel):
 class UserCreate(User):
     username: str
     status: UserStatusCreate = None
+    # Marzban parity fix (pydantic-v2 migration regression): in v1 the
+    # inbounds validator ran with ``always=True``, so an omitted ``inbounds``
+    # meant "include every inbound of the selected protocols". In v2
+    # validators never run for defaulted (missing) fields — without
+    # validate_default=True a fresh API-created user silently ended up with
+    # EVERY inbound excluded (empty subscription!). UserModify is left
+    # untouched on purpose: there the omission must mean "no change".
+    inbounds: Dict[ProxyTypes, List[str]] = Field(default={}, validate_default=True)
     model_config = ConfigDict(json_schema_extra={
         "example": {
             "username": "user1234",

@@ -10,7 +10,234 @@ multi-core platform line.
 
 ---
 
-## [1.0.0-alpha.6] — 2026-08-06 — Release-blocker fixes only (no new features)
+## [1.0.0-alpha.7] — 2026-08-06 — Multi-core platform-user architecture (phase 1+2) + admin governance
+
+### Added — multi-core platform-user architecture (Master Prompt phases 1+2)
+
+* **ONE dashboard user holds protocols from ANY cores.** `core_access`
+  (`{core_id: [inbound tags]}`) on users AND user-templates: create/modify
+  applies a per-core grant diff through real driver provision/deprovision
+  calls; template selection merges its grant map into the form; editing
+  revokes removed inbounds only. Picker UI lists every core's inbounds
+  grouped (xray group is the built-in legacy proxies surface).
+* **The built-in xray is now a protected platform core.** Attached at
+  runtime boot (the legacy Marzban engine, marked `builtin: true` in
+  `GET /api/zagros/cores`): the bridge's per-user xray mirror rows finally
+  materialize into the portal/subscription, the manager refuses
+  uninstall/disable for built-ins (start/stop/restart stay legal — same as
+  the legacy "restart core"), the dashboard hides destructive actions and
+  shows a "built-in" badge, and the usage recorder skips built-in ids so
+  xray traffic is never double-counted.
+* **Unified shared quota across cores (spec §1).** `app/platform/usage_recorder.py`:
+  every usage-capable core reports per-account deltas (drivers convert
+  cumulative counters via DeltaTracker/SessionUsageTracker) → folded into
+  exactly ONE counter set: legacy `used_traffic` (master), platform quota
+  store, usage journal and persistent baselines (exactly-once across panel
+  restarts, handed back via `restore_usage_baselines`).
+* **Race-proof persistence.** Proven by the concurrent-pass test: a naive
+  get-then-write previously lost quota increments or crashed on
+  `usage_baselines`/`settings` UNIQUE keys. `SQLQuotaStore.add` now
+  increments in one atomic SQL statement with retry-on-conflict insert;
+  baseline and KV upserts retry into the UPDATE branch.
+* **Global Device Limit (spec §3) + unified online (spec §4).** Legacy
+  `users.device_limit` (+`device_limit_disabled` revive marker, alembic
+  `0006`): a 30s reconciler counts each user's devices as the IP-union of
+  every core (IP-blind cores like xray's stats API contribute one presence
+  per online account — documented lower bound) and the 4th device on a
+  3-device plan is rejected: user → `limited` on ALL cores; only users the
+  reconciler itself limited are revived (quota-limited/expired users never
+  resurrected). The same pass touches `online_at` on both stores when any
+  core reports the user online.
+* **Multi-format multi-core subscription (spec §7/§8).**
+  `/zagros/sub/{token}` now negotiates by UA (and `?format=` override):
+  clash/clash-meta/Stash → mihomo YAML, sing-box/SFA/SFI/SFM → complete
+  sing-box 1.8+ JSON, v2rayNG/Streisand/Nekobox/Shadowrocket → the
+  Marzban-convention base64 link list. Exact-duplicate links collapse,
+  names stay unique, and anything a format cannot express is listed in
+  YAML comments / notes — never fabricated.
+* **Marzban-parity link rendering.** The platform xray delivery resolves
+  the SAME template variables the legacy `/sub/` generator uses
+  (`{SERVER_IP}/{USERNAME}/{DATA_USAGE}/{DAYS_LEFT}…` + `*` salting +
+  per-protocol `{PROTOCOL}/{TRANSPORT}`) — the multi-core portal link and
+  the legacy link for the same user are byte-identical in verification.
+* Subscription tokens can be issued **by username**
+  (`POST /api/zagros/users/by-username/{username}/subscription-token`);
+  rotation invalidates older links immediately (fail-closed jti).
+
+### Fixed — multi-core architecture follow-ups
+
+* **Pydantic-v2 migration regression (Marzban parity).** `always=True` was
+  dropped from the legacy `inbounds` validator at the v1→v2 port, so an
+  API-created user without explicit `inbounds` silently ended with EVERY
+  inbound excluded (empty subscription). `UserCreate.inbounds` now runs
+  its default through the validator (`validate_default=True`): omitted →
+  all inbounds of the selected protocols, exactly like v1. `UserModify`
+  untouched on purpose (omission must mean "no change").
+* Legacy subscription copy actions in the dashboard read a non-existent
+  `sub_url`; they now use `subscription_url` (made absolute against the
+  serving origin) — the edit dialog shows the legacy link again next to
+  the new multi-core portal link section.
+* The multi-core inbound catalog no longer lists xray twice (legacy
+  running-config group wins; manager-attached entry suppressed).
+
+
+### Added — admin governance (transaction-safe, race-tested)
+
+* Admins gain four governance caps: **max_users** (user creation hard-fails
+  with a Real 403 past the cap), **expire_at** (an expired admin can neither
+  obtain a token nor use an existing JWT — both die with 401
+  "Admin account expired"), **traffic_alloc_limit** (cap on the sum of the
+  admin's users' `data_limit` — enforced on create AND on update), and
+  **traffic_consume_limit** (cap on real consumed traffic — crossing it
+  suspends ALL of the admin's users; raising/removing the cap revives exactly
+  the users the reconciler suspended, manual disables never touched).
+* All cap checks run under a dialect-correct row lock
+  (`SELECT … FOR UPDATE` on PostgreSQL/MySQL, a same-value write lock on
+  SQLite) inside the same transaction as the write — proven by a 9-thread
+  race test that can never exceed the cap.
+* A scheduler review loop re-enforces the consumption cap every tick (with
+  dangling-flag repair when a cap is removed) and syncs the running core once
+  per pass; the admin-modify endpoint enforces immediately and pushes
+  suspend/revive transitions into xray best-effort (a core that cannot
+  restart no longer 500s the request — the scheduler retries).
+* `GET /api/admins` attaches live aggregates per admin: `users_count`,
+  `users_allocated_traffic`, `users_lifetime_usage` (live usage + reset
+  usage-log history), `created_at`.
+* `zagros-cli admin create/update` exposes all four caps
+  (`--max-users/--expire-at/--traffic-alloc-limit-gb/--traffic-consume-limit-gb`,
+  interactive prompts for update) and `admin list` renders them.
+* New idempotent alembic revision `0004_admin_governance` (legacy engine,
+  MySQL TINYINT variant handled, full downgrade).
+
+### Added — schema-driven outbounds + Import URL
+
+* New `GET /api/zagros/outbounds/schema` endpoint: a full JSON-Schema per
+  outbound kind (all 16 kinds) with `x-group` (basic/auth/transport/security)
+  and `x-widget` hints. Every transport (tcp/kcp/ws/http/grpc/quic/
+  httpupgrade/splithttp) and security (none/tls/reality incl. sni, alpn,
+  fingerprint, reality keys) is described — the UI renders its form FROM the
+  schema, nothing hardcoded.
+* New `POST /api/zagros/utils/parse-share-url`: paste a
+  vless/vmess/trojan/ss(+2022)/hysteria2(hy2)/tuic link and every field is
+  extracted (address, port, uuid/password, flow, transport incl. ws path +
+  headers, grpc service, httpupgrade, splithttp/xhttp, security, sni, alpn,
+  fingerprint, reality pbk/sid/spx, ss2022 psk, hysteria2 obfs + port
+  hopping). Bogus links return an honest 422 naming the supported schemes.
+* OpenVPN outbound: complete credential form (`.ovpn` upload or
+  username/password + CA/cert/key PEMs, proto/cipher/auth) and re-export —
+  `GET /api/zagros/outbounds/export?name=…` downloads a synthesized `.ovpn`.
+* WireGuard (private/peer/preshared keys, local address, DNS, MTU,
+  keepalive), SSH, hysteria2 (obfs, port-hopping), TUIC (congestion, UDP
+  relay), VMess (alter-id/cipher) profiles completed the same way; `core`
+  outbounds chain another Zagros core.
+
+### Fixed
+
+* **Outbound name validation rejected uppercase and several legal characters
+  —** regex widened to `^[A-Za-z0-9][A-Za-z0-9\-_.]{1,63}$`; covered by tests.
+* **New-User dialog left the lower half of the page un-blacked and let the
+  body scroll behind it** — the overlay layer was rendered `absolute inset-0`
+  INSIDE a scrollable container. Rewritten: backdrop and dialog portal to
+  `document.body` as fixed full-viewport sibling layers with a ref-counted
+  body scroll lock (scrollbar-width compensated). Verified in a real browser
+  on desktop, mobile (390px) and tablet (820px) viewports.
+* Admin modify with governance transitions no longer 500s when the legacy
+  xray binary is absent/restarting — core sync after governance changes is
+  best-effort with scheduler retry (regression test included).
+
+### Changed — dashboard (one proprietary Zagros panel)
+
+* **Management nav group**: Users, **Admins** and **Templates** are main-menu
+  pages (no longer buried in Settings); Settings keeps panel info + the
+  advanced-mode gate only.
+* New **Admins** page: per-admin rows with sudo marker, expired badge,
+  users-vs-cap and lifetime-usage-vs-cap progress, allocation line, row menu
+  (edit, disable/activate all users, reset usage counter, delete non-sudo)
+  and a wide dialog with the governance section.
+* New **Templates** page: card CRUD over `/api/user_template` with a
+  per-protocol inbound picker (multi-tag), name prefix/suffix,
+  data-limit/expire in GB/days.
+* **User dialog**: create mode toggle — pick a *template* (pre-fills limit,
+  expire and inbound selection) or *manual* (per-protocol inbound chips with
+  ports); the subscription-owned access/auth fields were removed from the
+  user form (users inherit their subscription — one source of truth).
+* **Outbounds** page rewritten on top of the driver schema: grouped
+  endpoint/credentials/transport/security rendering, conditional
+  transport/security field visibility, Import URL block for URL-based kinds,
+  `.ovpn` upload and per-card Export download.
+* **Cores** page: install dialog with **Simple** (auto latest / pick a
+  release from `GET /api/zagros/cores/{id}/versions` — GitHub-managed drivers
+  only, others answer an honest 404 / start-after-install) and **Advanced**
+  (full schema) modes; cards show version/status/CPU/RAM/binary/config paths;
+  Reinstall keeps stored settings server-side via
+  `POST /api/zagros/cores/{id}/reinstall`.
+* **Config Studio**: visual tree editor (collapsible typed nodes, inline
+  scalar editors, add/remove/convert) is now the default; raw document and
+  patch ops are marked pro modes. All three funnel into the same
+  validate/diff/apply pipeline.
+
+### Backend — driver release management
+
+* Driver metadata carries `release_repo` for GitHub-managed cores
+  (XTLS/Xray-core, SagerNet/sing-box, apernet/hysteria, EAimTY/tuic);
+  `fetch_recent_releases()` lists exact tags; xray and hysteria2 installers
+  honor a `release_version` setting pinned as an exact `(tag, asset)` pair.
+* `uninstall_core` no longer eats the operator's stored settings on reinstall
+  — the reinstall endpoint snapshots settings and restores the running state.
+
+### Tests
+
+* `tests/adminapi/test_admin_governance.py` — 11 tests incl. race safety and
+  the core-sync-failure regression; `tests/cores/test_shareurl.py` — 9 tests
+  across every importable scheme; `tests/cores/test_release_pinning.py` — 3
+  tests; platform API suite extended (schema completeness, parse endpoint,
+  ovpn export roundtrip, versions honesty, reinstall).
+* Phase-2 test surface (all new and green): `tests/platform/test_builtin_xray.py`
+  (5), `test_device_limits.py` (4 — IP-union, 4th-device rejection + revival,
+  quota/expiry guards, xray presence), `test_sub_formats.py` (5),
+  `test_usage_recorder.py` incl. the concurrent-pass race test,
+  `tests/adminapi/test_user_core_access.py` (11) and the alembic `0006`
+  pre-existing-database test — **final suite: 375 passed / 7 skipped / 0
+  failed** (run twice on the exact release commit: 172 s, 161 s).
+* Real-browser smoke (`zagros-scripts/tests/browser-smoke.mjs`) now covers
+  **18 pages** plus NEW hard gates: modal backdrop covers the viewport with
+  body scroll locked (and releases on close), and the outbound dialog exposes
+  the Import URL block. Login, 15 s soak, 3× reload, logout→login: PASS —
+  re-run against the release-state server (fresh DB, migration `0006`
+  applied).
+* CLI suite: **235/235 passed**.
+* Local E2E on a fresh booted server (current code, new database, admin
+  created via env): user create with `device_limit` → 200; built-in core
+  listed with `builtin: true`; uninstall/disable of the built-in xray →
+  400 with clear messages; portal link for an active user renders the
+  base64 share list (v2rayNG UA), a valid mihomo YAML (clash-verge UA),
+  and a complete sing-box 1.8+ JSON (SFI UA) — the portal `ss://` link is
+  byte-identical to the legacy `/sub/{jwt}` link for the same user;
+  `device_limit` roundtrip 5 → clear → `-1` rejected with 422.
+
+### Known limitations
+
+* **Real-VPS multi-core E2E still needs the community.** Every Phase-2 gate
+  that can run off a VPS is green here (unit/integration, CLI, real-browser,
+  fresh-boot local E2E, driver contract tests), but xray + sing-box +
+  WireGuard + SoftEther serving *real traffic on a real server* has not been
+  exercised yet. A turnkey workflow exists for exactly this
+  (`zagros-scripts/.github/workflows/e2e.yml`); help running it on real
+  hardware is tracked on the roadmap and in a pinned issue.
+* **PPTP/SSTP/L2TP are served through the SoftEther core** (same platform
+  contract as every other protocol: unified quota/device-limit/subscription)
+  — code-complete and integration-tested, live-verification pending with the
+  rest of the real-VPS E2E.
+* **TUIC accounts no usage** by design: the protocol exposes no per-user
+  counters, so TUIC traffic honestly cannot be measured; it is delivered but
+  not quota-accounted.
+* Device counting is an explicit union: distinct client IPs where a core
+  sees them, plus one presence per online account for IP-blind cores (xray)
+  — a documented lower bound, never an invention.
+
+---
+
+## [1.0.0-alpha.6] — 2026-08-06 — Dashboard stability + full uninstall hardening
 
 ### Fixed — panel went white seconds after load (Blocker #1)
 

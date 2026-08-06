@@ -41,6 +41,7 @@ PyJWT>=2.8
 jdatetime>=4.1
 rpyc>=5.3
 websockets<16,>=15.0.1
+PyYAML>=6.0  # imported directly (portal clash/mihomo output + tests); formerly arrived only transitively via uvicorn[standard]
 pillow_heif<2,>=0.16.0
 # Zagros deployment databases (installer-supported engine URLs)
 PyMySQL>=1.1

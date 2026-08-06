@@ -1,19 +1,20 @@
-// Cores — full lifecycle in-panel: catalog (registry), install (schema-driven
-// form — no hardcoding), start/stop/restart/enable/disable/update/uninstall,
-// live status + logs drawer. The CLI is never needed for daily core ops.
+// Cores — full lifecycle in-panel: catalog (registry), install with a
+// SIMPLE zero-input flow (version pick + auto everything) and an ADVANCED
+// escape hatch (the schema-driven form), start/stop/restart/enable/disable/
+// upgrade/reinstall/uninstall, live CPU/RAM/uptime, logs drawer.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Cpu, Download, FileText, HardDriveDownload, Play, Power, PowerOff,
-  RefreshCcw, RotateCw, Settings2, Square, Trash2, UploadCloud,
+  Cpu, Download, FileText, HardDriveDownload, Play, PowerOff,
+  RefreshCcw, RotateCw, Square, Trash2, UploadCloud,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "../components/feedback";
 import { ConfirmDialog, Dialog, Drawer } from "../components/overlays";
-import { Badge, Button, Card, CardHeader, EmptyState, ErrorState, Field, Input, Select, Skeleton, StatusDot, Switch, Tabs, cn } from "../components/ui";
+import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Select, Skeleton, StatusDot, Switch, Tabs, cn } from "../components/ui";
 import { api, ApiError } from "../lib/api";
 import { useDigits, formatBytes, formatDuration, formatNumber } from "../lib/format";
 import { useT } from "../lib/i18n";
-import type { CoreRegistryEntry, CoreView } from "../lib/types";
+import type { CoreRegistryEntry, CoreRelease, CoreView } from "../lib/types";
 
 const stateTone = (s: string) =>
   s === "running" ? "ok" : s === "error" ? "danger" : s === "stopped" || s === "installed" ? "info" : "muted";
@@ -26,6 +27,7 @@ export default function Cores() {
   const [installFor, setInstallFor] = useState<CoreRegistryEntry | null>(null);
   const [logsFor, setLogsFor] = useState<string | null>(null);
   const [uninstallFor, setUninstallFor] = useState<CoreView | null>(null);
+  const [reinstallFor, setReinstallFor] = useState<CoreView | null>(null);
   const [purge, setPurge] = useState(false);
 
   const registry = useQuery({
@@ -55,6 +57,12 @@ export default function Cores() {
     mutationFn: ({ id, purge }: { id: string; purge: boolean }) =>
       api.post(`/zagros/cores/${id}/uninstall`, { purge }),
     onSuccess: () => { toast.ok(t("common.deleted")); setUninstallFor(null); invalidate(); },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
+  });
+
+  const reinstall = useMutation({
+    mutationFn: (id: string) => api.post(`/zagros/cores/${id}/reinstall`),
+    onSuccess: (_d, id) => { toast.ok(`${id}: reinstalled (settings kept)`); setReinstallFor(null); invalidate(); },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
   });
 
@@ -106,6 +114,11 @@ export default function Cores() {
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <h3 className="truncate text-[15px] font-semibold">{c.id}</h3>
+                        {c.builtin && (
+                          <span className="rounded-md bg-brand-soft px-1.5 py-0.5 text-[10px] font-semibold text-brand" title={t("cores.builtinHint")}>
+                            {t("cores.builtin")}
+                          </span>
+                        )}
                         <StatusDot tone={c.state === "running" ? "ok" : c.state === "error" ? "danger" : "muted"} pulse={c.state === "running"} />
                       </div>
                       <p className="truncate text-[11px] text-content-3">
@@ -116,6 +129,7 @@ export default function Cores() {
                   <Switch
                     checked={c.enabled}
                     label="enabled"
+                    disabled={!!c.builtin}
                     onChange={() => act.mutate({ id: c.id, action: c.enabled ? "disable" : "enable" })}
                   />
                 </div>
@@ -124,9 +138,12 @@ export default function Cores() {
                   <Meta k={t("common.status")} v={<Badge tone={stateTone(c.state) as never} dot>{c.state}{c.health ? ` · ${c.health}` : ""}</Badge>} />
                   <Meta k="version" v={<span className="tabular-nums">{c.core_version ?? "—"}</span>} />
                   <Meta k="uptime" v={formatDuration(c.uptime_seconds, digits)} />
+                  <Meta k="cpu" v={<span className="tabular-nums">{(c.metrics?.cpu_percent ?? 0).toFixed(1)}%</span>} />
+                  <Meta k="ram" v={formatBytes(c.metrics?.memory_bytes ?? 0, digits)} />
                   <Meta k="accounts" v={formatNumber(c.metrics?.active_accounts ?? 0, digits)} />
-                  <Meta k="traffic" v={`${formatBytes(c.metrics?.rx_bytes ?? 0, digits)} ↓ / ${formatBytes(c.metrics?.tx_bytes ?? 0, digits)} ↑`} />
+                  <Meta k="traffic" v={`${formatBytes(c.metrics?.network_rx_bytes ?? 0, digits)} ↓ / ${formatBytes(c.metrics?.network_tx_bytes ?? 0, digits)} ↑`} />
                   <Meta k="binary" v={<code className="block max-w-full truncate font-mono text-[10.5px]" dir="ltr" title={c.binary_path ?? ""}>{c.binary_path ?? "—"}</code>} />
+                  <Meta k="config" v={<code className="block max-w-full truncate font-mono text-[10.5px]" dir="ltr" title={String(c.settings?.config_path ?? "")}>{c.settings?.config_path ? String(c.settings.config_path) : "—"}</code>} />
                 </div>
                 {c.message && <p className="mt-2 rounded-lg bg-warn-soft px-2.5 py-1.5 text-[11px] text-warn">{c.message}</p>}
 
@@ -140,10 +157,16 @@ export default function Cores() {
                     <Button size="sm" onClick={() => act.mutate({ id: c.id, action: "start" })} disabled={!c.enabled}><Play size={13} /> start</Button>
                   )}
                   <Button size="sm" variant="ghost" onClick={() => setLogsFor(c.id)}><FileText size={13} /> logs</Button>
-                  <Button size="sm" variant="ghost" onClick={() => act.mutate({ id: c.id, action: "update" })}><UploadCloud size={13} /> update</Button>
-                  <div className="ms-auto">
-                    <Button size="sm" variant="danger" onClick={() => { setPurge(false); setUninstallFor(c); }}><Trash2 size={13} /></Button>
-                  </div>
+                  {!c.builtin && (
+                    <>
+                      <Button size="sm" variant="ghost" onClick={() => act.mutate({ id: c.id, action: "update" })}><UploadCloud size={13} /> {t("cores.upgrade")}</Button>
+                      <Button size="sm" variant="ghost" loading={false}
+                        onClick={() => setReinstallFor(c)}><RefreshCcw size={13} /> {t("cores.reinstall")}</Button>
+                      <div className="ms-auto">
+                        <Button size="sm" variant="danger" onClick={() => { setPurge(false); setUninstallFor(c); }}><Trash2 size={13} /></Button>
+                      </div>
+                    </>
+                  )}
                 </div>
               </Card>
             ))}
@@ -173,9 +196,12 @@ export default function Cores() {
                 </div>
                 <div className="mt-4 flex items-center justify-between border-t border-border pt-3.5">
                   <span className="text-[10.5px] text-content-3">
-                    {r.driver_version ? `driver ${r.driver_version}` : ""}
+                    {r.driver_version ? `driver ${r.driver_version}` : (r.capabilities ?? []).includes("self_install") ? "" : t("cores.catalog.osManagedHint")}
                   </span>
-                  <Button size="sm" onClick={() => setInstallFor(r)}><HardDriveDownload size={13} /> install</Button>
+                  <Button size="sm" onClick={() => setInstallFor(r)} disabled={!(r.capabilities ?? []).includes("self_install")}
+                    title={(r.capabilities ?? []).includes("self_install") ? undefined : t("cores.catalog.osManaged")}>
+                    <HardDriveDownload size={13} /> install
+                  </Button>
                 </div>
               </Card>
             ))}
@@ -186,6 +212,15 @@ export default function Cores() {
       {installFor && (
         <InstallDialog entry={installFor} onClose={() => setInstallFor(null)} onDone={() => { setInstallFor(null); invalidate(); }} />
       )}
+
+      <ConfirmDialog
+        open={!!reinstallFor}
+        onClose={() => setReinstallFor(null)}
+        onConfirm={() => reinstallFor && reinstall.mutate(reinstallFor.id)}
+        title={`${t("cores.reinstall")} — ${reinstallFor?.id ?? ""}`}
+        body="The binary is fetched fresh; settings, data directory and the running state are preserved server-side (secrets never leave the panel)."
+        loading={reinstall.isPending}
+      />
 
       <LogsDrawer coreId={logsFor} onClose={() => setLogsFor(null)} />
 
@@ -226,27 +261,45 @@ function Meta({ k, v }: { k: string; v: React.ReactNode }) {
   );
 }
 
-// -- install: renders fields straight from the driver's JSON Schema (no hardcode)
+// -- install: SIMPLE (zero-developer-fields) by default; ADVANCED keeps the
+// schema-driven form for operators who really need executable paths etc.
+
+type SchemaProps = Record<string, { type?: string; title?: string; description?: string; default?: unknown; enum?: unknown[] }>;
 
 function InstallDialog({ entry, onClose, onDone }: { entry: CoreRegistryEntry; onClose: () => void; onDone: () => void }) {
   const t = useT();
-  const schema = entry.config_schema as { properties?: Record<string, { type?: string; title?: string; description?: string; default?: unknown; enum?: unknown[] }>; required?: string[] } | null | undefined;
+  const schema = entry.config_schema as { properties?: SchemaProps; required?: string[] } | null | undefined;
   const props = schema?.properties ?? {};
   const required = new Set(schema?.required ?? []);
+  const [mode, setMode] = useState<"simple" | "advanced">("simple");
+  const [version, setVersion] = useState(""); // "" = latest
+  const [customVersion, setCustomVersion] = useState("");
   const [values, setValues] = useState<Record<string, string>>({});
   const [startNow, setStartNow] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
+  // Release list, straight from the driver's own repo (release_repo) —
+  // empty/404 for OS-managed cores: then the picker honestly degrades.
+  const versions = useQuery({
+    queryKey: ["zagros", "core-versions", entry.id],
+    queryFn: () => api.get<{ releases: CoreRelease[] }>(`/zagros/cores/${entry.id}/versions`),
+    retry: false, staleTime: 600000,
+  });
+
   const install = async () => {
     setBusy(true); setError("");
     const settings: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(values)) {
-      if (v === "") continue;
-      const type = props[k]?.type;
-      settings[k] = type === "integer" || type === "number" ? Number(v)
-        : type === "boolean" ? v === "true" : v;
+    if (mode === "advanced") {
+      for (const [k, v] of Object.entries(values)) {
+        if (v === "") continue;
+        const type = props[k]?.type;
+        settings[k] = type === "integer" || type === "number" ? Number(v)
+          : type === "boolean" ? v === "true" : v;
+      }
     }
+    const chosen = customVersion.trim() || version;
+    if (chosen) settings.release_version = chosen.replace(/^v/, "");
     try {
       await api.post(`/zagros/cores/${entry.id}/install`, { settings, enabled: true });
       toast.ok(`${entry.id} installed`);
@@ -268,38 +321,84 @@ function InstallDialog({ entry, onClose, onDone }: { entry: CoreRegistryEntry; o
         <>
           <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
           <Button onClick={install} loading={busy}><HardDriveDownload size={14} /> install</Button>
-        </>
-      }>
-      <div className="space-y-3.5">
-        {fields.length === 0 && (
-          <p className="rounded-xl bg-surface-2 p-3 text-xs text-content-2">
-            This core needs no settings — the official binary is downloaded and verified automatically.
-          </p>
+        </>}
+    >
+      <Tabs
+        active={mode}
+        onChange={(m) => setMode(m as "simple" | "advanced")}
+        tabs={[
+          { id: "simple", label: t("cores.install.simple") },
+          { id: "advanced", label: t("cores.install.advanced") },
+        ]}
+      />
+
+      <div className="mt-4 space-y-3.5">
+        {mode === "simple" && (
+          <>
+            <p className="rounded-xl bg-surface-2 p-3 text-[12px] leading-5 text-content-2">
+              {t("cores.install.autoNote")}
+            </p>
+            <Field label={t("cores.install.version")}>
+              {versions.isLoading ? (
+                <Skeleton className="h-9" />
+              ) : (
+                <>
+                  <Select value={version} onChange={(e) => setVersion(e.target.value)} disabled={!versions.data?.releases?.length}>
+                    <option value="">{t("cores.install.latest")}</option>
+                    {(versions.data?.releases ?? []).map((r) => (
+                      <option key={r.tag} value={r.tag}>
+                        {r.tag}{r.prerelease ? " (pre)" : ""}
+                      </option>
+                    ))}
+                  </Select>
+                  {(!versions.data?.releases?.length) && (
+                    <p className="mt-1 text-[11px] text-content-3">
+                      version list unavailable for this core/host — the latest build will be installed
+                    </p>
+                  )}
+                </>
+              )}
+            </Field>
+            <Field label="custom tag (optional)" hint="e.g. 1.8.23 — overrides the picker">
+              <Input value={customVersion} onChange={(e) => setCustomVersion(e.target.value)} dir="ltr" placeholder="leave empty" />
+            </Field>
+          </>
         )}
-        {fields.map(([key, meta]) => (
-          <Field key={key} label={meta?.title ?? key} hint={meta?.description} required={required.has(key)}>
-            {meta?.enum ? (
-              <Select value={values[key] ?? String(meta.default ?? "")} onChange={(e) => setValues({ ...values, [key]: e.target.value })}>
-                {(meta.enum as string[]).map((o) => <option key={o} value={String(o)}>{String(o)}</option>)}
-              </Select>
-            ) : meta?.type === "boolean" ? (
-              <Select value={values[key] ?? String(meta.default ?? false)} onChange={(e) => setValues({ ...values, [key]: e.target.value })}>
-                <option value="true">{t("common.yes")}</option>
-                <option value="false">{t("common.no")}</option>
-              </Select>
-            ) : (
-              <Input
-                type={key.toLowerCase().match(/secret|password|token|key/) ? "password" : meta?.type === "integer" || meta?.type === "number" ? "number" : "text"}
-                placeholder={meta?.default !== undefined ? String(meta.default) : ""}
-                value={values[key] ?? ""}
-                onChange={(e) => setValues({ ...values, [key]: e.target.value })}
-              />
+
+        {mode === "advanced" && (
+          <>
+            {fields.length === 0 && (
+              <p className="rounded-xl bg-surface-2 p-3 text-xs text-content-2">
+                This core needs no settings — the official binary is downloaded and verified automatically.
+              </p>
             )}
-          </Field>
-        ))}
+            {fields.map(([key, meta]) => (
+              <Field key={key} label={meta?.title ?? key} hint={meta?.description} required={required.has(key)}>
+                {meta?.enum ? (
+                  <Select value={values[key] ?? String(meta.default ?? "")} onChange={(e) => setValues({ ...values, [key]: e.target.value })}>
+                    {(meta.enum as string[]).map((o) => <option key={o} value={String(o)}>{String(o)}</option>)}
+                  </Select>
+                ) : meta?.type === "boolean" ? (
+                  <Select value={values[key] ?? String(meta.default ?? false)} onChange={(e) => setValues({ ...values, [key]: e.target.value })}>
+                    <option value="true">{t("common.yes")}</option>
+                    <option value="false">{t("common.no")}</option>
+                  </Select>
+                ) : (
+                  <Input
+                    type={key.toLowerCase().match(/secret|password|token|key/) ? "password" : meta?.type === "integer" || meta?.type === "number" ? "number" : "text"}
+                    placeholder={meta?.default !== undefined ? String(meta.default) : ""}
+                    value={values[key] ?? ""}
+                    onChange={(e) => setValues({ ...values, [key]: e.target.value })}
+                  />
+                )}
+              </Field>
+            ))}
+          </>
+        )}
+
         <label className="flex items-center gap-2.5 pt-1 text-sm text-content-2">
-          <Switch checked={startNow} onChange={setStartNow} label="start after install" />
-          start the core right after installation
+          <Switch checked={startNow} onChange={setStartNow} label={t("cores.install.startAfter")} />
+          {t("cores.install.startAfter")}
         </label>
         {error && <p role="alert" className="rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
       </div>

@@ -71,6 +71,33 @@ def fetch_latest_release(repo: str, *, timeout: float = 30.0) -> dict:
         raise CoreError(f"cannot resolve latest release of {repo}: {exc}") from exc
 
 
+_RELEASE_LIST_API = "https://api.github.com/repos/{repo}/releases?per_page={limit}"
+
+
+def fetch_recent_releases(repo: str, *, limit: int = 10, timeout: float = 20.0) -> list[dict]:
+    """Last N release tags of a repo (newest first, non-draft)."""
+    limit = max(1, min(limit, 30))
+    try:
+        with _open(_RELEASE_LIST_API.format(repo=repo, limit=limit),
+                   timeout=timeout) as resp:
+            releases = json.loads(resp.read().decode())
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        raise CoreError(f"cannot list releases of {repo}: {exc}") from exc
+    out = []
+    for rel in releases:
+        if rel.get("draft"):
+            continue
+        out.append({
+            "tag": rel.get("tag_name"),
+            "name": rel.get("name") or "",
+            "prerelease": bool(rel.get("prerelease")),
+            "published_at": rel.get("published_at"),
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _download_asset(repo: str, name: str, url: str | None, *,
                     member_match: Callable[[str], bool] | None,
                     extra_members: dict | None = None,

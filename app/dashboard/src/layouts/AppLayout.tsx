@@ -3,8 +3,8 @@
 import { clsx } from "clsx";
 import {
   Activity, Award, Boxes, ChevronLeft, Cpu, FileTerminal, Globe,
-  HardDrive, LayoutDashboard, LogOut, Menu, Moon, Network, Radio,
-  Route, Search, Settings, ShieldCheck, Store, Sun, TerminalSquare,
+  HardDrive, LayoutDashboard, LayoutTemplate, LogOut, Menu, Moon, Network,
+  Radio, Route, Search, Settings, ShieldCheck, Store, Sun, TerminalSquare,
   Users, Waypoints, Wifi,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -19,9 +19,13 @@ import { applyUiState, useUI } from "../stores/ui";
 const NAV = [
   { section: "nav.section.operate", items: [
     { to: "/", icon: LayoutDashboard, key: "nav.overview", end: true },
-    { to: "/users", icon: Users, key: "nav.users" },
     { to: "/subscriptions", icon: Radio, key: "nav.subscriptions" },
     { to: "/nodes", icon: HardDrive, key: "nav.nodes" },
+  ]},
+  { section: "nav.section.management", items: [
+    { to: "/users", icon: Users, key: "nav.users" },
+    { to: "/admins", icon: ShieldCheck, key: "nav.admins" },
+    { to: "/templates", icon: LayoutTemplate, key: "nav.templates" },
   ]},
   { section: "nav.section.network", items: [
     { to: "/cores", icon: Cpu, key: "nav.cores" },

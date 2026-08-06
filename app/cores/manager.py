@@ -41,6 +41,15 @@ logger = logging.getLogger("zagros.cores.manager")
 
 SettingsProvider = Callable[[str], Awaitable[dict[str, Any]]]
 
+# Cores the panel itself is made of — attached automatically at boot, never
+# persisted in the platform store and never removable/disablable through the
+# core-management surface (their binaries and lifecycle belong to the panel;
+# "uninstall xray" would delete the panel's own engine). The guard lives at
+# manager level so every caller (admin API, host CLI, studio, tests) gets the
+# same honest refusal. Start/stop/restart stay allowed — those are real admin
+# operations on the built-in engine, same as the legacy "restart core".
+BUILTIN_CORE_IDS: frozenset[str] = frozenset({"xray"})
+
 
 class CoreStateStore(Protocol):
     """Port: persistence of installed cores. Implemented by an SQLAlchemy
@@ -175,6 +184,12 @@ class CoreManager:
             return self._states[core_id]
 
     async def uninstall_core(self, core_id: str, *, purge: bool = False, force: bool = False) -> None:
+        if core_id in BUILTIN_CORE_IDS:
+            raise CoreStateError(
+                f"Core '{core_id}' is the panel's built-in engine and cannot be "
+                "uninstalled — it is not a managed add-on. You may start/stop/"
+                "restart it, but its binary and data belong to the panel."
+            )
         # shared-feature guard: refuse to uninstall a provider others require
         dependents = self.dependents(core_id)
         if dependents and not force:
@@ -246,6 +261,13 @@ class CoreManager:
         await self._store.save_state(core_id, state=self._states[core_id], enabled=True)
 
     async def disable_core(self, core_id: str) -> None:
+        if core_id in BUILTIN_CORE_IDS:
+            raise CoreStateError(
+                f"Core '{core_id}' is the panel's built-in engine and cannot be "
+                "disabled through core management — hiding it would silently "
+                "drop its users from delivery while the engine keeps serving "
+                "them. Stop it explicitly if that is what you intend."
+            )
         if self._states.get(core_id) == CoreState.RUNNING:
             await self.stop_core(core_id)
         async with self._locks[core_id]:

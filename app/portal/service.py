@@ -101,3 +101,44 @@ class PortalService:
             support_url=settings.support_url,
             notes=notes,
         )
+
+    async def build_links(self, user_id: int) -> tuple[list[str], list[str]] | None:
+        """Every share-link the user's cores can produce — the multi-core
+        subscription payload for non-browser clients (v2rayNG, Streisand,
+        sing-box for Android...).
+
+        Returns ``(links, notes)`` — every LINK artifact across ALL
+        (driver, account) pairs. FILE/FIELDS artifacts (ovpn/wireguard
+        configs, l2tp/sstp/pptp credentials) have no standard URL form; they
+        stay on the HTML portal instead of being fabricated into pseudo
+        links, and the drivers' honest notes are returned so the caller can
+        state why (never silently dropped).
+        """
+        ctx = await self._provider.get_subscription_context(user_id)
+        if ctx is None:
+            return None
+        settings = await self._settings.get_portal_settings()
+        mode = ctx.user.client_auth_mode or settings.client_auth_mode
+        if mode is ClientAuthMode.APPLICATION_LOGIN:
+            # Mode 2 quarantine: not a single byte of configuration material —
+            # same gate as the portal page, enforced on the raw list too.
+            return [], []
+        links: list[str] = []
+        notes: list[str] = []
+        for driver, account in ctx.accounts:
+            if not account.enabled:
+                continue
+            try:
+                profile = await driver.describe_delivery(account)
+            except Exception as exc:  # noqa: BLE001 — honest, never crash the list
+                notes.append(f"{account.protocol}: temporarily unavailable ({exc.__class__.__name__})")
+                continue
+            for section in profile.sections:
+                for artifact in section.artifacts:
+                    if artifact.kind is ArtifactKind.LINK and artifact.content:
+                        links.append(artifact.content)
+                    elif artifact.note:
+                        notes.append(f"{section.title}: {artifact.note}")
+            if profile.note:
+                notes.append(profile.note)
+        return links, notes

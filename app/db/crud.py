@@ -354,6 +354,157 @@ def get_users_count(db: Session, status: UserStatus = None, admin: Admin = None)
     return query.count()
 
 
+# --------------------------------------------------------------------- #
+# Admin governance (Zagros alpha.7+)
+#
+# Four optional caps on every DB-backed admin account, all enforced
+# transaction-safely (the admin row is locked with SELECT ... FOR UPDATE
+# before any check runs, so concurrent writers serialize on the row; on
+# SQLite the database-level write lock provides the same guarantee):
+#
+#   * max_users             — create_user fails once the admin owns that
+#                             many users.
+#   * expire_at             — login and every admin API action die.
+#   * traffic_alloc_limit   — create_user/update_user fail when the sum
+#                             of users' data_limit would exceed the
+#                             admin's allocation budget.
+#   * traffic_consume_limit — when the sum of users' LIFETIME traffic
+#                             (used_traffic + reset logs) reaches the cap,
+#                             all of the admin's users are SUSPENDED
+#                             (status=disabled, flagged, never deleted);
+#                             raising the cap (or removing it) re-activates
+#                             exactly the users the reconciler suspended.
+# --------------------------------------------------------------------- #
+
+class AdminLimitError(Exception):
+    """A create/update was rejected by an admin-governance cap."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def admin_is_expired(dbadmin: Admin) -> bool:
+    return dbadmin.expire_at is not None and dbadmin.expire_at <= datetime.utcnow()
+
+
+def admin_lifetime_usage(db: Session, admin_id: int) -> int:
+    """Total bytes ever consumed by this admin's users (survives resets)."""
+    live = db.query(func.coalesce(func.sum(User.used_traffic), 0)) \
+        .filter(User.admin_id == admin_id).scalar()
+    past = db.query(func.coalesce(func.sum(UserUsageResetLogs.used_traffic_at_reset), 0)) \
+        .join(User, User.id == UserUsageResetLogs.user_id) \
+        .filter(User.admin_id == admin_id).scalar()
+    return int(live or 0) + int(past or 0)
+
+
+def admin_allocated_traffic(db: Session, admin_id: int) -> int:
+    """Sum of users' data_limit (the admin's allocated budget in use)."""
+    total = db.query(func.coalesce(func.sum(User.data_limit), 0)) \
+        .filter(User.admin_id == admin_id).scalar()
+    return int(total or 0)
+
+
+def _lock_admin_row(db: Session, admin_id: int) -> None:
+    """Serialize concurrent governance decisions on the admin row until the
+    session commits.
+
+    * Postgres/MySQL: ``SELECT ... FOR UPDATE`` — the loser of a race
+      blocks until the winner commits, then reads the fresh committed
+      counters. Race-free by construction.
+    * SQLite has no row locks or FOR UPDATE; a REAL UPDATE statement
+      (same-value assignment still writes) takes the database write lock
+      for the rest of the transaction, which serializes writers exactly
+      the same way.
+    """
+    bind = db.get_bind()
+    if bind is not None and bind.dialect.name == "sqlite":
+        db.execute(
+            Admin.__table__.update()
+            .where(Admin.id == admin_id)
+            .values(users_usage=Admin.users_usage)
+        )
+    else:
+        db.query(Admin.id).filter(Admin.id == admin_id).with_for_update().first()
+
+
+def _admin_user_count(db: Session, admin_id: int) -> int:
+    return int(db.query(func.count(User.id)).filter(User.admin_id == admin_id).scalar() or 0)
+
+
+def _check_user_create_limits(db: Session, admin: Optional[Admin], new_data_limit: Optional[int]) -> None:
+    """max_users + allocation budget, evaluated while the admin row is
+    locked (see _lock_admin_row): the check and the insert below are one
+    serialized unit on every supported database."""
+    if admin is None:
+        return
+    if admin.max_users is None and admin.traffic_alloc_limit is None:
+        return
+    _lock_admin_row(db, admin.id)
+    if admin.max_users is not None and _admin_user_count(db, admin.id) >= admin.max_users:
+        raise AdminLimitError(
+            "max_users",
+            f"admin '{admin.username}' reached the user cap "
+            f"({admin.max_users}); delete a user or raise the cap first.")
+    if admin.traffic_alloc_limit is not None and new_data_limit:
+        projected = admin_allocated_traffic(db, admin.id) + int(new_data_limit)
+        if projected > admin.traffic_alloc_limit:
+            raise AdminLimitError(
+                "traffic_alloc_limit",
+                f"admin '{admin.username}' allocation budget exceeded: granting "
+                f"{int(new_data_limit)} more bytes pushes allocated traffic to "
+                f"{projected}, past the {admin.traffic_alloc_limit} byte cap.")
+
+
+def _check_user_update_limits(db: Session, dbuser: User, new_data_limit: Optional[int]) -> None:
+    """Re-validate the allocation budget (under the admin row lock) when a
+    user's data_limit changes — edits must not smuggle past the budget."""
+    if dbuser.admin_id is None:
+        return
+    admin = db.query(Admin).get(dbuser.admin_id)
+    if admin is None or admin.traffic_alloc_limit is None:
+        return
+    _lock_admin_row(db, admin.id)
+    others = db.query(func.coalesce(func.sum(User.data_limit), 0)) \
+        .filter(User.admin_id == admin.id, User.id != dbuser.id).scalar()
+    projected = int(others or 0) + int(new_data_limit or 0)
+    if projected > admin.traffic_alloc_limit:
+        raise AdminLimitError(
+            "traffic_alloc_limit",
+            f"admin '{admin.username}' allocation budget exceeded: the new "
+            f"data_limit would push allocated traffic to {projected}, past "
+            f"the {admin.traffic_alloc_limit} byte cap.")
+
+
+def enforce_admin_consumption(db: Session, dbadmin: Admin) -> Dict[str, List[User]]:
+    """Reconcile users against the admin's consumption cap (idempotent).
+
+    Over the cap: every ACTIVE user is disabled and flagged
+    (``admin_limit_disabled=True``) so they — and only they — are revived
+    once usage falls back under the cap (typically after the cap is
+    raised). Users an operator disabled manually are never touched.
+    """
+    limit = dbadmin.traffic_consume_limit
+    over = limit is not None and admin_lifetime_usage(db, dbadmin.id) >= limit
+    suspended: List[User] = []
+    reactivated: List[User] = []
+    users = db.query(User).filter(User.admin_id == dbadmin.id).all()
+    for dbuser in users:
+        if over and dbuser.status == UserStatus.active and not dbuser.admin_limit_disabled:
+            dbuser.status = UserStatus.disabled
+            dbuser.admin_limit_disabled = True
+            dbuser.last_status_change = datetime.utcnow()
+            suspended.append(dbuser)
+        elif not over and dbuser.admin_limit_disabled:
+            dbuser.status = UserStatus.active
+            dbuser.admin_limit_disabled = False
+            dbuser.last_status_change = datetime.utcnow()
+            reactivated.append(dbuser)
+    if suspended or reactivated:
+        db.commit()
+    return {"suspended": suspended, "reactivated": reactivated}
+
+
 def create_user(db: Session, user: UserCreate, admin: Admin = None) -> User:
     """
     Creates a new user with provided details.
@@ -366,6 +517,10 @@ def create_user(db: Session, user: UserCreate, admin: Admin = None) -> User:
     Returns:
         User: The created user object.
     """
+    # Governance gate FIRST (under the admin row lock) — never insert a
+    # user that violates the admin's caps, never partially apply one.
+    _check_user_create_limits(db, admin, user.data_limit or None)
+
     excluded_inbounds_tags = user.excluded_inbounds
     proxies = []
     for proxy_type, settings in user.proxies.items():
@@ -383,6 +538,7 @@ def create_user(db: Session, user: UserCreate, admin: Admin = None) -> User:
         proxies=proxies,
         status=user.status,
         data_limit=(user.data_limit or None),
+        device_limit=(user.device_limit or None),
         expire=(user.expire or None),
         admin=admin,
         data_limit_reset_strategy=user.data_limit_reset_strategy,
@@ -471,7 +627,13 @@ def update_user(db: Session, dbuser: User, modify: UserModify) -> User:
     if modify.status is not None:
         dbuser.status = modify.status
 
+    # Global device limit: None (field absent) = keep; 0 = explicit unlimited.
+    if modify.device_limit is not None:
+        dbuser.device_limit = (modify.device_limit or None)
+
     if modify.data_limit is not None:
+        # Governance: the admin's allocation budget must still hold.
+        _check_user_update_limits(db, dbuser, modify.data_limit or None)
         dbuser.data_limit = (modify.data_limit or None)
         if dbuser.status not in (UserStatus.expired, UserStatus.disabled):
             if not dbuser.data_limit or dbuser.used_traffic < dbuser.data_limit:
@@ -936,12 +1098,36 @@ def create_admin(db: Session, admin: AdminCreate) -> Admin:
         hashed_password=admin.hashed_password,
         is_sudo=admin.is_sudo,
         telegram_id=admin.telegram_id if admin.telegram_id else None,
-        discord_webhook=admin.discord_webhook if admin.discord_webhook else None
+        discord_webhook=admin.discord_webhook if admin.discord_webhook else None,
+        max_users=(admin.max_users or None),
+        expire_at=admin.expire_at,
+        traffic_alloc_limit=(admin.traffic_alloc_limit or None),
+        traffic_consume_limit=(admin.traffic_consume_limit or None),
     )
     db.add(dbadmin)
     db.commit()
     db.refresh(dbadmin)
     return dbadmin
+
+
+def _apply_governance_fields(dbadmin: Admin, modified_admin) -> None:
+    """Apply the alpha.7 governance fields with explicit-presence semantics:
+    field absent from the payload -> keep; present-but-falsy -> clear;
+    positive value -> set."""
+    fields_set = getattr(modified_admin, "model_fields_set", set()) or set()
+    for field, column in (
+        ("max_users", "max_users"),
+        ("expire_at", "expire_at"),
+        ("traffic_alloc_limit", "traffic_alloc_limit"),
+        ("traffic_consume_limit", "traffic_consume_limit"),
+    ):
+        if field not in fields_set:
+            continue
+        value = getattr(modified_admin, field, None)
+        if column == "expire_at":
+            setattr(dbadmin, column, value or None)
+        else:
+            setattr(dbadmin, column, (int(value) if value and value > 0 else None))
 
 
 def update_admin(db: Session, dbadmin: Admin, modified_admin: AdminModify) -> Admin:
@@ -965,6 +1151,7 @@ def update_admin(db: Session, dbadmin: Admin, modified_admin: AdminModify) -> Ad
         dbadmin.telegram_id = modified_admin.telegram_id
     if modified_admin.discord_webhook:
         dbadmin.discord_webhook = modified_admin.discord_webhook
+    _apply_governance_fields(dbadmin, modified_admin)
 
     db.commit()
     db.refresh(dbadmin)
@@ -992,6 +1179,7 @@ def partial_update_admin(db: Session, dbadmin: Admin, modified_admin: AdminParti
         dbadmin.telegram_id = modified_admin.telegram_id
     if modified_admin.discord_webhook is not None:
         dbadmin.discord_webhook = modified_admin.discord_webhook
+    _apply_governance_fields(dbadmin, modified_admin)
 
     db.commit()
     db.refresh(dbadmin)
@@ -1065,7 +1253,22 @@ def get_admins(db: Session,
         query = query.offset(offset)
     if limit:
         query = query.limit(limit)
-    return query.all()
+    admins = query.all()
+    # Attach governance aggregates as plain attributes — the pydantic
+    # response model (from_attributes) picks them up for the dashboard.
+    for dbadmin in admins:
+        counts = db.query(
+            func.count(User.id),
+            func.coalesce(func.sum(User.data_limit), 0),
+            func.coalesce(func.sum(User.used_traffic), 0),
+        ).filter(User.admin_id == dbadmin.id).one()
+        past = db.query(func.coalesce(func.sum(UserUsageResetLogs.used_traffic_at_reset), 0)) \
+            .join(User, User.id == UserUsageResetLogs.user_id) \
+            .filter(User.admin_id == dbadmin.id).scalar()
+        dbadmin.users_count = int(counts[0] or 0)
+        dbadmin.users_allocated_traffic = int(counts[1] or 0)
+        dbadmin.users_lifetime_usage = int(counts[2] or 0) + int(past or 0)
+    return admins
 
 
 def reset_admin_usage(db: Session, dbadmin: Admin) -> int:
@@ -1112,6 +1315,7 @@ def create_user_template(db: Session, user_template: UserTemplateCreate) -> User
         expire_duration=user_template.expire_duration,
         username_prefix=user_template.username_prefix,
         username_suffix=user_template.username_suffix,
+        core_access=user_template.core_access,
         inbounds=db.query(ProxyInbound).filter(ProxyInbound.tag.in_(inbound_tags)).all()
     )
     db.add(dbuser_template)
@@ -1143,6 +1347,8 @@ def update_user_template(
         dbuser_template.username_prefix = modified_user_template.username_prefix
     if modified_user_template.username_suffix is not None:
         dbuser_template.username_suffix = modified_user_template.username_suffix
+    if modified_user_template.core_access is not None:
+        dbuser_template.core_access = modified_user_template.core_access or None
 
     if modified_user_template.inbounds:
         inbound_tags: List[str] = []

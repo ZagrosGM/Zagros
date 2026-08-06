@@ -8,7 +8,7 @@ stack (fastapi/apscheduler/xray singletons) into their interpreter.
 """
 import logging
 
-__version__ = "1.0.0-alpha.6"  # Zagros begins a new version line after the rebrand
+__version__ = "1.0.0-alpha.7"  # Zagros begins a new version line after the rebrand
 
 
 _building = False
@@ -136,6 +136,15 @@ def _build_app_inner():
             runtime = getattr(app.state, "zagros", None)
             if runtime is not None:
                 await runtime.boot_cores()
+                # hand persisted usage baselines back to driver trackers so a
+                # panel restart never re-reports whole counters (exactly-once)
+                try:
+                    from app.platform.usage_recorder import restore_baselines
+
+                    await restore_baselines(runtime)
+                except Exception as _exc:  # noqa: BLE001 - never block boot
+                    logging.getLogger("uvicorn.error").warning(
+                        "usage baseline restore failed: %s", _exc)
     except Exception as exc:  # noqa: BLE001 - import-level failure
         logging.getLogger("uvicorn.error").critical(
             "Zagros product layer unavailable: %s", exc)

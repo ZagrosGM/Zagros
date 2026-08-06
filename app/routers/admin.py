@@ -1,3 +1,4 @@
+import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -11,6 +12,8 @@ from app.models.admin import Admin, AdminCreate, AdminModify, Token
 from app.utils import report, responses
 from app.utils.jwt import create_admin_token
 from config import LOGIN_NOTIFY_WHITE_LIST
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Admin"], prefix="/api", responses={401: responses._401})
 
@@ -89,7 +92,30 @@ def modify_admin(
 
     updated_admin = crud.update_admin(db, dbadmin, modified_admin)
 
+    # Governance: changing the consumption cap re-evaluates it NOW —
+    # raising the cap revives the users the reconciler suspended,
+    # lowering it suspends the admin's users immediately.
+    changed = crud.enforce_admin_consumption(db, updated_admin)
+    _sync_core_after_limit_change(changed)
+
     return updated_admin
+
+
+def _sync_core_after_limit_change(changed: dict) -> None:
+    """Push suspend/revive transitions into the running xray core.
+
+    The governance change is already committed at this point — a core that
+    cannot restart (binary missing, mid-install, permission error) must NOT
+    turn the admin-modify call into a 500. The scheduler's review loop
+    re-runs the same enforcement every tick and retries the sync.
+    """
+    if not (changed.get("suspended") or changed.get("reactivated")):
+        return
+    try:
+        startup_config = xray.config.include_db_users()
+        xray.core.restart(startup_config)
+    except Exception as exc:  # noqa: BLE001 — sync is best-effort here
+        logger.warning(f"core sync after governance change failed (scheduler will retry): {exc}")
 
 
 @router.delete(

@@ -224,6 +224,20 @@ class TestCores:
         assert r.json()["ok"] is True
         assert client.get(f"/api/zagros/cores/{fake}").status_code in (404, 500)
 
+    def test_reinstall_preserves_settings_and_state(self, stack):
+        client, fake = stack["client"], stack["plain"]
+        r = client.post(f"/api/zagros/cores/{fake}/install",
+                        json={"settings": {"executable_path": "/bin/fake",
+                                           "secret_key": "keepme"}, "enabled": True})
+        assert r.status_code == 200, r.text
+        r = client.post(f"/api/zagros/cores/{fake}/reinstall")
+        assert r.status_code == 200, r.text
+        assert r.json()["ok"] is True
+        view = client.get(f"/api/zagros/cores/{fake}").json()
+        assert view["settings"]["executable_path"] == "/bin/fake"  # kept
+        assert view["settings"]["secret_key"] == "set (6 chars)"  # secret preserved
+        client.post(f"/api/zagros/cores/{fake}/uninstall", json={"purge": False})
+
     def test_lifecycle_unknown_core_404(self, stack):
         client = stack["client"]
         assert client.post("/api/zagros/cores/nope/start").status_code in (404, 400)
@@ -342,6 +356,101 @@ def _seed_user_and_rows(rt):
         s.add(DeviceModel(device_id="dev-1", user_id=user.id, name="Pixel", platform="android"))
         s.commit()
         return user.id
+
+
+class TestOutboundsAlpha7:
+    """alpha.7 outbounds item: case-insensitive names, driver-shaped
+    schemas, share-URL import, .ovpn re-export, version picker."""
+
+    def test_uppercase_and_mixed_names_accepted(self, stack):
+        r = stack["client"].put("/api/zagros/outbounds", json={"outbounds": [
+            {"name": "Warp-EU_2", "kind": "direct", "settings": {}, "enabled": True},
+        ]})
+        assert r.status_code == 200, r.text
+
+    def test_invalid_names_still_rejected(self, stack):
+        r = stack["client"].put("/api/zagros/outbounds", json={"outbounds": [
+            {"name": "-bad-start", "kind": "direct", "settings": {}},
+        ]})
+        assert r.status_code == 422
+
+    def test_schema_covers_every_kind_and_transport(self, stack):
+        payload = stack["client"].get("/api/zagros/outbounds/schema").json()
+        schemas = payload["schemas"]
+        from app.cores.outbounds.model import OutboundKind
+        assert set(schemas) == {k.value for k in OutboundKind}
+        vless_props = schemas["vless"]["properties"]
+        assert set(vless_props["network"]["enum"]) >= {
+            "tcp", "ws", "grpc", "http", "kcp", "quic",
+            "httpupgrade", "splithttp"}
+        assert "reality" in vless_props["security"]["enum"]
+        assert {"reality_public_key", "reality_short_id",
+                "fingerprint", "sni", "alpn"} <= set(vless_props)
+        wg_props = schemas["wireguard"]["properties"]
+        assert {"private_key", "peer_public_key", "mtu", "keepalive"} <= set(wg_props)
+        ovpn_props = schemas["openvpn"]["properties"]
+        assert {"ovpn_content", "username", "password",
+                "ca_pem", "cert_pem", "key_pem"} <= set(ovpn_props)
+
+    def test_parse_share_url_endpoint(self, stack):
+        r = stack["client"].post("/api/zagros/utils/parse-share-url", json={
+            "url": "vless://8f3b6b90-1111-4222-8333-944455556666@cdn.example.com:443"
+                   "?security=reality&type=ws&path=%2Fws&pbk=K&sid=01&sni=x.io"
+                   "&flow=xtls-rprx-vision#imported"})
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["kind"] == "vless"
+        assert data["settings"]["uuid"].startswith("8f3b")
+        assert data["settings"]["network"] == "ws"
+        assert data["settings"]["reality_public_key"] == "K"
+        assert data["name_hint"] == "imported"
+        assert "vless" in data["supported_schemes"]
+
+        bad = stack["client"].post("/api/zagros/utils/parse-share-url",
+                                   json={"url": "pptp://nope"})
+        assert bad.status_code == 422
+
+    def test_ovpn_export_roundtrip(self, stack):
+        client = stack["client"]
+        r = client.put("/api/zagros/outbounds", json={"outbounds": [
+            {"name": "Office-VPN", "kind": "openvpn", "settings": {
+                "server": "vpn.example.com", "server_port": 1194,
+                "username": "alice", "password": "s3cret",
+                "ca_pem": "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----",
+            }, "enabled": True},
+        ]})
+        assert r.status_code == 200, r.text
+        exp = client.get("/api/zagros/outbounds/export?name=Office-VPN")
+        assert exp.status_code == 200, exp.text
+        body = exp.text
+        assert "remote vpn.example.com 1194" in body
+        assert "auth-user-pass" in body
+        assert "<ca>" in body and "</ca>" in body
+        missing = client.get("/api/zagros/outbounds/export?name=ghost")
+        assert missing.status_code == 404
+
+    def test_versions_endpoint_uses_driver_repo(self, stack, monkeypatch):
+        from app.cores import github_install
+        calls = {}
+
+        def fake_fetch(repo, *, limit=10, timeout=20.0):
+            calls["repo"] = repo
+            return [{"tag": "v1.2.3", "name": "x", "prerelease": False,
+                     "published_at": "2026-01-01"}]
+
+        monkeypatch.setattr(github_install, "fetch_recent_releases", fake_fetch)
+        from app.platform import admin_api
+        admin_api._VERSION_CACHE.clear()
+        r = stack["client"].get("/api/zagros/cores/xray/versions")
+        assert r.status_code == 200, r.text
+        assert calls["repo"] == "XTLS/Xray-core"
+        assert r.json()["releases"][0]["tag"] == "v1.2.3"
+
+        # wireguard is OS-package managed → honest 404, not a fake list
+        r = stack["client"].get("/api/zagros/cores/wireguard/versions")
+        assert r.status_code == 404
+        r = stack["client"].get("/api/zagros/cores/ghost/versions")
+        assert r.status_code == 404
 
 
 class TestInventory:

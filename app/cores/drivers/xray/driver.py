@@ -12,6 +12,8 @@ the legacy singletons (env-based), exactly as Zagros works today.
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import random
 import secrets
 from collections import defaultdict
@@ -41,6 +43,8 @@ from app.cores.types import (
     UsageRecord,
     UserAccount,
 )
+
+logger = logging.getLogger("zagros.cores.drivers.xray")
 
 FLOW_NONE = ""  # XTLSFlows.NONE.value — XTLS only supports TCP/mKCP + tls/reality
 
@@ -111,6 +115,24 @@ class XrayDriver(BaseCoreDriver):
     # ------------------------------------------------------------------ #
     # helpers / policy
     # ------------------------------------------------------------------ #
+    def export_config_document(self) -> dict[str, Any]:
+        """Studio seed: the legacy engine's REAL current config document (the
+        file xray actually runs — read from disk so the studio edits the true
+        document, works while stopped; missing file ⇒ honest empty skeleton)."""
+        import json
+
+        try:
+            from config import XRAY_JSON
+        except Exception:  # noqa: BLE001 — stand-alone usage without host config
+            XRAY_JSON = "xray_config.json"
+        if not os.path.exists(XRAY_JSON):
+            return {"inbounds": []}
+        try:
+            with open(XRAY_JSON, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError) as exc:
+            raise CoreError(f"cannot read the legacy xray document '{XRAY_JSON}': {exc}") from exc
+
     @staticmethod
     def _ensure_supported(protocol: str) -> str:
         if protocol not in _PROTOCOLS:
@@ -174,13 +196,32 @@ class XrayDriver(BaseCoreDriver):
         await asyncio.to_thread(_uninstall_xray, self.settings, purge)
 
     async def start(self) -> None:
+        await self._ensure_binary_before_start()
         await asyncio.to_thread(self._backend.start)
 
     async def stop(self) -> None:
         await asyncio.to_thread(self._backend.stop)
 
     async def restart(self) -> None:
+        await self._ensure_binary_before_start()
         await asyncio.to_thread(self._backend.restart)
+
+    async def _ensure_binary_before_start(self) -> None:
+        """Self-heal the classic 'Start fails with ENOENT /usr/local/bin/xray':
+        the image ships no baked-in core binaries, so start triggers the
+        driver's own installer once (pinned version honored) targeting the
+        exact path the backend will exec, then proceeds with the real start."""
+        getter = getattr(self._backend, "executable_path", None)
+        if getter is None:
+            return
+        exe = getter()
+        if exe and not os.path.exists(exe):
+            logger.warning(
+                "xray binary missing at %s — self-installing before start "
+                "(release pin: %s)", exe, self.settings.get("release_version") or "latest")
+            settings = dict(self.settings)
+            settings["executable_path"] = exe
+            await asyncio.to_thread(_install_xray, settings)
 
     async def status(self) -> CoreStatus:
         running = await asyncio.to_thread(self._backend.is_running)

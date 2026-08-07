@@ -54,6 +54,7 @@ class LocalHysteria2Backend:
     """Production backend (local hysteria binary + loopback stats API)."""
 
     def __init__(self, settings: dict):
+        self.settings = settings  # install_binary() reads release_version from it
         self.executable = settings.get("executable_path", "hysteria")
         self.work_dir = settings.get("work_dir", "/var/lib/zagros/cores/hysteria2")
         self.traffic_listen = settings.get("traffic_listen", "127.0.0.1:19999")

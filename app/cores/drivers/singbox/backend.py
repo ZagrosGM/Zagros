@@ -168,6 +168,52 @@ class LocalSingBoxBackend:
         except (FileNotFoundError, subprocess.SubprocessError):
             return False
 
+    def probe_v2ray_support(self) -> bool:
+        """True iff THIS sing-box build includes the experimental v2ray API.
+
+        Official builds dropped the `with_v2ray_api` build tag in 1.12, so a
+        config rendered with the block FATALs at start ("v2ray api is not
+        included in this build — rebuild with -tags with_v2ray_api"). Probe
+        the actual binary (`sing-box check` on a minimal config); never trust
+        version folklore.
+        """
+        if not self._binary_available():
+            return False
+        probe = {
+            "log": {"level": "warning"},
+            "inbounds": [{
+                "type": "mixed", "tag": "zg-probe",
+                "listen": "127.0.0.1", "listen_port": 0,
+            }],
+            "outbounds": [{"type": "direct", "tag": "direct"}],
+            "experimental": {
+                "v2ray_api": {
+                    "listen": "127.0.0.1:0",
+                    "stats": {"enabled": True, "outbounds": ["direct"], "users": []},
+                },
+            },
+        }
+        tmp_path = f"{self.config_path}.v2probe"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(probe, fh)
+            proc = subprocess.run(
+                [self.executable, "check", "-c", tmp_path],
+                capture_output=True, text=True, timeout=15,
+            )
+        except (subprocess.SubprocessError, OSError) as exc:
+            logger.warning("sing-box v2ray_api probe could not run (%s) — assuming unsupported", exc)
+            return False
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        detail = f"{proc.stderr or ''}\n{proc.stdout or ''}"
+        if "v2ray api is not included" in detail:
+            return False
+        return proc.returncode == 0
+
     # ------------------------------------------------------------------ #
     # process (delegated)
     # ------------------------------------------------------------------ #

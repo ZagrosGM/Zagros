@@ -59,9 +59,30 @@ jobs:
         run: |
           set -euo pipefail
           cd sing-box-src
-          RELEASE_TAGS=$(sed -n 's/^TAGS ?= //p' Makefile | head -1)
-          test -n "$RELEASE_TAGS"
+          # Upstream defines the release tag list as `TAGS ?= ...` in the Makefile.
+          # Two shapes exist in the wild and BOTH must resolve correctly:
+          #   * <= v1.12.x: `TAGS ?= with_gvisor,with_quic,...`      (literal list)
+          #   * >= v1.13.x: `TAGS ?= $(shell cat release/DEFAULT_BUILD_TAGS_OTHERS)`
+          # Resolve exactly the way `make` would: a $(shell cat <file>) value means
+          # "read that file"; anything else must BE the literal list. Any other
+          # shape is a FATAL, loudly — never guess at an upstream change.
+          RAW_TAGS_LINE=$(sed -n 's/^TAGS ?= //p' Makefile | head -1)
+          test -n "$RAW_TAGS_LINE"
+          SHELL_CAT_RE='^\$\(shell cat ([^[:space:]]+)\)$'
+          if [[ "$RAW_TAGS_LINE" =~ $SHELL_CAT_RE ]]; then
+            TAGS_FILE="${BASH_REMATCH[1]}"
+            test -f "$TAGS_FILE"
+            RELEASE_TAGS=$(tr -d '[:space:]' < "$TAGS_FILE")
+          elif [[ "$RAW_TAGS_LINE" != *'$('* && "$RAW_TAGS_LINE" != *' '* ]]; then
+            RELEASE_TAGS="$RAW_TAGS_LINE"
+          else
+            echo "FATAL: unrecognized 'TAGS ?=' shape in upstream Makefile: $RAW_TAGS_LINE" >&2
+            exit 2
+          fi
+          [[ "$RELEASE_TAGS" =~ ^[a-z0-9_,]+$ ]] || {
+            echo "FATAL: resolved release tags are malformed: $RELEASE_TAGS" >&2; exit 2; }
           BUILD_TAGS="${RELEASE_TAGS},with_v2ray_api"
+          echo "tags line    : $RAW_TAGS_LINE"
           echo "release tags : $RELEASE_TAGS"
           echo "build tags   : $BUILD_TAGS"
           CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} \

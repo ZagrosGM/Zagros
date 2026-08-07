@@ -1,0 +1,61 @@
+# TEMPORARY debug workflow — hunts the runner-only pytest exit hang.
+# Lives ONLY on the ci-debug-hang branch; never merged to main.
+name: CI-DEBUG hang hunt
+on:
+  workflow_dispatch:
+    inputs:
+      pytest_args:
+        description: "pytest target/args"
+        default: "tests -q"
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies (+py-spy)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest py-spy
+      - name: Run suite with hang watchdog
+        run: |
+          set +e
+          export PYTHONFAULTHANDLER=1
+          python -m pytest ${{ inputs.pytest_args }} > suite.log 2>&1 &
+          PID=$!
+          echo "pytest pid=$PID"
+          RESULT=clean
+          for i in $(seq 1 80); do
+            sleep 15
+            if ! kill -0 $PID 2>/dev/null; then echo "process exited at poll $i"; break; fi
+            if grep -qE "[0-9]+ passed" suite.log 2>/dev/null; then
+              echo "summary printed at poll $i — grace 25s..."
+              sleep 25
+              if kill -0 $PID 2>/dev/null; then
+                RESULT=hang
+              else
+                echo "process exited during grace"
+              fi
+              break
+            fi
+          done
+          if [ "$RESULT" = hang ]; then
+            echo "=========== HANG CONFIRMED — py-spy dump ==========="
+            py-spy dump --pid $PID 2>&1 || sudo py-spy dump --pid $PID 2>&1
+            echo "=========== native dump ==========="
+            sudo py-spy dump --native --pid $PID 2>&1 | head -120
+            echo "=========== thread list ==========="
+            for t in /proc/$PID/task/*; do echo "$t comm=$(cat $t/comm 2>/dev/null)"; done
+            echo "=========== open fds ==========="
+            ls -l /proc/$PID/fd 2>/dev/null | head -30
+            echo "=========== faulthandler via SIGABRT ==========="
+            sudo kill -ABRT $PID; sleep 3; tail -80 suite.log
+            sudo kill -9 $PID 2>/dev/null
+          fi
+          echo "RESULT=$RESULT"
+          tail -3 suite.log
+          grep -cE "." suite.log | head -1

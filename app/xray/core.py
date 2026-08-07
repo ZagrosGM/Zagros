@@ -89,10 +89,16 @@ class XRayCore:
                 elif not self.process or self.process.poll() is not None:
                     break
 
+        # daemon=True (zagros hard-fork hardening): these threads block in
+        # readline() for the whole lifetime of the xray process; a non-daemon
+        # capture thread pins interpreter shutdown forever whenever a consumer
+        # exits without an explicit stop() (observed in CI: pytest printed its
+        # summary, the process then hung in threading._shutdown). Log capture
+        # must never hold the interpreter hostage.
         if DEBUG:
-            threading.Thread(target=capture_and_debug_log).start()
+            threading.Thread(target=capture_and_debug_log, daemon=True).start()
         else:
-            threading.Thread(target=capture_only).start()
+            threading.Thread(target=capture_only, daemon=True).start()
 
     @contextmanager
     def get_logs(self):
@@ -143,9 +149,10 @@ class XRayCore:
 
         self.__capture_process_logs()
 
-        # execute on start functions
+        # execute on start functions (daemons: a stuck one-shot callback must
+        # never block interpreter shutdown; see __capture_process_logs note)
         for func in self._on_start_funcs:
-            threading.Thread(target=func).start()
+            threading.Thread(target=func, daemon=True).start()
 
     def stop(self):
         if not self.started:
@@ -155,9 +162,9 @@ class XRayCore:
         self.process = None
         logger.warning("Xray core stopped")
 
-        # execute on stop functions
+        # execute on stop functions (daemons: same reasoning as start funcs)
         for func in self._on_stop_funcs:
-            threading.Thread(target=func).start()
+            threading.Thread(target=func, daemon=True).start()
 
     def restart(self, config: XRayConfig):
         if self.restarting is True:

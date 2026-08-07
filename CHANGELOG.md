@@ -262,6 +262,26 @@ multi-core platform line.
 * **TUIC Studio was refused** ("no studio_inbounds_path declared") — the
   driver now exposes its listener to the studio (single-entry semantics).
 
+### Fixed — hardening found while shipping alpha.7
+
+* **A consumer that forgets `stop()` could hang process shutdown forever.**
+  The xray core wrapper spawned its log-capture and lifecycle-callback
+  threads as non-daemons; they block in `readline()` for the lifetime of the
+  xray process, so any host process (CI test runner, CLI, future worker) that
+  starts xray and exits without an explicit `stop()` pinned
+  `threading._shutdown` indefinitely. These threads are daemons now —
+  log capture and one-shot callbacks must never hold the interpreter hostage
+  (root-caused on GitHub-hosted runners via faulthandler dump at
+  `app/xray/core.py`).
+* **The unit/integration suite no longer performs real binary downloads.**
+  Because the driver now self-heals a missing xray binary on start, an
+  app-booting test on a networked machine would fetch ~30 MB from GitHub and
+  launch a real daemon. Tests that boot the app (adminapi/platform) now run
+  with the installer blocked; the pin-resolution logic keeps RAW-installer
+  coverage in `tests/cores/test_release_pinning.py`, and the self-heal
+  contract stays pinned by `tests/platform/test_alpha7_fixes.py`. Real
+  installs remain covered by the real-binary E2E suite.
+
 ### Known limitations
 
 * **Real-VPS multi-core E2E still needs the community.** Every Phase-2 gate

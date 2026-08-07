@@ -107,6 +107,24 @@ class LegacyXrayBackend:
             if getattr(node, "connected", False) and getattr(node, "started", False)
         ]
 
+    def executable_path(self) -> str:
+        """The binary path the wrapped legacy core will actually exec.
+
+        Settings override wins (manager-installed cores); otherwise the
+        legacy module's own configured path (Marzban convention
+        ``/usr/local/bin/xray``) — read lazily so host config is honored.
+        """
+        if self._mod is not None:
+            return getattr(self._mod.core, "executable_path", "") or ""
+        override = self._settings.get("executable_path")
+        if override:
+            return str(override)
+        try:
+            from config import XRAY_EXECUTABLE_PATH
+            return XRAY_EXECUTABLE_PATH
+        except Exception:  # noqa: BLE001 — stand-alone usage without host config
+            return "/usr/local/bin/xray"
+
     # ------------------------------------------------------------------ #
     # process
     # ------------------------------------------------------------------ #

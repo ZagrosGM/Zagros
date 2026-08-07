@@ -260,19 +260,29 @@ def test_honest_capability_surface_locked() -> None:
     assert driver.supports(Capability.HOT_RELOAD)          # vpncmd is live
     assert driver.supports(Capability.USAGE_ACCOUNTING)
     assert driver.supports(Capability.DEVICE_DETECTION)
-    for cap in (Capability.SELF_INSTALL, Capability.ROUTING,
-                Capability.CHAIN_ROUTING, Capability.MULTI_NODE):
+    # alpha.7 fix: the Install button no longer sits dead — the driver claims
+    # SELF_INSTALL and actually performs it (apt package, else the official
+    # GitHub release). What stays UNCLAIMED is what the engine still cannot do.
+    assert driver.supports(Capability.SELF_INSTALL)
+    for cap in (Capability.ROUTING, Capability.CHAIN_ROUTING, Capability.MULTI_NODE):
         assert not driver.supports(cap), f"{cap.value} must NOT be claimed for softether"
 
+
+def test_softether_install_runs_package_strategies(monkeypatch) -> None:
+    """install() delegates to the backend's real package strategies and then
+    performs a first daemon start so the hub answers right away."""
+    driver, backend = _driver()
+    calls: list[str] = []
+
+    backend.reachable = lambda: "vpncmd" in calls
+    backend.install_packages = lambda: calls.append("vpncmd") or "installed via fake"
+    backend.server_start = lambda: calls.append("start")
+
     async def run():
-        driver, _ = _driver()
-        try:
-            await driver.install()                          # no self-install, honestly
-            raise AssertionError("install must raise CapabilityNotSupportedError")
-        except Exception as exc:
-            assert "self_install" in str(exc)
+        await driver.install()
 
     asyncio.run(run())
+    assert calls[:1] == ["vpncmd"], calls
 
 
 # ---------------------------------------------------------------------- #

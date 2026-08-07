@@ -114,6 +114,11 @@ class LocalWireGuardBackend:
             ("apk", ["apk", "add", "wireguard-tools"]),
         ):
             if shutil.which(manager):
+                if manager == "apt-get":
+                    # fresh containers/minimal cloud images ship EMPTY apt
+                    # lists — install without update fails with
+                    # "Unable to locate package" (reported on alpha.7 VPS)
+                    self._run(["apt-get", "update"], timeout=600)
                 return self._run(argv, timeout=600)
         raise CoreError("no supported package manager found (apt/dnf/yum/pacman/apk).")
 

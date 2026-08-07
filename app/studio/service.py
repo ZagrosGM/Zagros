@@ -162,7 +162,27 @@ class ConfigStudioService:
         entry.update(spec.settings)
         return [PatchOperation(op="add", path=f"{path}/-", value=entry)]
 
+    @staticmethod
+    def _path_missing(doc: dict[str, Any], pointer: str) -> bool:
+        """True when a JSON-Pointer's parent chain is absent (patch would 422)."""
+        node: Any = doc
+        for seg in (s for s in pointer.split("/") if s):
+            if not isinstance(node, dict) or seg not in node:
+                return True
+            node = node[seg]
+        return False
+
     async def wizard_add_inbound(self, driver: BaseCoreDriver,
                                  spec: InboundSpec) -> PreviewResult:
-        """Full wizard flow: build patch → validate → apply → return diff."""
-        return await self.apply(driver, self.wizard_patch(driver, spec))
+        """Full wizard flow: build patch → validate → apply → return diff.
+
+        Tolerant seeding: an empty document (core never started, store fresh)
+        gets the inbound-list parent created first instead of 422ing.
+        """
+        ops = self.wizard_patch(driver, spec)
+        path = driver.metadata.studio_inbounds_path
+        if path:
+            doc = await self.get_document(driver.metadata.id, driver)
+            if self._path_missing(doc, path):
+                ops = [PatchOperation(op="add", path=path, value=[])] + ops
+        return await self.apply(driver, ops)

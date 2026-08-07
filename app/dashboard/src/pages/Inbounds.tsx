@@ -11,45 +11,19 @@ import { api, ApiError } from "../lib/api";
 import { useT } from "../lib/i18n";
 import type { CoreView } from "../lib/types";
 
-// Protocol wizard field plans — per-protocol structured forms (identity-level:
-// tag/listen/port + protocol-specific essentials). Backend validates the rest.
-interface ProtoPlan {
-  key: string;
-  label: string;
-  defaultPort: number;
-  fields: { key: string; label: string; type: "text" | "number" | "select" | "password"; options?: string[]; placeholder?: string; required?: boolean }[];
+// Dynamic wizard blueprint — fetched per core from the backend
+// (GET /zagros/cores/{id}/wizard-schema): protocols × transports × securities
+// × fields. NOTHING is hardcoded here anymore; switching cores changes the
+// entire flow (the alpha.7 fixed-list complaint, fixed at the source).
+interface WizardField {
+  key: string; label: string; type: "string" | "int" | "bool" | "select" | "multiselect" | "password";
+  required?: boolean; default?: string | number | boolean | string[];
+  options?: string[]; placeholder?: string; help?: string;
 }
-const PROTOCOLS: ProtoPlan[] = [
-  { key: "vless-reality", label: "VLESS + Reality", defaultPort: 443, fields: [
-    { key: "sni", label: "camouflage SNI", type: "text", placeholder: "www.microsoft.com", required: true },
-    { key: "fp", label: "fingerprint", type: "select", options: ["chrome", "firefox", "safari", "random"] },
-    { key: "flow", label: "flow", type: "select", options: ["xtls-rprx-vision", ""] },
-  ]},
-  { key: "vless", label: "VLESS (TLS)", defaultPort: 8443, fields: [
-    { key: "sni", label: "SNI / certificate name", type: "text", placeholder: "panel.example.com" },
-  ]},
-  { key: "vmess", label: "VMess (WS)", defaultPort: 2053, fields: [
-    { key: "path", label: "WebSocket path", type: "text", placeholder: "/ws" },
-    { key: "host", label: "Host header", type: "text", placeholder: "cdn.example.com" },
-  ]},
-  { key: "trojan", label: "Trojan (TLS)", defaultPort: 2087, fields: [
-    { key: "sni", label: "SNI", type: "text" },
-  ]},
-  { key: "shadowsocks", label: "Shadowsocks 2022", defaultPort: 8388, fields: [
-    { key: "method", label: "cipher", type: "select", options: ["2022-blake3-aes-128-gcm", "aes-128-gcm", "chacha20-ietf-poly1305"] },
-  ]},
-  { key: "hysteria2", label: "Hysteria 2", defaultPort: 4430, fields: [
-    { key: "up_mbps", label: "up (Mbps)", type: "number" },
-    { key: "down_mbps", label: "down (Mbps)", type: "number" },
-    { key: "obfs", label: "obfs password", type: "password" },
-  ]},
-  { key: "tuic", label: "TUIC v5", defaultPort: 5443, fields: [
-    { key: "congestion_control", label: "congestion control", type: "select", options: ["bbr", "cubic", "new_reno"] },
-  ]},
-  { key: "wireguard", label: "WireGuard", defaultPort: 51820, fields: [
-    { key: "mtu", label: "MTU", type: "number", placeholder: "1420" },
-  ]},
-];
+interface WizardSecurity { id: string; label: string; fields: WizardField[] }
+interface WizardTransport { id: string; label: string; securities: WizardSecurity[] }
+interface WizardProtocol { id: string; label: string; default_port: number; transports: WizardTransport[] }
+interface WizardSchema { core_id: string; protocols: WizardProtocol[] }
 
 interface InboundRow { tag: string; protocol: string; listen?: string; port: number | string; [k: string]: unknown }
 
@@ -175,32 +149,60 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
 }) {
   const t = useT();
   const [step, setStep] = useState(0);
-  const [plan, setPlan] = useState<ProtoPlan>(PROTOCOLS[0]);
+  const [proto, setProto] = useState<WizardProtocol | null>(null);
+  const [transport, setTransport] = useState<WizardTransport | null>(null);
+  const [security, setSecurity] = useState<WizardSecurity | null>(null);
   const [tag, setTag] = useState("");
   const [listen, setListen] = useState("0.0.0.0");
-  const [port, setPort] = useState(PROTOCOLS[0].defaultPort);
-  const [fields, setFields] = useState<Record<string, string>>({});
+  const [port, setPort] = useState(443);
+  const [fields, setFields] = useState<Record<string, string | string[]>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const wireProtocol = plan.key.startsWith("vless") ? "vless" : plan.key;
+  const schema = useQuery({
+    queryKey: ["zagros", "wizard-schema", coreId],
+    queryFn: () => api.get<WizardSchema>(`/zagros/cores/${coreId}/wizard-schema`),
+    retry: false, staleTime: 600000,
+  });
 
-  const spec = useMemo(() => ({
-    tag: tag.trim() || `${wireProtocol}-${port}`,
-    protocol: wireProtocol,
-    listen: listen || null,
-    port: Number(port),
-    settings: {
-      inbound_variant: plan.key,
-      ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== "")),
-    },
-  }), [tag, wireProtocol, listen, port, fields, plan.key]);
+  // sensible defaults once the blueprint lands / whenever an ancestor changes
+  const effProto = proto ?? schema.data?.protocols[0] ?? null;
+  const effTransport = transport ?? effProto?.transports[0] ?? null;
+  const effSecurity = security ?? effTransport?.securities[0] ?? null;
+
+  const pickProto = (p: WizardProtocol) => {
+    setProto(p); setTransport(null); setSecurity(null); setFields({}); setPort(p.default_port || 443);
+  };
+  const pickTransport = (tr: WizardTransport) => { setTransport(tr); setSecurity(null); };
+
+  const spec = useMemo(() => {
+    if (!effProto || !effTransport || !effSecurity) return null;
+    const settings: Record<string, unknown> = {
+      transport: effTransport.id,
+      security: effSecurity.id,
+    };
+    for (const f of effSecurity.fields) {
+      const v = fields[f.key];
+      if (v === undefined || v === "") continue;
+      settings[f.key] = f.type === "int" ? Number(v) : f.type === "bool" ? v === "true" : v;
+    }
+    return {
+      tag: tag.trim() || `${effProto.id}-${port}`,
+      protocol: effProto.id,
+      listen: listen || null,
+      port: Number(port),
+      settings,
+    };
+  }, [effProto, effTransport, effSecurity, tag, listen, port, fields]);
 
   const submit = async () => {
+    if (!spec) return;
     setBusy(true); setError("");
     try {
-      await api.post(`/zagros/studio/${coreId}/wizard/inbound`, spec);
-      toast.ok(`inbound "${spec.tag}" created on ${coreId}`);
+      const res = await api.post<{ materialized?: boolean; notice?: string }>(`/zagros/studio/${coreId}/wizard/inbound`, spec);
+      toast.ok(res.materialized === false
+        ? `inbound "${spec.tag}" saved on ${coreId} (applies on next start)`
+        : `inbound "${spec.tag}" created on ${coreId}`);
       onDone();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : t("common.error"));
@@ -208,36 +210,59 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
     }
   };
 
-  const step1Invalid = !port || port < 1 || port > 65535 || existingTags.includes(spec.tag);
+  const stepNames = ["choose protocol", "transport", "security", "details & review"];
+  const invalid =
+    step === 0 ? !effProto
+    : step === 1 ? !effTransport
+    : step === 2 ? !effSecurity
+    : !spec || !port || port < 1 || port > 65535 || existingTags.includes(spec.tag);
+
+  const renderChoice = (
+    <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+      {(step === 0 ? schema.data?.protocols ?? [] : step === 1 ? effProto?.transports ?? [] : effTransport?.securities ?? []).map((o: { id: string; label: string; default_port?: number }) => {
+        const active =
+          step === 0 ? effProto?.id === o.id : step === 1 ? effTransport?.id === o.id : effSecurity?.id === o.id;
+        return (
+          <button key={o.id} onClick={() => (step === 0 ? pickProto(o as WizardProtocol) : step === 1 ? pickTransport(o as WizardTransport) : setSecurity(o as WizardSecurity))}
+            className={`rounded-xl border p-3 text-start transition-colors ${active ? "border-brand bg-brand-soft" : "border-border hover:border-border-strong"}`}>
+            <p className="text-[13px] font-semibold">{o.label}</p>
+            {o.default_port ? <p className="mt-1 text-[10.5px] text-content-3">:{o.default_port}</p> : null}
+          </button>
+        );
+      })}
+    </div>
+  );
 
   return (
     <Dialog open onClose={onClose} wide
       title={<span className="inline-flex items-center gap-2"><Wand2 size={16} className="text-brand" /> inbound wizard — {coreId}</span>}
-      subtitle={`step ${step + 1} of 2 — ${step === 0 ? "choose protocol" : "details & review"}`}
+      subtitle={`step ${step + 1} of 4 — ${stepNames[step]}`}
       footer={
         <>
-          {step === 1 && <Button variant="ghost" onClick={() => setStep(0)}><ChevronLeft size={14} /> back</Button>}
+          {step > 0 && <Button variant="ghost" onClick={() => setStep(step - 1)}><ChevronLeft size={14} /> back</Button>}
           <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
-          {step === 0
-            ? <Button onClick={() => setStep(1)}>continue</Button>
-            : <Button onClick={submit} loading={busy} disabled={step1Invalid}><Wand2 size={14} /> create inbound</Button>}
+          {step < 3
+            ? <Button onClick={() => setStep(step + 1)} disabled={invalid}>continue</Button>
+            : <Button onClick={submit} loading={busy} disabled={invalid}><Wand2 size={14} /> create inbound</Button>}
         </>
       }>
-      {step === 0 ? (
-        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-          {PROTOCOLS.map((p) => (
-            <button
-              key={p.key}
-              onClick={() => { setPlan(p); setPort(p.defaultPort); }}
-              className={`rounded-xl border p-3 text-start transition-colors ${plan.key === p.key ? "border-brand bg-brand-soft" : "border-border hover:border-border-strong"}`}
-            >
-              <p className="text-[13px] font-semibold">{p.label}</p>
-              <p className="mt-1 text-[10.5px] text-content-3">:{p.defaultPort}</p>
-            </button>
-          ))}
-        </div>
-      ) : (
+      {schema.isLoading && <div className="space-y-2"><Skeleton className="h-10" /><Skeleton className="h-24" /></div>}
+      {schema.isError && (
+        <p role="alert" className="rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">
+          no dynamic wizard blueprint for this core — use Advanced Mode for raw edits.
+        </p>
+      )}
+      {schema.data && step < 3 && renderChoice}
+      {schema.data && step === 3 && spec && (
         <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-1.5 text-[11.5px] text-content-2">
+            {[effProto?.label, effTransport?.label, effSecurity?.label].filter(Boolean).map((x, i, arr) => (
+              <span key={String(x)} className="inline-flex items-center gap-1.5">
+                <span className="rounded-lg bg-brand-soft px-2 py-0.5 font-medium text-brand">{x}</span>
+                {i < arr.length - 1 && <span className="text-content-3">→</span>}
+              </span>
+            ))}
+          </div>
           <div className="grid gap-4 sm:grid-cols-3">
             <Field label="tag" hint={existingTags.includes(spec.tag) ? "this tag already exists" : "unique on this core"}>
               <Input value={tag} placeholder={spec.tag} onChange={(e) => setTag(e.target.value)} dir="ltr" invalid={existingTags.includes(spec.tag)} />
@@ -252,28 +277,49 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
               <Input type="number" min={1} max={65535} value={port} onChange={(e) => setPort(Number(e.target.value))} dir="ltr" />
             </Field>
           </div>
-          <div className="grid gap-4 rounded-xl border border-border p-3.5 sm:grid-cols-3">
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-content-3 sm:col-span-3">{plan.label} — specifics</p>
-            {plan.fields.map((f) => (
-              <Field key={f.key} label={f.label} required={f.required}>
-                {f.type === "select" ? (
-                  <Select value={fields[f.key] ?? (f.options?.[0] ?? "")} onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })}>
-                    {f.options?.map((o) => <option key={o} value={o}>{o || "—"}</option>)}
-                  </Select>
-                ) : (
-                  <Input type={f.type === "number" ? "number" : f.type === "password" ? "password" : "text"}
-                    placeholder={f.placeholder} value={fields[f.key] ?? ""}
-                    onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })} dir="ltr" />
-                )}
-              </Field>
-            ))}
-          </div>
+          {effSecurity && effSecurity.fields.length > 0 && (
+            <div className="grid gap-4 rounded-xl border border-border p-3.5 sm:grid-cols-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-content-3 sm:col-span-3">
+                {effProto?.label} / {effTransport?.label} / {effSecurity.label} — settings
+              </p>
+              {effSecurity.fields.map((f) => (
+                <Field key={f.key} label={f.label} required={f.required} hint={f.help}>
+                  {f.type === "select" ? (
+                    <Select value={(fields[f.key] as string) ?? String(f.default ?? f.options?.[0] ?? "")}
+                      onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })}>
+                      {f.options?.map((o) => <option key={o} value={o}>{o || "—"}</option>)}
+                    </Select>
+                  ) : f.type === "multiselect" ? (
+                    <div className="flex flex-wrap gap-2 pt-1.5">
+                      {f.options?.map((o) => {
+                        const cur = (fields[f.key] as string[]) ?? (Array.isArray(f.default) ? f.default : []);
+                        const on = cur.includes(o);
+                        return (
+                          <button key={o} type="button"
+                            onClick={() => setFields({ ...fields, [f.key]: on ? cur.filter((x) => x !== o) : [...cur, o] })}
+                            className={`rounded-lg border px-2.5 py-1 text-[11.5px] ${on ? "border-brand bg-brand-soft text-brand" : "border-border text-content-2"}`}>
+                            {o}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <Input type={f.type === "int" ? "number" : f.type === "password" ? "password" : "text"}
+                      placeholder={f.placeholder}
+                      value={(fields[f.key] as string) ?? String(f.default ?? "")}
+                      onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })} dir="ltr" />
+                  )}
+                </Field>
+              ))}
+            </div>
+          )}
           <div className="rounded-xl bg-surface-2 p-3.5 text-[12px] text-content-2">
             <p className="mb-1 flex items-center gap-1.5 font-medium"><Eye size={13} className="text-brand" /> summary</p>
             <p>
-              <b>{plan.label}</b> inbound <code className="font-mono text-[11px]" dir="ltr">{spec.tag}</code> listening on{" "}
+              <b>{effProto?.label}</b> over <b>{effTransport?.label}</b> with <b>{effSecurity?.label}</b> — inbound{" "}
+              <code className="font-mono text-[11px]" dir="ltr">{spec.tag}</code> on{" "}
               <code className="font-mono text-[11px]" dir="ltr">{listen}:{port}</code> will be validated against the{" "}
-              <b>{coreId}</b> schema and appended to its configuration. New users need it enabled in their protocol list.
+              <b>{coreId}</b> schema and materialized into its configuration. New users need it granted in their core access.
             </p>
           </div>
         </div>

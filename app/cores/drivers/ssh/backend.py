@@ -132,5 +132,9 @@ class LocalSystemSSHBackend:
             ("apk", ["apk", "add", "openssh"]),
         ):
             if shutil.which(manager):
+                if manager == "apt-get":
+                    # container images carry no apt lists: without update the
+                    # candidate lookup fails ("no installation candidate")
+                    self._run(["apt-get", "update"], timeout=600)
                 return self._run(argv, timeout=600)
         raise CoreError("no supported package manager found (apt/dnf/yum/pacman/apk).")

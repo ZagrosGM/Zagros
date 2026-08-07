@@ -28,8 +28,11 @@ Honestly NOT claimed (documented):
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
+
+logger = logging.getLogger("zagros.cores.drivers.softether")
 
 from app.cores.base import BaseCoreDriver
 from app.cores.exceptions import CoreError
@@ -68,6 +71,7 @@ class SoftEtherDriver(BaseCoreDriver):
             Capability.HOT_RELOAD,
             Capability.CLIENT_CONFIG,
             Capability.UDP_SUPPORT,
+            Capability.SELF_INSTALL,
         },
         config_schema={
             "type": "object",
@@ -108,11 +112,22 @@ class SoftEtherDriver(BaseCoreDriver):
     # lifecycle — the server is external/systemd-owned; we verify reachability
     # ------------------------------------------------------------------ #
     async def start(self) -> None:
-        if not await asyncio.to_thread(self._backend.reachable):
-            raise CoreError(
-                f"SoftEther hub '{self.settings['hub']}' unreachable via vpncmd "
-                f"at {self.settings['server']} — check server/credentials."
-            )
+        if await asyncio.to_thread(self._backend.reachable):
+            return
+        # not reachable: if the binaries exist (systemd-less container), bring
+        # the daemon up ourselves once, honestly re-check, then decide
+        server_start = getattr(self._backend, "server_start", None)
+        if callable(server_start) and getattr(self._backend, "server_binary", lambda: None)() is not None:
+            await asyncio.to_thread(server_start)
+            for _ in range(10):
+                await asyncio.sleep(0.5)
+                if await asyncio.to_thread(self._backend.reachable):
+                    return
+        raise CoreError(
+            f"SoftEther hub '{self.settings['hub']}' unreachable via vpncmd "
+            f"at {self.settings['server']} — press Install first or check "
+            f"server/credentials."
+        )
 
     async def stop(self) -> None:
         # the VPN server stays up (system-owned); accounts remain provisioned
@@ -144,7 +159,20 @@ class SoftEtherDriver(BaseCoreDriver):
         yield  # pragma: no cover - keeps this an async generator
 
     async def install(self) -> None:
-        self._require(Capability.SELF_INSTALL)  # honest: not claimed → raises
+        """Real install: apt when shipped by the distro, else the official
+        GitHub release (vpnserver + vpncmd + hamcore.se2), then a first
+        daemon start so the hub answers right away."""
+        detail = await asyncio.to_thread(self._backend.install_packages)
+        logger.info("softether %s", detail)
+        if not await asyncio.to_thread(self._backend.reachable):
+            try:
+                await asyncio.to_thread(self._backend.server_start)
+            except Exception as exc:  # noqa: BLE001 — install still valid
+                logger.warning("softether installed but first start failed: %s", exc)
+        for _ in range(10):
+            await asyncio.sleep(0.5)
+            if await asyncio.to_thread(self._backend.reachable):
+                break
 
     # ------------------------------------------------------------------ #
     # user management

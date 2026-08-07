@@ -57,9 +57,12 @@ one driver among many, with no special status anywhere in the codebase.
   configs leave the server exclusively through sealed delivery
   (X25519 + HKDF-SHA256 + AES-256-GCM, self-contained crypto with a fast
   `cryptography` backend and an audited pure-Python fallback).
-* **Config Studio** — graphical config management: inbound wizard, JSON-tree
-  editor producing RFC 6902 patches, schema-validated previews, unified
-  diffs, Advanced raw-JSON mode.
+* **Config Studio** — graphical config management: a **fully dynamic**
+  inbound wizard (Core → Protocol → Transport → Security → only the valid
+  settings for that exact combination, served per-engine by the backend),
+  JSON-tree editor producing RFC 6902 patches, schema-validated previews,
+  unified diffs, Advanced raw-JSON mode — and applied changes materialize
+  into the core itself for engines with a live bridge (sing-box, TUIC, …).
   Routine operations need **zero hand-written JSON**.
 * **Modern persistence** — SQLAlchemy 2 + Alembic, encrypted credentials at
   rest (AES-256-GCM with row-bound AAD), idempotent Marzban → Zagros

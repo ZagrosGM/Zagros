@@ -107,6 +107,9 @@ class TUICDriver(BaseCoreDriver):
         },
         homepage="https://github.com/EAimTY/tuic",
         release_repo="EAimTY/tuic",
+        # ONE listener is all tuic-server supports; the studio manages it as
+        # a single-entry inbound list (apply enforces the cardinality).
+        studio_inbounds_path="/inbounds",
         provides=set(),
         requires=set(),
     )
@@ -190,6 +193,43 @@ class TUICDriver(BaseCoreDriver):
         await asyncio.to_thread(self._backend.apply_config, self.render_config())
         if await asyncio.to_thread(self._backend.is_running):
             await asyncio.to_thread(self._backend.restart)
+
+    # ------------------------------------------------------------------ #
+    # Config Studio bridge (single-listener engine)
+    # ------------------------------------------------------------------ #
+    def export_config_document(self) -> dict[str, Any]:
+        """Studio seed: the tuic listener modelled as a one-entry inbound list
+        (works while stopped; pure settings read)."""
+        s = self.settings
+        return {
+            "inbounds": [{
+                "tag": "tuic",
+                "protocol": "tuic",
+                "listen": s["listen"],
+                "port": int(s["port"]),
+                "congestion_control": s["congestion_control"],
+                "sni": s.get("advertise_sni") or s["cert_common_name"],
+            }],
+        }
+
+    async def apply_studio_document(self, document: dict[str, Any]) -> None:
+        """Adopt the studio document's single inbound as THE listener settings
+        (tuic-server physically supports exactly one socket — a document with
+        more than one inbound is rejected loudly, not truncated)."""
+        inbounds = (document or {}).get("inbounds") or []
+        if len(inbounds) != 1:
+            raise CoreError(
+                f"tuic serves exactly ONE listener; the studio document carries "
+                f"{len(inbounds)} inbounds — keep one or use a multi-inbound engine."
+            )
+        ib = inbounds[0]
+        for key, target in (("listen", "listen"), ("congestion_control", "congestion_control"),
+                            ("sni", "advertise_sni")):
+            if ib.get(key) not in (None, ""):
+                self.settings[target] = ib[key] if key != "listen" else str(ib[key])
+        if ib.get("port") is not None:
+            self.settings["port"] = int(ib["port"])
+        await self._publish()
 
     # ------------------------------------------------------------------ #
     # lifecycle

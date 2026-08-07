@@ -215,6 +215,53 @@ multi-core platform line.
   byte-identical to the legacy `/sub/{jwt}` link for the same user;
   `device_limit` roundtrip 5 → clear → `-1` rejected with 422.
 
+### Added — dynamic inbound wizard (field feedback)
+
+* **The wizard is no longer a fixed list.** `GET /api/zagros/cores/{id}/wizard-schema`
+  serves a per-engine blueprint (protocols × transports × securities × typed
+  fields) and the dashboard renders a real stepper — Core → Protocol →
+  Transport → Security → only the settings valid for THAT combination
+  (xhttp exists only for Xray, REALITY generates its X25519 keypair at the
+  panel, sing-box additionally hosts Hysteria2 and TUIC as protocols, …).
+* **Studio changes now materialize.** Applied documents push into the core
+  itself: sing-box adopts studio listeners as its inbound truth (users stay
+  platform-driven, unmappable wizard fields fail loudly instead of being
+  silently dropped), tuic adopts its single listener (cardinality enforced),
+  engines without a live bridge reply with an honest `materialized: false`
+  notice instead of pretending.
+
+### Fixed — field feedback from the alpha.7 VPS report
+
+* **`apt-get install` failed on fresh hosts/containers** ("Unable to locate
+  package wireguard-tools / openvpn", "openssh-server has no installation
+  candidate"): the images ship EMPTY apt lists. WireGuard/OpenVPN/OpenSSH
+  installers now run `apt-get update` first (ordering covered by tests).
+* **Hysteria2 install crashed** with `'LocalHysteria2Backend' object has no
+  attribute 'settings'` — the backend now keeps the settings dict it
+  receives (pinned-version path included).
+* **SoftEther "Install Core" did nothing** — the driver claimed no
+  SELF_INSTALL and raised instead. It now installs for real (apt
+  `softether-vpnserver` where shipped, otherwise the official GitHub
+  release tarball with `vpnserver`+`vpncmd`+`hamcore.se2` laid out under
+  `/usr/local/softether` and symlinked onto PATH), then starts the daemon
+  and confirms hub reachability.
+* **Xray Start failed** with `ENOENT /usr/local/bin/xray`: the image ships
+  no baked-in core binaries, so start/restart now self-installs the binary
+  first (pinned release honored) targeting exactly the path the backend
+  will exec.
+* **Sing-box Start FATALed** with "v2ray api is not included in this
+  build": official builds dropped the tag in 1.12. The driver probes the
+  actual binary once and renders the experimental stats block only when
+  supported; otherwise it starts cleanly and reports the accounting
+  degradation honestly in status (`HealthStatus.DEGRADED` + message).
+* **Studio wizard 422ed on stopped cores** — an empty studio document made
+  the patch's parent list missing. Seeds now come from the drivers
+  themselves (`export_config_document()` on xray/sing-box/tuic — pure
+  renders that work while stopped), and the wizard creates a missing
+  inbound-list parent instead of 422ing.
+* **TUIC Studio was refused** ("no studio_inbounds_path declared") — the
+  driver now exposes its listener to the studio (single-entry semantics).
+
 ### Known limitations
 
 * **Real-VPS multi-core E2E still needs the community.** Every Phase-2 gate

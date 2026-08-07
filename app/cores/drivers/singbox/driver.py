@@ -16,8 +16,14 @@ Reality of sing-box (and how this driver deals with it):
 from __future__ import annotations
 
 import asyncio
+import base64
+import copy
+import logging
+import secrets
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
+
+logger = logging.getLogger("zagros.cores.drivers.singbox")
 
 from app.cores.base import BaseCoreDriver
 from app.cores.exceptions import CoreError
@@ -50,6 +56,21 @@ _INBOUND_KEYS: dict[str, set[str]] = {
     "shadowsocks": {"password"},
 }
 _PROTOCOLS = set(_INBOUND_KEYS)
+
+
+def _x25519_keypair() -> tuple[str, str]:
+    """(private, public) raw-base64url keys in the exact sing-box reality /
+    Xray `x25519` output format. Backed by the project's own crypto module
+    (fast C backend when available, audited pure-Python otherwise — never a
+    hard dependency on the local wheel situation)."""
+    from app.crypto import x25519
+
+    private_key, public_key = x25519.generate_keypair()
+
+    def enc(raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    return enc(private_key), enc(public_key)
 
 
 class SingBoxDriver(BaseCoreDriver):
@@ -133,6 +154,9 @@ class SingBoxDriver(BaseCoreDriver):
         self._chain_listeners: dict[tuple[str, int], ChainEndpoint] = {}
         self._usage = DeltaTracker()
         self._online_seen: dict[str, tuple[int, int]] = {}
+        self._v2ray_supported: bool | None = None  # lazy binary probe cache
+        self._stats_degrade_warned = False
+        self._studio_doc: dict[str, Any] | None = None  # set by apply_studio_document
         self._stats_error: str | None = None
 
     # ------------------------------------------------------------------ #
@@ -151,6 +175,8 @@ class SingBoxDriver(BaseCoreDriver):
         return entry
 
     def _render_inbounds(self) -> list[dict[str, Any]]:
+        if self._studio_doc and self._studio_doc.get("inbounds"):
+            return self._merge_studio_inbounds()
         ports: dict[str, int] = self.settings["ports"]
         inbounds: list[dict[str, Any]] = []
         for protocol in sorted(_PROTOCOLS):
@@ -183,6 +209,161 @@ class SingBoxDriver(BaseCoreDriver):
             })
         return inbounds
 
+    # ------------------------------------------------------------------ #
+    # Config Studio bridge — the applied document becomes the LISTENER truth,
+    # users stay platform-driven (attached per protocol at render time)
+    # ------------------------------------------------------------------ #
+
+
+    def export_config_document(self) -> dict[str, Any]:
+        """Studio seed: the current effective document (pure render — works
+        equally when the core is stopped; this fixed the 422 wizard saw on a
+        non-running sing-box)."""
+        return self.render_config()
+
+    async def apply_studio_document(self, document: dict[str, Any]) -> None:
+        """Adopt the studio document: inbounds materialize on the binary
+        (translation is STRICT — an unmappable key fails loudly instead of
+        being silently dropped); restart only when running."""
+        self._studio_doc = copy.deepcopy(document)
+        rendered = self.render_config()
+        await asyncio.to_thread(self._backend.apply_config, rendered)
+        if await asyncio.to_thread(self._backend.is_running):
+            await asyncio.to_thread(self._backend.restart)
+
+    def _merge_studio_inbounds(self) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        for raw in self._studio_doc["inbounds"]:
+            ib = self._studio_entry_to_native(raw)
+            tag = str(ib.get("tag") or "")
+            if tag.startswith("zg-chain-"):
+                continue  # chain listeners are managed, never doc-owned
+            ptype = ib.get("type")
+            if ptype in _PROTOCOLS or ptype == "hysteria2" or ptype == "tuic":
+                users = [
+                    self._user_entry(a)
+                    for a in self._accounts.values()
+                    if a.protocol == ptype and a.enabled
+                ]
+                if users:
+                    ib["users"] = users
+                    merged.append(ib)
+                # else: dead listener (no enabled user) — dropped honestly,
+                # same rule as the derived rendering
+            else:
+                merged.append(ib)
+        for (protocol, port), _ep in sorted(self._chain_listeners.items()):
+            merged.append({
+                "type": protocol,
+                "tag": f"zg-chain-{protocol}-{port}",
+                "listen": "127.0.0.1",
+                "listen_port": port,
+            })
+        return merged
+
+    def _studio_entry_to_native(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Studio entry {tag, protocol, listen, port, …wizard fields} → native
+        sing-box inbound. Every wizard field maps somewhere; anything
+        unmappable raises CoreError (never silently ignored)."""
+        if raw.get("type") and raw.get("listen_port"):
+            return dict(raw)  # already native (edited in Advanced Mode)
+
+        proto = str(raw.get("protocol") or raw.get("type") or "")
+        if not proto:
+            raise CoreError(f"studio inbound '{raw.get('tag')}' declares no protocol")
+        known = {"tag", "protocol", "listen", "port", "inbound_variant",
+                 "transport", "security",
+                 "path", "host", "headers", "service_name", "authority",
+                 "sni", "alpn", "method", "flow", "fingerprint", "public_key",
+                 "congestion_control", "up_mbps", "down_mbps", "obfs",
+                 "cipher", "ports", "ipsec_psk", "certificate", "mode"}
+        unknown = sorted(set(raw) - known)
+        if unknown:
+            raise CoreError(
+                f"studio inbound '{raw.get('tag')}': fields not translatable "
+                f"to a sing-box listener: {unknown} — edit raw JSON instead."
+            )
+        ib: dict[str, Any] = {
+            "type": proto,
+            "tag": raw["tag"],
+            "listen": raw.get("listen") or self.settings["listen"],
+            "listen_port": int(raw["port"]),
+        }
+        # transport — explicit selection wins (dynamic wizard sends it); any
+        # transport sing-box cannot serve fails loudly instead of silently
+        # degrading the listener to plain TCP
+        net = str(raw.get("transport") or "").lower()
+        if net in ("xhttp", "quic") and proto not in ("hysteria2", "tuic"):
+            raise CoreError(
+                f"sing-box cannot serve a {proto} inbound over {net} "
+                f"(xhttp is Xray-only) — pick ws/httpupgrade/grpc/http instead."
+            )
+        if net == "grpc" or raw.get("service_name"):
+            if not raw.get("service_name"):
+                raise CoreError("gRPC inbound requires service_name")
+            ib["transport"] = {"type": "grpc", "service_name": raw["service_name"]}
+        elif net == "httpupgrade":
+            ib["transport"] = {"type": "httpupgrade", "path": raw.get("path") or "/",
+                               **({"host": raw["host"]} if raw.get("host") else {})}
+        elif net == "http":
+            ib["transport"] = {"type": "http",
+                               **({"path": raw["path"]} if raw.get("path") else {}),
+                               **({"host": raw["host"]} if raw.get("host") else {})}
+        elif net == "ws" or raw.get("path") is not None or raw.get("host"):
+            headers = dict(raw.get("headers") or {})
+            if raw.get("host"):
+                headers["Host"] = raw["host"]
+            ib["transport"] = {"type": "ws", "path": raw.get("path") or "/",
+                               **({"headers": headers} if headers else {})}
+        # security — explicit; reality needs nothing but an SNI + generated keys
+        security = str(raw.get("security") or "").lower()
+        alpn = raw.get("alpn")
+        if security == "reality" or raw.get("public_key"):
+            private, public = _x25519_keypair()
+            sni = str(raw.get("sni") or "").split(":")[0]
+            if not sni:
+                raise CoreError("reality inbound needs a camouflage SNI")
+            ib["tls"] = {
+                "enabled": True,
+                "server_name": sni,
+                "reality": {
+                    "enabled": True,
+                    "handshake": {"server": sni, "server_port": 443},
+                    "private_key": private,
+                    "short_id": [secrets.token_hex(8)],
+                },
+                **({"alpn": alpn} if alpn else {}),
+            }
+            ib["_reality_public_key"] = public  # surfaced for share links
+        elif security == "tls" or raw.get("sni"):
+            cert = raw.get("certificate") or {}
+            tls: dict[str, Any] = {"enabled": True, "server_name": raw.get("sni") or "",
+                                   **({"alpn": alpn} if alpn else {})}
+            if isinstance(cert, dict) and cert.get("cert_path"):
+                tls["certificate_path"] = cert["cert_path"]
+                tls["key_path"] = cert.get("key_path")
+            else:
+                raise CoreError(
+                    "TLS inbound needs certificate paths (managed-certificate "
+                    "integration is not wired into the studio document yet) — "
+                    "provide certificate.cert_path/key_path, or use Advanced mode."
+                )
+            ib["tls"] = tls
+        # protocol specifics
+        if proto == "shadowsocks" and raw.get("method"):
+            ib["method"] = raw["method"]
+        if proto == "vless" and raw.get("flow"):
+            ib["_client_flow"] = raw["flow"]  # client-level, link rendering
+        if proto == "hysteria2":
+            for k in ("up_mbps", "down_mbps"):
+                if raw.get(k) not in (None, ""):
+                    ib[k.replace("_mbps", "_mbps")] = int(raw[k])
+            if raw.get("obfs"):
+                ib["obfs"] = {"type": "salamander", "password": raw["obfs"]}
+        if proto == "tuic" and raw.get("congestion_control"):
+            ib["congestion_control"] = raw["congestion_control"]
+        return ib
+
     def render_config(self) -> dict[str, Any]:
         """Desired-state → full sing-box JSON (deterministic, testable)."""
         outbounds = [
@@ -205,7 +386,7 @@ class SingBoxDriver(BaseCoreDriver):
                 "auto_detect_interface": True,
             },
         }
-        if self.settings.get("stats_enabled"):
+        if self.settings.get("stats_enabled") and self._v2ray_api_supported():
             config["experimental"] = {
                 "v2ray_api": {
                     "listen": self.settings["stats_api"],
@@ -221,7 +402,33 @@ class SingBoxDriver(BaseCoreDriver):
                     },
                 },
             }
+        elif self.settings.get("stats_enabled"):
+            self._stats_error = (
+                "this sing-box build lacks the v2ray_api build tag — "
+                "per-user accounting disabled (install a with_v2ray_api build)"
+            )
+            if not self._stats_degrade_warned:
+                logger.warning(
+                    "sing-box: stats_enabled but this build lacks the v2ray_api "
+                    "build tag — starting WITHOUT per-user accounting; install "
+                    "a build with -tags with_v2ray_api to restore it."
+                )
+                self._stats_degrade_warned = True
         return config
+
+    def _v2ray_api_supported(self) -> bool:
+        """Lazy one-shot probe, cached per binary (reset after install)."""
+        if self._v2ray_supported is None:
+            probe = getattr(self._backend, "probe_v2ray_support", None)
+            if probe is None:
+                self._v2ray_supported = True  # fakes/tests without a probe: legacy behavior
+            else:
+                try:
+                    self._v2ray_supported = bool(probe())
+                except Exception as exc:  # noqa: BLE001 — never block render
+                    logger.warning("sing-box v2ray_api probe failed (%s) — assuming unsupported", exc)
+                    self._v2ray_supported = False
+        return self._v2ray_supported
 
     async def _republish(self) -> None:
         await asyncio.to_thread(self._backend.apply_config, self.render_config())
@@ -265,9 +472,11 @@ class SingBoxDriver(BaseCoreDriver):
     async def install(self) -> None:
         """Fetch the latest sing-box release binary matching this OS/arch."""
         await asyncio.to_thread(self._backend.install_binary)
+        self._v2ray_supported = None  # binary changed: re-probe on next render
 
     async def update(self, version: str | None = None) -> str:
         await asyncio.to_thread(self._backend.install_binary)
+        self._v2ray_supported = None
         new_version = await asyncio.to_thread(self._backend.version) or "unknown"
         return new_version
 

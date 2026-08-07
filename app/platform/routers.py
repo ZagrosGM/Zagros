@@ -267,6 +267,18 @@ async def studio_raw(core_id: str, runtime=Depends(get_runtime)):
     return {"core_id": core_id, "json": await runtime.studio.raw_text(core_id, driver)}
 
 
+@zagros_admin_router.get("/cores/{core_id}/wizard-schema")
+async def core_wizard_schema(core_id: str):
+    """Dynamic inbound-wizard blueprint (protocols × transports × securities
+    × fields) for THIS engine — the dashboard stepper renders it verbatim."""
+    from app.studio.wizard import blueprint_for
+
+    try:
+        return blueprint_for(core_id)
+    except KeyError:
+        raise HTTPException(404, f"no inbound-wizard blueprint for core '{core_id}'") from None
+
+
 class StudioPatchBody(BaseModel):
     operations: list[PatchOperation]
 
@@ -278,6 +290,20 @@ async def studio_preview(core_id: str, body: StudioPatchBody,
     return await runtime.studio.preview(driver, body.operations)
 
 
+async def _materialize_studio(runtime, core_id: str, driver) -> str | None:
+    """Push the freshly-applied studio document INTO the core (sing-box,
+    tuic, … implement apply_studio_document). Engines without a hook keep
+    the document-only surface (alpha.6 semantic) — returned as a warning so
+    the operator isn't told the core changed when it did not."""
+    doc = await runtime.studio_store.get_document(core_id)
+    hook = getattr(driver, "apply_studio_document", None)
+    if hook is None or doc is None:
+        return ("document saved; this engine applies it on next start "
+                "(no live studio→core bridge for this driver)")
+    await hook(doc)
+    return None
+
+
 @zagros_admin_router.post("/studio/{core_id}/apply")
 async def studio_apply(core_id: str, body: StudioPatchBody,
                        runtime=Depends(get_runtime)):
@@ -285,7 +311,8 @@ async def studio_apply(core_id: str, body: StudioPatchBody,
     result = await runtime.studio.apply(driver, body.operations)
     if not result.valid:
         raise HTTPException(422, {"errors": result.errors})
-    return result
+    warning = await _materialize_studio(runtime, core_id, driver)
+    return {**result.model_dump(), "materialized": warning is None, "notice": warning}
 
 
 @zagros_admin_router.post("/studio/{core_id}/wizard/inbound")
@@ -298,7 +325,8 @@ async def studio_wizard_inbound(core_id: str, spec: InboundSpec,
         raise HTTPException(422, str(exc)) from exc
     if not result.valid:
         raise HTTPException(422, {"errors": result.errors})
-    return result
+    warning = await _materialize_studio(runtime, core_id, driver)
+    return {**result.model_dump(), "materialized": warning is None, "notice": warning}
 
 
 def _driver_or_404(runtime, core_id: str):

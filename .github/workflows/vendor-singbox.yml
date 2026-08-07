@@ -114,8 +114,11 @@ jobs:
           ASSET="sing-box-${{ inputs.version }}-v2rayapi-linux-${{ matrix.arch }}.tar.gz"
           tar -czf "$GITHUB_WORKSPACE/$ASSET" sing-box
           cd "$GITHUB_WORKSPACE"
-          sha256sum "$ASSET" >> sha256sums.txt
-          sha256sum -c <(grep "$ASSET" sha256sums.txt)
+          # per-arch sums filename — a shared sha256sums.txt would COLLIDE when
+          # the publish job flattens the matrix artifacts (merge-multiple),
+          # silently keeping only one arch's line.
+          sha256sum "$ASSET" > "sha256sums-linux-${{ matrix.arch }}.txt"
+          sha256sum -c "sha256sums-linux-${{ matrix.arch }}.txt"
 
       - name: Upload assets
         uses: actions/upload-artifact@v4
@@ -123,7 +126,7 @@ jobs:
           name: vendored-${{ matrix.arch }}
           path: |
             sing-box-${{ inputs.version }}-v2rayapi-linux-${{ matrix.arch }}.tar.gz
-            sha256sums.txt
+            sha256sums-linux-${{ matrix.arch }}.txt
           if-no-files-found: error
 
   publish:
@@ -141,9 +144,14 @@ jobs:
       - name: Merge + verify checksum manifest
         run: |
           set -euo pipefail
-          sort -u sha256sums.txt > sha256sums.all && mv sha256sums.all sha256sums.txt
+          # every arch shipped its own sums file (no collision); the RELEASED
+          # manifest is the union of all of them, and it must cover every
+          # tarball — a silent gap is a publishing failure, not a warning.
+          cat sha256sums-linux-*.txt | sort -u > sha256sums.txt
           ls -la
-          while read -r sum file; do echo "$sum  $file" | sha256sum -c -; done < sha256sums.txt
+          for tb in sing-box-*.tar.gz; do grep -q "  $tb\$" sha256sums.txt || {
+            echo "FATAL: $tb missing from sha256sums.txt" >&2; exit 2; }; done
+          sha256sum -c sha256sums.txt
 
       - name: Record provenance
         run: |

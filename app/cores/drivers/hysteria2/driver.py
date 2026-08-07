@@ -131,6 +131,10 @@ class Hysteria2Driver(BaseCoreDriver):
         },
         homepage="https://v2.hysteria.network/",
         release_repo="apernet/hysteria",
+        # ONE QUIC listener per server — the studio manages it as a
+        # single-entry inbound (wizard = configure-the-listener).
+        studio_inbounds_path="/inbounds",
+        studio_max_inbounds=1,
         provides=set(),
         requires=set(),
     )
@@ -217,6 +221,59 @@ class Hysteria2Driver(BaseCoreDriver):
         await asyncio.to_thread(self._backend.apply_config, self.render_server_config())
         if await asyncio.to_thread(self._backend.is_running):
             await asyncio.to_thread(self._backend.restart)
+
+    # ------------------------------------------------------------------ #
+    # Config Studio bridge (single-listener engine)
+    # ------------------------------------------------------------------ #
+    def export_config_document(self) -> dict[str, Any]:
+        """Studio seed: the hy2 listener modelled as a one-entry inbound
+        (pure settings read, works while stopped)."""
+        s = self.settings
+        return {
+            "inbounds": [{
+                "tag": "hysteria2",
+                "protocol": "hysteria2",
+                "listen": s.get("listen") or "::",
+                "port": int(s.get("port") or 443),
+                "sni": s.get("advertise_sni") or s.get("cert_common_name") or "",
+                "masquerade": s.get("masquerade_url") or "",
+                "up_mbps": s.get("bandwidth_up") or "",
+                "down_mbps": s.get("bandwidth_down") or "",
+                "obfs": "",
+                "has_obfs": bool(s.get("obfs_password")),
+                "has_certificate": bool(s.get("cert_path") and s.get("key_path")),
+            }],
+        }
+
+    async def apply_studio_document(self, document: dict[str, Any]) -> None:
+        """Adopt the studio document's single entry as THE hy2 listener
+        (settings mutate → same validated _publish path as Start)."""
+        inbounds = (document or {}).get("inbounds") or []
+        if len(inbounds) != 1:
+            raise CoreError(
+                f"hysteria2 serves exactly ONE listener; the studio document "
+                f"carries {len(inbounds)} inbounds — keep exactly one."
+            )
+        ib = inbounds[0]
+        if str(ib.get("protocol") or "hysteria2") != "hysteria2":
+            raise CoreError(f"a hysteria2 core cannot host a '{ib.get('protocol')}' listener.")
+        s = self.settings
+        if ib.get("port") is not None:
+            s["port"] = int(ib["port"])
+        if ib.get("listen"):
+            s["listen"] = str(ib["listen"])
+        if ib.get("sni") is not None:
+            s["advertise_sni"] = str(ib["sni"])
+            s["cert_common_name"] = str(ib["sni"]) or s.get("cert_common_name")
+        if ib.get("masquerade") is not None:
+            s["masquerade_url"] = str(ib["masquerade"])
+        if ib.get("up_mbps") not in (None, ""):
+            s["bandwidth_up"] = str(ib["up_mbps"])
+        if ib.get("down_mbps") not in (None, ""):
+            s["bandwidth_down"] = str(ib["down_mbps"])
+        if ib.get("obfs"):
+            s["obfs_password"] = str(ib["obfs"])
+        await self._publish()
 
     # ------------------------------------------------------------------ #
     # lifecycle

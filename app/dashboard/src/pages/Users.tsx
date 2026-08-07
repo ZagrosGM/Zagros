@@ -10,7 +10,7 @@ import { useMemo, useRef, useState } from "react";
 import { DataTable, type Column } from "../components/DataTable";
 import { toast } from "../components/feedback";
 import { ConfirmDialog, Dialog } from "../components/overlays";
-import { Badge, Button, Card, EmptyState, Field, Input, Progress, Select, StatusDot, Switch, cn } from "../components/ui";
+import { Badge, Button, Card, EmptyState, Field, Input, Progress, Select, StatusDot, Switch, Tooltip, cn } from "../components/ui";
 import CoreAccessPicker from "../components/CoreAccessPicker";
 import { api, ApiError } from "../lib/api";
 import { useDigits, formatBytes, formatDate, formatRelative, usagePercent } from "../lib/format";
@@ -52,6 +52,28 @@ function absolutizeSub(path: string | null | undefined): string | null {
   if (!path) return null;
   if (/^https?:\/\//i.test(path)) return path;
   return `${window.location.origin}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+/** Per-row one-click subscription link copy with a tooltip (α7.1, item 7):
+ *  visible without opening the overflow menu, disabled when the user has no
+ *  link instead of failing late. */
+function CopySubButton({ u, copySub }: { u: User; copySub: (u: User) => void }) {
+  const t = useT();
+  const [done, setDone] = useState(false);
+  const hasLink = absolutizeSub(u.subscription_url ?? u.sub_url) !== null;
+  return (
+    <Tooltip label={done ? t("common.copied") : t("users.copySub")}>
+      <button
+        type="button"
+        aria-label={t("users.copySub")}
+        disabled={!hasLink}
+        onClick={() => { copySub(u); setDone(true); setTimeout(() => setDone(false), 1600); }}
+        className="rounded-lg p-1.5 text-content-3 hover:bg-surface-3 hover:text-content disabled:pointer-events-none disabled:opacity-40"
+      >
+        {done ? <Check size={15} className="text-ok" /> : <Link2 size={15} />}
+      </button>
+    </Tooltip>
+  );
 }
 
 export default function Users() {
@@ -218,9 +240,10 @@ export default function Users() {
       } },
     { id: "online", header: t("users.lastOnline"), width: "120px", cell: (u) => <span className="text-[12px] text-content-3">{formatRelative(u.online_at, digits)}</span> },
     {
-      id: "actions", header: "", width: "44px",
+      id: "actions", header: "", width: "82px",
       cell: (u) => (
-        <div className="relative" onClick={(e) => e.stopPropagation()}>
+        <div className="relative flex items-center justify-end gap-0.5" onClick={(e) => e.stopPropagation()}>
+          <CopySubButton u={u} copySub={copySub} />
           <button aria-label="actions" onClick={() => setMenuFor(menuFor === u.username ? null : u.username)}
             className="rounded-lg p-1.5 text-content-3 hover:bg-surface-3 hover:text-content">
             <MoreHorizontal size={16} />
@@ -230,7 +253,7 @@ export default function Users() {
               <div className="fixed inset-0 z-30" onClick={() => setMenuFor(null)} />
               <div className="absolute end-0 top-8 z-40 w-48 overflow-hidden rounded-xl border border-border-strong bg-surface-1 py-1 shadow-pop">
                 <MenuItem icon={<ExternalLink size={14} />} label={t("common.edit")} onClick={() => { setMenuFor(null); setDialog({ mode: "edit", user: u }); }} />
-                <MenuItem icon={<Copy size={14} />} label={t("users.qr")} onClick={() => { setMenuFor(null); copySub(u); }} />
+                <MenuItem icon={<Copy size={14} />} label={t("users.copySub")} onClick={() => { setMenuFor(null); copySub(u); }} />
                 <MenuItem icon={<RefreshCcw size={14} />} label={t("users.resetUsage")} onClick={() => { setMenuFor(null); resetUsage.mutate(u.username); }} />
                 <MenuItem icon={<Link2 size={14} />} label={t("users.revokeSub")} onClick={() => { setMenuFor(null); revokeSub.mutate(u.username); }} />
                 <div className="my-1 border-t border-border" />

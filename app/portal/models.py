@@ -1,10 +1,12 @@
 """Portal data models (framework-agnostic)."""
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 from app.cores.delivery import DeliverySection
 
@@ -14,6 +16,27 @@ class ClientAuthMode(str, Enum):
 
     SUBSCRIPTION_LINK = "subscription_link"    # Mode 1: classic portal page
     APPLICATION_LOGIN = "application_login"    # Mode 2: official Zagros app only
+
+
+_AUTH_MODE_ALIASES = {
+    # the alpha.7 dashboard posted this shorthand id and got a raw 422 —
+    # normalize at the schema edge so the spellings stay one concept
+    "app_login": "application_login",
+    "sub_link": "subscription_link",
+}
+
+
+def _coerce_auth_mode(value: object) -> object:
+    if isinstance(value, str):
+        return _AUTH_MODE_ALIASES.get(value, value)
+    return value
+
+
+CoercedClientAuthMode = Annotated[ClientAuthMode,
+                                  BeforeValidator(_coerce_auth_mode)]
+
+
+_SUBSCRIPTION_PATH_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 
 
 class PageKind(str, Enum):
@@ -36,11 +59,33 @@ class PortalSettings(BaseModel):
 
     brand: str = "Zagros"
     portal_title: str = "اشتراک من"
-    client_auth_mode: ClientAuthMode = ClientAuthMode.SUBSCRIPTION_LINK
+    client_auth_mode: CoercedClientAuthMode = ClientAuthMode.SUBSCRIPTION_LINK
     app_downloads: list[AppDownload] = Field(default_factory=list)
     support_url: str | None = None
     home_url: str | None = None
     default_lang: str = "fa"
+    # identity + link shape surfaced by the dashboard Subscription page
+    # (alpha.7 saved them and they silently vanished — the schema now owns
+    # them, with validation instead of free-form strings):
+    app_name: str = Field(default="Zagros", max_length=64)
+    subscription_path: str = "sub"
+    subscription_url_prefix: str | None = None
+
+    def normalize(self) -> "PortalSettings":
+        prefix = (self.subscription_url_prefix or "").strip() or None
+        if prefix is not None:
+            prefix = prefix.rstrip("/")
+        path = (self.subscription_path or "sub").strip().strip("/") or "sub"
+        if not _SUBSCRIPTION_PATH_RE.match(path):
+            raise ValueError(
+                "subscription_path must be 1-32 chars of a-z 0-9 . _ - "
+                "and start with a letter or digit"
+            )
+        return self.model_copy(update={
+            "app_name": (self.app_name or "Zagros").strip() or "Zagros",
+            "subscription_path": path,
+            "subscription_url_prefix": prefix,
+        })
 
 
 class PortalUserView(BaseModel):
@@ -53,7 +98,9 @@ class PortalUserView(BaseModel):
     data_limit_bytes: int | None = None
     expire_at: datetime | None = None
     online: bool = False
-    client_auth_mode: ClientAuthMode | None = None   # per-user override (None = inherit)
+    # per-user override (None = inherit); same alias tolerance as the panel
+    # setting so a legacy-stored shorthand cannot 422 the whole portal page
+    client_auth_mode: CoercedClientAuthMode | None = None
 
     @property
     def remaining_bytes(self) -> int | None:
@@ -73,6 +120,7 @@ class PortalPage(BaseModel):
 
     kind: PageKind
     brand: str = "Zagros"
+    app_name: str = "Zagros"
     title: str = ""
     lang: str = "fa"
     direction: str = "rtl"

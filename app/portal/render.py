@@ -30,6 +30,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "show_qr": "نمایش QR", "details": "جزئیات اتصال", "reveal": "نمایش",
         "hide": "پنهان", "download_app": "دانلود اپلیکیشن", "support": "پشتیبانی",
         "app_only_title": "اتصال فقط از طریق اپلیکیشن رسمی",
+        "app_name_line": "اپلیکیشن رسمی: {app}",
         "app_only_body": "این اشتراک با لینک تحویل داده نمی‌شود. برای اتصال، "
                           "اپلیکیشن رسمی را نصب کنید و با نام کاربری و رمز عبور "
                           "اختصاصی اپ خود وارد شوید.",
@@ -50,6 +51,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "show_qr": "Show QR", "details": "Connection details", "reveal": "Reveal",
         "hide": "Hide", "download_app": "Download the app", "support": "Support",
         "app_only_title": "Connection via the official app only",
+        "app_name_line": "Official app: {app}",
         "app_only_body": "This subscription is not delivered as a link. Install the "
                           "official app and sign in with your dedicated app username "
                           "and password.",
@@ -382,6 +384,7 @@ def _render_app_page(page: PortalPage) -> str:
 <div class="card" style="text-align:center;padding:34px 22px">
   <div style="font-size:44px">📲</div>
   <h2 style="margin:10px 0 6px">{_esc(_t(page, "app_only_title"))}</h2>
+  <p style="color:var(--zg-muted);margin:0 0 8px">{_esc(_t(page, "app_name_line")).replace("{app}", _esc(page.app_name))}</p>
   <p style="color:var(--zg-muted);max-width:52ch;margin:0 auto">{_esc(_t(page, "app_only_body"))}</p>
   <div class="stat" style="max-width:320px;margin:18px auto 0">
     <div class="k">{_esc(_t(page, "your_username"))}</div>

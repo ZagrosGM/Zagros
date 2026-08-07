@@ -6,7 +6,7 @@ import { ChevronLeft, Eye, Plus, Trash2, Waypoints, Wand2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "../components/feedback";
 import { ConfirmDialog, Dialog } from "../components/overlays";
-import { Badge, Button, Card, CardHeader, EmptyState, Field, Input, Select, Skeleton } from "../components/ui";
+import { Badge, Button, Card, CardHeader, EmptyState, Field, Input, Select, Skeleton, Textarea } from "../components/ui";
 import { api, ApiError } from "../lib/api";
 import { useT } from "../lib/i18n";
 import type { CoreView } from "../lib/types";
@@ -16,7 +16,7 @@ import type { CoreView } from "../lib/types";
 // × fields. NOTHING is hardcoded here anymore; switching cores changes the
 // entire flow (the alpha.7 fixed-list complaint, fixed at the source).
 interface WizardField {
-  key: string; label: string; type: "string" | "int" | "bool" | "select" | "multiselect" | "password";
+  key: string; label: string; type: "string" | "int" | "bool" | "select" | "multiselect" | "password" | "textarea" | "file";
   required?: boolean; default?: string | number | boolean | string[];
   options?: string[]; placeholder?: string; help?: string;
 }
@@ -248,9 +248,10 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
       }>
       {schema.isLoading && <div className="space-y-2"><Skeleton className="h-10" /><Skeleton className="h-24" /></div>}
       {schema.isError && (
-        <p role="alert" className="rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">
-          no dynamic wizard blueprint for this core — use Advanced Mode for raw edits.
-        </p>
+        <div role="alert" className="flex items-center justify-between gap-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">
+          <span>the wizard blueprint could not be loaded from the panel.</span>
+          <Button variant="ghost" size="sm" onClick={() => schema.refetch()}>retry</Button>
+        </div>
       )}
       {schema.data && step < 3 && renderChoice}
       {schema.data && step === 3 && spec && (
@@ -289,6 +290,34 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
                       onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })}>
                       {f.options?.map((o) => <option key={o} value={o}>{o || "—"}</option>)}
                     </Select>
+                  ) : f.type === "bool" ? (
+                    <Select value={(fields[f.key] as string) ?? String(f.default ?? "false")}
+                      onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })}>
+                      <option value="true">yes</option>
+                      <option value="false">no</option>
+                    </Select>
+                  ) : f.type === "textarea" || f.type === "file" ? (
+                    <div className="sm:col-span-2">
+                      <Textarea rows={f.type === "file" ? 5 : 3}
+                        placeholder={f.placeholder}
+                        value={(fields[f.key] as string) ?? String(f.default ?? "")}
+                        onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })} dir="ltr"
+                        className="font-mono text-[11px]" />
+                      {f.type === "file" && (
+                        <label className="mt-1.5 inline-flex cursor-pointer items-center gap-1.5 text-[11px] text-brand hover:underline">
+                          <input type="file" className="hidden" accept=".pem,.crt,.cer,.key,.txt"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (!file) return;
+                              const rd = new FileReader();
+                              rd.onload = () => setFields((cur) => ({ ...cur, [f.key]: String(rd.result ?? "") }));
+                              rd.readAsText(file);
+                              e.target.value = "";
+                            }} />
+                          or choose a file to paste its content
+                        </label>
+                      )}
+                    </div>
                   ) : f.type === "multiselect" ? (
                     <div className="flex flex-wrap gap-2 pt-1.5">
                       {f.options?.map((o) => {

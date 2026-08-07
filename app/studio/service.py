@@ -178,11 +178,32 @@ class ConfigStudioService:
 
         Tolerant seeding: an empty document (core never started, store fresh)
         gets the inbound-list parent created first instead of 422ing.
+
+        Single-listener engines (``studio_max_inbounds == 1``: tuic, hy2,
+        wireguard, openvpn, ssh) physically bind ONE socket — the wizard
+        replaces that listener instead of appending a second entry the
+        engine could never serve (the old flow appended; the driver's
+        cardinality guard then died as an opaque 500).
         """
-        ops = self.wizard_patch(driver, spec)
         path = driver.metadata.studio_inbounds_path
+        entry_ops = self.wizard_patch(driver, spec)
         if path:
             doc = await self.get_document(driver.metadata.id, driver)
+            # getattr: third-party/metadata-mock drivers predate the field —
+            # absence must read as "unlimited", never AttributeError.
+            max_inbounds = getattr(driver.metadata, "studio_max_inbounds", None)
             if self._path_missing(doc, path):
-                ops = [PatchOperation(op="add", path=path, value=[])] + ops
-        return await self.apply(driver, ops)
+                ops = [PatchOperation(op="add", path=path, value=[])] + entry_ops
+            elif max_inbounds is not None:
+                existing = doc.get(path.strip("/"), [])
+                count = len(existing) if isinstance(existing, list) else 0
+                if count >= max_inbounds:
+                    # replace the ONLY listener (wizard = configure-the-listener)
+                    entry = entry_ops[0].value
+                    ops = [PatchOperation(op="replace", path=f"{path}/0", value=entry)]
+                else:
+                    ops = entry_ops
+            else:
+                ops = entry_ops
+            return await self.apply(driver, ops)
+        return await self.apply(driver, entry_ops)

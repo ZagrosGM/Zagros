@@ -95,6 +95,10 @@ class SoftEtherDriver(BaseCoreDriver):
         homepage="https://www.softether.org/",
         provides=set(),
         requires=set(),
+        # hub features are listener-shaped but MANY-valued: each studio
+        # inbound entry = one hub capability (l2tp/sstp/pptp/ovpn-clone)
+        # driven by a real vpncmd verb on apply.
+        studio_inbounds_path="/inbounds",
     )
 
     def __init__(self, settings: dict[str, Any] | None = None, *, backend: Any | None = None):
@@ -107,6 +111,114 @@ class SoftEtherDriver(BaseCoreDriver):
         self._accounts: dict[str, UserAccount] = {}
         self._usage = DeltaTracker()
         self._suspended_expire_restore: dict[str, str | None] = {}
+
+    # ------------------------------------------------------------------ #
+    # Config Studio bridge — every entry maps to REAL vpncmd verbs
+    # ------------------------------------------------------------------ #
+    _STUDIO_FEATURES = {"l2tp", "sstp", "pptp", "ovpn"}
+
+    def export_config_document(self) -> dict[str, Any]:
+        """Studio seed: hub feature flags as inbound entries (settings-shaped;
+        ipsec_psk is write-only like every secret in the studio surface)."""
+        s = self.settings
+        inbounds: list[dict[str, Any]] = []
+        if s.get("feature_l2tp"):
+            inbounds.append({
+                "tag": "l2tp", "protocol": "l2tp", "port": 0,
+                "ipsec_psk": "", "has_ipsec_psk": bool(s.get("ipsec_psk")),
+            })
+        if s.get("feature_sstp"):
+            inbounds.append({"tag": "sstp", "protocol": "sstp", "port": 443})
+        if s.get("feature_pptp"):
+            inbounds.append({"tag": "pptp", "protocol": "pptp", "port": 1723})
+        if s.get("feature_ovpn"):
+            inbounds.append({
+                "tag": "ovpn", "protocol": "ovpn", "port": 0,
+                "ports": str(s.get("ovpn_ports") or "1194"),
+            })
+        if not inbounds:
+            inbounds.append({
+                "tag": "l2tp", "protocol": "l2tp", "port": 0,
+                "ipsec_psk": "", "has_ipsec_psk": bool(s.get("ipsec_psk")),
+            })
+        return {"inbounds": inbounds}
+
+    async def apply_studio_document(self, document: dict[str, Any]) -> None:
+        """Converge hub features to the document via real vpncmd verbs:
+        IPsecEnable / OpenVPNEnable / ListenerCreate / ListenerDelete.
+
+        Every entry maps to a server-side effect; entries with unknown
+        protocols or missing required fields (the L2TP pre-shared key)
+        fail loudly BEFORE anything is commanded."""
+        inbounds = (document or {}).get("inbounds") or []
+        if not inbounds:
+            raise CoreError(
+                "an empty SoftEther feature set disconnects every client — "
+                "keep at least one feature inbound."
+            )
+        s = self.settings
+        hub = s["hub"]
+        wanted: dict[str, dict[str, Any]] = {}
+        for ib in inbounds:
+            proto = str(ib.get("protocol") or "")
+            if proto not in self._STUDIO_FEATURES:
+                raise CoreError(
+                    f"SoftEther has no hub feature '{proto}' "
+                    f"({sorted(self._STUDIO_FEATURES)})."
+                )
+            wanted[proto] = ib
+
+        if not await asyncio.to_thread(self._backend.reachable):
+            raise CoreError(
+                "SoftEther hub is not reachable right now — Start the core "
+                "first; feature changes need a live vpncmd."
+            )
+
+        # L2TP/IPsec (PSK required when enabled)
+        if "l2tp" in wanted:
+            psk = str(wanted["l2tp"].get("ipsec_psk") or "") or str(s.get("ipsec_psk") or "")
+            if not psk:
+                raise CoreError("L2TP/IPsec needs a pre-shared key (ipsec_psk).")
+            await asyncio.to_thread(
+                self._backend._cmd,  # noqa: SLF001 — same driver package
+                f"IPsecEnable /L2TP:yes /L2TPRAW:no /ETHERIP:no /PSK:{psk} /DEFAULTHUB:{hub}")
+            s["ipsec_psk"] = psk
+            s["feature_l2tp"] = True
+        else:
+            await asyncio.to_thread(
+                self._backend._cmd,  # noqa: SLF001
+                f"IPsecEnable /L2TP:no /L2TPRAW:no /ETHERIP:no /DEFAULTHUB:{hub}")
+            s["feature_l2tp"] = False
+
+        # SSTP / PPTP — plain TCP listeners on the hub; converge
+        # idempotently (create-or-ignore-exists, delete-or-ignore-absent)
+        for proto, port in (("sstp", 443), ("pptp", 1723)):
+            if proto in wanted:
+                try:
+                    await asyncio.to_thread(self._backend._cmd, f"ListenerCreate {port}")  # noqa: SLF001
+                except CoreError as exc:
+                    if "exist" not in str(exc).lower():
+                        raise
+                s[f"feature_{proto}"] = True
+            else:
+                try:
+                    await asyncio.to_thread(self._backend._cmd, f"ListenerDelete {port}")  # noqa: SLF001
+                except CoreError as exc:
+                    if "exist" not in str(exc).lower():
+                        raise
+                s[f"feature_{proto}"] = False
+
+        # OpenVPN clone server
+        if "ovpn" in wanted:
+            ports = str(wanted["ovpn"].get("ports") or s.get("ovpn_ports") or "1194")
+            await asyncio.to_thread(
+                self._backend._cmd, f"OpenVPNEnable yes /PORTS:{ports}")  # noqa: SLF001
+            s["ovpn_ports"] = ports
+            s["feature_ovpn"] = True
+        else:
+            await asyncio.to_thread(
+                self._backend._cmd, "OpenVPNEnable no /PORTS:1194")  # noqa: SLF001
+            s["feature_ovpn"] = False
 
     # ------------------------------------------------------------------ #
     # lifecycle — the server is external/systemd-owned; we verify reachability

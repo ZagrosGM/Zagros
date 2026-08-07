@@ -1,6 +1,6 @@
 // Design-system primitives — every page composes these; nothing restyles per page.
 import { clsx } from "clsx";
-import { forwardRef, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import { forwardRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 import { AlertTriangle, Loader2, PackageOpen } from "lucide-react";
 
 export const cn = (...args: Parameters<typeof clsx>) => clsx(...args);
@@ -245,6 +245,27 @@ export function Tabs({ tabs, active, onChange }: { tabs: { id: string; label: Re
   );
 }
 
+// --------------------------------------------------------------- Tooltip ---
+/** Minimal accessible tooltip: hover/focus reveals, ESC/blur hides.
+ *  Positioned so table row actions can explain icon-only buttons. */
+export function Tooltip({ label, children, className }: { label: ReactNode; children: ReactNode; className?: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className={cn("relative inline-flex", className)}
+      onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}
+      onFocus={() => setOpen(true)} onBlur={() => setOpen(false)}>
+      {children}
+      <span role="tooltip"
+        className={cn(
+          "pointer-events-none absolute bottom-full start-1/2 z-50 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-lg border border-border-strong bg-surface-1 px-2 py-1 text-[11px] font-medium text-content shadow-pop transition-opacity rtl:translate-x-1/2",
+          open ? "opacity-100" : "opacity-0",
+        )}>
+        {label}
+      </span>
+    </span>
+  );
+}
+
 export function CopyButton({ text, copiedLabel = "Copied!", copyLabel = "Copy" }: { text: string; copiedLabel?: string; copyLabel?: string }) {
   const [done, setDone] = useStateBool();
   return (
@@ -256,7 +277,6 @@ export function CopyButton({ text, copiedLabel = "Copied!", copyLabel = "Copy" }
   );
 }
 
-import { useState } from "react";
 function useStateBool(): [boolean, () => void] {
   const [v, setV] = useState(false);
   return [v, () => { setV(true); setTimeout(() => setV(false), 1600); }];

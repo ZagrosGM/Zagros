@@ -21,6 +21,36 @@ from app.cores.types import CoreMetrics
 
 logger = logging.getLogger("zagros.cores.drivers.singbox")
 
+#: Zagros-vendored stats-enabled builds live as release assets here (see
+#: ``.github/workflows/vendor-singbox.yml`` — compiled from the upstream tag
+#: with its OWN Makefile release tag-list plus ``with_v2ray_api``).
+_VENDOR_REPO = "ZagrosGM/Zagros"
+
+
+def _vendored_checksum(version: str, asset: str, *, timeout: float = 20.0) -> str | None:
+    """Expected sha256 for a vendored stats-enabled asset, from the vendor
+    release's ``sha256sums.txt``. ``None`` when no vendor release exists for
+    this version (fallback to the upstream build is then the honest path)."""
+    import urllib.error
+    import urllib.request
+
+    url = (f"https://github.com/{_VENDOR_REPO}/releases/download/"
+           f"vendor-singbox-{version}/sha256sums.txt")
+    req = urllib.request.Request(url, headers={"User-Agent": "zagros-panel"})
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode()
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return None
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("*") == asset:
+            return parts[0]
+    return None
+
 
 @runtime_checkable
 class SingBoxBackend(Protocol):
@@ -41,8 +71,10 @@ class SingBoxBackend(Protocol):
 class TrafficStatsSource(Protocol):
     """Per-user cumulative counters from sing-box's experimental v2ray API.
 
-    sing-box (built with the `with_v2ray_api` tag, as official releases are)
-    serves the v2fly StatsService; users are enumerable counters of the form
+    Only builds carrying the ``with_v2ray_api`` tag serve it — and upstream
+    stopped shipping that tag in official releases entirely (verified
+    1.9.7→1.13.16), which is why Zagros vendors its own build. The server
+    speaks the v2fly StatsService; users are enumerable counters of the form
     ``user>>><name>>>>traffic>>>uplink``. The vendored xray_api package is
     reused here purely as a *protocol client* — this is not a dependency on
     the Xray core.
@@ -115,7 +147,17 @@ class LocalSingBoxBackend:
 
         Installs the **pinned** release from settings (``release_version``,
         default below) — reproducible and immune to GitHub API rate limits;
-        set it empty to track the latest release instead."""
+        set it empty to track the latest release instead.
+
+        Binary source (alpha.7.1): NO official sing-box build (verified
+        1.9.7→1.13.16) ships the ``with_v2ray_api`` tag, so per-user
+        accounting is impossible on upstream binaries. Zagros therefore
+        vendors its own build of the SAME upstream tag compiled with the
+        official release tag-list plus ``with_v2ray_api`` (reproducible by
+        ``.github/workflows/vendor-singbox.yml``; sha256 published in the
+        vendor release and verified before install). Order: vendored build →
+        upstream build (accounting then degrades, honestly, via the probe).
+        """
         from app.cores.github_install import host_arch, host_os, install_from_github
 
         system, arch = host_os(), host_arch()
@@ -124,22 +166,59 @@ class LocalSingBoxBackend:
         target = (os.path.join(os.path.abspath(self.work_dir), self.executable)
                   if bare else self.executable)
         version = self.settings.get("release_version", "1.12.4") or None
-        pinned = None
+        source = "upstream"
+        tag: str | None = None
         if version:
-            asset = f"sing-box-{version}-{system}-{arch}{suffix}"
-            pinned = (f"v{version}", asset)
-        tag = install_from_github(
-            repo="SagerNet/sing-box",
-            target_executable=target,
-            asset_match=lambda name: f"-{system}-{arch}" in name and name.endswith(suffix),
-            member_match=lambda name: name.endswith("sing-box.exe") if system == "windows"
-            else (name.endswith("/sing-box") or name == "sing-box"),
-            pinned=pinned,
-        )
+            vendored_asset = f"sing-box-{version}-v2rayapi-{system}-{arch}{suffix}"
+            checksum = _vendored_checksum(version, vendored_asset)
+            if checksum:
+                tag = install_from_github(
+                    repo=_VENDOR_REPO,
+                    target_executable=target,
+                    asset_match=lambda name: name == vendored_asset,
+                    member_match=lambda m: m.endswith("sing-box.exe") if system == "windows"
+                    else (m.endswith("/sing-box") or m == "sing-box"),
+                    pinned=(f"vendor-singbox-{version}", vendored_asset),
+                    sha256=checksum,
+                )
+                source = "vendor"
+            else:
+                logger.info(
+                    "no vendored stats-enabled sing-box build for %s/%s v%s — "
+                    "falling back to the official build (per-user accounting "
+                    "will probe-degrade if the API is absent)",
+                    system, arch, version,
+                )
+                tag = install_from_github(
+                    repo="SagerNet/sing-box",
+                    target_executable=target,
+                    asset_match=lambda n: f"-{system}-{arch}" in n and n.endswith(suffix),
+                    member_match=lambda m: m.endswith("sing-box.exe") if system == "windows"
+                    else (m.endswith("/sing-box") or m == "sing-box"),
+                    pinned=(f"v{version}", f"sing-box-{version}-{system}-{arch}{suffix}"),
+                )
+        else:
+            tag = install_from_github(
+                repo="SagerNet/sing-box",
+                target_executable=target,
+                asset_match=lambda n: f"-{system}-{arch}" in n and n.endswith(suffix),
+                member_match=lambda m: m.endswith("sing-box.exe") if system == "windows"
+                else (m.endswith("/sing-box") or m == "sing-box"),
+            )
         if target != self.executable:
             self.executable = target
             if not self._proc.is_running:
                 self._proc = self._make_proc()
+        if source == "vendor" and not self.probe_v2ray_support():
+            # the whole point of the vendored build IS the stats API — a probe
+            # failure here means our packaging is broken; say so, loudly,
+            # instead of silently degrading the feature we just promised.
+            raise CoreError(
+                "the vendored stats-enabled sing-box build failed its "
+                "v2ray_api probe after install — refusing to run a build that "
+                "cannot deliver per-user accounting. Report this as a "
+                "vendor-build bug."
+            )
         return tag
 
     # ------------------------------------------------------------------ #

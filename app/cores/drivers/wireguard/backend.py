@@ -34,11 +34,20 @@ class WireGuardBackend(Protocol):
     # setup
     def is_installed(self) -> bool: ...
     def install_packages(self) -> str: ...
+    def missing_dependencies(self) -> dict[str, str]:
+        """tool → os-package for everything wg / wg-quick hard-require."""
+        ...
     def ensure_server_keys(self) -> tuple[str, str]:
         """Persisted server keypair → (private_key, public_key)."""
         ...
     def generate_keypair(self) -> tuple[str, str]: ...
     def generate_preshared(self) -> str: ...
+    def public_from_private(self, private: str) -> str:
+        """Derive the public key for an operator-supplied private key."""
+        ...
+    def write_server_private_key(self, private: str) -> None:
+        """Persist an operator-supplied server private key (0600)."""
+        ...
 
     # lifecycle
     def up(self, config_text: str) -> None: ...
@@ -57,6 +66,18 @@ class WireGuardBackend(Protocol):
 
 class LocalWireGuardBackend:
     """Production backend based on wireguard-tools (`wg` / `wg-quick`)."""
+
+    # wg-quick is a bash wrapper that shells out to more than just `wg`:
+    # `ip` (iproute2) is a strict requirement (alpha.7 report: "ip: command
+    # not found"); iptables backs the default-route/PostUp hooks operators
+    # rely on.  DNS helpers are deliberately NOT required server-side:
+    # panel-rendered server interfaces carry no `DNS =` lines.
+    _REQUIRED_TOOLS: dict[str, str] = {
+        "wg": "wireguard-tools",
+        "wg-quick": "wireguard-tools",
+        "ip": "iproute2",
+        "iptables": "iptables",
+    }
 
     def __init__(self, settings: dict):
         self.interface = settings.get("interface", "mzwg0")
@@ -88,7 +109,7 @@ class LocalWireGuardBackend:
             ) from exc
         if proc.returncode != 0:
             raise CoreError(
-                f"'{' '.join(argv)}' failed (rc={proc.returncode}): {proc.stderr.strip()}"
+                f"{' '.join(argv)!r} failed (rc={proc.returncode}): {proc.stderr.strip()}"
             )
         return proc.stdout
 
@@ -105,13 +126,45 @@ class LocalWireGuardBackend:
     def is_installed(self) -> bool:
         return shutil.which(self.executable) is not None
 
+    def missing_dependencies(self) -> dict[str, str]:
+        """tool → package mapping for tools wg / wg-quick need but lack."""
+        missing: dict[str, str] = {}
+        for tool, package in self._REQUIRED_TOOLS.items():
+            if shutil.which(tool) is None:
+                missing[tool] = package
+        return missing
+
+    def _ensure_host_tools(self) -> None:
+        """Self-heal host prerequisites before touching the interface.
+
+        Raises an honest CoreError that names the missing OS packages when
+        they are absent (and after a failed install attempt) instead of
+        surfacing wg-quick's raw ``ip: command not found``.
+        """
+        missing = self.missing_dependencies()
+        if not missing:
+            return
+        logger.warning(
+            "wireguard: host prerequisites missing %s — installing…",
+            ", ".join(sorted(set(missing.values()))),
+        )
+        self.install_packages()  # CoreError from the PM propagates as-is
+        still_missing = self.missing_dependencies()
+        if still_missing:
+            packages = ", ".join(sorted(set(still_missing.values())))
+            raise CoreError(
+                f"wireguard prerequisites still missing after install attempt: "
+                f"{packages}. Install them with your OS package manager and retry."
+            )
+
     def install_packages(self) -> str:
+        # wg-quick hard-requires `ip` and (for the default-route/PostUp
+        # firewall hooks) iptables — install all three in one shot.
         for manager, argv in (
-            ("apt-get", ["apt-get", "install", "-y", "wireguard-tools"]),
-            ("dnf", ["dnf", "install", "-y", "wireguard-tools"]),
-            ("yum", ["yum", "install", "-y", "wireguard-tools"]),
-            ("pacman", ["pacman", "-S", "--noconfirm", "wireguard-tools"]),
-            ("apk", ["apk", "add", "wireguard-tools"]),
+            ("apt-get", ["apt-get", "install", "-y", "wireguard-tools", "iproute2", "iptables"]),
+            ("dnf", ["dnf", "install", "-y", "wireguard-tools", "iproute", "iptables"]),
+            ("yum", ["yum", "install", "-y", "wireguard-tools", "iproute", "iptables"]),
+            ("pacman", ["pacman", "-S", "--noconfirm", "wireguard-tools", "iproute2", "iptables"]),
         ):
             if shutil.which(manager):
                 if manager == "apt-get":
@@ -120,7 +173,7 @@ class LocalWireGuardBackend:
                     # "Unable to locate package" (reported on alpha.7 VPS)
                     self._run(["apt-get", "update"], timeout=600)
                 return self._run(argv, timeout=600)
-        raise CoreError("no supported package manager found (apt/dnf/yum/pacman/apk).")
+        raise CoreError("no supported package manager found (apt/dnf/yum/pacman).")
 
     def generate_keypair(self) -> tuple[str, str]:
         private = self._run([self.executable, "genkey"]).strip()
@@ -129,6 +182,17 @@ class LocalWireGuardBackend:
 
     def generate_preshared(self) -> str:
         return self._run([self.executable, "genpsk"]).strip()
+
+    def public_from_private(self, private: str) -> str:
+        """Derive the public key for an operator-supplied private key (the
+        studio wizard accepts a custom server key)."""
+        return self._run([self.executable, "pubkey"], input_text=private.strip()).strip()
+
+    def write_server_private_key(self, private: str) -> None:
+        """Persist an operator-supplied server private key (0600), replacing
+        the generated one — next start/render uses it."""
+        self._atomic_write(self.key_path, private.strip() + "\n", mode=0o600)
+        logger.info("wireguard: server key file replaced (%s).", self.key_path)
 
     def ensure_server_keys(self) -> tuple[str, str]:
         if os.path.exists(self.key_path):
@@ -145,6 +209,7 @@ class LocalWireGuardBackend:
     # lifecycle
     # ------------------------------------------------------------------ #
     def up(self, config_text: str) -> None:
+        self._ensure_host_tools()
         self._atomic_write(self.config_path, config_text)
         if self.is_running():
             self.sync(config_text)

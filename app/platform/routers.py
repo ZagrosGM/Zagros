@@ -4,7 +4,10 @@ Mount under the FastAPI app (the lazy ``app`` builder includes this router
 when the platform runtime is available):
 
     Client API:  /client/v1/...        (official Zagros app)
-    Portal:      /zagros/sub/{token}   (driver-agnostic subscription page)
+    Portal:      /zagros/sub/{token}   (driver-agnostic subscription page;
+                 the path segment is customizable via portal settings —
+                 /zagros/{subscription_path}/{token} — with /zagros/sub/...
+                 kept as the canonical alias so existing links never die)
     Admin API:   /api/zagros/...       (dashboard, studio, settings, migration)
 """
 from __future__ import annotations
@@ -19,6 +22,7 @@ import base64 as _base64
 from app.clientapi.errors import ClientApiError
 from app.clientapi.models import AppCredentials, AuthTokens, ConnectOffer
 from app.clientapi.tokens import TokenError
+from app.cores.exceptions import CoreError
 from app.portal.models import PortalSettings
 from app.portal.render import render_page_html
 from app.studio.jsonpatch import PatchOperation
@@ -145,11 +149,8 @@ async def client_config(body: ConfigBody, runtime=Depends(get_runtime)):
 # Subscription portal (/zagros/sub/{token})
 # ---------------------------------------------------------------------- #
 
-@zagros_router.get("/zagros/sub/{token}", response_class=HTMLResponse)
-async def subscription_portal(token: str, request: Request,
-                              runtime=Depends(get_runtime),
-                              accept_language: str | None = Header(default=None),
-                              user_agent: str | None = Header(default=None)):
+async def _verify_and_serve(token, request, runtime,
+                            accept_language, user_agent):
     try:
         payload = runtime.tokens.verify(token, expected_type="sub")
     except TokenError as exc:
@@ -159,7 +160,40 @@ async def subscription_portal(token: str, request: Request,
     current_jti = await runtime.kv.get_value(f"portal.sub_jti.{user_id}")
     if current_jti is None or payload.get("jti") != current_jti:
         raise HTTPException(404, "subscription not found")
+    return await _serve_subscription(runtime, user_id, request,
+                                     accept_language, user_agent)
 
+
+@zagros_router.get("/zagros/sub/{token}", response_class=HTMLResponse)
+async def subscription_portal(token: str, request: Request,
+                              runtime=Depends(get_runtime),
+                              accept_language: str | None = Header(default=None),
+                              user_agent: str | None = Header(default=None)):
+    """Canonical subscription URL — always served, regardless of the
+    configured path, so already-issued links keep working forever."""
+    return await _verify_and_serve(token, request, runtime,
+                                   accept_language, user_agent)
+
+
+@zagros_router.get("/zagros/{sub_path}/{token}", response_class=HTMLResponse)
+async def subscription_portal_custom_path(sub_path: str, token: str,
+                                          request: Request,
+                                          runtime=Depends(get_runtime),
+                                          accept_language: str | None = Header(default=None),
+                                          user_agent: str | None = Header(default=None)):
+    """Settings-driven subscription URL segment. Fail closed: any segment
+    other than the currently-configured one is indistinguishable from a bad
+    token (404), never a redirect that would leak the configured path."""
+    settings = await runtime.portal_settings.get_portal_settings()
+    if sub_path != settings.subscription_path:
+        raise HTTPException(404, "subscription not found")
+    return await _verify_and_serve(token, request, runtime,
+                                   accept_language, user_agent)
+
+
+async def _serve_subscription(runtime, user_id: int, request: Request,
+                              accept_language: str | None,
+                              user_agent: str | None):
     # Content negotiation: subscription CLIENTS (v2rayNG, Streisand, sing-box,
     # Nekoray...) fetch the link list (base64 body, Marzban convention);
     # BROWSERS get the rich multi-core portal page.
@@ -237,7 +271,11 @@ async def issue_subscription_token(user_id: int, runtime=Depends(get_runtime)):
                                     token_type="sub")
     payload = runtime.tokens.verify(token, expected_type="sub")
     await runtime.kv.set_value(f"portal.sub_jti.{user_id}", payload["jti"])
-    return {"token": token, "path": f"/zagros/sub/{token}"}
+    settings = await runtime.portal_settings.get_portal_settings()
+    path = f"/zagros/{settings.subscription_path}/{token}"
+    prefix = (settings.subscription_url_prefix or "").rstrip("/")
+    return {"token": token, "path": path,
+            "url": f"{prefix}{path}" if prefix else None}
 
 
 @zagros_admin_router.post("/users/by-username/{username}/subscription-token")
@@ -291,16 +329,22 @@ async def studio_preview(core_id: str, body: StudioPatchBody,
 
 
 async def _materialize_studio(runtime, core_id: str, driver) -> str | None:
-    """Push the freshly-applied studio document INTO the core (sing-box,
-    tuic, … implement apply_studio_document). Engines without a hook keep
-    the document-only surface (alpha.6 semantic) — returned as a warning so
-    the operator isn't told the core changed when it did not."""
+    """Push the freshly-applied studio document INTO the core (every driver
+    implements apply_studio_document since alpha.7.1).
+
+    A driver that refuses the document (CoreError — cardinality violation,
+    untranslatable wizard field, failed restart) speaks to the OPERATOR, so
+    it maps to 422 with the driver's own message instead of leaking out as
+    an opaque 500 (the field-reported TUIC/OpenVPN/… wizard crash)."""
     doc = await runtime.studio_store.get_document(core_id)
     hook = getattr(driver, "apply_studio_document", None)
     if hook is None or doc is None:
         return ("document saved; this engine applies it on next start "
                 "(no live studio→core bridge for this driver)")
-    await hook(doc)
+    try:
+        await hook(doc)
+    except CoreError as exc:
+        raise HTTPException(422, f"{core_id}: {exc}") from exc
     return None
 
 
@@ -344,7 +388,10 @@ async def get_portal_settings(runtime=Depends(get_runtime)):
 @zagros_admin_router.put("/settings/portal", response_model=PortalSettings)
 async def put_portal_settings(settings: PortalSettings,
                               runtime=Depends(get_runtime)):
-    return await runtime.portal_settings.save_portal_settings(settings)
+    try:
+        return await runtime.portal_settings.save_portal_settings(settings)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @zagros_admin_router.post("/users/{user_id}/app-credentials",

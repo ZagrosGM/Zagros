@@ -5,10 +5,27 @@ History: the first wizard (alpha.6) hardcoded a single fixed protocol list in
 the dashboard, so switching cores changed nothing and asking for e.g. VLESS
 over HTTPUpgrade was impossible. This module turns the matrix into data the
 dashboard stepper renders directly, per core ID, honoring what each engine
-actually supports (xhttp exists only in Xray, REALITY only where the TLS
-stack offers it, TUIC/Hysteria2 are QUIC-only, …).
+actually supports.
 
-Shape consumed by the dashboard (JSON):
+The matrix is EMPIRICALLY PINNED (alpha.7.1): every offered
+protocol × transport × security cell on xray/sing-box was rendered by the
+real driver translator and validated against the real binary
+(``xray run -test`` Xray 26.3.27, ``sing-box check`` 1.12.4):
+
+* Xray: transports tcp/ws/httpupgrade/grpc/xhttp/mkcp — HTTP/2 and QUIC
+  transports were REMOVED upstream ("migrated to XHTTP stream-one H2 & H3",
+  old mKCP header/seed gone); REALITY only accepts VLESS/Trojan over
+  RAW/XHTTP/gRPC; ss-2022 ciphers are refused here (legacy account material
+  cannot be 2022 uPSKs — the sing-box core carries verified ss-2022).
+* sing-box: no xhttp (Xray-only), no wireguard inbound (outbound-only in
+  sing-box); shadowsocks has NO transport/tls sections at all; socks/mixed
+  carry no TLS; naive REQUIRES TLS; generic quic transport requires TLS;
+  2022-blake3-chacha20-poly1305 is Xray-only.
+
+Anything not offered here still works through Advanced Mode (raw JSON), but
+no matrix cell offered here may produce an unbootable config.
+
+Shape consumed by the dashboard (JSON)::
 
     {
       "core_id": "singbox",
@@ -25,7 +42,8 @@ Shape consumed by the dashboard (JSON):
     }
 
 FieldSpec: {key, label, type, required, default, options, placeholder, help}
-with type ∈ string|int|bool|select|multiselect|password.
+with type ∈ string|int|bool|select|multiselect|password|textarea|file.
+Secrets are write-only (apply keeps the stored value when left blank).
 """
 from __future__ import annotations
 
@@ -57,13 +75,26 @@ GRPC_FIELDS = [_f("service_name", "gRPC service name", placeholder="grpc-service
                _f("authority", "authority (optional)")]
 XHTTP_FIELDS = [_f("path", "XHTTP path", placeholder="/xh", default="/xh"),
                 _f("host", "Host header", placeholder="cdn.example.com"),
-                _f("mode", "mode", "select", options=["auto", "packet-up", "stream-up"], default="auto")]
+                _f("mode", "mode", "select", options=["auto", "packet-up", "stream-up", "stream-one"],
+                   default="auto")]
 H2_FIELDS = [_f("path", "HTTP/2 path", placeholder="/h2", default="/h2"),
              _f("host", "HTTP/2 host", placeholder="cdn.example.com")]
+MKCP_FIELDS = [_f("mtu", "MTU", "int", default=1350, placeholder="1350"),
+               _f("tti", "TTI (ms)", "int", default=50, placeholder="50"),
+               _f("congestion", "congestion control", "bool", default=False,
+                  help="Header/seed were removed upstream (migrated to finalmask); "
+                       "this is the pure mKCP UDP transport.")]
 
 SNI_FIELD = _f("sni", "SNI / certificate name", placeholder="panel.example.com", required=True)
 ALPN_FIELD = _f("alpn", "ALPN", "multiselect", options=_ALPN, default=["h2", "http/1.1"])
-TLS_EXTRA = [_f("certificate", "certificate (managed certs listed; blank = panel default)")]
+TLS_UPLOAD_FIELDS = [
+    _f("certificate", "certificate (PEM)", "file",
+       help="Paste a PEM certificate, or leave blank and the panel generates a "
+            "self-signed one — upload a real pair for production domains."),
+    _f("certificate_key", "private key (PEM)", "file",
+       help="Paste the matching PEM private key (never stored in the studio "
+            "document — written 0600 into the core's cert dir)."),
+]
 REALITY_FIELDS = [
     _f("sni", "camouflage target (dest/SNI)", placeholder="www.microsoft.com", required=True,
        help="The server masquerades as this TLS site; it must be TLSv1.3 + h2 capable."),
@@ -73,11 +104,15 @@ REALITY_FIELDS = [
 FLOW_FIELD = _f("flow", "flow", "select",
                 options=["xtls-rprx-vision"], required=False,
                 help="recommended for VLESS + TCP + TLS/REALITY")
-SS_FIELD = _f("method", "cipher", "select", required=True,
-              options=["2022-blake3-aes-128-gcm", "2022-blake3-chacha20-poly1305",
-                       "aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305",
-                       "xchacha20-ietf-poly1305", "none"],
-              default="2022-blake3-aes-128-gcm")
+
+
+def _ss_field(*, allow_2022: bool) -> Field:
+    options = ["aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305",
+               "xchacha20-ietf-poly1305"]
+    if allow_2022:
+        options = ["2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", *options]
+    return _f("method", "cipher", "select", required=True, options=options,
+              default=options[0])
 
 
 def _sec(id_: str, label: str, fields: list[Field]) -> Security:
@@ -97,7 +132,7 @@ def _none(extra: list[Field] | None = None) -> Security:
 
 
 def _tls(extra: list[Field] | None = None) -> Security:
-    return _sec("tls", "TLS", [SNI_FIELD, ALPN_FIELD, *TLS_EXTRA, *(extra or [])])
+    return _sec("tls", "TLS", [SNI_FIELD, ALPN_FIELD, *TLS_UPLOAD_FIELDS, *(extra or [])])
 
 
 def _reality() -> Security:
@@ -105,69 +140,132 @@ def _reality() -> Security:
 
 
 # --------------------------------------------------------------------- #
-# modern engines: xray & sing-box share the proxy-protocol space but NOT
-# the transport space (xhttp is Xray-only; sing-box uses plain "http")
+# transport builders per engine (the verified matrices)
 # --------------------------------------------------------------------- #
 
-def _modern_blueprint(*, xhttp: bool, h2_id: str, h2_label: str) -> list[Protocol]:
-    transports = [
-        _tr("tcp", "TCP (raw)", [_reality(), _tls(), _none()]),
-        _tr("ws", "WebSocket", [_reality(), _tls(), _none()]),
-        _tr("httpupgrade", "HTTPUpgrade", [_reality(), _tls(), _none()]),
-        _tr("grpc", "gRPC", [_reality(), _tls(), _none()]),
-    ]
-    if xhttp:
-        transports.append(_tr("xhttp", "XHTTP", [_reality(), _tls(), _none()]))
-    else:
-        transports.append(_tr(h2_id, h2_label, [_tls(), _none()]))
+def _xray_transports(*, reality: bool, tls_only: bool = False,
+                     none_too: bool = True) -> list[Transport]:
+    """Verified Xray matrix: REALITY only on RAW/XHTTP/gRPC."""
+    out: list[Transport] = []
+    for tid, label, fields in (
+        ("tcp", "TCP (raw)", None),
+        ("ws", "WebSocket", None),
+        ("httpupgrade", "HTTPUpgrade", None),
+        ("grpc", "gRPC", None),
+        ("xhttp", "XHTTP", None),
+        ("mkcp", "mKCP (UDP)", MKCP_FIELDS),
+    ):
+        secs: list[Security] = []
+        if reality and tid in ("tcp", "xhttp", "grpc"):
+            secs.append(_reality())
+        if tls_only:
+            secs.append(_tls())
+        elif none_too:
+            secs += [_tls(), _none()]
+        else:
+            secs.append(_none())
+        if fields:
+            for s in secs:
+                s["fields"] = [*fields, *s["fields"]]
+        out.append(_tr(tid, label, secs))
+    return out
 
-    vmess_transports = [
-        _tr("tcp", "TCP (raw)", [_tls(), _none()]),
-        _tr("ws", "WebSocket", [_tls(), _none()]),
-        _tr("httpupgrade", "HTTPUpgrade", [_tls(), _none()]),
-        _tr("grpc", "gRPC", [_tls(), _none()]),
-        *([_tr("xhttp", "XHTTP", [_tls(), _none()])] if xhttp else
-          [_tr(h2_id, h2_label, [_tls(), _none()])]),
-    ]
+
+def _singbox_proxy_transports(*, reality: bool, none_too: bool = True) -> list[Transport]:
+    """Verified sing-box matrix (vless/vmess/trojan): quic only under TLS/REALITY."""
+    out: list[Transport] = []
+    for tid, label in (
+        ("tcp", "TCP (raw)"),
+        ("ws", "WebSocket"),
+        ("httpupgrade", "HTTPUpgrade"),
+        ("grpc", "gRPC"),
+        ("http", "HTTP/2"),
+    ):
+        if reality:
+            secs = [_reality(), _tls()] + ([_none()] if none_too else [])
+        else:
+            secs = [_tls()] + ([_none()] if none_too else [])
+        out.append(_tr(tid, label, secs))
+    # generic quic transport exists but REFUSES to boot without TLS
+    secs_q = [_tls()] + ([_reality()] if reality else [])
+    out.append(_tr("quic", "QUIC", secs_q))
+    return out
+
+
+# --------------------------------------------------------------------- #
+# xray (Xray-core)
+# --------------------------------------------------------------------- #
+
+def _xray_blueprint() -> list[Protocol]:
     return [
-        _proto("vless", "VLESS", 443, [
-            # flow only works on raw TCP (+ TLS/REALITY) — honest matrix
-            _tr("tcp", "TCP (raw)", [_reality(), _tls([FLOW_FIELD]), _none()]),
-            *[t for t in transports if t["id"] != "tcp"],
+        _proto("vless", "VLESS", 443, _xray_transports(reality=True)),
+        _proto("vmess", "VMess", 8443, _xray_transports(reality=False)),
+        _proto("trojan", "Trojan", 8443,
+               [t for t in _xray_transports(reality=True, tls_only=True)]),
+        _proto("shadowsocks", "Shadowsocks", 8388,
+               [_tr(t["id"], t["label"],
+                    [_tls([*(MKCP_FIELDS if t["id"] == "mkcp" else []),
+                           _ss_field(allow_2022=False)]),
+                     _none([*(MKCP_FIELDS if t["id"] == "mkcp" else []),
+                            _ss_field(allow_2022=False)])])
+                for t in _xray_transports(reality=False)]),
+        _proto("socks", "SOCKS5 proxy", 1080, [
+            _tr("tcp", "TCP (local proxy)", [
+                _tls(), _none([
+                    _f("auth", "authentication", "select",
+                       options=["noauth", "password"], default="noauth"),
+                    _f("username", "username (when password auth)"),
+                    _f("password", "password (when password auth)", "password"),
+                ]),
+            ]),
         ]),
-        _proto("vmess", "VMess", 8443, vmess_transports),
-        _proto("trojan", "Trojan", 8443, [
-            _tr(t["id"], t["label"], [_reality(), _tls()]) for t in transports
+        _proto("http", "HTTP proxy", 8080, [
+            _tr("tcp", "TCP (local proxy)", [
+                _tls(), _none([
+                    _f("username", "username (optional)"),
+                    _f("password", "password (optional)", "password"),
+                ]),
+            ]),
         ]),
-        _proto("shadowsocks", "Shadowsocks", 8388, [
-            _tr("tcp", "TCP+UDP (in-protocol)", [_none([SS_FIELD])]),
+        _proto("dokodemo-door", "Dokodemo (port-forward · DNS relay)", 8053, [
+            _tr("tcp", "TCP+UDP forward", [
+                _tls(), _none([
+                    _f("address", "target address", placeholder="1.1.1.1",
+                       required=True,
+                       help="For a DNS relay use a resolver IP with target port 53."),
+                    _f("target_port", "target port", "int", default=53, required=True),
+                ]),
+            ]),
         ]),
     ]
 
 
-# transport/security specific field attachments (applied at merge time)
-_TRANSPORT_FIELDS: dict[str, list[Field]] = {
-    "ws": WS_FIELDS,
-    "httpupgrade": HUP_FIELDS,
-    "grpc": GRPC_FIELDS,
-    "xhttp": XHTTP_FIELDS,
-    "http": H2_FIELDS,
-    "h2": H2_FIELDS,
-}
+# --------------------------------------------------------------------- #
+# sing-box
+# --------------------------------------------------------------------- #
+
+def _proxy_user_fields(*, required: bool) -> list[Field]:
+    return [
+        _f("username", "username" + ("" if required else " (optional)"), required=required),
+        _f("password", "password" + ("" if required else " (optional)"), "password",
+           required=required),
+    ]
 
 
-# --------------------------------------------------------------------- #
-# QUIC engines
-# --------------------------------------------------------------------- #
+def _hy2_fields() -> list[Field]:
+    return [
+        _f("up_mbps", "up (Mbps)", "int", placeholder="0 = unlimited"),
+        _f("down_mbps", "down (Mbps)", "int", placeholder="0 = unlimited"),
+        _f("obfs", "obfs password", "password",
+           help="salamander obfuscation; blank = disabled/unchanged"),
+        _f("masquerade", "masquerade URL", placeholder="https://www.bing.com",
+           help="non-hysteria traffic is answered like this site"),
+    ]
+
 
 def _hy2_protocol() -> Protocol:
     return _proto("hysteria2", "Hysteria 2", 4430, [
-        _tr("quic", "QUIC (UDP)", [_tls([
-            _f("up_mbps", "up (Mbps)", "int", placeholder="0 = unlimited"),
-            _f("down_mbps", "down (Mbps)", "int", placeholder="0 = unlimited"),
-            _f("obfs", "obfs password", "password",
-               help="salamander obfuscation; blank = disabled"),
-        ])]),
+        _tr("quic", "QUIC (UDP)", [_tls(_hy2_fields())]),
     ])
 
 
@@ -176,53 +274,179 @@ def _tuic_protocol() -> Protocol:
         _tr("quic", "QUIC (UDP)", [_tls([
             _f("congestion_control", "congestion control", "select",
                options=["bbr", "cubic", "new_reno"], default="bbr"),
+            _f("zero_rtt", "0-RTT handshake", "bool", default=False),
         ])]),
     ])
 
 
+def _singbox_blueprint() -> list[Protocol]:
+    return [
+        _proto("vless", "VLESS", 443, _singbox_proxy_transports(reality=True)),
+        _proto("vmess", "VMess", 8443, _singbox_proxy_transports(reality=False)),
+        _proto("trojan", "Trojan", 8443,
+               _singbox_proxy_transports(reality=True, none_too=False)),
+        _proto("shadowsocks", "Shadowsocks", 8388, [
+            _tr("tcp", "TCP+UDP (in-protocol)", [_none([_ss_field(allow_2022=True)])]),
+        ]),
+        _proto("socks", "SOCKS5 proxy", 1080, [
+            _tr("tcp", "TCP (local proxy)", [_none(_proxy_user_fields(required=False))]),
+        ]),
+        _proto("http", "HTTP proxy", 8080, [
+            _tr("tcp", "TCP (local proxy)", [
+                _tls(_proxy_user_fields(required=False)),
+                _none(_proxy_user_fields(required=False)),
+            ]),
+        ]),
+        _proto("mixed", "Mixed (SOCKS+HTTP)", 1081, [
+            _tr("tcp", "TCP (local proxy)", [_none(_proxy_user_fields(required=False))]),
+        ]),
+        _proto("naive", "NaiveProxy", 8446, [
+            _tr("quic", "HTTPS/2 (implicit)", [_tls(_proxy_user_fields(required=True))]),
+        ]),
+        _proto("anytls", "AnyTLS", 8447, [
+            _tr("tcp", "TCP", [_tls([
+                _f("password", "listener password", "password", required=True),
+                _f("padding_scheme", "padding scheme", "textarea",
+                   placeholder="stop=8\n0=30-30\n1=100-400",
+                   help="one per line, AnyTLS padding grammar (optional)"),
+            ])]),
+        ]),
+        _hy2_protocol(),
+        _tuic_protocol(),
+    ]
+
+
 # --------------------------------------------------------------------- #
-# OS-level engines
+# OS-level engines (single-listener studio contracts)
 # --------------------------------------------------------------------- #
 
 def _wireguard_blueprint() -> list[Protocol]:
     return [_proto("wireguard", "WireGuard", 51820, [
         _tr("udp", "UDP", [_none([
-            _f("listen", "listen address (blank = all)", placeholder="0.0.0.0"),
+            _f("listen", "listen address", placeholder="0.0.0.0", default="0.0.0.0"),
+            _f("mtu", "MTU (blank = kernel default)", "int", placeholder="1420"),
+            _f("dns", "DNS servers (comma separated)", default="1.1.1.1",
+               placeholder="1.1.1.1, 9.9.9.9"),
+            _f("address", "tunnel subnet (Address)", default="10.66.66.0/24",
+               placeholder="10.66.66.0/24", required=True),
+            _f("endpoint", "public endpoint host", placeholder="vpn.example.com",
+               help="written into delivered client configs (.conf / QR)"),
+            _f("allowed_ips", "peer AllowedIPs default", default="0.0.0.0/0, ::/0",
+               help="routed subnets on the client side"),
+            _f("persistent_keepalive", "PersistentKeepalive (s)", "int", default=25),
+            _f("preshared_keys", "per-peer preshared keys", "bool", default=True,
+               help="recommended (post-quantum safety layer)"),
+            _f("private_key", "server private key (blank = keep current)", "password",
+               help="paste a base64 wireguard key ONLY to replace the server key; "
+                    "the public key is derived and shown after applying"),
+            _f("public_key", "server public key (derived — read only)", "string",
+               help="filled automatically; clients authenticate the server with it"),
         ])]),
     ])]
 
 
 def _openvpn_blueprint() -> list[Protocol]:
     return [_proto("ovpn", "OpenVPN", 1194, [
-        _tr("udp", "UDP", [_tls([
-            _f("cipher", "cipher", "select",
+        _tr("udp", "UDP", [_none([
+            _f("topology", "topology", "select",
+               options=["subnet", "net30", "p2p"], default="subnet"),
+            _f("cipher", "data cipher", "select",
                options=["AES-256-GCM", "AES-128-GCM", "CHACHA20-POLY1305"],
                default="AES-256-GCM"),
+            _f("cipher_fallback", "fallback cipher", "select",
+               options=["AES-128-GCM", "AES-256-GCM", "CHACHA20-POLY1305"],
+               default="AES-128-GCM"),
+            _f("auth", "HMAC auth digest (blank = omit)", "select",
+               options=["", "SHA256", "SHA384", "SHA512"], default="",
+               help="ignored by AEAD data ciphers; only set for legacy CBC setups"),
+            _f("compression", "compression", "select",
+               options=["", "lz4-v2", "lzo"], default="",
+               help="off is safest (VORACLE); enable only when you know why"),
+            _f("dns", "pushed DNS servers (comma separated)",
+               default="1.1.1.1, 8.8.8.8"),
+            _f("redirect_gateway", "redirect default gateway", "bool", default=True),
+            _f("auth_mode", "authentication", "select",
+               options=["management", "static"], default="management",
+               help="management = per-user panel credentials · static = one shared "
+                    "username/password pair"),
+            _f("username", "static username (auth=static)"),
+            _f("password", "static password (auth=static)", "password"),
+            _f("ca_certificate", "CA certificate (PEM, optional)", "file",
+               help="bring-your-own PKI: replaces the panel-generated CA"),
+            _f("certificate", "server certificate (PEM, optional)", "file",
+               help="must match the uploaded private key (validated)"),
+            _f("certificate_key", "server private key (PEM, optional)", "file"),
+            _f("extra_directives", "extra server.conf directives", "textarea",
+               placeholder="max-clients 512\nsndbuf 393216",
+               help="advanced, appended verbatim — one directive per line"),
         ])]),
-        _tr("tcp", "TCP", [_tls([
-            _f("cipher", "cipher", "select",
+        _tr("tcp", "TCP", [_none([
+            _f("topology", "topology", "select",
+               options=["subnet", "net30", "p2p"], default="subnet"),
+            _f("cipher", "data cipher", "select",
                options=["AES-256-GCM", "AES-128-GCM", "CHACHA20-POLY1305"],
                default="AES-256-GCM"),
+            _f("cipher_fallback", "fallback cipher", "select",
+               options=["AES-128-GCM", "AES-256-GCM", "CHACHA20-POLY1305"],
+               default="AES-128-GCM"),
+            _f("auth", "HMAC auth digest (blank = omit)", "select",
+               options=["", "SHA256", "SHA384", "SHA512"], default=""),
+            _f("compression", "compression", "select",
+               options=["", "lz4-v2", "lzo"], default=""),
+            _f("dns", "pushed DNS servers (comma separated)",
+               default="1.1.1.1, 8.8.8.8"),
+            _f("redirect_gateway", "redirect default gateway", "bool", default=True),
+            _f("auth_mode", "authentication", "select",
+               options=["management", "static"], default="management"),
+            _f("username", "static username (auth=static)"),
+            _f("password", "static password (auth=static)", "password"),
+            _f("ca_certificate", "CA certificate (PEM, optional)", "file"),
+            _f("certificate", "server certificate (PEM, optional)", "file"),
+            _f("certificate_key", "server private key (PEM, optional)", "file"),
+            _f("extra_directives", "extra server.conf directives", "textarea",
+               placeholder="max-clients 512"),
+        ])]),
+    ])]
+
+
+def _ssh_blueprint() -> list[Protocol]:
+    return [_proto("ssh", "SSH tunnel", 2022, [
+        _tr("tcp", "TCP", [_none([
+            _f("authentication", "authentication", "select",
+               options=["both", "password", "publickey"], default="both",
+               help="never lets you disable BOTH — the panel refuses an sshd "
+                    "nobody could log into"),
+            _f("password", "default account password (blank = keep)", "password",
+               help="used for panel users provisioned without an own password"),
+            _f("public_key", "default account public key (blank = keep)", "file",
+               help="ssh-ed25519/ssh-rsa/… — installed for every tunnel account "
+                    "via a panel-owned AuthorizedKeysFile"),
+            _f("shell", "login shell", "select",
+               options=["/bin/bash", "/bin/sh", "/bin/zsh", "/usr/sbin/nologin"],
+               default="/bin/bash"),
+            _f("sftp", "SFTP subsystem", "bool", default=True),
+            _f("max_sessions", "max sessions per connection", "int", default=10),
+            _f("banner", "login banner text (blank = keep)", "textarea",
+               placeholder="Welcome to this server"),
         ])]),
     ])]
 
 
 def _softether_blueprint() -> list[Protocol]:
-    """Hub-managed listeners: enabling/configuring them is one command away;
-    the wizard models exactly the levers vpncmd offers."""
+    """Hub-managed features: every entry maps to real vpncmd verbs on apply."""
     return [
         _proto("l2tp", "L2TP/IPsec (hub)", 0, [
             _tr("udp", "UDP 500/4500/1701", [_none([
                 _f("ipsec_psk", "IPsec pre-shared key", required=True),
             ])]),
         ]),
-        _proto("sstp", "SSTP (hub)", 0, [
+        _proto("sstp", "SSTP (hub)", 443, [
             _tr("tcp", "TCP 443 (hub listener)", [_tls()]),
         ]),
-        _proto("pptp", "PPTP (hub)", 0, [
+        _proto("pptp", "PPTP (hub)", 1723, [
             _tr("tcp", "TCP 1723 (hub listener)", [_none()]),
         ]),
-        _proto("ovpn", "OpenVPN clone (hub)", 0, [
+        _proto("ovpn", "OpenVPN clone (hub)", 1194, [
             _tr("udp", "OpenVPN-compatible ports", [_none([
                 _f("ports", "UDP ports (comma separated)", default="1194",
                    placeholder="1194,1195"),
@@ -239,11 +463,9 @@ def blueprint_for(core_id: str) -> dict[str, Any]:
     """The wizard blueprint for one core; KeyError on unknown engine."""
     cid = core_id.lower()
     if cid == "xray":
-        protocols = _modern_blueprint(xhttp=True, h2_id="h2", h2_label="HTTP/2")
+        protocols = _xray_blueprint()
     elif cid == "singbox":
-        protocols = _modern_blueprint(xhttp=False, h2_id="http", h2_label="HTTP/2")
-        # both hy2 + tuic exist natively under sing-box — one engine, all protocols
-        protocols += [_hy2_protocol(), _tuic_protocol()]
+        protocols = _singbox_blueprint()
     elif cid == "hysteria2":
         protocols = [_hy2_protocol()]
     elif cid == "tuic":
@@ -252,18 +474,31 @@ def blueprint_for(core_id: str) -> dict[str, Any]:
         protocols = _wireguard_blueprint()
     elif cid == "openvpn":
         protocols = _openvpn_blueprint()
+    elif cid == "ssh":
+        protocols = _ssh_blueprint()
     elif cid == "softether":
         protocols = _softether_blueprint()
     else:
         raise KeyError(core_id)
+    # transport field libraries ride along every security of that transport
     for p in protocols:
         for t in p["transports"]:
             extra = _TRANSPORT_FIELDS.get(t["id"])
             if not extra:
                 continue
             for s in t["securities"]:
-                # transport fields come first, then security-specific ones;
-                # avoid duplicating when the matrix already inlined them
                 keys = {f["key"] for f in s["fields"]}
-                s["fields"] = [*extra, *s["fields"]] if not keys & {f["key"] for f in extra} else s["fields"]
+                merged = [f for f in extra if f["key"] not in keys]
+                s["fields"] = [*merged, *s["fields"]]
     return {"core_id": cid, "protocols": protocols}
+
+
+# transport/security specific field attachments (applied at merge time)
+_TRANSPORT_FIELDS: dict[str, list[Field]] = {
+    "ws": WS_FIELDS,
+    "httpupgrade": HUP_FIELDS,
+    "grpc": GRPC_FIELDS,
+    "xhttp": XHTTP_FIELDS,
+    "http": H2_FIELDS,
+    "h2": H2_FIELDS,
+}

@@ -101,17 +101,32 @@ def fetch_recent_releases(repo: str, *, limit: int = 10, timeout: float = 20.0) 
 def _download_asset(repo: str, name: str, url: str | None, *,
                     member_match: Callable[[str], bool] | None,
                     extra_members: dict | None = None,
-                    timeout: float) -> tuple[bytes, str]:
+                    timeout: float,
+                    sha256: str | None = None) -> tuple[bytes, str]:
     """Fetch one asset (zip/tar.gz/raw) and return (binary bytes, filename).
 
     ``extra_members``: archive member name → absolute target path; every
     listed member is also extracted and installed with mode 0644.
+    ``sha256``: optional expected digest of the RAW downloaded payload
+    (the archive itself, verified before any extraction) — hard supply-chain
+    check for vendored binaries; mismatch raises, never installs.
     """
     try:
         with _open(url or _DIRECT_DL.format(repo=repo, asset=name), timeout=timeout) as resp:
             blob = resp.read()
     except (urllib.error.URLError, TimeoutError) as exc:
         raise CoreError(f"download of {name} failed: {exc}") from exc
+
+    if sha256 is not None:
+        import hashlib
+
+        actual = hashlib.sha256(blob).hexdigest()
+        if actual.lower() != sha256.lower():
+            raise CoreError(
+                f"checksum mismatch for {name}: expected sha256 {sha256}, "
+                f"got {actual} — refusing to install a payload whose integrity "
+                f"could not be verified."
+            )
 
     def extras_from(namelist, read):
         for member, target in (extra_members or {}).items():
@@ -159,6 +174,7 @@ def install_from_github(
     pinned: tuple[str, str] | None = None,
     extra_members: dict | None = None,
     timeout: float = 180.0,
+    sha256: str | None = None,
 ) -> str:
     """Download the matching asset of *repo*'s latest release and install it.
 
@@ -176,6 +192,9 @@ def install_from_github(
     ``extra_members``: optional mapping of additional archive member names
     (e.g. ``geoip.dat``) to absolute target paths, installed alongside the
     main binary from the same archive with mode 0644.
+    ``sha256``: optional expected digest of the downloaded payload, verified
+    before extraction (used for Zagros-vendored binaries whose checksums are
+    published in the same vendor release).
 
     Returns the release tag (e.g. "v1.11.4", or "latest-direct" when the
     fallback path was used and the exact tag is unknown). Raises CoreError
@@ -186,7 +205,7 @@ def install_from_github(
         data, _ = _download_asset(
             repo, name, _PINNED_DL.format(repo=repo, tag=tag, asset=name),
             member_match=member_match, extra_members=extra_members,
-            timeout=timeout)
+            timeout=timeout, sha256=sha256)
         _install_bytes(data, target_executable)
         return tag
     tag: str | None = None
@@ -213,7 +232,8 @@ def install_from_github(
         tag, name, url = "latest-direct", direct_asset, None
 
     data, _ = _download_asset(repo, name, url, member_match=member_match,
-                              extra_members=extra_members, timeout=timeout)
+                              extra_members=extra_members, timeout=timeout,
+                              sha256=sha256)
     _install_bytes(data, target_executable)
     return tag
 

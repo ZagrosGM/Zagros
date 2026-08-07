@@ -10,6 +10,112 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.7.1] — 2026-08-07 — Hotfix: driver root-fixes + Studio wizard completion
+
+Hotfix release. Every issue reported against `alpha.7` was fixed **at the
+root** — no workarounds, no hidden errors, fully backward compatible.
+
+### Fixed — OS-level driver bring-up (items 1–4)
+
+* **sing-box stats now actually work.** Upstream sing-box binaries ship
+  without the v2ray stats API, so the driver's stats backend could never
+  activate. Zagros now carries a pinned, checksum-verified vendor pipeline:
+  `.github/workflows/vendor-singbox.yml` builds sing-box from source at a
+  tag with the v2ray API enabled (amd64/arm64), publishes
+  `sing-box-<version>-v2rayapi-linux-<arch>.tar.gz` + `sha256sums.txt` as a
+  `vendor-singbox-<version>` release, and `app/cores/github_install.py`
+  downloads the asset, verifies the SHA-256 (lines 105-126/177-196) and
+  installs it atomically. The stats readiness path (`_stats_ready`,
+  `app/platform` sing-box stats wiring) is covered by new tests.
+* **OpenVPN starts on stock hosts.** `openvpn` preflight now checks for the
+  TUN device and NET_ADMIN capability with actionable errors, and the
+  installer compose template grants `cap_add: [NET_ADMIN]` and
+  `devices: [/dev/net/tun:/dev/net/tun]` to the service.
+* **WireGuard pulls its own toolchain.** Host dependencies
+  (`wireguard-tools`/`wg`, `wg-quick`, `iproute2`, `iptables`) are checked
+  and ensured by the driver (`_ensure_host_tools`) instead of failing
+  cryptically mid-apply.
+* **SSH driver bring-up chain is complete.** The driver walks the full
+  `ensure_service` chain (install check → unit enable → start → verify) and
+  refuses to drop a config that would take sshd off port 22 without an
+  explicit guard, so enabling the SSH core can no longer lock
+  administrators out of the host.
+
+### Added — Studio wizard completion for every core (item 5)
+
+* **No driver may answer "use Advanced Mode" anymore.** The wizard
+  blueprint matrix now covers all 8 cores end-to-end (xray full transport
+  × security matrix empirically validated against Xray 26.3.27 — 54/54
+  cells; sing-box 26/26 cells against sing-box 1.12.4; hysteria2, TUIC,
+  OpenVPN, WireGuard, SSH field sets). Single-listener engines
+  (tuic/hysteria2/wireguard/openvpn/ssh) declare
+  `CoreMetadata.studio_max_inbounds = 1` so the wizard replaces
+  `/inbounds/0` instead of appending; other cores keep unlimited appends.
+* **User-facing inbounds catalog stays in sync** with what the cores
+  actually expose, and the dashboard wizards render `file` (upload +
+  textarea fallback), `textarea` and `bool` field kinds natively
+  (`Inbounds.tsx`). The banned "use Advanced Mode" message is gone — a
+  retry banner appears on transient failures instead.
+
+### Fixed — subscription & portal (items 6–8)
+
+* **Dashboard subscription UI matches the backend auth modes**
+  (`Subscriptions.tsx` canonical ids) and users list rows gained a
+  copy-subscription-link button with a real tooltip
+  (`ui.tsx::Tooltip`, hover/focus, `role="tooltip"`).
+* **Access Mode = Application no longer 422s.** Root cause: portal
+  settings accepted arbitrary strings for the subscription path/prefix and
+  propagated them un-normalized, so `application_login` vs `app_login`
+  style values from older payloads failed validation deep in the router.
+  Fixed in `app/portal/models.py`: `ClientAuthMode` alias validator,
+  `subscription_path` / `subscription_url_prefix` normalization (slashes
+  stripped, regex-validated, garbage rejected with a clear `ValueError` →
+  HTTP 422 with a *descriptive* detail), applied at both stores
+  (in-memory + SQL). The router now serves the canonical
+  `/zagros/sub/{token}` plus the settings-defined path
+  (`/zagros/{sub_path}/{token}`, fail-closed 404), and
+  `issue-subscription-token` returns the resolved `path`/`url` so clients
+  never guess. Portal pages personalize with `app_name`.
+
+### Fixed — core runtime hotfixes
+
+* **Cold boot no longer crashes the xray job** on a fresh database:
+  `app/jobs/0_xray_core.py` called `include_db_users()` unconditionally, so
+  `sqlite3.OperationalError: no such table: users` killed startup before
+  migrations finished. The job now probes the schema (`_schema_has_users`)
+  and falls back to a file-only startup config with a CRITICAL log line
+  instead of dying. New regression tests: `tests/jobs/test_xray_core_boot.py`.
+* **sing-box `mixed` inbound keeps its users.** The native-entry
+  translator dropped accounts for `mixed` inbounds (tuple only listed
+  socks/http/naive); `mixed` was validated against the real 1.12.4 binary
+  (`sing-box check`) with users present.
+* **sing-box translator accepts socks + users and mixed + users**
+  (empirically confirmed valid by `sing-box check`).
+* **xray self-signed certificates are no longer re-minted on every
+  apply** — `_materialize_certificate` reuses the existing on-disk pair
+  per tag, removing cert churn and restart ripples.
+* **WireGuard driver no longer raises `NameError`** on its log path
+  (`logging` import added; the same latent bug class was fixed earlier in
+  the SSH driver).
+
+### Tests & verification
+
+* Full Python suite: **490 passed, 7 skipped** (was 426), including new
+  coverage: `tests/cores/test_alpha71_os_drivers.py`,
+  `tests/platform/test_alpha71_singbox_stats.py`,
+  `tests/platform/test_alpha71_studio_flow.py` (27),
+  `tests/cores/test_alpha71_studio_drivers.py` (35),
+  `tests/portal/test_item8_portal_settings.py` (9),
+  `tests/jobs/test_xray_core_boot.py` (2).
+* CLI suite (zagros-scripts): **237 passed**, including new assertions for
+  compose NET_ADMIN + `/dev/net/tun`.
+* Browser E2E (Playwright, real Chromium): login → user create → 300 s
+  soak across 18 dashboard pages with reloads → logout/login — **passed**.
+* Empirical binary validation: Xray 26.3.27 `xray run -test` (54/54
+  wizard cells) and sing-box 1.12.4 `sing-box check` (26/26 cells).
+
+---
+
 ## [1.0.0-alpha.7] — 2026-08-06 — Multi-core platform-user architecture (phase 1+2) + admin governance
 
 ### Added — multi-core platform-user architecture (Master Prompt phases 1+2)

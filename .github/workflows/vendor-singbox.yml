@@ -1,0 +1,150 @@
+# =============================================================================
+# Zagros-vendored stats-enabled sing-box builds
+#
+# WHY THIS EXISTS: upstream sing-box stopped shipping the `with_v2ray_api`
+# build tag in EVERY official release asset (verified empirically against
+# 1.9.7 → 1.13.16: each FATALs with
+#   "create v2ray-server: v2ray api is not included in this build,
+#    rebuild with -tags with_v2ray_api").
+# Without that tag there is no per-user traffic accounting at all. Zagros
+# unified quota is a core promise, so we vendor our own build of the SAME
+# upstream version, compiled with that version's OWN Makefile release
+# tag-list (parsed from the tag at build time) plus `with_v2ray_api`.
+#
+# Provenance contract (checked by the panel installer):
+#   * asset  : sing-box-<version>-v2rayapi-<os>-<arch>.tar.gz
+#   * sums   : sha256sums.txt (installer verifies the archive digest BEFORE
+#              extraction — github_install.install_from_github(sha256=...))
+#   * release: vendor-singbox-<version> in THIS repository
+#
+# Manual trigger only: Actions → "vendor sing-box (stats-enabled)" → version.
+# =============================================================================
+name: vendor sing-box (stats-enabled)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "upstream sing-box version to vendor (e.g. 1.12.4)"
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  build:
+    name: build linux/${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Fetch upstream source at the exact tag
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "v${{ inputs.version }}" \
+            https://github.com/SagerNet/sing-box "$GITHUB_WORKSPACE/sing-box-src"
+          SRC_TAG=$(git -C "$GITHUB_WORKSPACE/sing-box-src" describe --tags)
+          echo "building from upstream ${SRC_TAG}"
+          test "$SRC_TAG" = "v${{ inputs.version }}"
+
+      - name: Set up Go (version pinned by upstream go.mod)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: sing-box-src/go.mod
+          cache: false
+
+      - name: Build with the upstream release tag-list + with_v2ray_api
+        run: |
+          set -euo pipefail
+          cd sing-box-src
+          RELEASE_TAGS=$(sed -n 's/^TAGS ?= //p' Makefile | head -1)
+          test -n "$RELEASE_TAGS"
+          BUILD_TAGS="${RELEASE_TAGS},with_v2ray_api"
+          echo "release tags : $RELEASE_TAGS"
+          echo "build tags   : $BUILD_TAGS"
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} \
+            go build -trimpath -buildvcs=false \
+              -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=v${{ inputs.version }}" \
+              -tags "$BUILD_TAGS" \
+              -o "$GITHUB_WORKSPACE/out-${{ matrix.arch }}/sing-box" ./cmd/sing-box
+
+      - name: Smoke-check the binary (must accept a v2ray_api config)
+        if: matrix.arch == 'amd64'
+        run: |
+          set -euo pipefail
+          BIN="$GITHUB_WORKSPACE/out-amd64/sing-box"
+          "$BIN" version
+          cat > probe.json <<'JSON'
+          {"log":{"level":"error"},
+           "inbounds":[{"type":"mixed","tag":"zg-probe","listen":"127.0.0.1","listen_port":0}],
+           "outbounds":[{"type":"direct","tag":"direct"}],
+           "experimental":{"v2ray_api":{"listen":"127.0.0.1:0",
+             "stats":{"enabled":true,"outbounds":["direct"],"users":[]}}}}
+          JSON
+          "$BIN" check -c probe.json
+          echo "v2ray_api present ✓"
+
+      - name: Package + checksum
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/out-${{ matrix.arch }}"
+          ASSET="sing-box-${{ inputs.version }}-v2rayapi-linux-${{ matrix.arch }}.tar.gz"
+          tar -czf "$GITHUB_WORKSPACE/$ASSET" sing-box
+          cd "$GITHUB_WORKSPACE"
+          sha256sum "$ASSET" >> sha256sums.txt
+          sha256sum -c <(grep "$ASSET" sha256sums.txt)
+
+      - name: Upload assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: vendored-${{ matrix.arch }}
+          path: |
+            sing-box-${{ inputs.version }}-v2rayapi-linux-${{ matrix.arch }}.tar.gz
+            sha256sums.txt
+          if-no-files-found: error
+
+  publish:
+    name: publish vendor release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: vendored-*
+          merge-multiple: true
+
+      - name: Merge + verify checksum manifest
+        run: |
+          set -euo pipefail
+          sort -u sha256sums.txt > sha256sums.all && mv sha256sums.all sha256sums.txt
+          ls -la
+          while read -r sum file; do echo "$sum  $file" | sha256sum -c -; done < sha256sums.txt
+
+      - name: Record provenance
+        run: |
+          {
+            echo "Zagros-vendored **stats-enabled** sing-box v${{ inputs.version }}";
+            echo;
+            echo "* source: https://github.com/SagerNet/sing-box/tree/v${{ inputs.version }} (exact tag, depth-1 clone)";
+            echo '* build tags: the Makefile `TAGS ?=` release list of that exact tag, **plus `with_v2ray_api`**';
+            echo "* toolchain: Go from the tag's own go.mod (actions/setup-go go-version-file)";
+            echo '* CGO_ENABLED=0, -trimpath, stripped; per-arch smoke check: `sing-box check` on a v2ray_api config';
+            echo;
+            echo 'The panel installer prefers these assets and verifies the digests in `sha256sums.txt` before extraction.';
+            echo 'Without `with_v2ray_api` there is NO per-user traffic accounting in sing-box — that is why this vendor release exists.';
+          } > PROVENANCE.md
+
+      - name: Create / update the vendor release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: vendor-singbox-${{ inputs.version }}
+          name: vendored sing-box v${{ inputs.version }} (stats-enabled)
+          body_path: PROVENANCE.md
+          prerelease: true
+          files: |
+            sing-box-${{ inputs.version }}-v2rayapi-linux-*.tar.gz
+            sha256sums.txt

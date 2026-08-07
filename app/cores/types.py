@@ -92,6 +92,12 @@ class CoreMetadata(BaseModel):
     #: document, if the core supports the visual Inbound Wizard (else None —
     #: the Studio honestly reports the wizard as unsupported for this core).
     studio_inbounds_path: str | None = None
+    #: How many inbounds the engine physically serves (None = unlimited).
+    #: Single-listener engines (tuic, hysteria2, wireguard, openvpn, ssh)
+    #: declare 1 — the wizard then REPLACES the listener instead of
+    #: appending a second one the engine could never bind (the old flow
+    #: appended and died with a bare 500).
+    studio_max_inbounds: int | None = None
 
 
 class CoreMetrics(BaseModel):

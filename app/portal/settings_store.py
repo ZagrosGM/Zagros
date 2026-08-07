@@ -29,6 +29,9 @@ class InMemorySettingsStore:
             return self._settings.model_copy(deep=True)
 
     async def save_portal_settings(self, settings: PortalSettings) -> PortalSettings:
+        # same canonical-shape invariant as the SQL store — the protocol
+        # promises normalized persistence regardless of implementation
+        settings = settings.normalize()
         async with self._lock:
             self._settings = settings.model_copy(deep=True)
             return self._settings.model_copy(deep=True)

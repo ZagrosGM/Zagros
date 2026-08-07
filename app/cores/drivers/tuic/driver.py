@@ -108,8 +108,11 @@ class TUICDriver(BaseCoreDriver):
         homepage="https://github.com/EAimTY/tuic",
         release_repo="EAimTY/tuic",
         # ONE listener is all tuic-server supports; the studio manages it as
-        # a single-entry inbound list (apply enforces the cardinality).
+        # a single-entry inbound list. The wizard therefore REPLACES the
+        # listener (studio_max_inbounds=1); araw multi-inbound document is
+        # still rejected loudly by apply_studio_document.
         studio_inbounds_path="/inbounds",
+        studio_max_inbounds=1,
         provides=set(),
         requires=set(),
     )
@@ -199,16 +202,18 @@ class TUICDriver(BaseCoreDriver):
     # ------------------------------------------------------------------ #
     def export_config_document(self) -> dict[str, Any]:
         """Studio seed: the tuic listener modelled as a one-entry inbound list
-        (works while stopped; pure settings read)."""
+        (works while stopped; pure settings read, defaults-tolerant)."""
         s = self.settings
+        defaults = self.metadata.default_settings
         return {
             "inbounds": [{
                 "tag": "tuic",
                 "protocol": "tuic",
-                "listen": s["listen"],
-                "port": int(s["port"]),
-                "congestion_control": s["congestion_control"],
-                "sni": s.get("advertise_sni") or s["cert_common_name"],
+                "listen": s.get("listen", defaults["listen"]),
+                "port": int(s.get("port") or defaults["port"]),
+                "congestion_control": s.get("congestion_control") or defaults["congestion_control"],
+                "sni": s.get("advertise_sni") or s.get("cert_common_name") or defaults["cert_common_name"],
+                "zero_rtt": bool(s.get("zero_rtt_handshake", False)),
             }],
         }
 
@@ -227,6 +232,8 @@ class TUICDriver(BaseCoreDriver):
                             ("sni", "advertise_sni")):
             if ib.get(key) not in (None, ""):
                 self.settings[target] = ib[key] if key != "listen" else str(ib[key])
+        if ib.get("zero_rtt") is not None:
+            self.settings["zero_rtt_handshake"] = bool(ib["zero_rtt"])
         if ib.get("port") is not None:
             self.settings["port"] = int(ib["port"])
         await self._publish()

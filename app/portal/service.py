@@ -55,6 +55,7 @@ class PortalService:
             return PortalPage(
                 kind=PageKind.APP_DOWNLOAD,
                 brand=settings.brand,
+                app_name=settings.app_name,
                 title=settings.portal_title,
                 lang=page_lang, direction=direction,
                 user=ctx.user.model_copy(update={"client_auth_mode": mode}),
@@ -93,6 +94,7 @@ class PortalService:
         return PortalPage(
             kind=PageKind.PORTAL,
             brand=settings.brand,
+            app_name=settings.app_name,
             title=settings.portal_title,
             lang=page_lang, direction=direction,
             user=ctx.user,

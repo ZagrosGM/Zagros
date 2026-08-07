@@ -96,7 +96,32 @@ class LocalOpenVPNBackend:
     # ------------------------------------------------------------------ #
     # process
     # ------------------------------------------------------------------ #
+    def preflight_start(self) -> None:
+        """Root-cause readiness before any launch attempt. The field failure
+        was a bare 'cannot reach openvpn management interface: Connection
+        refused' — which hid whichever of these actually died first."""
+        if shutil.which(self.executable) is None and not os.path.exists(self.executable):
+            # self-heal on Start (same contract as xray/sing-box): install,
+            # then RE-verify — a failed package install must surface here,
+            # not as a bogus management-interface error later.
+            self.install_packages()
+            if shutil.which(self.executable) is None and not os.path.exists(self.executable):
+                raise CoreError(
+                    f"'{self.executable}' is still missing right after the "
+                    f"package install step — read the package-manager output "
+                    f"in the core logs."
+                )
+        if not os.path.exists("/dev/net/tun"):
+            raise CoreError(
+                "/dev/net/tun is missing on this host — OpenVPN cannot create "
+                "a tunnel interface without it. If the panel runs in Docker, "
+                "grant the container the device and capability: "
+                "devices: [/dev/net/tun:/dev/net/tun], cap_add: [NET_ADMIN] "
+                "(the zagros compose template ships both since 1.0.0-alpha.7.1)."
+            )
+
     def start(self) -> None:
+        self.preflight_start()
         self._proc.start()
         self.connect_management()
 
@@ -158,6 +183,11 @@ class LocalOpenVPNBackend:
                        "-CAcreateserial", "-out", paths["server.crt"], "-days", "3650"])
         if not os.path.exists(paths["ta.key"]):
             self._run([self.executable, "--genkey", "--secret", paths["ta.key"]])
+        for private in ("ca.key", "server.key", "ta.key"):
+            try:
+                os.chmod(paths[private], 0o600)  # private key material: owner-only
+            except OSError:
+                pass
         with open(paths["ca.crt"], encoding="utf-8") as fh:
             ca_crt = fh.read()
         with open(paths["ta.key"], encoding="utf-8") as fh:
@@ -200,6 +230,15 @@ class LocalOpenVPNBackend:
         deadline = time.monotonic() + timeout
         last_error: Exception | None = None
         while time.monotonic() < deadline:
+            if not self._proc.is_running:
+                # openvpn DIED during boot (bad config, missing tun, port
+                # clash, …): the real reason lives in its own log, not in a
+                # socket error — surface it verbatim.
+                tail = "\n".join(self._proc.logs(15)) or "(no process output captured)"
+                raise CoreError(
+                    f"openvpn exited during startup — management interface "
+                    f"never came up. Process output:\n{tail}"
+                )
             try:
                 client.connect(self.mgmt_host, self.mgmt_port, timeout=3)
                 self._mgmt = client
@@ -207,7 +246,11 @@ class LocalOpenVPNBackend:
             except OSError as exc:  # core still booting
                 last_error = exc
                 time.sleep(0.4)
-        raise CoreError(f"cannot reach openvpn management interface: {last_error}")
+        raise CoreError(
+            f"openvpn management interface did not answer within "
+            f"{int(timeout)}s ({last_error}); the process is still alive — "
+            f"recent output:\n" + ("\n".join(self._proc.logs(15)) or "(none)")
+        )
 
     def management_alive(self) -> bool:
         if self._mgmt is None:

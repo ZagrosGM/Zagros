@@ -79,6 +79,27 @@ class OpenVPNDriver(BaseCoreDriver):
                 "redirect_gateway": {"type": "boolean", "default": True},
                 "dns_servers": {"type": "array", "items": {"type": "string"}},
                 "advertise_host": {"type": "string"},
+                "topology": {"type": "string", "enum": ["subnet", "net30", "p2p"],
+                             "default": "subnet"},
+                "cipher": {"type": "string", "default": "AES-256-GCM"},
+                "cipher_fallback": {"type": "string", "default": "AES-128-GCM"},
+                "auth_digest": {"type": "string",
+                                "description": "HMAC digest directive (blank = omit — "
+                                               "AEAD ciphers ignore --auth)"},
+                "compression": {"type": "string",
+                                "enum": ["", "lz4-v2", "lzo"], "default": ""},
+                "auth_mode": {"type": "string",
+                              "enum": ["management", "static"], "default": "management",
+                              "description": "management = per-user panel credentials "
+                                             "via management-client-auth; static = one "
+                                             "shared username/password "
+                                             "(auth-user-pass-verify)"},
+                "static_user": {"type": "string"},
+                "static_pass": {"type": "string"},
+                "extra_directives": {"type": "string",
+                                     "description": "raw server.conf lines appended "
+                                                    "(operator escape hatch, e.g. "
+                                                    "'max-clients 512')"},
             },
         },
         default_settings={
@@ -93,10 +114,23 @@ class OpenVPNDriver(BaseCoreDriver):
             "redirect_gateway": True,
             "dns_servers": ["1.1.1.1", "8.8.8.8"],
             "advertise_host": "127.0.0.1",
+            "topology": "subnet",
+            "cipher": "AES-256-GCM",
+            "cipher_fallback": "AES-128-GCM",
+            "auth_digest": "",
+            "compression": "",
+            "auth_mode": "management",
+            "static_user": "",
+            "static_pass": "",
+            "extra_directives": "",
         },
         homepage="https://openvpn.net/community/",
         provides=set(),
         requires=set(),
+        # ONE server listener set per core — studio manages it as a
+        # single-entry inbound (apply re-renders server.conf + restarts).
+        studio_inbounds_path="/inbounds",
+        studio_max_inbounds=1,
     )
 
     def __init__(self, settings: dict[str, Any] | None = None, *, backend: Any | None = None):
@@ -112,6 +146,173 @@ class OpenVPNDriver(BaseCoreDriver):
         self._pki: dict[str, str] | None = None
 
     # ------------------------------------------------------------------ #
+    # Config Studio bridge (single-listener engine; apply re-renders
+    # server.conf, restarts when running, same validated path as Start)
+    # ------------------------------------------------------------------ #
+    def export_config_document(self) -> dict[str, Any]:
+        """Studio seed: the openvpn listener modelled as a one-entry inbound
+        (pure settings read; secrets never exported — wizard write-only)."""
+        s = self.settings
+        return {
+            "inbounds": [{
+                "tag": "openvpn",
+                "protocol": "ovpn",
+                "listen": s.get("listen") or "0.0.0.0",
+                "port": int(s.get("port") or 1194),
+                "transport": s.get("proto") or "udp",
+                "topology": s.get("topology") or "subnet",
+                "cipher": s.get("cipher") or "AES-256-GCM",
+                "auth": s.get("auth_digest") or "",
+                "compression": s.get("compression") or "",
+                "auth_mode": s.get("auth_mode") or "management",
+                "username": "",
+                "password": "",
+                "redirect_gateway": bool(s.get("redirect_gateway", True)),
+                "dns": ", ".join(str(d) for d in (s.get("dns_servers") or [])),
+                "has_static_credentials": bool(s.get("static_user")),
+                "has_ca_certificate": bool(s.get("ca_crt_text")),
+            }],
+        }
+
+    async def apply_studio_document(self, document: dict[str, Any]) -> None:
+        inbounds = (document or {}).get("inbounds") or []
+        if len(inbounds) != 1:
+            raise CoreError(
+                f"openvpn serves exactly ONE listener set; the studio document "
+                f"carries {len(inbounds)} inbounds — keep exactly one."
+            )
+        ib = inbounds[0]
+        if str(ib.get("protocol") or "ovpn") not in ("ovpn", "openvpn"):
+            raise CoreError(f"an openvpn core cannot host a '{ib.get('protocol')}' listener.")
+        s = self.settings
+        if ib.get("port") is not None:
+            port = int(ib["port"])
+            if not 1 <= port <= 65535:
+                raise CoreError(f"openvpn port out of range: {port}")
+            s["port"] = port
+        if ib.get("listen"):
+            s["listen"] = str(ib["listen"])
+        transport = str(ib.get("transport") or ib.get("proto") or "").lower()
+        if transport in ("udp", "tcp"):
+            s["proto"] = transport
+        elif transport:
+            raise CoreError(f"openvpn serves udp or tcp, not '{transport}'.")
+        if ib.get("topology"):
+            topology = str(ib["topology"])
+            if topology not in ("subnet", "net30", "p2p"):
+                raise CoreError(f"unknown openvpn topology '{topology}' "
+                                "(subnet / net30 / p2p).")
+            s["topology"] = topology
+        if ib.get("cipher"):
+            s["cipher"] = str(ib["cipher"])
+        if ib.get("cipher_fallback"):
+            s["cipher_fallback"] = str(ib["cipher_fallback"])
+        if ib.get("auth") is not None:
+            s["auth_digest"] = str(ib["auth"])
+        if ib.get("compression") is not None:
+            compression = str(ib["compression"])
+            if compression not in ("", "lz4-v2", "lzo"):
+                raise CoreError(f"unknown openvpn compression '{compression}'.")
+            s["compression"] = compression
+        if ib.get("dns") is not None:
+            s["dns_servers"] = [d.strip() for d in str(ib["dns"]).split(",") if d.strip()]
+        if ib.get("redirect_gateway") is not None:
+            s["redirect_gateway"] = bool(ib["redirect_gateway"])
+        auth_mode = str(ib.get("auth_mode") or "").lower()
+        if auth_mode in ("management", "static"):
+            s["auth_mode"] = auth_mode
+        if ib.get("username"):
+            s["static_user"] = str(ib["username"])
+        if ib.get("password"):
+            s["static_pass"] = str(ib["password"])
+        if s.get("auth_mode") == "static":
+            # validated eagerly — a shared-cred server without the creds is
+            # a brick (the install raises with a clear message)
+            self._install_static_auth()
+        if str(ib.get("extra_directives") or ""):
+            s["extra_directives"] = str(ib["extra_directives"])
+        # PKI uploads (CA / server cert / server key — operator-owned chains
+        # replace the panel-generated PKI); private key never in the export
+        self._materialize_uploaded_pki(
+            ca_pem=ib.get("ca_certificate") or ib.get("ca"),
+            cert_pem=ib.get("certificate"),
+            key_pem=ib.get("certificate_key"),
+        )
+        await self._publish()
+
+    def _materialize_uploaded_pki(self, *, ca_pem: Any, cert_pem: Any,
+                                  key_pem: Any) -> None:
+        """Write operator-uploaded PEMs into the work_dir PKI (validated as a
+        MATCHING cert/key pair; idempotent — unchanged files are not
+        rewritten, so no needless restart ripple)."""
+        import os
+        if not (ca_pem or cert_pem or key_pem):
+            return
+        if bool(cert_pem) != bool(key_pem):
+            raise CoreError(
+                "upload the server certificate AND private key together."
+            )
+        from cryptography import x509
+        from cryptography.hazmat.primitives import serialization
+
+        work_dir = str(self.settings.get("work_dir") or ".")
+        os.makedirs(work_dir, exist_ok=True)
+        if cert_pem:
+            try:
+                cert_obj = x509.load_pem_x509_certificate(str(cert_pem).encode())
+                key_obj = serialization.load_pem_private_key(
+                    str(key_pem).encode(), password=None
+                )
+            except ValueError as exc:
+                raise CoreError(f"uploaded certificate/key is not valid PEM: {exc}") from exc
+            if (cert_obj.public_key().public_bytes(
+                    serialization.Encoding.DER,
+                    serialization.PublicFormat.SubjectPublicKeyInfo)
+                    != key_obj.public_key().public_bytes(
+                        serialization.Encoding.DER,
+                        serialization.PublicFormat.SubjectPublicKeyInfo)):
+                raise CoreError(
+                    "uploaded certificate does NOT match the uploaded private key."
+                )
+            for name, text in (("server.crt", str(cert_pem)), ("server.key", str(key_pem))):
+                self._write_if_changed(os.path.join(work_dir, name), text,
+                                       0o600 if name.endswith(".key") else 0o644)
+        if ca_pem:
+            try:
+                x509.load_pem_x509_certificate(str(ca_pem).encode())
+            except ValueError as exc:
+                raise CoreError(f"uploaded CA certificate is not valid PEM: {exc}") from exc
+            self._write_if_changed(os.path.join(work_dir, "ca.crt"), str(ca_pem), 0o644)
+        self._pki = None  # force ensure_pki/client-profile re-read
+
+    @staticmethod
+    def _write_if_changed(path: str, text: str, mode: int) -> None:
+        import os
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as fh:
+                if fh.read() == text:
+                    return
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text if text.endswith("\n") else text + "\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+
+    async def _publish(self) -> None:
+        """Re-render server.conf into the backend; restart when running."""
+        running = await asyncio.to_thread(self._backend.is_running)
+        if not running:
+            return  # stopped core: settings land on next start()
+        log_path = getattr(self._backend, "disconnect_log", "disconnect-log.jsonl")
+        hook_path = await asyncio.to_thread(
+            self._backend.install_hook_script, self._render_hook(log_path)
+        )
+        await asyncio.to_thread(
+            self._backend.apply_config, self.render_server_conf(hook_path)
+        )
+        await asyncio.to_thread(self._backend.restart)
+
+    # ------------------------------------------------------------------ #
     # config rendering
     # ------------------------------------------------------------------ #
     def render_server_conf(self, hook_path: str) -> str:
@@ -120,30 +321,95 @@ class OpenVPNDriver(BaseCoreDriver):
         if s["redirect_gateway"]:
             pushes.append('push "redirect-gateway def1 bypass-dhcp"')
         pushes += [f'push "dhcp-option DNS {dns}"' for dns in s["dns_servers"]]
-        return "\n".join([
+        cipher = str(s.get("cipher") or "AES-256-GCM")
+        fallback = str(s.get("cipher_fallback") or "AES-128-GCM")
+        lines = [
             f"port {s['port']}",
             f"proto {s['proto']}",
             "dev tun",
-            "topology subnet",
+            f"topology {s.get('topology') or 'subnet'}",
             f"server {s['subnet']} {s['netmask']}",
             "ifconfig-pool-persist ipp.txt",
             "ca ca.crt", "cert server.crt", "key server.key",
             "dh none",
             "tls-crypt ta.key",
-            "data-ciphers AES-256-GCM:AES-128-GCM",
-            "data-ciphers-fallback AES-128-GCM",
+            f"data-ciphers {cipher}:{fallback}",
+            f"data-ciphers-fallback {fallback}",
             "tls-version-min 1.2",
             f"management {self._mgmt_addr()}",
-            "management-client-auth",
-            "client-cert-not-required",
-            "username-as-common-name",
+        ]
+        if str(s.get("auth_digest") or ""):
+            lines.append(f"auth {s['auth_digest']}")
+        compression = str(s.get("compression") or "")
+        if compression:
+            lines += ["allow-compression yes", f"compress {compression}",
+                      f'push "compress {compression}"']
+        if str(s.get("auth_mode") or "management") == "static":
+            # one shared username/password, verified by a root-owned script:
+            # real auth-user-pass-verify (via-env), management interface stays
+            # for status/usage but NOT for auth
+            lines += [
+                f"auth-user-pass-verify {self._static_auth_script_path()} via-env",
+            ]
+        else:
+            lines += [
+                "management-client-auth",
+                "client-cert-not-required",
+                "username-as-common-name",
+            ]
+        lines += [
             f"client-disconnect {hook_path}",
             *pushes,
             "keepalive 10 60",
             "persist-key", "persist-tun",
             "verb 3",
-            "",
-        ])
+        ]
+        extra = str(s.get("extra_directives") or "").strip()
+        if extra:
+            lines.append("# operator extra directives (studio)")
+            lines += [ln.rstrip() for ln in extra.splitlines() if ln.strip()]
+        lines.append("")
+        return "\n".join(lines)
+
+    def _static_auth_script_path(self) -> str:
+        import os
+        return os.path.join(str(self.settings.get("work_dir") or "."),
+                            "zagros-static-auth.sh")
+
+    _STATIC_AUTH_SCRIPT = """#!/bin/sh
+# zagros openvpn static auth — auth-user-pass-verify (via-env).
+# Credentials live root-only 0600 next to this script; the daemon compares.
+set -eu
+creds="$(cat "$(dirname "$0")/.ovpn-static-auth")" || exit 1
+want_user="${creds%%:*}"
+want_pass="${creds#*:}"
+[ "${username:-}" = "$want_user" ] && [ "${password:-}" = "$want_pass" ]
+"""
+
+    def _install_static_auth(self) -> None:
+        """Root-owned verify script + 0600 credential file for static mode."""
+        import os
+        s = self.settings
+        work_dir = str(s.get("work_dir") or ".")
+        os.makedirs(work_dir, exist_ok=True)
+        user, password = str(s.get("static_user") or ""), str(s.get("static_pass") or "")
+        if not user or not password:
+            raise CoreError(
+                "openvpn static auth_mode needs username AND password "
+                "(the wizard's Static Authentication section)."
+            )
+        if ":" in user or "\n" in user or "\n" in password:
+            raise CoreError("static openvpn credentials may not contain ':' or newlines.")
+        script = self._static_auth_script_path()
+        with open(script + ".tmp", "w", encoding="utf-8") as fh:
+            fh.write(self._STATIC_AUTH_SCRIPT)
+        os.chmod(script + ".tmp", 0o700)
+        os.replace(script + ".tmp", script)
+        creds = os.path.join(work_dir, ".ovpn-static-auth")
+        with open(creds + ".tmp", "w", encoding="utf-8") as fh:
+            fh.write(f"{user}:{password}")
+        os.chmod(creds + ".tmp", 0o600)
+        os.replace(creds + ".tmp", creds)
 
     def _mgmt_addr(self) -> str:
         return f"127.0.0.1 {self.settings['management_port']}"
@@ -160,6 +426,8 @@ class OpenVPNDriver(BaseCoreDriver):
             self._backend.install_hook_script, self._render_hook(log_path)
         )
         self._pki = await asyncio.to_thread(self._backend.ensure_pki)
+        if str(self.settings.get("auth_mode") or "management") == "static":
+            await asyncio.to_thread(self._install_static_auth)
         await asyncio.to_thread(self._backend.apply_config, self.render_server_conf(hook_path))
         await asyncio.to_thread(self._backend.start)
         await asyncio.to_thread(self._backend.set_auth_handler, self._authorize)
@@ -224,6 +492,10 @@ class OpenVPNDriver(BaseCoreDriver):
             raise CoreError(f"OpenVPN core only serves protocol 'ovpn', got '{protocol}'.")
 
     def _ensure_credentials(self, account: UserAccount) -> None:
+        # static auth_mode authenticates EVERY client with the shared pair;
+        # a per-user password is only mandatory in management auth mode
+        if str(self.settings.get("auth_mode") or "management") == "static":
+            return
         if not account.settings.get("password"):
             raise CoreError(f"OpenVPN account '{account.account_id}' needs settings.password.")
 
@@ -381,8 +653,10 @@ class OpenVPNDriver(BaseCoreDriver):
             "persist-key", "persist-tun",
             "remote-cert-tls server",
             "auth-user-pass",
-            "data-ciphers AES-256-GCM:AES-128-GCM",
-            "data-ciphers-fallback AES-128-GCM",
+            f"data-ciphers {s.get('cipher') or 'AES-256-GCM'}:"
+            f"{s.get('cipher_fallback') or 'AES-128-GCM'}",
+            f"data-ciphers-fallback {s.get('cipher_fallback') or 'AES-128-GCM'}",
+            *([f"compress {s['compression']}"] if str(s.get("compression") or "") else []),
             "verb 3",
             "<ca>", self._pki["ca_crt"].strip(), "</ca>",
             "<tls-crypt>", self._pki["tls_crypt"].strip(), "</tls-crypt>",
@@ -421,12 +695,23 @@ class OpenVPNDriver(BaseCoreDriver):
                 DeliveryArtifact(
                     kind=ArtifactKind.FIELDS,
                     label="Authentication",
-                    fields=[
-                        DeliveryField(key="username", label="Username",
-                                      value=account.account_id),
-                        DeliveryField(key="password", label="Password",
-                                      value=str(account.settings["password"]), secret=True),
-                    ],
+                    fields=(
+                        [
+                            DeliveryField(key="username", label="Username (shared)",
+                                          value=str(self.settings.get("static_user") or "")),
+                            DeliveryField(key="password", label="Password (shared)",
+                                          value=str(self.settings.get("static_pass") or ""),
+                                          secret=True),
+                        ]
+                        if str(self.settings.get("auth_mode") or "management") == "static"
+                        else [
+                            DeliveryField(key="username", label="Username",
+                                          value=account.account_id),
+                            DeliveryField(key="password", label="Password",
+                                          value=str(account.settings["password"]),
+                                          secret=True),
+                        ]
+                    ),
                 ),
                 DeliveryArtifact(
                     kind=ArtifactKind.NOTE,

@@ -129,8 +129,52 @@ class PlatformRuntime:
 
     async def boot_cores(self) -> None:
         await self.core_manager.boot()
+        await self._hydrate_studio_documents()
         await self.core_manager.start_enabled()
         await self._attach_builtin_xray()
+
+    async def _hydrate_studio_documents(self) -> None:
+        """Re-apply persisted studio documents into drivers BEFORE they start.
+
+        Root fix (alpha.7.1): Studio documents live in SQL and drivers keep
+        the applied result IN MEMORY — so a panel restart silently dropped
+        every wizard-created listener the next time a core started (the old
+        doc was re-applied only when somebody pressed Apply again). Xray is
+        exempt: apply already persists XRAY_JSON on disk and its boot seed
+        is that file. Every other enabled core gets its stored document
+        pushed through the same strict apply path the wizard uses, so a core
+        boots with EXACTLY the config the studio shows.
+
+        A stored document that no longer applies (engine downgraded, stale
+        fields) is logged LOUDLY and skipped — it must never abort panel
+        boot; the surfaces the operator anyway (status/delivery) stay honest.
+        """
+        for core_id in self.core_manager.list_cores():
+            try:
+                driver = self.core_manager.get(core_id)
+            except Exception:  # noqa: BLE001 — core vanished mid-boot
+                continue
+            hook = getattr(driver, "apply_studio_document", None)
+            if hook is None:
+                continue
+            try:
+                doc = await self.studio_store.get_document(core_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("studio hydration: cannot read document for %s: %s",
+                               core_id, exc)
+                continue
+            if not doc:
+                continue
+            try:
+                await hook(doc)
+                logger.info("studio hydration: %s restored from persisted document", core_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "studio hydration: persisted document for %s no longer "
+                    "applies (%s) — the core boots from its default config; "
+                    "open the Studio to review the stored document.",
+                    core_id, exc,
+                )
 
     async def _attach_builtin_xray(self) -> None:
         """Attach the panel's built-in xray engine as a protected core.

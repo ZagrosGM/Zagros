@@ -29,9 +29,12 @@ Honestly NOT claimed (documented limitations):
 """
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
+
+logger = logging.getLogger("zagros.cores.drivers.wireguard")
 
 from app.cores.base import BaseCoreDriver
 from app.cores.drivers.wireguard.wgtool import (
@@ -99,6 +102,9 @@ class WireGuardDriver(BaseCoreDriver):
                 "mtu": {"type": "integer"},
                 "use_preshared_keys": {"type": "boolean", "default": True},
                 "online_threshold_seconds": {"type": "integer", "default": 180},
+                "peer_allowed_ips": {"type": "array", "items": {"type": "string"},
+                                     "default": ["0.0.0.0/0", "::/0"]},
+                "peer_keepalive": {"type": "integer", "default": 25},
             },
         },
         default_settings={
@@ -112,10 +118,16 @@ class WireGuardDriver(BaseCoreDriver):
             "mtu": None,
             "use_preshared_keys": True,
             "online_threshold_seconds": 180,
+            "peer_allowed_ips": ["0.0.0.0/0", "::/0"],
+            "peer_keepalive": 25,
         },
         homepage="https://www.wireguard.com/",
         provides=set(),
         requires=set(),
+        # ONE kernel interface per core — the studio manages it as a
+        # single-entry listener list (the wizard rewrites that entry).
+        studio_inbounds_path="/inbounds",
+        studio_max_inbounds=1,
     )
 
     def __init__(self, settings: dict[str, Any] | None = None, *, backend: Any | None = None):
@@ -181,8 +193,76 @@ class WireGuardDriver(BaseCoreDriver):
             raise
 
     # ------------------------------------------------------------------ #
-    # lifecycle                                                          #
+    # Config Studio bridge (single-interface engine)
     # ------------------------------------------------------------------ #
+    def export_config_document(self) -> dict[str, Any]:
+        """Studio seed: the kernel interface modelled as a one-entry inbound
+        list (pure settings read; private key never leaves the host — the
+        wizard field is write-only, blank = keep the persisted keypair)."""
+        s = self.settings
+        return {
+            "inbounds": [{
+                "tag": "wireguard",
+                "protocol": "wireguard",
+                "listen": s.get("listen") or "0.0.0.0",
+                "port": int(s.get("port") or 51820),
+                "mtu": s.get("mtu") or None,
+                "dns": ", ".join(str(d) for d in (s.get("dns_servers") or [])),
+                "address": s.get("subnet") or "10.66.66.0/24",
+                "endpoint": s.get("advertise_host") or "",
+                "allowed_ips": ", ".join(str(a) for a in (s.get("peer_allowed_ips")
+                                                          or ["0.0.0.0/0", "::/0"])),
+                "persistent_keepalive": int(s.get("peer_keepalive") or 25),
+                "preshared_keys": bool(s.get("use_preshared_keys", True)),
+                "public_key": self._server_public or "",
+            }],
+        }
+
+    async def apply_studio_document(self, document: dict[str, Any]) -> None:
+        """Adopt the studio document's single entry as THE interface config."""
+        import asyncio
+
+        inbounds = (document or {}).get("inbounds") or []
+        if len(inbounds) != 1:
+            raise CoreError(
+                f"wireguard serves exactly ONE interface; the studio document "
+                f"carries {len(inbounds)} inbounds — keep exactly one."
+            )
+        ib = inbounds[0]
+        if str(ib.get("protocol") or "wireguard") != "wireguard":
+            raise CoreError(f"a wireguard core cannot host a '{ib.get('protocol')}' listener.")
+        s = self.settings
+        if ib.get("port") is not None:
+            s["port"] = int(ib["port"])
+        if ib.get("listen"):
+            s["listen"] = str(ib["listen"])
+        if ib.get("mtu") not in (None, ""):
+            s["mtu"] = int(ib["mtu"])
+        if ib.get("dns") is not None:
+            s["dns_servers"] = [d.strip() for d in str(ib["dns"]).split(",") if d.strip()]
+        if ib.get("address"):
+            s["subnet"] = str(ib["address"])
+        if ib.get("endpoint") is not None:
+            s["advertise_host"] = str(ib["endpoint"])
+        if ib.get("allowed_ips") is not None:
+            s["peer_allowed_ips"] = [a.strip() for a in str(ib["allowed_ips"]).split(",")
+                                     if a.strip()]
+        if ib.get("persistent_keepalive") is not None:
+            s["peer_keepalive"] = int(ib["persistent_keepalive"])
+        if ib.get("preshared_keys") is not None:
+            s["use_preshared_keys"] = bool(ib["preshared_keys"])
+        # operator-supplied server key (wizard field, blank = keep persisted)
+        private = str(ib.get("private_key") or "").strip()
+        if private:
+            if self._server_private and private == self._server_private:
+                pass  # idempotent — no key churn, no restart ripple
+            else:
+                public = await asyncio.to_thread(self._backend.public_from_private, private)
+                self._backend.write_server_private_key(private)
+                self._server_private, self._server_public = private, public
+                logger.info("wireguard: server private key replaced via studio.")
+        await self._publish()
+
     async def start(self) -> None:
         import asyncio
 
@@ -419,6 +499,8 @@ class WireGuardDriver(BaseCoreDriver):
             preshared_key=s.get("preshared_key") or None,
             dns=list(cfg["dns_servers"]),
             mtu=cfg.get("mtu"),
+            allowed_ips=tuple(cfg.get("peer_allowed_ips") or ("0.0.0.0/0", "::/0")),
+            persistent_keepalive=int(cfg.get("peer_keepalive") or 25),
         )
 
     async def describe_delivery(

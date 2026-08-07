@@ -118,7 +118,9 @@ class XrayDriver(BaseCoreDriver):
     def export_config_document(self) -> dict[str, Any]:
         """Studio seed: the legacy engine's REAL current config document (the
         file xray actually runs — read from disk so the studio edits the true
-        document, works while stopped; missing file ⇒ honest empty skeleton)."""
+        document, works while stopped). A never-initialised installation gets
+        a complete minimal skeleton (the legacy ``XRayConfig`` cannot start
+        from a bare ``{"inbounds": []}`` — it validates outbounds too)."""
         import json
 
         try:
@@ -126,12 +128,362 @@ class XrayDriver(BaseCoreDriver):
         except Exception:  # noqa: BLE001 — stand-alone usage without host config
             XRAY_JSON = "xray_config.json"
         if not os.path.exists(XRAY_JSON):
-            return {"inbounds": []}
+            return {
+                "log": {"loglevel": "warning"},
+                "inbounds": [],
+                "outbounds": [
+                    {"protocol": "freedom", "tag": "DIRECT"},
+                    {"protocol": "blackhole", "tag": "BLOCK"},
+                ],
+                "routing": {"domainStrategy": "IPIfNonMatch", "rules": []},
+            }
         try:
             with open(XRAY_JSON, encoding="utf-8") as fh:
                 return json.load(fh)
         except (OSError, ValueError) as exc:
             raise CoreError(f"cannot read the legacy xray document '{XRAY_JSON}': {exc}") from exc
+
+    # ------------------------------------------------------------------ #
+    # Config Studio bridge (alpha.7.1) — the old gap: xray exported its
+    # document but had NO apply path, so wizard-created inbounds lived only
+    # in the studio store and never became real listeners (field report:
+    # "inbound created in wizard does not appear / does nothing").
+    #
+    # Bridge contract: validate+translate STRICTLY in the driver (unknown
+    # wizard fields and unmappable combos fail loudly), then hand the full
+    # document to the backend which persists it, reloads the live catalog
+    # singleton, and restarts a running core.
+    # ------------------------------------------------------------------ #
+    _STUDIO_PROTOCOLS = {
+        "vless", "vmess", "trojan", "shadowsocks", "socks", "http", "dokodemo-door",
+    }
+    # verified live against Xray 26.3.27 (`xray run -test` per cell):
+    # REALITY is only constructible on RAW/XHTTP/gRPC transports, and only
+    # makes protocol sense for VLESS/Trojan (the AES-auth protocols cannot do
+    # the reality handshake); h2/quic/old-mKCP-header transports were removed
+    # upstream ("migrated to XHTTP stream-one H2 & H3").
+    _STUDIO_TRANSPORTS = {"tcp", "ws", "httpupgrade", "grpc", "xhttp", "mkcp"}
+    _REALITY_PROTOCOLS = {"vless", "trojan"}
+    _REALITY_TRANSPORTS = {"tcp", "xhttp", "grpc"}
+    _STUDIO_KNOWN_FIELDS = {
+        "tag", "protocol", "listen", "port", "transport", "security",
+        "path", "host", "headers", "service_name", "authority", "mode",
+        "sni", "alpn", "certificate", "certificate_key", "fingerprint",
+        "public_key", "flow", "method",
+        "address", "target_port", "auth", "username", "password",
+        "mtu", "tti", "congestion",
+    }
+
+    async def apply_studio_document(self, document: dict[str, Any]) -> None:
+        """Adopt the studio document as THE running xray configuration."""
+        inbounds = (document or {}).get("inbounds")
+        if not isinstance(inbounds, list) or not inbounds:
+            raise CoreError(
+                "the xray studio document must carry at least ONE inbound — "
+                "xray cannot boot an empty listener set (legacy validation)."
+            )
+        translated = [self._studio_entry_to_native(dict(raw)) for raw in inbounds]
+        tags = [str(ib.get("tag") or "") for ib in translated]
+        if any(not t for t in tags) or len(set(tags)) != len(tags):
+            raise CoreError("every inbound needs a unique, non-empty tag.")
+        import copy as _copy
+
+        doc = _copy.deepcopy(document)
+        doc["inbounds"] = translated
+        apply = getattr(self._backend, "apply_config_document", None)
+        if apply is None:
+            raise CoreError(
+                "this xray backend cannot apply studio documents — upgrade the "
+                "panel; the studio bridge ships in the core backend."
+            )
+        await asyncio.to_thread(apply, doc)
+
+    def _studio_entry_to_native(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Wizard entry {tag, protocol, port, transport, security, …fields} →
+        native xray inbound (``streamSettings`` shape exactly as the legacy
+        ``XRayConfig._resolve_inbounds`` parses it back into the user
+        catalog). Entries that already look native pass through untouched —
+        that is how Advanced Mode edits survive the bridge."""
+        if "streamSettings" in raw or "settings" in raw:
+            return dict(raw)  # already native (Advanced Mode / seeded file)
+
+        proto = str(raw.get("protocol") or "")
+        if proto not in self._STUDIO_PROTOCOLS:
+            raise CoreError(
+                f"studio inbound '{raw.get('tag')}': protocol '{proto}' is not "
+                f"an xray server inbound ({', '.join(sorted(self._STUDIO_PROTOCOLS))}). "
+                "WireGuard is an OUTBOUND-only protocol in Xray (use the "
+                "WireGuard core, or sing-box >= 1.11, for a WireGuard listener)."
+            )
+        unknown = sorted(set(raw) - self._STUDIO_KNOWN_FIELDS)
+        if unknown:
+            raise CoreError(
+                f"studio inbound '{raw.get('tag')}': fields not translatable to "
+                f"a native xray inbound: {unknown} — edit the raw document in "
+                "Advanced Mode instead."
+            )
+        tag = str(raw.get("tag") or "").strip()
+        if not tag:
+            raise CoreError("studio inbound needs a non-empty tag.")
+        try:
+            port = int(raw["port"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CoreError(f"studio inbound '{tag}' needs a numeric port.") from exc
+        transport = str(raw.get("transport") or "tcp").lower()
+        security = str(raw.get("security") or "none").lower()
+        if transport not in self._STUDIO_TRANSPORTS:
+            raise CoreError(
+                f"studio inbound '{tag}': transport '{transport}' is removed/not "
+                "available in current Xray — supported: tcp, ws, httpupgrade, "
+                "grpc, xhttp, mkcp (h2/quic were removed upstream in favour of "
+                "XHTTP stream-one H2 & H3; old mKCP header/seed is gone too)."
+            )
+        if security == "reality" and (
+            proto not in self._REALITY_PROTOCOLS
+            or transport not in self._REALITY_TRANSPORTS
+        ):
+            raise CoreError(
+                f"studio inbound '{tag}': REALITY requires VLESS/Trojan over "
+                "TCP/XHTTP/gRPC (verified against the real binary: \"REALITY "
+                "only supports RAW, XHTTP and gRPC\")."
+            )
+        if proto == "trojan" and security == "none":
+            raise CoreError(
+                f"studio inbound '{tag}': Trojan without TLS is not offered — "
+                "the protocol's own identity IS the TLS layer; pick TLS or REALITY."
+            )
+
+        inbound: dict[str, Any] = {
+            "tag": tag,
+            "listen": raw.get("listen") or "0.0.0.0",
+            "port": port,
+            "protocol": proto,
+            "settings": self._studio_protocol_settings(proto, raw),
+            "streamSettings": self._studio_stream_settings(tag, raw),
+            "sniffing": {
+                "enabled": True,
+                "destOverride": ["http", "tls", "quic"],
+                "routeOnly": True,
+            },
+        }
+        return inbound
+
+    @staticmethod
+    def _studio_protocol_settings(proto: str, raw: dict[str, Any]) -> dict[str, Any]:
+        if proto in ("vless", "vmess", "trojan"):
+            settings: dict[str, Any] = {"clients": []}
+            if proto == "vless":
+                settings["decryption"] = "none"
+            return settings
+        if proto == "shadowsocks":
+            method = str(raw.get("method") or "")
+            if method.startswith("2022-"):
+                # verified against the real binary: ss-2022 multi-user needs
+                # a server iPSK + per-user base64 PSK uPSKs and empty client
+                # methods ("shadowsocks 2022 (multi-user): users must have
+                # empty method"); legacy account passwords (token_urlsafe)
+                # are structurally NOT 2022 uPSKs, so restarting with real
+                # users would FATAL the live core. The sing-box core carries
+                # full, verified ss-2022 support (iPSK persisted, per-user
+                # PSKs normalized at ingest, ss:// iPSK:uPSK links).
+                raise CoreError(
+                    "shadowsocks 2022 ciphers need iPSK/uPSK key material the "
+                    "legacy xray account store cannot supply (verified against "
+                    "xray 26.3.27) — use the sing-box core for ss-2022; it is "
+                    "fully supported there. Classic ciphers work natively here."
+                )
+            # per-user method+password live on each client entry; the panel
+            # attaches users at restart/include_db_users time
+            return {"clients": [], "network": "tcp,udp"}
+        if proto == "socks":
+            auth = str(raw.get("auth") or "noauth")
+            settings = {"udp": True, "auth": auth}
+            if auth == "password":
+                user, password = raw.get("username"), raw.get("password")
+                if not user or not password:
+                    raise CoreError(
+                        "a socks inbound with password auth needs username AND password."
+                    )
+                settings["accounts"] = [{"user": str(user), "pass": str(password)}]
+            return settings
+        if proto == "http":
+            settings = {"allowTransparent": False}
+            user, password = raw.get("username"), raw.get("password")
+            if user or password:
+                if not (user and password):
+                    raise CoreError(
+                        "an authenticated http inbound needs username AND password."
+                    )
+                settings["accounts"] = [{"user": str(user), "pass": str(password)}]
+            return settings
+        # dokodemo-door (port-forward; the DNS-relay preset targets resolver:53)
+        address = str(raw.get("address") or "").strip()
+        if not address:
+            raise CoreError("a dokodemo-door inbound needs a target address.")
+        try:
+            target_port = int(raw.get("target_port") or 0)
+        except (TypeError, ValueError) as exc:
+            raise CoreError("dokodemo-door target port must be numeric.") from exc
+        if not 1 <= target_port <= 65535:
+            raise CoreError("dokodemo-door needs a target port between 1 and 65535.")
+        return {"address": address, "port": target_port, "network": "tcp,udp"}
+
+    def _studio_stream_settings(self, tag: str, raw: dict[str, Any]) -> dict[str, Any]:
+        net = str(raw.get("transport") or "tcp").lower()
+        stream: dict[str, Any] = {"network": net}
+        path = raw.get("path")
+        host = raw.get("host")
+        if net == "ws":
+            settings: dict[str, Any] = {"path": path or "/"}
+            if host:
+                settings["headers"] = {"Host": str(host)}
+            stream["wsSettings"] = settings
+        elif net == "httpupgrade":
+            settings = {"path": path or "/"}
+            if host:
+                settings["host"] = str(host)
+            stream["httpupgradeSettings"] = settings
+        elif net == "grpc":
+            service = str(raw.get("service_name") or "")
+            if not service:
+                raise CoreError(f"gRPC inbound '{tag}' requires a service name.")
+            settings = {"serviceName": service}
+            if raw.get("authority"):
+                settings["authority"] = str(raw["authority"])
+            stream["grpcSettings"] = settings
+        elif net == "xhttp":
+            settings = {"path": path or "/"}
+            if host:
+                settings["host"] = str(host)
+            if raw.get("mode"):
+                settings["mode"] = str(raw["mode"])
+            stream["xhttpSettings"] = settings
+        elif net == "mkcp":
+            # Xray >= 25 removed the header/seed levers ("migrated to
+            # finalmask ... mkcp-original & mkcp-aes128gcm"); what remains is
+            # the pure UDP transport with tuning fields.
+            stream["network"] = "mkcp"
+            settings = {}
+            if raw.get("mtu"):
+                settings["mtu"] = int(raw["mtu"])
+            if raw.get("tti"):
+                settings["tti"] = int(raw["tti"])
+            if raw.get("congestion") is not None:
+                settings["congestion"] = bool(raw["congestion"])
+            stream["kcpSettings"] = settings
+        elif net != "tcp":
+            raise CoreError(
+                f"xray cannot serve transport '{net}' — supported: tcp, ws, "
+                "httpupgrade, grpc, xhttp, mkcp."
+            )
+        stream.update(self._studio_security(tag, raw))
+        return stream
+
+    def _studio_security(self, tag: str, raw: dict[str, Any]) -> dict[str, Any]:
+        security = str(raw.get("security") or "none").lower()
+        alpn = [a for a in (raw.get("alpn") or []) if a]
+        if security == "none":
+            return {"security": "none"}
+        if security == "tls":
+            sni = str(raw.get("sni") or "").strip()
+            if not sni:
+                raise CoreError(f"TLS inbound '{tag}' needs an SNI/certificate name.")
+            cert_pem = raw.get("certificate")
+            key_pem = raw.get("certificate_key")
+            cert_path, key_path = self._materialize_certificate(tag, sni, cert_pem, key_pem)
+            tls: dict[str, Any] = {
+                "serverName": sni,
+                "certificates": [{"certificateFile": cert_path, "keyFile": key_path}],
+            }
+            if alpn:
+                tls["alpn"] = alpn
+            return {"security": "tls", "tlsSettings": tls}
+        if security == "reality":
+            sni = str(raw.get("sni") or "").split(":")[0].strip()
+            if not sni:
+                raise CoreError(
+                    f"Reality inbound '{tag}' needs a camouflage target (SNI) — "
+                    "a TLSv1.3+h2 site the server masquerades as."
+                )
+            private, public = self._xray_x25519_keypair()
+            import secrets as _secrets
+
+            return {
+                "security": "reality",
+                "realitySettings": {
+                    "show": False,
+                    "dest": f"{sni}:443",
+                    "xver": 0,
+                    "serverNames": [sni],
+                    "privateKey": private,
+                    # the legacy catalog resolver reads publicKey back for
+                    # share links; the extra key is documented in the bridge
+                    # contract (Xray accepts it in the reality settings).
+                    "publicKey": str(raw.get("public_key") or "") or public,
+                    "shortIds": [_secrets.token_hex(8)],
+                },
+            }
+        raise CoreError(f"unknown security '{security}' for inbound '{tag}'.")
+
+    def _materialize_certificate(
+        self, tag: str, sni: str,
+        cert_pem: Any, key_pem: Any,
+    ) -> tuple[str, str]:
+        """Wizard certificate handling: uploads (PEM contents) are written to
+        the panel-owned cert dir; when nothing is provided a self-signed
+        certificate is generated there (honest default — the wizard help text
+        tells the operator production TLS should upload a real cert pair)."""
+        if bool(cert_pem) != bool(key_pem):
+            raise CoreError(
+                f"TLS inbound '{tag}': upload certificate AND private key together."
+            )
+        import re as _re
+
+        safe_tag = _re.sub(r"[^A-Za-z0-9_.-]+", "_", tag)
+        cert_dir = self.settings.get("cert_dir") or "/var/lib/zagros/cores/xray/certs"
+        cert_path = os.path.join(cert_dir, f"{safe_tag}.crt")
+        key_path = os.path.join(cert_dir, f"{safe_tag}.key")
+        if cert_pem:
+            cert_text, key_text = str(cert_pem), str(key_pem)
+        elif os.path.exists(cert_path) and os.path.exists(key_path):
+            # self-signed default already materialized for this tag: REUSE it.
+            # minting a fresh pair on every apply would rotate the server
+            # identity under connected clients (and needlessly restart-ripple).
+            return cert_path, key_path
+        else:
+            from app.utils.crypto import generate_certificate
+
+            pair = generate_certificate()
+            cert_text, key_text = pair["cert"], pair["key"]
+        os.makedirs(cert_dir, exist_ok=True)
+        for path, text, mode in (
+            (cert_path, cert_text, 0o644),
+            (key_path, key_text, 0o600),
+        ):
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as fh:
+                    if fh.read() == text:
+                        continue  # idempotent — no needless restart ripple
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.chmod(path, mode)
+        return cert_path, key_path
+
+
+    @staticmethod
+    def _xray_x25519_keypair() -> tuple[str, str]:
+        """(private, public) raw-base64url x25519 keys — same encoding the
+        sing-box driver and ``xray x25519`` CLI use (shared project crypto)."""
+        import base64
+
+        from app.crypto import x25519
+
+        private_key, public_key = x25519.generate_keypair()
+
+        def enc(raw: bytes) -> str:
+            return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+        return enc(private_key), enc(public_key)
 
     @staticmethod
     def _ensure_supported(protocol: str) -> str:

@@ -271,8 +271,66 @@ class LegacyXrayBackend:
         return online
 
     # ------------------------------------------------------------------ #
-    # config injection
+    # studio document bridge (alpha.7.1 — the wizard→real-listener root fix)
     # ------------------------------------------------------------------ #
+    def apply_config_document(self, document: dict[str, Any]) -> None:
+        """Make the studio document THE xray configuration, in safe order:
+
+        1. validate by constructing an ``XRayConfig`` from it (legacy rules:
+           unique tags, fallbacks port, reality shortIds, outbounds present…)
+           — nothing is touched when invalid;
+        2. persist the CLEAN document to ``XRAY_JSON`` (the boot seed — the
+           API inbound/api section the validator injects into its own copy
+           never leak into the file);
+        3. reload the LIVE ``app.xray.config`` singleton *in place* — object
+           identity is load-bearing (every legacy router holds this one
+           reference); ``GET /api/inbounds`` (the user-creation catalog) and
+           the subscription generator see the new inbound immediately, which
+           is the reported 'catalog does not refresh after the wizard' bug;
+        4. restart a running core so the listener is actually served.
+        """
+        import json
+        import os
+        from copy import deepcopy
+
+        try:
+            from config import XRAY_JSON
+        except Exception:  # noqa: BLE001 — stand-alone usage without host config
+            XRAY_JSON = "xray_config.json"
+
+        from app.xray.config import XRayConfig
+
+        mod = self._x()
+        try:
+            candidate = XRayConfig(
+                deepcopy(document),
+                api_host=getattr(mod.config, "api_host", "127.0.0.1"),
+                api_port=getattr(mod.config, "api_port", 8080),
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            raise CoreError(
+                f"xray rejected the studio document (nothing was applied): {exc}"
+            ) from exc
+
+        tmp_path = f"{XRAY_JSON}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(document, fh, indent=2, ensure_ascii=False)
+            fh.write("\n")
+        os.replace(tmp_path, XRAY_JSON)
+
+        mod.config.clear()
+        mod.config.update(candidate)
+        mod.config.inbounds = candidate.inbounds
+        mod.config.inbounds_by_protocol = candidate.inbounds_by_protocol
+        mod.config.inbounds_by_tag = candidate.inbounds_by_tag
+        mod.config._fallbacks_inbound = candidate._fallbacks_inbound  # noqa: SLF001
+
+        hosts = getattr(mod, "hosts", None)
+        if hasattr(hosts, "clear"):
+            hosts.clear()  # re-derives per-tag rows lazily on next access
+
+        self._persist_and_maybe_restart()
+
     def _persist_and_maybe_restart(self) -> None:
         """Apply in-memory config mutations to the live core (restart path)."""
         mod = self._x()

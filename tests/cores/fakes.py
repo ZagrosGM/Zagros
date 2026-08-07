@@ -254,6 +254,13 @@ class FakeSSHBackend:
         self._sessions = [s for s in self._sessions if s.user != username]
         self.killed.append(username)
         return before - len(self._sessions)
+    # mirrors LocalSystemSSHBackend.ensure_service's contract: start() must
+    # fail loudly (CoreError) when sshd is down instead of reporting RUNNING
+    def ensure_service(self):
+        if not self._sshd:
+            raise CoreError("sshd is not running and could not be started — "
+                            "enable the system ssh service")
+        return "fake (already running)"
     def sshd_running(self): return self._sshd
     def logs(self, tail: int = 200): return []
     def install_packages(self): return "installed"

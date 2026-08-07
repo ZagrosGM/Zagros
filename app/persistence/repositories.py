@@ -414,6 +414,9 @@ class SQLPortalSettingsStore:
         return await asyncio.to_thread(_sync)
 
     async def save_portal_settings(self, settings: PortalSettings) -> PortalSettings:
+        # normalize at the persistence edge too so ANY writer (HTTP router,
+        # service call, script) stores one canonical shape
+        settings = settings.normalize()
         payload = settings.model_dump(mode="json")
         def _sync() -> PortalSettings:
             with self._sf() as s:

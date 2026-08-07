@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import copy
 import logging
+import os
 import secrets
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
@@ -157,6 +159,7 @@ class SingBoxDriver(BaseCoreDriver):
         self._v2ray_supported: bool | None = None  # lazy binary probe cache
         self._stats_degrade_warned = False
         self._studio_doc: dict[str, Any] | None = None  # set by apply_studio_document
+        self._studio_link_meta: dict[str, dict[str, Any]] = {}  # per-tag link metadata
         self._stats_error: str | None = None
 
     # ------------------------------------------------------------------ #
@@ -170,6 +173,15 @@ class SingBoxDriver(BaseCoreDriver):
             entry["uuid"] = str(account.settings["id"])
             if protocol == "vless" and account.settings.get("flow"):
                 entry["flow"] = account.settings["flow"]
+        elif protocol == "tuic":
+            # sing-box tuic users are {uuid, password} — NO name field
+            # (the generic branch rendered a tuic user without uuid, which
+            # the binary rejects with "missing uuid for user 0"; caught by
+            # the wizard matrix probe against the real binary)
+            entry = {
+                "uuid": str(account.settings.get("uuid") or account.settings.get("id")),
+                "password": str(account.settings["password"]),
+            }
         else:
             entry["password"] = account.settings["password"]
         return entry
@@ -192,13 +204,19 @@ class SingBoxDriver(BaseCoreDriver):
                 # with nobody on it is dead weight anyway, and a fresh core
                 # with no accounts starts cleanly with zero inbounds.
                 continue
+            ss_extra: dict[str, Any] = {}
+            if protocol == "shadowsocks":
+                ss_extra["method"] = self._ss_checked_method(str(self.settings["ss_method"]))
+                psk = self._ss_server_psk()  # mandatory iPSK for 2022 ciphers
+                if psk:
+                    ss_extra["password"] = psk
             inbounds.append({
                 "type": protocol,
                 "tag": f"{protocol}-in",
                 "listen": self.settings["listen"],
                 "listen_port": int(ports[protocol]),
                 "users": users,
-                **({"method": self.settings["ss_method"]} if protocol == "shadowsocks" else {}),
+                **ss_extra,
             })
         for (protocol, port), _ep in sorted(self._chain_listeners.items()):
             inbounds.append({
@@ -233,11 +251,19 @@ class SingBoxDriver(BaseCoreDriver):
 
     def _merge_studio_inbounds(self) -> list[dict[str, Any]]:
         merged: list[dict[str, Any]] = []
+        self._studio_link_meta = {}
         for raw in self._studio_doc["inbounds"]:
             ib = self._studio_entry_to_native(raw)
             tag = str(ib.get("tag") or "")
             if tag.startswith("zg-chain-"):
                 continue  # chain listeners are managed, never doc-owned
+            # sing-box strictly rejects unknown fields — panel-side link
+            # metadata (reality public key, client flow hint, …) must NOT
+            # leak into the rendered document; keep it in the side map the
+            # delivery path reads instead (probe vs real binary, alpha.7.1)
+            meta = {k: ib.pop(k) for k in list(ib) if k.startswith("_")}
+            if meta:
+                self._studio_link_meta[tag] = meta
             ptype = ib.get("type")
             if ptype in _PROTOCOLS or ptype == "hysteria2" or ptype == "tuic":
                 users = [
@@ -261,6 +287,102 @@ class SingBoxDriver(BaseCoreDriver):
             })
         return merged
 
+    #: protocols the wizard can materialize — verified live against
+    #: sing-box 1.12.4 (`sing-box check` per offered combo)
+    _STUDIO_PROTOCOLS = {
+        "vless", "vmess", "trojan", "shadowsocks",
+        "socks", "http", "mixed", "naive", "anytls", "hysteria2", "tuic",
+    }
+
+    #: Shadowsocks 2022 ciphers - their passwords ARE the AEAD keys and must
+    #: be base64 PSKs of an exact byte size (verified live: a 2022 cipher
+    #: with a legacy string password fails `sing-box check` "missing psk").
+    #: The default ss_method stays aes-128-gcm (password = free-form string).
+    _SS2022_PSK_BYTES: ClassVar[dict[str, int]] = {
+        "2022-blake3-aes-128-gcm": 16,
+        "2022-blake3-aes-256-gcm": 32,
+    }
+    #: methods the binary actually serves (verified per method against 1.12.4;
+    #: 2022-blake3-chacha20-poly1305 is Xray-only and rejected here).
+    _SS_SUPPORTED_METHODS: ClassVar[frozenset[str]] = frozenset({
+        "aes-128-gcm", "aes-192-gcm", "aes-256-gcm",
+        "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305",
+        "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm",
+    })
+
+    def _ss_checked_method(self, method: str) -> str:
+        if method not in self._SS_SUPPORTED_METHODS:
+            raise CoreError(
+                f"sing-box does not implement shadowsocks method '{method}' "
+                f"(verified against the real binary) — supported: "
+                f"{sorted(self._SS_SUPPORTED_METHODS)}."
+            )
+        return method
+
+    def _ss_server_psk(self, method: str | None = None) -> str | None:
+        """Server-level identity PSK (iPSK) for Shadowsocks-2022 methods.
+
+        sing-box rejects a 2022 inbound without it ("missing psk") and every
+        client needs it (ss:// encodes ``method:iPSK:uPSK``). Generated once,
+        persisted 0600 under work_dir per key-size, exactly like the
+        tuic/hysteria2 bootstrap-secret convention. None for classic methods
+        (the free-form per-user password suffices there).
+        """
+        method = str(method or self.settings.get("ss_method") or "aes-128-gcm")
+        size = self._SS2022_PSK_BYTES.get(method)
+        if not size:
+            return None
+        work_dir = str(self.settings.get("work_dir") or ".")
+        path = os.path.join(work_dir, f".ss-2022-psk-{size}")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as fh:
+                stored = fh.read().strip()
+            if stored:
+                return stored
+        os.makedirs(work_dir, exist_ok=True)
+        psk = base64.b64encode(secrets.token_bytes(size)).decode()
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(psk + "\n")
+        return psk
+
+    def _normalize_account(self, account: UserAccount) -> UserAccount:
+        """Derive engine-mandated credential material ONCE at the ingest
+        boundary (create/update/sync), so render paths never re-mint and
+        every consumer — listener, share link, delivery — sees the same
+        values. UserAccount is frozen; normalization returns a NEW object.
+
+        * ss with a 2022 method: ``password`` becomes a proper base64 PSK
+          (deterministically expanded from the stored secret when it is not
+          one already — the stored row/subscription keeps the ORIGINAL
+          secret, so this must be a pure function of it);
+        * uuid-carrying protocols (tuic): accept legacy ``id`` as ``uuid``.
+        """
+        if account.protocol == "shadowsocks":
+            method = str(self.settings.get("ss_method") or "aes-128-gcm")
+            need = self._SS2022_PSK_BYTES.get(method)
+            secret = str(account.settings.get("password") or "")
+            if need and secret:
+                try:
+                    raw = base64.b64decode(secret, validate=True)
+                except Exception:
+                    raw = b""
+                if len(raw) != need:
+                    digest = hashlib.sha256(secret.encode("utf-8")).digest()
+                    account = account.model_copy(update={
+                        "settings": {
+                            **account.settings,
+                            "password": base64.b64encode(digest[:need]).decode(),
+                        }
+                    })
+        elif account.protocol == "tuic" and not account.settings.get("uuid"):
+            legacy_id = account.settings.get("id")
+            if legacy_id is not None:
+                account = account.model_copy(update={
+                    "settings": {**account.settings, "uuid": str(legacy_id)}
+                })
+        return account
+
     def _studio_entry_to_native(self, raw: dict[str, Any]) -> dict[str, Any]:
         """Studio entry {tag, protocol, listen, port, …wizard fields} → native
         sing-box inbound. Every wizard field maps somewhere; anything
@@ -269,14 +391,22 @@ class SingBoxDriver(BaseCoreDriver):
             return dict(raw)  # already native (edited in Advanced Mode)
 
         proto = str(raw.get("protocol") or raw.get("type") or "")
-        if not proto:
-            raise CoreError(f"studio inbound '{raw.get('tag')}' declares no protocol")
+        if proto not in self._STUDIO_PROTOCOLS:
+            raise CoreError(
+                f"studio inbound '{raw.get('tag')}': sing-box has no server "
+                f"inbound '{proto}' — WireGuard exists in sing-box only as an "
+                "OUTBOUND (a WireGuard *listener* is the WireGuard core's job); "
+                "redirect/tproxy/tun/shadowtls are transparent-proxy facilities, "
+                "not per-user inbounds."
+            )
         known = {"tag", "protocol", "listen", "port", "inbound_variant",
                  "transport", "security",
                  "path", "host", "headers", "service_name", "authority",
                  "sni", "alpn", "method", "flow", "fingerprint", "public_key",
                  "congestion_control", "up_mbps", "down_mbps", "obfs",
-                 "cipher", "ports", "ipsec_psk", "certificate", "mode"}
+                 "cipher", "ports", "ipsec_psk", "certificate", "certificate_key",
+                 "mode", "username", "password", "auth", "padding_scheme",
+                 "masquerade"}
         unknown = sorted(set(raw) - known)
         if unknown:
             raise CoreError(
@@ -289,36 +419,82 @@ class SingBoxDriver(BaseCoreDriver):
             "listen": raw.get("listen") or self.settings["listen"],
             "listen_port": int(raw["port"]),
         }
-        # transport — explicit selection wins (dynamic wizard sends it); any
-        # transport sing-box cannot serve fails loudly instead of silently
+        # transport — explicit selection wins (dynamic wizard sends it);
+        # a transport sing-box cannot serve fails loudly instead of silently
         # degrading the listener to plain TCP
         net = str(raw.get("transport") or "").lower()
-        if net in ("xhttp", "quic") and proto not in ("hysteria2", "tuic"):
+        security = str(raw.get("security") or "").lower()
+        if proto == "shadowsocks" and net not in ("", "tcp"):
             raise CoreError(
-                f"sing-box cannot serve a {proto} inbound over {net} "
+                "sing-box shadowsocks inbounds have no transport field at all "
+                "(TCP+UDP in-protocol) — pick VLESS/VMess/Trojan for ws/gRPC/h2."
+            )
+        if net == "xhttp" and proto not in ("hysteria2", "tuic"):
+            raise CoreError(
+                f"sing-box cannot serve a {proto} inbound over xhttp "
                 f"(xhttp is Xray-only) — pick ws/httpupgrade/grpc/http instead."
             )
-        if net == "grpc" or raw.get("service_name"):
+        # naive (HTTPS/2) and anytls have NO transport field physically (sing-box
+        # struct literally lacks it — "unknown field transport", verified); the
+        # wizard's transport pick for them is decorative and is dropped here
+        skip_transport = proto in ("naive", "anytls")
+        if net == "grpc" and not skip_transport or raw.get("service_name"):
             if not raw.get("service_name"):
                 raise CoreError("gRPC inbound requires service_name")
             ib["transport"] = {"type": "grpc", "service_name": raw["service_name"]}
-        elif net == "httpupgrade":
+        elif net == "httpupgrade" and not skip_transport:
             ib["transport"] = {"type": "httpupgrade", "path": raw.get("path") or "/",
                                **({"host": raw["host"]} if raw.get("host") else {})}
-        elif net == "http":
+        elif net == "http" and not skip_transport:
+            _h = raw.get("host")
             ib["transport"] = {"type": "http",
                                **({"path": raw["path"]} if raw.get("path") else {}),
-                               **({"host": raw["host"]} if raw.get("host") else {})}
+                               **({"host": [_h] if isinstance(_h, str) else _h} if _h else {})}
+        elif net == "quic" and proto not in ("hysteria2", "tuic") and not skip_transport:
+            # sing-box DOES have a generic quic transport, but it refuses to
+            # boot it without TLS ("create server transport: quic: TLS
+            # required", verified) — so it is only offered under TLS/REALITY.
+            if security not in ("tls", "reality"):
+                raise CoreError(
+                    "a QUIC transport requires TLS or REALITY in sing-box."
+                )
+            ib["transport"] = {"type": "quic"}
+        elif skip_transport:
+            pass  # decorative transport choice (see above)
         elif net == "ws" or raw.get("path") is not None or raw.get("host"):
             headers = dict(raw.get("headers") or {})
             if raw.get("host"):
                 headers["Host"] = raw["host"]
             ib["transport"] = {"type": "ws", "path": raw.get("path") or "/",
                                **({"headers": headers} if headers else {})}
-        # security — explicit; reality needs nothing but an SNI + generated keys
-        security = str(raw.get("security") or "").lower()
+        # security — explicit; reality is verified per-protocol below
         alpn = raw.get("alpn")
+        if proto in ("socks", "mixed"):
+            if security not in ("", "none"):
+                raise CoreError(
+                    f"sing-box {proto} inbounds do not carry a TLS section "
+                    "(verified against the binary) — terminate TLS upstream or "
+                    "pick the http inbound."
+                )
+        elif proto == "shadowsocks":
+            if security not in ("", "none"):
+                raise CoreError(
+                    "sing-box shadowsocks inbounds do not carry a TLS section — "
+                    "Shadowsocks IS the encryption layer itself."
+                )
+        elif proto == "trojan" and security in ("", "none"):
+            raise CoreError(
+                "Trojan without TLS is not offered — the protocol's identity IS "
+                "the TLS layer; pick TLS or REALITY."
+            )
+        if proto == "naive" and not raw.get("username"):
+            raise CoreError("naive (HTTPS/2 proxy) needs username+password users.")
         if security == "reality" or raw.get("public_key"):
+            if proto in ("vmess", "shadowsocks"):
+                raise CoreError(
+                    f"REALITY is not offered for {proto} — clients only do the "
+                    "REALITY handshake under VLESS/Trojan."
+                )
             private, public = _x25519_keypair()
             sni = str(raw.get("sni") or "").split(":")[0]
             if not sni:
@@ -334,35 +510,101 @@ class SingBoxDriver(BaseCoreDriver):
                 },
                 **({"alpn": alpn} if alpn else {}),
             }
-            ib["_reality_public_key"] = public  # surfaced for share links
-        elif security == "tls" or raw.get("sni"):
-            cert = raw.get("certificate") or {}
-            tls: dict[str, Any] = {"enabled": True, "server_name": raw.get("sni") or "",
-                                   **({"alpn": alpn} if alpn else {})}
-            if isinstance(cert, dict) and cert.get("cert_path"):
-                tls["certificate_path"] = cert["cert_path"]
-                tls["key_path"] = cert.get("key_path")
-            else:
-                raise CoreError(
-                    "TLS inbound needs certificate paths (managed-certificate "
-                    "integration is not wired into the studio document yet) — "
-                    "provide certificate.cert_path/key_path, or use Advanced mode."
-                )
-            ib["tls"] = tls
+            ib["_reality_public_key"] = public  # → side map (delivery), never rendered
+        elif security == "tls" or proto in ("naive", "anytls"):
+            cert_path, key_path = self._studio_materialize_certificate(
+                str(raw["tag"]), raw.get("certificate"), raw.get("certificate_key"),
+            )
+            ib["tls"] = {
+                "enabled": True,
+                "server_name": raw.get("sni") or "",
+                "certificate_path": cert_path,
+                "key_path": key_path,
+                **({"alpn": alpn} if alpn else {}),
+            }
         # protocol specifics
-        if proto == "shadowsocks" and raw.get("method"):
-            ib["method"] = raw["method"]
+        if proto == "shadowsocks":
+            if raw.get("method"):
+                ib["method"] = self._ss_checked_method(str(raw["method"]))
+            psk = self._ss_server_psk(str(raw.get("method") or "") or None)
+            if psk:
+                ib["password"] = psk  # mandatory iPSK for 2022 ciphers
         if proto == "vless" and raw.get("flow"):
             ib["_client_flow"] = raw["flow"]  # client-level, link rendering
+        if proto in ("socks", "http", "mixed", "naive"):
+            if raw.get("username"):
+                ib["users"] = [{
+                    "username": str(raw["username"]),
+                    "password": str(raw.get("password") or ""),
+                }]
+                if proto == "naive" and not raw.get("password"):
+                    raise CoreError("naive users need a password.")
+        if proto == "anytls":
+            password = str(raw.get("password") or "")
+            if not password:
+                raise CoreError(
+                    "anytls needs a listener password (its users authenticate "
+                    "by password; per-user accounts stay a panel concern)."
+                )
+            ib["users"] = [{"name": str(raw.get("username") or raw["tag"]),
+                            "password": password}]
+            if raw.get("padding_scheme"):
+                scheme = raw["padding_scheme"]
+                ib["padding_scheme"] = (
+                    scheme if isinstance(scheme, list)
+                    else [s.strip() for s in str(scheme).splitlines() if s.strip()]
+                )
         if proto == "hysteria2":
             for k in ("up_mbps", "down_mbps"):
                 if raw.get(k) not in (None, ""):
-                    ib[k.replace("_mbps", "_mbps")] = int(raw[k])
+                    ib[k] = int(raw[k])
             if raw.get("obfs"):
                 ib["obfs"] = {"type": "salamander", "password": raw["obfs"]}
-        if proto == "tuic" and raw.get("congestion_control"):
-            ib["congestion_control"] = raw["congestion_control"]
+            if raw.get("masquerade"):
+                ib["masquerade"] = str(raw["masquerade"])
+        if proto == "tuic":
+            if raw.get("congestion_control"):
+                ib["congestion_control"] = raw["congestion_control"]
         return ib
+
+    def _studio_materialize_certificate(
+        self, tag: str, cert_pem: Any, key_pem: Any,
+    ) -> tuple[str, str]:
+        """Wizard TLS: uploaded PEM contents are written panel-side (uploads
+        must come as a pair); blank = generate a self-signed certificate —
+        the wizard help tells the operator to upload a real pair for
+        production SNI."""
+        if bool(cert_pem) != bool(key_pem):
+            raise CoreError(
+                f"TLS inbound '{tag}': upload certificate AND private key together."
+            )
+        import re as _re
+
+        safe_tag = _re.sub(r"[^A-Za-z0-9_.-]+", "_", tag)
+        cert_dir = str(self.settings.get("cert_dir") or
+                       os.path.join(str(self.settings.get("work_dir") or "."), "certs"))
+        cert_path = os.path.join(cert_dir, f"{safe_tag}.crt")
+        key_path = os.path.join(cert_dir, f"{safe_tag}.key")
+        if cert_pem:
+            cert_text, key_text = str(cert_pem), str(key_pem)
+        else:
+            from app.utils.crypto import generate_certificate
+
+            pair = generate_certificate()
+            cert_text, key_text = pair["cert"], pair["key"]
+        os.makedirs(cert_dir, exist_ok=True)
+        for path, text, mode in (
+            (cert_path, cert_text, 0o644),
+            (key_path, key_text, 0o600),
+        ):
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as fh:
+                    if fh.read() == text:
+                        continue  # idempotent — no needless restart ripple
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.chmod(path, mode)
+        return cert_path, key_path
 
     def render_config(self) -> dict[str, Any]:
         """Desired-state → full sing-box JSON (deterministic, testable)."""
@@ -496,7 +738,9 @@ class SingBoxDriver(BaseCoreDriver):
 
     async def create_account(self, account: UserAccount) -> None:
         self._ensure_supported(account.protocol)
-        key = account.settings.get("id") or account.settings.get("password")
+        account = self._normalize_account(account)
+        key = account.settings.get("id") or account.settings.get("password") \
+            or account.settings.get("uuid")
         if account.enabled and not key:
             raise CoreError(
                 f"Account '{account.account_id}' for '{account.protocol}' is missing credentials "
@@ -507,7 +751,7 @@ class SingBoxDriver(BaseCoreDriver):
 
     async def update_account(self, account: UserAccount) -> None:
         self._ensure_supported(account.protocol)
-        self._accounts[account.account_id] = account
+        self._accounts[account.account_id] = self._normalize_account(account)
         await self._republish()
 
     async def delete_account(self, account_id: str) -> None:
@@ -529,18 +773,38 @@ class SingBoxDriver(BaseCoreDriver):
     async def sync_accounts(self, accounts: list[UserAccount]) -> None:
         """Config-render cores converge best by rebuilding user state wholesale."""
         self._accounts = {
-            a.account_id: a for a in accounts if a.protocol in _PROTOCOLS
+            a.account_id: self._normalize_account(a)
+            for a in accounts
+            if a.protocol in _PROTOCOLS or a.protocol in ("hysteria2", "tuic")
         }
         await self._republish()
 
     # ------------------------------------------------------------------ #
     # statistics — v2ray StatsService (experimental API)
     # ------------------------------------------------------------------ #
+    def _stats_ready(self) -> bool:
+        """True only when the rendered config actually carries a stats
+        listener: accounting on AND this binary probe-confirmed the v2ray_api
+        build tag. Anything less and there is physically nothing to dial."""
+        return bool(self.settings.get("stats_enabled")) and self._v2ray_api_supported()
+
     async def _query_counters(self) -> dict[str, tuple[int, int]]:
+        # Never dial a listener that was never rendered: the field error was
+        # a raw "stats API unreachable / Connection refused" masking the real
+        # cause (an upstream build without the tag). Short-circuit + keep the
+        # coherent degrade message set at render time instead.
+        if not self._stats_ready():
+            return {}
         try:
             counters = await asyncio.to_thread(self._stats.query_user_counters)
         except Exception as exc:
-            self._stats_error = str(exc)
+            self._stats_error = (
+                f"sing-box stats listener not answering on "
+                f"{self.settings['stats_api']}: {exc} — the build supports the "
+                f"v2ray API (probe passed) but the listener is not up; the "
+                f"core may be running a stale config — restart it so the "
+                f"rendered config applies."
+            )
             raise
         self._stats_error = None
         return counters
@@ -859,7 +1123,11 @@ class SingBoxDriver(BaseCoreDriver):
         else:
             outbound["password"] = account.settings["password"]
             if account.protocol == "shadowsocks":
-                outbound["method"] = self.settings["ss_method"]
+                outbound["method"] = self._ss_checked_method(str(self.settings["ss_method"]))
+                psk = self._ss_server_psk()
+                if psk:
+                    # SIP022 multi-user form: ss:// encodes method:iPSK:uPSK
+                    outbound["password"] = f"{psk}:{account.settings['password']}"
         outbound["tls"] = {"enabled": False}
         return ClientConfig(
             core_id=self.metadata.id,

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 from collections.abc import Sequence
@@ -24,6 +25,7 @@ class SSHBackend(Protocol):
     def user_exists(self, username: str) -> bool: ...
     def create_user(self, username: str, password: str, shell: str, create_home: bool) -> None: ...
     def set_password(self, username: str, password: str) -> None: ...
+    def authorize_key(self, username: str, public_key: str) -> str: ...
     def lock_user(self, username: str) -> None: ...
     def unlock_user(self, username: str) -> None: ...
     def delete_user(self, username: str) -> None: ...
@@ -35,6 +37,11 @@ class SSHBackend(Protocol):
 
 
 class LocalSystemSSHBackend:
+    # sshd lives outside PATH (sbin) on Debian-family service environments,
+    # so `which` alone is not enough; keep the well-known fallbacks as an
+    # explicit seam (tests patch it to simulate a host without sshd).
+    SSHD_FALLBACK_PATHS = ("/usr/sbin/sshd", "/usr/local/sbin/sshd")
+
     """Production backend driving the host's standard account tools."""
 
     def __init__(self, settings: dict):
@@ -84,6 +91,41 @@ class LocalSystemSSHBackend:
 
     def delete_user(self, username: str) -> None:
         self._run(["userdel", username], check=False)  # idempotent
+        key_file = os.path.join(self._keys_dir, username)
+        if os.path.exists(key_file):
+            os.remove(key_file)
+
+    # ------------------------------------------------------------------ #
+    # authorized keys (panel-owned dir, home-dir independent; sshd reads it
+    # via the drop-in's AuthorizedKeysFile line — works even for
+    # --no-create-home tunnel accounts)
+    # ------------------------------------------------------------------ #
+    _keys_dir = "/etc/ssh/zagros_keys"
+
+    def authorize_key(self, username: str, public_key: str) -> str:
+        """Install *public_key* as the account's panel-owned authorized key.
+
+        StrictModes-compliant: directory and file root-owned, sshd only
+        requires the chain to be non-group/world-writable, while the file
+        itself is made readable by the target user's primary group is NOT
+        needed — sshd reads authorized keys as root before dropping
+        privileges, so root:root 0600 is sufficient and safest.
+        """
+        key = public_key.strip()
+        if not key.startswith(("ssh-rsa", "ssh-ed25519", "ecdsa-sha2-", "sk-")):
+            raise CoreError(
+                f"refusing to install non-SSH public key for '{username}' "
+                "(expected ssh-ed25519/ssh-rsa/ecdsa-*/sk-*)."
+            )
+        os.makedirs(self._keys_dir, exist_ok=True)
+        os.chmod(self._keys_dir, 0o755)
+        path = os.path.join(self._keys_dir, username)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(key + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        return path
 
     # ------------------------------------------------------------------ #
     # sessions
@@ -138,3 +180,165 @@ class LocalSystemSSHBackend:
                     self._run(["apt-get", "update"], timeout=600)
                 return self._run(argv, timeout=600)
         raise CoreError("no supported package manager found (apt/dnf/yum/pacman/apk).")
+
+    # ------------------------------------------------------------------ #
+    # full service bring-up (alpha.7.1): the old behaviour was a bare
+    # "sshd is not running — enable the system ssh service" error. A core
+    # must reach the READY state itself: install → host keys → panel-owned
+    # drop-in → validate → enable+start → verify.
+    # ------------------------------------------------------------------ #
+    @property
+    def _dropin_path(self) -> str:
+        return self.settings.get(
+            "dropin_path", "/etc/ssh/sshd_config.d/zagros.conf"
+        )
+
+    def _sshd_bin(self) -> str | None:
+        found = shutil.which("sshd")
+        if found:
+            return found
+        for candidate in self.SSHD_FALLBACK_PATHS:
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
+    def render_dropin(self) -> str:
+        """Panel-owned sshd overrides. SAFETY CONTRACT: port 22 is always
+        kept — a `Port` directive replaces the default listener set, and a
+        panel that removed 22 would lock the operator out of their own box.
+        """
+        s = self.settings
+        panel_port = int(s.get("port") or 22)
+        lines = [
+            "# zagros-managed sshd drop-in — rewritten by the panel; do not edit by hand.",
+            "Port 22  # operator access must never be locked out",
+        ]
+        if panel_port != 22:
+            lines.append(f"Port {panel_port}")
+        lines.append(
+            "PasswordAuthentication " + ("yes" if s.get("password_auth", True) else "no")
+        )
+        lines.append(
+            "PubkeyAuthentication " + ("yes" if s.get("pubkey_auth", True) else "no")
+        )
+        if s.get("pubkey_auth", True):
+            # panel-owned per-user key files (root:root 0600 — StrictModes clean,
+            # sshd reads them as root pre-setuid); works without home dirs
+            lines.append(
+                f"AuthorizedKeysFile .ssh/authorized_keys {self._keys_dir}/%u"
+            )
+        if s.get("max_sessions"):
+            lines.append(f"MaxSessions {int(s['max_sessions'])}")
+        if s.get("banner"):
+            banner_path = os.path.join(
+                os.path.dirname(self._dropin_path), "zagros.banner"
+            )
+            with open(banner_path, "w", encoding="utf-8") as fh:
+                fh.write(str(s["banner"]).rstrip("\n") + "\n")
+            lines.append(f"Banner {banner_path}")
+        if s.get("sftp", True):
+            lines.append("Subsystem sftp internal-sftp")
+        return "\n".join(lines) + "\n"
+
+    def _write_dropin_if_changed(self) -> bool:
+        content = self.render_dropin()
+        path = self._dropin_path
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as fh:
+                if fh.read() == content:
+                    return False  # idempotent: no rewrite, no reload ripple
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+        return True
+
+    def _ensure_host_keys(self) -> None:
+        import glob
+
+        if glob.glob("/etc/ssh/ssh_host_*_key"):
+            return
+        keygen = shutil.which("ssh-keygen")
+        if keygen is None:
+            raise CoreError(
+                "no ssh host keys and ssh-keygen is unavailable — "
+                "generate host keys (ssh-keygen -A) before starting sshd."
+            )
+        self._run([keygen, "-A"], timeout=120)
+
+    def _systemd_alive(self) -> bool:
+        if not shutil.which("systemctl"):
+            return False
+        proc = subprocess.run(
+            ["systemctl", "is-system-running"], capture_output=True, text=True
+        )
+        return proc.returncode == 0 and proc.stdout.strip() in {
+            "running", "degraded", "starting", "maintenance",
+        }
+
+    def _ssh_unit(self) -> str | None:
+        for unit in ("ssh.service", "sshd.service"):
+            proc = subprocess.run(
+                ["systemctl", "cat", unit], capture_output=True, text=True
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                return unit
+        return None
+
+    def _enable_start_or_reload(self, changed: bool, was_running: bool) -> str:
+        """systemd (enable --now / reload when live config only) → service(8)
+        → direct `sshd` launch (ssh-daemonises itself — the container path).
+        sshd RELOAD is non-disruptive: never bounce a healthy daemon and kick
+        the operator's own sessions."""
+        if self._systemd_alive():
+            unit = self._ssh_unit()
+            if unit:
+                if was_running and changed:
+                    self._run(["systemctl", "reload", unit], timeout=60)
+                elif not was_running:
+                    self._run(["systemctl", "enable", "--now", unit], timeout=60)
+                return f"systemctl ({unit})"
+        if shutil.which("service"):
+            for name in ("ssh", "sshd"):
+                proc = subprocess.run(
+                    ["service", name, "reload" if (was_running and changed) else "start"],
+                    capture_output=True, text=True,
+                )
+                if proc.returncode == 0:
+                    return f"service ({name})"
+        if not was_running:
+            bin_ = self._sshd_bin()
+            assert bin_ is not None  # ensured before we get here
+            self._run([bin_])
+            return "direct sshd launch"
+        return "no-op (already running, config unchanged)"
+
+    def ensure_service(self) -> str:
+        """Bring sshd to READY and return HOW it was done (for status/logs)."""
+        if self._sshd_bin() is None:
+            self.install_packages()
+        bin_ = self._sshd_bin()
+        if bin_ is None:
+            raise CoreError(
+                "sshd is still missing after installing openssh-server — "
+                "read the package-manager output in the core logs."
+            )
+        self._ensure_host_keys()
+        changed = self._write_dropin_if_changed()
+        try:
+            self._run([bin_, "-t"], timeout=30)
+        except CoreError as exc:
+            raise CoreError(
+                f"generated sshd configuration failed validation — nothing "
+                f"was started; the panel-owned drop-in is the suspect:\n{exc}"
+            ) from exc
+        was_running = self.sshd_running()
+        how = self._enable_start_or_reload(changed, was_running)
+        if not self.sshd_running():
+            raise CoreError(
+                f"sshd did not come up via {how} — run 'journalctl -u ssh -u sshd "
+                f"-n 50' (or read the core logs) for the daemon's own reason."
+            )
+        return how

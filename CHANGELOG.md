@@ -10,6 +10,36 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.7.3] — 2026-08-08 — CI hermeticity fix (functionally identical to alpha.7.2)
+
+Un-breaks the release pipeline: the alpha.7.2 tag run failed in the `Test`
+job on a clean GitHub runner (8 failed / 591 passed of 599). Investigation
+pinned BOTH root causes to test code — production code reproduced clean in a
+CI-identical environment. No functional delta vs `1.0.0-alpha.7.2`.
+
+### Fixed — test suite hermeticity
+- `tests/portal/test_host_settings_service.py`: relied on an undeclared
+  pytest-asyncio install (bare `async def test_` + `pytest.mark.asyncio`)
+  while the repo pins no such plugin — CI installs `requirements.txt +
+  pytest` only, and the suite-wide convention is sync tests driving
+  coroutines via `asyncio.run()`. All 7 tests converted to that convention
+  (identical bodies and assertions); deterministic on any runner now.
+- `tests/cores/test_softether_driver.py::test_install_reports_every_failed_stage`:
+  the fixture left `_INSTALL_ROOT` at the real `/usr/local/softether`, so
+  `_install_from_github`'s real `makedirs` both polluted the host and made
+  the outcome depend on ambient permissions (writable locally, `EACCES` on
+  CI runners). Redirected to `tmp_path`; every stage now fails only from
+  the injected fault.
+
+### Verified before tagging
+- Full suite in a CI-identical venv (`requirements.txt` + pytest only):
+  **599 passed / 7 skipped / 0 failed**; both failures reproduced
+  byte-identically pre-fix.
+- CLI suite **237/0**; `tsc --noEmit` + vite build clean; 21-check real
+  browser e2e against a real panel boot: PASSED.
+- Docker release path reviewed stage-by-stage (COPY paths, `npm ci` lock,
+  fresh-env `pip install -r requirements.txt`, alembic-head boot).
+
 ## [1.0.0-alpha.7.2] — 2026-08-08 — Multi-core consolidation, host settings, portal UX
 
 Field-driven batch: core architecture consolidation, hardened installers and

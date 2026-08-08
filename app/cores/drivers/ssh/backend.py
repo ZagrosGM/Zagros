@@ -9,15 +9,23 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
-from app.cores.drivers.ssh.sshtool import SSHSession, parse_ps_sshd
+from app.cores.drivers.ssh.sshtool import (
+    ACCT_CHAIN,
+    SSHSession,
+    parse_acct_counters,
+    parse_ps_sshd,
+)
 from app.cores.exceptions import CoreError
 
 logger = logging.getLogger("zagros.cores.drivers.ssh")
+
+_UID_RULE_S = re.compile(r"--uid-owner (\d+)")
 
 
 @runtime_checkable
@@ -64,6 +72,89 @@ class LocalSystemSSHBackend:
                 f"'{' '.join(argv)}' failed (rc={proc.returncode}): {proc.stderr.strip()}"
             )
         return proc.stdout
+
+    # ------------------------------------------------------------------ #
+    # per-UID traffic accounting — iptables owner-match chain (alpha.7.4)
+    # ------------------------------------------------------------------ #
+    def acct_available(self) -> str | None:
+        """None when per-UID accounting can run; else a DIAGNOSIS for the
+        operator (iptables absent, or NET_ADMIN missing — the panel
+        container needs the capability: installer compose grants it)."""
+        iptables = shutil.which("iptables") or next(
+            (p for p in ("/usr/sbin/iptables", "/sbin/iptables") if os.path.exists(p)),
+            None,
+        )
+        if iptables is None:
+            return ("iptables not found — per-SSH-user accounting needs it "
+                    "(panel image ships it since 1.0.0-alpha.7.4).")
+        try:
+            self._run([iptables, "-S", ACCT_CHAIN], timeout=15)
+        except CoreError as exc:
+            text = str(exc)
+            if "Permission" in text or "Operation not permitted" in text:
+                return ("iptables unavailable inside this container — grant "
+                        "NET_ADMIN (installer compose does; existing installs: "
+                        "zagros update --force).")
+            return None  # any other error = chain simply absent: creatable
+        return None
+
+    def _iptables(self) -> str:
+        return shutil.which("iptables") or next(
+            (p for p in ("/usr/sbin/iptables", "/sbin/iptables") if os.path.exists(p)),
+            "iptables",
+        )
+
+    def acct_ensure(self) -> None:
+        ipt = self._iptables()
+        try:
+            self._run([ipt, "-N", ACCT_CHAIN], check=False)
+        except CoreError:
+            pass  # exists already
+        rules = self._run([ipt, "-S", "OUTPUT"], check=False)
+        if f" -j {ACCT_CHAIN}" not in rules:
+            self._run([ipt, "-I", "OUTPUT", "1", "-j", ACCT_CHAIN])
+
+    def acct_sync_users(self, uids: set[int]) -> None:
+        """Converge per-UID accounting rules to exactly ``uids``."""
+        ipt = self._iptables()
+        self.acct_ensure()
+        current: set[int] = set()
+        for line in self._run([ipt, "-S", ACCT_CHAIN]).splitlines():
+            m = _UID_RULE_S.search(line)
+            if m:
+                current.add(int(m.group("uid")))
+        for uid in sorted(uids - current):
+            self._run([ipt, "-A", ACCT_CHAIN, "-m", "owner",
+                       "--uid-owner", str(uid), "-j", "RETURN"])
+        # rule deletion counters-reset is fine for removed accounts — their
+        # tracker baseline is forgotten alongside (driver does both)
+        for uid in sorted(current - uids):
+            self._run([ipt, "-D", ACCT_CHAIN, "-m", "owner",
+                       "--uid-owner", str(uid), "-j", "RETURN"])
+
+    def acct_read(self) -> dict[int, int]:
+        out = self._run([self._iptables(), "-L", ACCT_CHAIN, "-n", "-v", "-x"])
+        return parse_acct_counters(out)
+
+    def acct_teardown(self) -> None:
+        """Remove jump + chain (best-effort; uninstall keeps the host clean)."""
+        ipt = self._iptables()
+        try:
+            self._run([ipt, "-D", "OUTPUT", "-j", ACCT_CHAIN], check=False)
+            self._run([ipt, "-F", ACCT_CHAIN], check=False)
+            self._run([ipt, "-X", ACCT_CHAIN], check=False)
+        except CoreError:
+            logger.debug("ssh acct teardown skipped: chain not removable")
+
+    def uid_of(self, username: str) -> int | None:
+        try:
+            out = self._run(["id", "-u", username], timeout=10)
+        except CoreError:
+            return None
+        try:
+            return int(out.strip())
+        except ValueError:
+            return None
 
     # ------------------------------------------------------------------ #
     # accounts

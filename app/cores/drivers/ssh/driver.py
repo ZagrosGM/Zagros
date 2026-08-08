@@ -11,11 +11,16 @@ Real capabilities used:
   * **Chain ingress**: cores with a native ssh outbound (Xray ≥ 1.8.x has
     one) can tunnel INTO this server with a dedicated chain account.
 
+  * USAGE_ACCOUNTING (claimed since alpha.7.4) — REAL kernel accounting via
+    an iptables owner-match chain (ZG-SSH-ACCT): the sshd session child runs
+    as the account's UID and re-emits every proxied payload byte in BOTH
+    directions, so a per-UID OUTPUT counter equals the tunnel's total
+    payload — deterministically, without fabricated numbers (full design
+    note in sshtool). Needs: iptables in the image + NET_ADMIN on the
+    container (the installer compose grants it); both missing → get_usage
+    raises with an actionable diagnosis instead of silent zeros.
+
 Honestly NOT claimed (documented, no simulation):
-  * USAGE_ACCOUNTING — mainstream per-user byte accounting does not exist
-    for sshd (iptables owner-match counts egress only and wrong-direction;
-    conntrack knows no users). Rather than report wrong halves, SSH traffic
-    is reported as *unaccounted* in unified quota notes.
   * SERVICE_CONTROL — sshd belongs to systemd; the driver manages accounts,
     not the daemon (status still reports sshd liveness, honestly).
   * DEVICE_DETECTION — sshd logs carry no client platform/version.
@@ -30,7 +35,8 @@ from typing import Any, ClassVar
 
 from app.cores.base import BaseCoreDriver
 from app.cores.drivers.ssh.sshtool import sanitize_username
-from app.cores.exceptions import CoreError
+from app.cores.exceptions import CapabilityNotSupportedError, CoreError
+from app.cores.stats import DeltaTracker
 from app.cores.types import (
     Capability,
     ChainEndpoint,
@@ -40,6 +46,7 @@ from app.cores.types import (
     CoreStatus,
     DeviceSession,
     HealthStatus,
+    UsageRecord,
     UserAccount,
 )
 
@@ -66,6 +73,7 @@ class SSHTunnelDriver(BaseCoreDriver):
             Capability.SELF_INSTALL,
             Capability.CLIENT_CONFIG,
             Capability.CHAIN_ROUTING,
+            Capability.USAGE_ACCOUNTING,
         },
         config_schema={
             "type": "object",
@@ -130,6 +138,8 @@ class SSHTunnelDriver(BaseCoreDriver):
         self._backend = backend
         self._accounts: dict[str, UserAccount] = {}
         self._chain_users: dict[str, tuple[str, str]] = {}
+        self._usage = DeltaTracker()
+        self._acct_error: str | None = None
 
     # ------------------------------------------------------------------ #
     # listeners (xray-style multi-inbound over the ONE sshd listener set)   #
@@ -195,6 +205,20 @@ class SSHTunnelDriver(BaseCoreDriver):
         # verify the daemon actually answers.
         how = await asyncio.to_thread(self._backend.ensure_service)
         logger.info("ssh core ready — sshd brought up via %s", how)
+        # accounting chain bring-up (best-effort): the diagnosis (if any)
+        # rides in _acct_error; get_usage raises it verbatim downstream.
+        unavailable = await asyncio.to_thread(
+            getattr(self._backend, "acct_available",
+                    lambda: "backend has no accounting support"))
+        self._acct_error = unavailable
+        if unavailable is None:
+            try:
+                await asyncio.to_thread(self._backend.acct_ensure)
+                self._acct_error = None
+            except Exception as exc:  # noqa: BLE001 — honest degrade
+                self._acct_error = f"ssh accounting chain setup failed: {exc}"
+        if self._acct_error:
+            logger.warning("ssh per-user accounting disabled: %s", self._acct_error)
 
     async def stop(self) -> None:
         # intentional no-op: stopping the host's ssh service is out of scope
@@ -213,9 +237,11 @@ class SSHTunnelDriver(BaseCoreDriver):
         return CoreStatus(
             core_id=self.metadata.id,
             state=CoreState.RUNNING if running else CoreState.STOPPED,
-            health=HealthStatus.HEALTHY if running else HealthStatus.UNHEALTHY,
+            health=(HealthStatus.DEGRADED if (running and self._acct_error)
+                    else HealthStatus.HEALTHY if running else HealthStatus.UNHEALTHY),
             metrics=metrics,
-            message=None if running else "sshd is not running (system service).",
+            message=(self._acct_error if running
+                     else "sshd is not running (system service)."),
         )
 
     async def get_logs(self, tail: int = 200) -> AsyncIterator[str]:
@@ -477,6 +503,7 @@ class SSHTunnelDriver(BaseCoreDriver):
 
     async def delete_account(self, account_id: str) -> None:
         account = self._accounts.pop(account_id, None)
+        self._usage.forget(account_id)
         if account is None:
             # still try: the unix account may exist from a previous panel life
             try:
@@ -553,6 +580,52 @@ class SSHTunnelDriver(BaseCoreDriver):
                 },
             ))
         return out
+
+    # ------------------------------------------------------------------ #
+    # usage — real kernel accounting via iptables owner-match (alpha.7.4)  #
+    # ------------------------------------------------------------------ #
+    def _uid_of_account(self, account: UserAccount) -> int | None:
+        lookup = getattr(self._backend, "uid_of", None)
+        if lookup is None:
+            return None
+        return lookup(self._unix_name(account))
+
+    def supports(self, capability: Capability) -> bool:
+        # environment-gated capability (alpha.7.4): the registry metadata
+        # means "this engine CAN account"; a deployment without the backend
+        # chain (no iptables/NET_ADMIN) must not claim it — the status
+        # message carries the diagnosis, quota treats absence honestly.
+        if capability is Capability.USAGE_ACCOUNTING and self._acct_error:
+            return False
+        return super().supports(capability)
+
+    async def get_usage(
+        self, account_ids: list[str] | None = None, since: Any | None = None
+    ) -> list[UsageRecord]:
+        if self._acct_error:
+            raise CapabilityNotSupportedError(
+                self.metadata.id,
+                f"usage_accounting (ssh): {self._acct_error}")
+        uid_map: dict[int, str] = {}
+        for account in self._accounts.values():
+            uid = await asyncio.to_thread(self._uid_of_account, account)
+            if uid is not None:
+                uid_map[uid] = account.account_id
+        await asyncio.to_thread(self._backend.acct_sync_users, set(uid_map))
+        counters = await asyncio.to_thread(self._backend.acct_read)
+        records: list[UsageRecord] = []
+        for uid, account_id in uid_map.items():
+            if account_ids is not None and account_id not in account_ids:
+                continue
+            # cumulative kernel bytes emitted by the account's sshd for BOTH
+            # tunnel directions (design note in sshtool) — reported as
+            # downlink, uplink stays 0; DeltaTracker gives per-tick deltas.
+            up, down = self._usage.observe(account_id, 0, counters.get(uid, 0))
+            records.append(UsageRecord(
+                core_id=self.metadata.id, account_id=account_id,
+                uplink_bytes=up, downlink_bytes=down,
+            ))
+        return records
 
     # ------------------------------------------------------------------ #
     # client config + delivery (sealed delivery; one section per granted   #

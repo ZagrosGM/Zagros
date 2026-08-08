@@ -375,15 +375,24 @@ class HostSettingsEngine:
     ) -> DeliverySection:
         artifacts: list[DeliveryArtifact] = []
         inapplicable: list[str] = []
+        # section-scoped remark variables (item 15 default template): the
+        # same DEFAULT_REMARK renders sensibly for every core — PROTOCOL
+        # from the section, TRANSPORT/SERVER_IP refined per link inside
+        # the link expander; files/fields use the section-level fallbacks.
+        local_vars = defaultdict(lambda: "<missing>", variables)
+        local_vars.setdefault("PROTOCOL", section.protocol or "")
+        local_vars.setdefault("TRANSPORT", _PROTO_TRANSPORT.get(
+            (section.protocol or "").lower(), "tcp"))
+        local_vars.setdefault("SERVER_IP", "")
         for artifact in section.artifacts:
             if artifact.kind is ArtifactKind.LINK:
-                artifacts.extend(self._expand_link(artifact, entries, variables,
+                artifacts.extend(self._expand_link(artifact, entries, local_vars,
                                                    inapplicable,
                                                    section_proto=section.protocol))
             elif artifact.kind is ArtifactKind.FILE:
-                artifacts.extend(self._expand_file(artifact, entries, variables))
+                artifacts.extend(self._expand_file(artifact, entries, local_vars))
             elif artifact.kind is ArtifactKind.FIELDS:
-                artifacts.extend(self._expand_fields(artifact, entries, variables))
+                artifacts.extend(self._expand_fields(artifact, entries, local_vars))
             else:
                 artifacts.append(artifact)
         if inapplicable:
@@ -541,7 +550,7 @@ class HostSettingsEngine:
                     f"entry '{name}': random user-agent applies to JSON "
                     "clients only; share links cannot express it")
 
-            remark = render_host_remark(entry.remark, local) or artifact.label
+            remark = render_host_remark(entry.remark or DEFAULT_REMARK, local) or artifact.label
             overridden = parsed.model_copy(update={"settings": new})
             try:
                 link = _emit(overridden, remark)
@@ -565,6 +574,9 @@ class HostSettingsEngine:
     ) -> list[DeliveryArtifact]:
         out: list[DeliveryArtifact] = []
         for entry in entries:
+            local = dict(variables)
+            if entry.address and not local.get("SERVER_IP"):
+                local["SERVER_IP"] = str(entry.address).split(",")[0].strip()
             host = render_host_value(entry.address, variables) if entry.address else None
             if host is None and entry.port is None:
                 continue  # nothing a file could take from this entry
@@ -588,7 +600,7 @@ class HostSettingsEngine:
                 content = self._WG_ENDPOINT.sub(_wg, content)
             else:
                 continue  # unknown file shape — never patch blindly
-            label = render_host_remark(entry.remark, variables) or artifact.label
+            label = render_host_remark(entry.remark or DEFAULT_REMARK, local) or artifact.label
             stem = artifact.filename or "config"
             stem = re.sub(r"[^A-Za-z0-9._-]+", "-", label) + \
                 ("" if "." not in stem else "." + stem.rsplit(".", 1)[1])
@@ -622,3 +634,51 @@ class HostSettingsEngine:
             out.append(DeliveryArtifact(kind=ArtifactKind.FIELDS, label=label,
                                         fields=fields, note=artifact.note))
         return out
+
+
+# --------------------------------------------------------------------- #
+# protocol-aware field matrix (alpha.7.4 items 15+16) — the UI renders the
+# entry editor from THIS truth instead of an xray-shaped one-size-fits-all.
+# --------------------------------------------------------------------- #
+
+#: default remark applied to every generated variant when an entry leaves
+#: the remark blank (item 15). Protocol/transport/server resolve per link or
+#: per section; username vars resolve per subscriber.
+DEFAULT_REMARK = "🛸 Zagros ({USERNAME}) [{PROTOCOL} - {TRANSPORT}] » {SERVER_IP}"
+
+_NON_LINK = {"wireguard", "openvpn", "ssh", "softether", "pptp", "sstp", "l2tp"}
+_TLS_LINK = {"vless", "trojan", "vmess", "hysteria2", "hy2", "tuic"}
+
+
+def host_field_matrix(protocol: str, *, engine: str | None = None) -> list[str]:
+    """Which HostEntry fields are MEANINGFUL for this protocol/inbound.
+
+    The anchor truth is the expansion engine itself: a field shown here is
+    one ``expand()`` can actually apply (everything else it already reports
+    as inapplicable). Non-link cores (WireGuard/OpenVPN/SSH/SoftEther) get
+    endpoint semantics only — remark/address/port — because that is all a
+    config file or a fields block can honestly take. ``random_user_agent``
+    is withheld everywhere: share links cannot express it at all (the
+    engine says so itself).
+    """
+    p = (protocol or "").lower()
+    if p in _NON_LINK:
+        return ["remark", "address", "port", "is_disabled"]
+    fields = ["remark", "address", "port", "is_disabled"]
+    if p in ("vless", "trojan", "vmess"):
+        fields += ["host", "path"]
+    if p in _TLS_LINK:
+        fields += ["sni", "allowinsecure", "use_sni_as_host"]
+        if p in ("vless", "trojan", "vmess"):
+            fields.append("security")
+        fields += ["alpn", "fingerprint"]
+    if p in ("vless", "trojan"):
+        fields += ["fragment_setting", "noise_setting", "mux_enable"]
+    return fields
+
+
+#: engine-truth transports for the default template on non-link sections
+_PROTO_TRANSPORT = {
+    "wireguard": "udp", "tuic": "udp", "hysteria2": "udp", "hy2": "udp",
+    "openvpn": "udp/tcp", "softether": "tcp/udp", "ssh": "tcp",
+}

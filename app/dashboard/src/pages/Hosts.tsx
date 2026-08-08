@@ -79,6 +79,14 @@ const denormalize = (row: HostRow): Record<string, unknown> => ({
   noise_setting: row.noise_setting || null,
 });
 
+// item 16: protocol-aware editor — rendered from the server's own field
+// matrix (GET …/hosts/schema); xray keeps the full legacy Marzban set.
+const XRAY_ALL_FIELDS = [
+  "remark", "address", "port", "is_disabled", "host", "path", "sni",
+  "allowinsecure", "use_sni_as_host", "security", "alpn", "fingerprint",
+  "fragment_setting", "noise_setting", "mux_enable", "random_user_agent",
+];
+
 export default function Hosts() {
   const t = useT();
   const qc = useQueryClient();
@@ -110,6 +118,18 @@ export default function Hosts() {
     return map;
   }, [hostsQ.data]);
   const hosts: HostMap = edited ?? live;
+
+  const schemaQ = useQuery({
+    queryKey: ["zagros", "hosts-schema", effectiveCore],
+    enabled: !!effectiveCore && effectiveCore !== "xray",
+    queryFn: () => api.get<{ engine: string | null; inbounds: { tag: string; protocol: string; fields: string[] }[] }>(`/zagros/cores/${effectiveCore}/hosts/schema`),
+    staleTime: 60000,
+  });
+  const allowedFieldsFor = (tag: string): Set<string> => {
+    if (effectiveCore === "xray") return new Set(XRAY_ALL_FIELDS);
+    const found = schemaQ.data?.inbounds.find((i) => i.tag === tag);
+    return new Set(found?.fields ?? ["remark", "address", "port", "is_disabled"]);
+  };
 
   const group = groups.find((g) => g.core_id === effectiveCore);
   const tags = useMemo(() => {
@@ -214,7 +234,9 @@ export default function Hosts() {
 
               {rows.length > 0 && (
                 <div className="space-y-3">
-                  {rows.map((row, idx) => (
+                  {rows.map((row, idx) => {
+                    const ok = allowedFieldsFor(tag);
+                    return (
                     <div key={idx} className={cn("rounded-xl border p-3 space-y-3",
                       row.is_disabled ? "border-border opacity-70" : "border-border-strong")}>
                       <div className="flex items-center justify-between">
@@ -240,8 +262,9 @@ export default function Hosts() {
                       </div>
 
                       <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-                        <Field label={t("hosts.remark")}>
-                          <Input value={row.remark} placeholder="{USERNAME}"
+                        <Field label={t("hosts.remark")}
+                          hint="blank → 🛸 Zagros ({USERNAME}) [{PROTOCOL} - {TRANSPORT}] » {SERVER_IP}">
+                          <Input value={row.remark} placeholder="🛸 Zagros ({USERNAME})"
                             onChange={(e) => update(tag, idx, { remark: e.target.value })} />
                         </Field>
                         <Field label={t("hosts.address")} required>
@@ -254,66 +277,80 @@ export default function Hosts() {
                             placeholder={t("hosts.portInherit")}
                             onChange={(e) => update(tag, idx, { port: e.target.value === "" ? null : Number(e.target.value) })} />
                         </Field>
+                        {/* item 16: only fields this (core, protocol) can apply */}
+                        {ok.has("security") && (
                         <Field label={t("hosts.security")}>
                           <Select value={row.security}
                             onChange={(e) => update(tag, idx, { security: e.target.value })}>
                             {SECURITY_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
                           </Select>
-                        </Field>
+                        </Field>)}
+                        {ok.has("sni") && (
                         <Field label="SNI">
                           <Input value={row.sni} dir="ltr" placeholder="a.com,b.com"
                             onChange={(e) => update(tag, idx, { sni: e.target.value })} />
-                        </Field>
+                        </Field>)}
+                        {ok.has("host") && (
                         <Field label={t("hosts.hostHeader")}>
                           <Input value={row.host} dir="ltr"
                             onChange={(e) => update(tag, idx, { host: e.target.value })} />
-                        </Field>
+                        </Field>)}
+                        {ok.has("path") && (
                         <Field label={t("hosts.path")}>
                           <Input value={row.path} dir="ltr" placeholder="/ws"
                             onChange={(e) => update(tag, idx, { path: e.target.value })} />
-                        </Field>
+                        </Field>)}
+                        {ok.has("alpn") && (
                         <Field label="ALPN">
                           <Select value={row.alpn}
                             onChange={(e) => update(tag, idx, { alpn: e.target.value })}>
                             {ALPN_OPTIONS.map((s) => <option key={s} value={s}>{s || "—"}</option>)}
                           </Select>
-                        </Field>
+                        </Field>)}
+                        {ok.has("fingerprint") && (
                         <Field label={t("hosts.fingerprint")}>
                           <Select value={row.fingerprint}
                             onChange={(e) => update(tag, idx, { fingerprint: e.target.value })}>
                             {FP_OPTIONS.map((s) => <option key={s} value={s}>{s || "—"}</option>)}
                           </Select>
-                        </Field>
+                        </Field>)}
+                        {ok.has("fragment_setting") && (
                         <Field label="fragment">
                           <Input value={row.fragment_setting} dir="ltr"
                             placeholder="10-20,10-20,tlshello"
                             onChange={(e) => update(tag, idx, { fragment_setting: e.target.value })} />
-                        </Field>
+                        </Field>)}
+                        {ok.has("noise_setting") && (
                         <Field label="noise">
                           <Input value={row.noise_setting} dir="ltr"
                             onChange={(e) => update(tag, idx, { noise_setting: e.target.value })} />
-                        </Field>
+                        </Field>)}
                       </div>
 
                       <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+                        {ok.has("allowinsecure") && (<>
                         <Switch checked={row.allowinsecure} label="allowInsecure"
                           onChange={(v) => update(tag, idx, { allowinsecure: v })} />
-                        <span className="-ms-3 text-[11.5px] text-content-2">allowInsecure</span>
+                        <span className="-ms-3 text-[11.5px] text-content-2">allowInsecure</span></>)}
+                        {ok.has("mux_enable") && (<>
                         <Switch checked={row.mux_enable} label="mux"
                           onChange={(v) => update(tag, idx, { mux_enable: v })} />
-                        <span className="-ms-3 text-[11.5px] text-content-2">mux</span>
+                        <span className="-ms-3 text-[11.5px] text-content-2">mux</span></>)}
+                        {ok.has("random_user_agent") && (<>
                         <Switch checked={row.random_user_agent} label="random user-agent"
                           onChange={(v) => update(tag, idx, { random_user_agent: v })} />
-                        <span className="-ms-3 text-[11.5px] text-content-2">random UA</span>
+                        <span className="-ms-3 text-[11.5px] text-content-2">random UA</span></>)}
+                        {ok.has("use_sni_as_host") && (<>
                         <Switch checked={row.use_sni_as_host} label="use sni as host"
                           onChange={(v) => update(tag, idx, { use_sni_as_host: v })} />
-                        <span className="-ms-3 text-[11.5px] text-content-2">SNI→Host</span>
+                        <span className="-ms-3 text-[11.5px] text-content-2">SNI→Host</span></>)}
                         <Switch checked={row.is_disabled} label="disabled"
                           onChange={(v) => update(tag, idx, { is_disabled: v })} />
                         <span className="-ms-3 text-[11.5px] text-content-2">{t("hosts.disabled")}</span>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </Card>

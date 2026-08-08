@@ -207,13 +207,24 @@ async def _verify_and_serve(token, request, runtime,
                                      accept_language, user_agent)
 
 
+@zagros_router.get("/sub/{token}", response_class=HTMLResponse)
+async def subscription_portal_canonical(token: str, request: Request,
+                                        runtime=Depends(get_runtime),
+                                        accept_language: str | None = Header(default=None),
+                                        user_agent: str | None = Header(default=None)):
+    """Canonical multi-core subscription URL — /sub/<token> (alpha.7.4 item
+    12). One user → one link → every core."""
+    return await _verify_and_serve(token, request, runtime,
+                                   accept_language, user_agent)
+
+
 @zagros_router.get("/zagros/sub/{token}", response_class=HTMLResponse)
 async def subscription_portal(token: str, request: Request,
                               runtime=Depends(get_runtime),
                               accept_language: str | None = Header(default=None),
                               user_agent: str | None = Header(default=None)):
-    """Canonical subscription URL — always served, regardless of the
-    configured path, so already-issued links keep working forever."""
+    """Legacy alias of the canonical /sub/<token> — already-issued links
+    keep working forever (no redirect, identical payload)."""
     return await _verify_and_serve(token, request, runtime,
                                    accept_language, user_agent)
 
@@ -378,7 +389,7 @@ async def issue_subscription_token(user_id: int, runtime=Depends(get_runtime)):
     payload = runtime.tokens.verify(token, expected_type="sub")
     await runtime.kv.set_value(f"portal.sub_jti.{user_id}", payload["jti"])
     settings = await runtime.portal_settings.get_portal_settings()
-    path = f"/zagros/{settings.subscription_path}/{token}"
+    path = f"/sub/{token}"  # canonical (alpha.7.4 item 12)
     prefix = (settings.subscription_url_prefix or "").rstrip("/")
     return {"token": token, "path": path,
             "url": f"{prefix}{path}" if prefix else None}
@@ -451,6 +462,19 @@ async def _materialize_studio(runtime, core_id: str, driver) -> str | None:
         await hook(doc)
     except CoreError as exc:
         raise HTTPException(422, f"{core_id}: {exc}") from exc
+    # Item 6: an applied document may have REMOVED inbounds — cascade the
+    # change into materialized grants (prune dangling tags / revoke empty
+    # accounts) so a later User Edit can never die on a ghost tag.
+    try:
+        from app.platform.provisioning import (
+            reconcile_accounts_after_inbound_change,
+        )
+
+        report = await reconcile_accounts_after_inbound_change(runtime, core_id)
+        if any(report.get(k) for k in ("pruned", "revoked")):
+            logger.info("studio apply on %s — grant cascade: %s", core_id, report)
+    except Exception as exc:  # noqa: BLE001 — never mask a successful apply
+        logger.warning("post-apply grant cascade failed on %s: %s", core_id, exc)
     return None
 
 
@@ -465,12 +489,74 @@ async def studio_apply(core_id: str, body: StudioPatchBody,
     return {**result.model_dump(), "materialized": warning is None, "notice": warning}
 
 
+def _certs_data_dir(runtime) -> str:
+    """The panel data dir for the managed certificate store — same contract
+    as admin_api._data_dir (kept local: admin_api depends on THIS module,
+    so importing it back would cycle)."""
+    url = str(getattr(runtime, "database_url", "") or "")
+    if url.startswith("sqlite:///"):
+        from pathlib import Path
+
+        return str(Path(url[10:]).parent)
+    return "/var/lib/zagros"
+
+
+def _resolve_certificate_ref(runtime, spec: InboundSpec) -> None:
+    """Item 10: ``certificate_ref`` (a managed certificate NAME from the
+    Certificates store) in a wizard spec is resolved server-side into the
+    inline PEM pair drivers already understand — with REAL validation
+    (parse + key-matches-cert + expiry surfaced), never trust by name.
+    Mutates the spec in place; ref always wins over pasted content."""
+    ref = spec.settings.pop("certificate_ref", None)
+    if not ref:
+        return
+    from pathlib import Path
+
+    data_dir = _certs_data_dir(runtime)
+    base = Path(data_dir) / "certs" / str(ref)
+    cert_path, key_path = base / "fullchain.pem", base / "key.pem"
+    if not base.is_dir() or not cert_path.exists() or not key_path.exists():
+        raise HTTPException(
+            404, f"managed certificate '{ref}' not found under {data_dir}/certs/")
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+
+    cert_pem = cert_path.read_bytes()
+    key_pem = key_path.read_bytes()
+    try:
+        cert = x509.load_pem_x509_certificate(cert_pem)
+        key = serialization.load_pem_private_key(key_pem, password=None)
+    except ValueError as exc:
+        raise HTTPException(422, f"certificate '{ref}' is not a valid PEM pair: {exc}") from exc
+    if cert.public_key().public_numbers() != key.public_key().public_numbers():
+        raise HTTPException(422, f"certificate '{ref}' and its private key do NOT match")
+    spec.settings["certificate"] = cert_pem.decode()
+    spec.settings["certificate_key"] = key_pem.decode()
+
+
 @zagros_admin_router.post("/studio/{core_id}/wizard/inbound")
 async def studio_wizard_inbound(core_id: str, spec: InboundSpec,
                                 runtime=Depends(get_runtime)):
     driver = _driver_or_404(runtime, core_id)
+    _resolve_certificate_ref(runtime, spec)
     try:
         result = await runtime.studio.wizard_add_inbound(driver, spec)
+    except StudioError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if not result.valid:
+        raise HTTPException(422, {"errors": result.errors})
+    warning = await _materialize_studio(runtime, core_id, driver)
+    return {**result.model_dump(), "materialized": warning is None, "notice": warning}
+
+
+@zagros_admin_router.put("/studio/{core_id}/wizard/inbound/{tag}")
+async def studio_wizard_update_inbound(core_id: str, tag: str, spec: InboundSpec,
+                                       runtime=Depends(get_runtime)):
+    """Item 11 — Edit an existing inbound through the same wizard flow."""
+    driver = _driver_or_404(runtime, core_id)
+    _resolve_certificate_ref(runtime, spec)
+    try:
+        result = await runtime.studio.wizard_update_inbound(driver, tag, spec)
     except StudioError as exc:
         raise HTTPException(422, str(exc)) from exc
     if not result.valid:
@@ -490,6 +576,7 @@ async def studio_wizard_preview(core_id: str, spec: InboundSpec,
     WITHOUT persisting or materializing — the stepper's review step calls
     this so an invalid inbound is rejected BEFORE any document mutation."""
     driver = _driver_or_404(runtime, core_id)
+    _resolve_certificate_ref(runtime, spec)
     try:
         result = await runtime.studio.wizard_preview_inbound(driver, spec)
     except StudioError as exc:

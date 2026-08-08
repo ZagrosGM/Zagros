@@ -10,6 +10,15 @@ services:
     image: ghcr.io/zagrosgm/zagros:latest
     restart: always
     network_mode: host
+    # TUN-based cores (OpenVPN, WireGuard) run INSIDE this container: without
+    # the tunnel device + NET_ADMIN their Start dies at interface creation.
+    # The installer template grants both; the sample mirrors it. On the HOST
+    # you still need the module loaded: `modprobe tun` (LXC/OpenVZ: enable
+    # TUN/TAP in the provider panel).
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
     volumes:
       - ./.env:/code/.env:ro
       - /var/lib/zagros:/var/lib/zagros

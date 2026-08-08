@@ -373,3 +373,77 @@ def _run_all() -> None:
 
 if __name__ == "__main__":
     _run_all()
+
+
+# --------------------------------------------------------------------- #
+# StatsService dialect negotiation (alpha.7.4): sing-box >= 1.12 serves the
+# stats API as v2ray.core.app.stats.command.StatsService, xray/<=1.11 as
+# xray.app.stats.command.StatsService — the client must serve both.
+# --------------------------------------------------------------------- #
+def test_stats_source_negotiates_v2ray_core_dialect() -> None:
+    """gRPC UNIMPLEMENTED on the xray dialect must fall through to the
+    v2ray.core dialect (the wire-identical sing-box >= 1.12 name)."""
+    import grpc
+    from xray_api.proto.app.stats.command import command_pb2
+
+    from app.cores.drivers.singbox.backend import V2RayStatsSource
+
+    called: list[str] = []
+
+    class _FakeUnary:
+        def __init__(self, path: str):
+            self._path = path
+        def __call__(self, request, timeout=None):
+            called.append(self._path)
+            if self._path.startswith("/xray.app."):
+                err = grpc.RpcError("unknown service xray.app.stats.command.StatsService")
+                err.code = lambda: grpc.StatusCode.UNIMPLEMENTED  # type: ignore[attr-defined]
+                err.details = lambda: "unknown service xray..."  # type: ignore[attr-defined]
+                raise err
+            stat = command_pb2.Stat(name="user>>>u1>>>traffic>>>downlink", value=2048)
+            return command_pb2.QueryStatsResponse(stat=[stat])
+
+    class _FakeChannel:
+        def unary_unary(self, path, request_serializer=None, response_deserializer=None):
+            return _FakeUnary(path)
+        def close(self):
+            pass
+
+    src = V2RayStatsSource("127.0.0.1:19091")
+    import unittest.mock as mock
+    with mock.patch("grpc.insecure_channel", lambda target: _FakeChannel()):
+        counters = src.query_user_counters()
+    assert counters == {"u1": (0, 2048)}
+    assert src._dialect == "v2ray.core.app.stats.command.StatsService"
+    assert called[0] == "/xray.app.stats.command.StatsService/QueryStats"
+
+
+def test_stats_source_when_no_dialect_matches_error_names_both() -> None:
+    import grpc
+
+    from app.cores.drivers.singbox.backend import V2RayStatsSource
+
+    class _FakeUnary:
+        def __init__(self, path: str):
+            self._path = path
+        def __call__(self, request, timeout=None):
+            err = grpc.RpcError(f"unknown service {self._path}")
+            err.code = lambda: grpc.StatusCode.UNIMPLEMENTED  # type: ignore[attr-defined]
+            err.details = lambda: "unknown"  # type: ignore[attr-defined]
+            raise err
+
+    class _FakeChannel:
+        def unary_unary(self, path, request_serializer=None, response_deserializer=None):
+            return _FakeUnary(path)
+        def close(self):
+            pass
+
+    src = V2RayStatsSource("127.0.0.1:19091")
+    import unittest.mock as mock
+    with mock.patch("grpc.insecure_channel", lambda target: _FakeChannel()):
+        try:
+            src.query_user_counters()
+            raise AssertionError("must fail when no dialect is served")
+        except CoreError as exc:
+            assert "xray.app.stats.command.StatsService" in str(exc)
+            assert "v2ray.core.app.stats.command.StatsService" in str(exc)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 from typing import Protocol, runtime_checkable
@@ -70,7 +71,12 @@ class LocalSoftEtherBackend:
         ]
         if csv:
             argv.append("/CSV")
-        argv += ["/CMD", command]
+        # vpncmd 5.x /CMD one-shot tokenizes argv NATIVELY: pass every token
+        # as its own argv element. The 4.x-era form — the entire command as
+        # ONE quoted string («"UserCreate e2e /GROUP: ..."») — dies with
+        # '"UserCreate": Command not found' on the 5.2 developer edition
+        # (verified live against a real source-built vpncmd 5.02.5187).
+        argv += ["/CMD", *shlex.split(command)]
         try:
             proc = subprocess.run(
                 argv, capture_output=True, text=True, timeout=self.timeout
@@ -105,19 +111,26 @@ class LocalSoftEtherBackend:
     )
 
     # toolchain for the source-build stage, per manager (best effort; the
-    # exact package names of the mainstream distros)
+    # exact package names of the mainstream distros). pkg-config/pkgconf is
+    # REQUIRED — SoftEther's cmake locates OpenSSL through it and dies with
+    # "Could NOT find PkgConfig" otherwise (field report alpha.7.3).
     _BUILD_DEPS: dict[str, tuple[list[str] | None, list[str]]] = {
         "apt-get": (["apt-get", "update"],
                     ["apt-get", "install", "-y", "build-essential", "cmake",
+                     "pkg-config", "libsodium-dev",
                      "libssl-dev", "zlib1g-dev", "libreadline-dev", "libncurses-dev"]),
         "dnf": (None, ["dnf", "install", "-y", "gcc", "gcc-c++", "make", "cmake",
+                       "pkgconf-pkg-config", "libsodium-devel",
                        "openssl-devel", "zlib-devel", "readline-devel", "ncurses-devel"]),
         "yum": (None, ["yum", "install", "-y", "gcc", "gcc-c++", "make", "cmake",
+                       "pkgconf-pkg-config", "libsodium-devel",
                        "openssl-devel", "zlib-devel", "readline-devel", "ncurses-devel"]),
         "pacman": (None, ["pacman", "-S", "--noconfirm", "base-devel", "cmake",
+                          "pkgconf", "libsodium",
                           "openssl", "zlib", "readline", "ncurses"]),
-        "apk": (None, ["apk", "add", "build-base", "cmake", "openssl-dev",
-                       "zlib-dev", "readline-dev", "ncurses-dev"]),
+        "apk": (None, ["apk", "add", "build-base", "cmake", "pkgconf",
+                       "libsodium-dev",
+                       "openssl-dev", "zlib-dev", "readline-dev", "ncurses-dev"]),
     }
 
     _INSTALL_ROOT = "/usr/local/softether"
@@ -164,14 +177,22 @@ class LocalSoftEtherBackend:
         )
 
     def _link_on_path(self, root: str) -> None:
+        # WRAPPER scripts, not symlinks (field failure alpha.7.4): SoftEther
+        # locates hamcore.se2/lang.config relative to its own argv[0] path —
+        # started through a symlink in /usr/local/bin it dies with
+        # 'hamcore.se2 is missing or broken'. A wrapper exec's the REAL path,
+        # so the resource lookup stays anchored at the install root.
         for name in ("vpnserver", "vpncmd"):
+            real = os.path.join(root, name)
             link = os.path.join("/usr/local/bin", name)
             try:
                 if os.path.lexists(link):
                     os.remove(link)
-                os.symlink(os.path.join(root, name), link)
+                with open(link, "w", encoding="utf-8") as fh:
+                    fh.write(f"#!/bin/sh\nexec \"{real}\" \"$@\"\n")
+                os.chmod(link, 0o755)
             except OSError as exc:
-                logger.warning("softether PATH link %s failed: %s", link, exc)
+                logger.warning("softether PATH wrapper %s failed: %s", link, exc)
 
     def _install_from_github(self) -> str:
         from app.cores.github_install import host_arch, host_os, install_from_github
@@ -182,20 +203,28 @@ class LocalSoftEtherBackend:
         arch_bits = ("x64-64bit",) if arch == "amd64" else ("arm64-64bit",)
         root = self._INSTALL_ROOT
         os.makedirs(root, exist_ok=True)
-        tag = install_from_github(
-            repo="SoftEtherVPN/SoftEtherVPN",
-            target_executable=os.path.join(root, "vpnserver"),
-            asset_match=lambda n: (
-                n.startswith("softether-vpnserver-")
-                and n.endswith(".tar.gz")
-                and any(bit in n for bit in arch_bits)
-            ),
-            member_match=lambda m: m.rsplit("/", 1)[-1] == "vpnserver",
-            extra_members={
-                "vpncmd": os.path.join(root, "vpncmd"),
-                "hamcore.se2": os.path.join(root, "hamcore.se2"),
-            },
-        )
+        try:
+            tag = install_from_github(
+                repo="SoftEtherVPN/SoftEtherVPN",
+                target_executable=os.path.join(root, "vpnserver"),
+                # BOTH upstream naming generations, never one hardcoded
+                # filename: current 5.x lines ship no Linux binary at all
+                # (Windows .exe bundles + the official source tarball only),
+                # older 4.x lines shipped linux tarballs.
+                asset_match=lambda n: (
+                    n.startswith("softether-vpnserver-")
+                    and n.endswith(".tar.gz")
+                    and "linux" in n.lower()
+                    and any(bit in n for bit in arch_bits)
+                ),
+                member_match=lambda m: m.rsplit("/", 1)[-1] == "vpnserver",
+                extra_members={
+                    "vpncmd": os.path.join(root, "vpncmd"),
+                    "hamcore.se2": os.path.join(root, "hamcore.se2"),
+                },
+            )
+        except CoreError as exc:
+            raise CoreError(f"{exc} → source-build stage follows") from exc
         os.chmod(os.path.join(root, "vpncmd"), 0o755)
         self._link_on_path(root)
         return f"installed SoftEther {tag} from GitHub releases"
@@ -232,8 +261,21 @@ class LocalSoftEtherBackend:
         tag = str(release.get("tag_name") or "").strip()
         if not tag:
             raise CoreError("could not resolve the latest SoftEther release tag.")
-        url = ("https://github.com/SoftEtherVPN/SoftEtherVPN/"
-               f"archive/refs/tags/{tag}.tar.gz")
+        # Prefer the OFFICIAL source tarball published as a release asset
+        # (SoftEtherVPN-<tag>.tar.xz) — discovered from the release's own
+        # asset list, never a hardcoded filename; fall back to the
+        # auto-generated tag archive when no such asset exists.
+        official = next(
+            (a for a in release.get("assets", [])
+             if str(a.get("name", "")).startswith("SoftEtherVPN-")
+             and str(a.get("name", "")).endswith(".tar.xz")),
+            None,
+        )
+        if official is not None and official.get("browser_download_url"):
+            url = str(official["browser_download_url"])
+        else:
+            url = ("https://github.com/SoftEtherVPN/SoftEtherVPN/"
+                   f"archive/refs/tags/{tag}.tar.gz")
         work = tempfile.mkdtemp(prefix="zagros-softether-src-")
         tarball = os.path.join(work, "src.tar.gz")
         try:
@@ -243,7 +285,7 @@ class LocalSoftEtherBackend:
                 data = response.read()
             with open(tarball, "wb") as fh:
                 fh.write(data)
-            with tarfile.open(tarball, "r:gz") as tar:
+            with tarfile.open(tarball, "r:*") as tar:  # gz AND xz (official asset)
                 tar.extractall(work, filter="data")
             roots = [d for d in os.listdir(work)
                      if os.path.isdir(os.path.join(work, d)) and d != "__pycache__"]
@@ -264,6 +306,48 @@ class LocalSoftEtherBackend:
                 shutil.copy2(built, os.path.join(root, name))
             os.chmod(os.path.join(root, "vpnserver"), 0o755)
             os.chmod(os.path.join(root, "vpncmd"), 0o755)
+            # cmake builds cedar/mayaqua as SHARED libs and bakes the temp
+            # build dir into RUNPATH (field failure alpha.7.4: daemon died
+            # with "libcedar.so: cannot open shared object file" once the
+            # temp tree was cleaned). Ship the libs next to the binaries
+            # and register the path with the dynamic loader.
+            libs = sorted(
+                name for name in os.listdir(build_dir)
+                if name.startswith(("libcedar.so", "libmayaqua.so"))
+                and os.path.isfile(os.path.join(build_dir, name))
+            )
+            for name in libs:
+                shutil.copy2(os.path.join(build_dir, name),
+                             os.path.join(root, name))
+            if libs:
+                conf = "/etc/ld.so.conf.d/zagros-softether.conf"
+                try:
+                    with open(conf, "w", encoding="utf-8") as fh:
+                        fh.write(root + "\n")
+                except OSError as exc:
+                    raise CoreError(
+                        f"cannot register {root} with the dynamic loader "
+                        f"({conf}: {exc}) — run as root or add the path to "
+                        "ld.so.conf manually, else vpnserver cannot start."
+                    ) from exc
+                ldconfig = shutil.which("ldconfig") or next(
+                    (p for p in ("/sbin/ldconfig", "/usr/sbin/ldconfig")
+                     if os.path.exists(p)),
+                    None,
+                )
+                if ldconfig is None:
+                    raise CoreError(
+                        "ldconfig not found on this host — register "
+                        f"{root} in /etc/ld.so.conf.d/ and refresh the "
+                        "loader cache manually, else vpnserver cannot start."
+                    )
+                try:
+                    self._run([ldconfig], timeout=60)
+                except CoreError as exc:
+                    raise CoreError(
+                        f"ldconfig failed ({exc}) — vpnserver would not find "
+                        "libcedar/libmayaqua at start."
+                    ) from exc
             self._link_on_path(root)
         finally:
             shutil.rmtree(work, ignore_errors=True)

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Depends, HTTPException
@@ -200,6 +201,51 @@ async def cores_list(runtime=Depends(get_runtime)):
         status_by_id = {}
     cores = [await _core_view(runtime, cid, status_by_id) for cid in manager.list_cores()]
     return {"cores": cores}
+
+
+@zagros_admin_router.get("/cores/traffic/totals")
+async def cores_traffic_totals(runtime=Depends(get_runtime)):
+    """Item 17 — REAL per-core traffic totals (user usage, NOT host NIC bytes).
+
+    * non-xray cores → usage journal sums (exactly-once deltas);
+    * xray → legacy NodeUserUsage rollup (its own stats pipeline).
+    """
+    from app.cores.manager import BUILTIN_CORE_IDS
+
+    totals: dict[str, dict[str, int]] = {}
+    try:
+        journal = await runtime.usage_journal.totals_by_core()
+    except Exception as exc:  # noqa: BLE001 — never break the page
+        logger.warning("usage journal totals failed: %s", exc)
+        journal = {}
+    for core_id, (up, down) in journal.items():
+        totals[core_id] = {"uplink_bytes": up, "downlink_bytes": down,
+                           "total_bytes": up + down}
+
+    if BUILTIN_CORE_IDS:
+        def _legacy_xray_total() -> tuple[int, int] | None:
+            try:
+                from sqlalchemy import func, select
+
+                from app.db import GetDB
+                from app.db.models import NodeUserUsage
+
+                with GetDB() as db:
+                    up_down = db.execute(
+                        select(
+                            func.coalesce(func.sum(NodeUserUsage.used_traffic), 0),
+                        )
+                    ).one()
+                    return 0, int(up_down[0] or 0)
+            except Exception:  # noqa: BLE001 — legacy store optional
+                return None
+        xray_tot = await asyncio.to_thread(_legacy_xray_total)
+        if xray_tot is not None:
+            _up, down = xray_tot
+            for cid in BUILTIN_CORE_IDS:
+                totals[cid] = {"uplink_bytes": 0, "downlink_bytes": down,
+                               "total_bytes": down}
+    return {"totals": totals}
 
 
 @zagros_admin_router.get("/cores/{core_id}")
@@ -825,15 +871,83 @@ async def certificates_self_signed(body: CertSelfSignedBody, runtime=Depends(get
     return {"ok": True, "certificate": info.model_dump(mode="json")}
 
 
-@zagros_admin_router.delete("/certificates/{name}")
-async def certificates_remove(name: str, runtime=Depends(get_runtime)):
+@zagros_admin_router.delete("/certificates/{ident:path}")
+async def certificates_remove(ident: str, runtime=Depends(get_runtime)):
+    """Delete by stable identifier: the inventory `id` (data-dir-relative
+    path — the ONLY handle that reaches core-materialized certs, item 18)
+    or a plain managed name for the legacy caller contract."""
+    ident = ident.strip().lstrip("/")
     try:
-        certificates.remove(_data_dir(runtime), name)
+        certificates.remove(_data_dir(runtime), ident)
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    return {"ok": True, "removed": name}
+    return {"ok": True, "removed": ident}
+
+
+# --------------------------------------------------------------------- #
+# users: multi-core online states (item 14)
+# --------------------------------------------------------------------- #
+
+@zagros_admin_router.get("/users/online")
+async def users_online_states(runtime=Depends(get_runtime)):
+    """Per-user MULTI-CORE online states for the dashboard indicator dot.
+
+    * ``online`` — the freshest device-limit collect saw ≥1 session/presence
+      for the user on ANY core (or the legacy xray flow touched online_at
+      within the window);
+    * ``offline`` — no session anywhere AND every online-capable core
+      answered its read;
+    * ``unknown`` — ≥1 core failed its read in the last pass, so absence of
+      evidence is NOT evidence of absence (item 14 requirement).
+    """
+    window = 90.0
+    try:
+        snapshot = (await runtime.kv.get_value("online.last_collect")) or {}
+    except Exception:  # noqa: BLE001
+        snapshot = {}
+    online_ids = set(snapshot.get("online_user_ids") or [])
+    failed = list(snapshot.get("failed_cores") or [])
+
+    def _fresh_usernames() -> set[str]:
+        now = datetime.now(timezone.utc)
+        out: set[str] = set()
+        try:
+            from app.db import GetDB
+            from app.db.models import User as LegacyUser
+
+            with GetDB() as db:
+                rows = db.query(LegacyUser.username, LegacyUser.online_at).all()
+        except Exception:  # noqa: BLE001 — legacy store optional
+            return out
+        for username, online_at in rows:
+            if not online_at:
+                continue
+            seen = online_at.replace(tzinfo=timezone.utc) \
+                if online_at.tzinfo is None else online_at
+            if (now - seen).total_seconds() <= window:
+                out.add(username)
+        return out
+
+    def _pid_username_map() -> dict[int, str]:
+        return {row.id: row.username for row in runtime.users.list_users(limit=100000)}
+
+    fresh = await asyncio.to_thread(_fresh_usernames)
+    try:
+        pid_map = await asyncio.to_thread(_pid_username_map)
+    except Exception:  # noqa: BLE001
+        pid_map = {}
+    states: dict[str, str] = {}
+    for pid, username in pid_map.items():
+        if pid in online_ids or username in fresh:
+            states[username] = "online"
+        elif failed:
+            states[username] = "unknown"
+        else:
+            states[username] = "offline"
+    return {"states": states, "collect_ts": snapshot.get("ts"),
+            "failed_cores": failed, "window_seconds": int(window)}
 
 
 # --------------------------------------------------------------------- #
@@ -965,6 +1079,30 @@ async def _known_catalog(runtime) -> dict[str, Any]:
     from app.platform.inbounds import catalog as _catalog
 
     return {g.core_id: g for g in await _catalog(runtime)}
+
+
+@zagros_admin_router.get("/cores/{core_id}/hosts/schema")
+async def host_settings_schema(core_id: str, runtime=Depends(get_runtime)):
+    """Item 16 — per-inbound FIELD MATRIX for the editor: which HostEntry
+    fields this (core, protocol) pair can actually apply. The dashboard
+    renders only those inputs instead of an xray-shaped one-size-fits-all
+    (a WireGuard row no longer offers ALPN/fragment/fingerprint)."""
+    from app.portal.hostengine import host_field_matrix
+
+    groups = await _known_catalog(runtime)
+    group = groups.get(core_id)
+    if group is None:
+        raise HTTPException(404, f"unknown core '{core_id}'")
+    engine = None
+    try:
+        engine = runtime.core_manager.get(core_id).metadata.name
+    except Exception:  # noqa: BLE001
+        pass
+    return {"core_id": core_id, "engine": engine, "inbounds": [
+        {"tag": i.tag, "protocol": i.protocol,
+         "fields": host_field_matrix(i.protocol, engine=engine)}
+        for i in group.inbounds
+    ]}
 
 
 @zagros_admin_router.get("/cores/{core_id}/hosts")

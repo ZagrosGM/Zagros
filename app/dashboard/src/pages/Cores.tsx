@@ -39,6 +39,14 @@ export default function Cores() {
     queryFn: () => api.get<{ cores: CoreView[] }>("/zagros/cores"),
     refetchInterval: 5000,
   });
+  // item 17: REAL per-core user-traffic totals (usage journal + legacy xray
+  // rollup) — the process/host NIC counters from backend metrics are NOT
+  // user traffic and must never be presented as such.
+  const traffic = useQuery({
+    queryKey: ["zagros", "cores-traffic"],
+    queryFn: () => api.get<{ totals: Record<string, { uplink_bytes: number; downlink_bytes: number; total_bytes: number }> }>("/zagros/cores/traffic/totals"),
+    refetchInterval: 30000,
+  });
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["zagros", "cores"] });
@@ -141,7 +149,12 @@ export default function Cores() {
                   <Meta k="cpu" v={<span className="tabular-nums">{(c.metrics?.cpu_percent ?? 0).toFixed(1)}%</span>} />
                   <Meta k="ram" v={formatBytes(c.metrics?.memory_bytes ?? 0, digits)} />
                   <Meta k="accounts" v={formatNumber(c.metrics?.active_accounts ?? 0, digits)} />
-                  <Meta k="traffic" v={`${formatBytes(c.metrics?.network_rx_bytes ?? 0, digits)} ↓ / ${formatBytes(c.metrics?.network_tx_bytes ?? 0, digits)} ↑`} />
+                  <Meta k="traffic" v={(() => {
+                    const tot = traffic.data?.totals?.[c.id];
+                    return tot
+                      ? <span title={`user traffic: ${formatBytes(tot.uplink_bytes, digits)} ↑ + ${formatBytes(tot.downlink_bytes, digits)} ↓`}>{formatBytes(tot.total_bytes, digits)}</span>
+                      : "—";
+                  })()} />
                   <Meta k="binary" v={<code className="block max-w-full truncate font-mono text-[10.5px]" dir="ltr" title={c.binary_path ?? ""}>{c.binary_path ?? "—"}</code>} />
                   <Meta k="config" v={<code className="block max-w-full truncate font-mono text-[10.5px]" dir="ltr" title={String(c.settings?.config_path ?? "")}>{c.settings?.config_path ? String(c.settings.config_path) : "—"}</code>} />
                 </div>

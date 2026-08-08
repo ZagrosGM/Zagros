@@ -51,6 +51,15 @@ LABEL org.opencontainers.image.title="Zagros" \
       org.opencontainers.image.source="https://github.com/ZagrosGM/Zagros" \
       org.opencontainers.image.licenses="AGPL-3.0"
 
+# Runtime network tooling for the host-managing cores:
+#  * iptables — SSH per-UID usage accounting (owner-match chain, alpha.7.4)
+#  * iproute2 — WireGuard/OpenVPN interface plumbing + net diagnostics
+# Both are inert until such a core is enabled, and NET_ADMIN comes from the
+# compose spec (installer grants it).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends iptables iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV PYTHON_LIB_PATH=/usr/local/lib/python${PYTHON_VERSION%.*}/site-packages
 
 WORKDIR /code

@@ -25,7 +25,9 @@ export default function Certificates() {
     queryFn: () => api.get<{ certificates: CertificateInfo[]; acme: { available: boolean; status: string } }>("/zagros/certificates"),
   });
   const del = useMutation({
-    mutationFn: (name: string) => api.delete(`/zagros/certificates/${encodeURIComponent(name)}`),
+    // item 18: address by the STABLE inventory id (reaches core-materialized
+    // certs too) — cleared on each list; fall back to the plain managed name
+    mutationFn: (c: CertificateInfo) => api.delete(`/zagros/certificates/${encodeURIComponent(c.id || c.name)}`),
     onSuccess: () => { toast.ok(t("common.deleted")); setDeleteFor(null); qc.invalidateQueries({ queryKey: ["zagros", "certificates"] }); },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
   });
@@ -74,7 +76,7 @@ export default function Certificates() {
                     {c.self_signed && <Badge tone="warn">self-signed</Badge>}
                     {!c.has_key && <Badge tone="danger">cert only</Badge>}
                   </div>
-                  <p className="mt-1 truncate text-[11px] text-content-3">CN: {c.subject_cn || "—"} · issuer: {c.issuer_cn || "—"}</p>
+                  <p className="mt-1 truncate text-[11px] text-content-3">CN: {c.subject || "—"} · issuer: {c.issuer || "—"}</p>
                 </div>
                 <Badge tone={expiryTone(c) as never} dot>
                   {c.expired ? "expired" : `${c.days_left}d left`}
@@ -97,7 +99,7 @@ export default function Certificates() {
       {dialog === "selfsigned" && <SelfSignedDialog onClose={() => setDialog(null)} />}
 
       <ConfirmDialog open={!!deleteFor} onClose={() => setDeleteFor(null)}
-        onConfirm={() => deleteFor && del.mutate(deleteFor.name)}
+        onConfirm={() => deleteFor && del.mutate(deleteFor)}
         title={`delete certificate — ${deleteFor?.name ?? ""}`}
         body="Cores pointing at these files will fail their next restart until re-pointed."
         danger loading={del.isPending} />

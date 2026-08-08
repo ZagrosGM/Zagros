@@ -41,13 +41,30 @@ carol     5000  80000 -bash
 
 
 class FakeSSHBackend:
-    def __init__(self, sessions: list[SSHSession] | None = None, sshd: bool = True):
+    def __init__(self, sessions: list[SSHSession] | None = None, sshd: bool = True,
+                 acct_reason: str | None = None):
         self._sessions = sessions or []
         self._sshd = sshd
         self.users: dict[str, str] = {}         # name → password
         self.locked: set[str] = set()
         self.deleted: list[str] = []
         self.killed: list[str] = []
+        # alpha.7.4 accounting simulation (kernel chain): uid per zg-* user,
+        # cumulative byte counters, last-converged rule set
+        self.counters: dict[int, int] = {}
+        self.synced_uids: set[int] = set()
+        self._acct_reason = acct_reason        # non-None = accounting unavailable
+
+    # accounting surface mirrors LocalSystemSSHBackend (alpha.7.4)
+    def acct_available(self): return self._acct_reason
+    def acct_ensure(self): pass
+    def acct_sync_users(self, uids): self.synced_uids = set(uids)
+    def acct_read(self): return dict(self.counters)
+    def acct_teardown(self): pass
+    def uid_of(self, username):
+        if username not in self.users:
+            return None
+        return 1000 + (sum(map(ord, username)) % 500)
 
     def user_exists(self, username): return username in self.users
     def create_user(self, username, password, shell, create_home):
@@ -193,9 +210,11 @@ def test_sshd_down_surfaces_honestly() -> None:
     asyncio.run(run())
 
 
-def test_chain_account_and_no_usage_honesty() -> None:
+def test_chain_account_and_usage_degrade_honesty() -> None:
     async def run():
-        driver, backend = _driver()
+        # backend without usable iptables → the chain cannot exist
+        driver, backend = _driver(FakeSSHBackend(
+            acct_reason="iptables unavailable inside this container — grant NET_ADMIN"))
         await driver.start()
         endpoint = await driver.ensure_chain_listener("ssh", 0)
         md = endpoint.metadata
@@ -204,14 +223,61 @@ def test_chain_account_and_no_usage_honesty() -> None:
         endpoint2 = await driver.ensure_chain_listener("ssh", 0)
         assert endpoint2.metadata["password"] == md["password"]
 
-        # usage is honestly NOT claimed (locked so a future regression trips CI)
+        # alpha.7.4: usage accounting is claimed only when the deployment
+        # can actually account — this host has no usable iptables → the
+        # capability degrades honestly (no fake zeros, explicit diagnosis).
         assert not driver.supports(Capability.USAGE_ACCOUNTING)
         assert not driver.supports(Capability.DEVICE_DETECTION)
         try:
             await driver.get_usage()
-            raise AssertionError("usage must raise CapabilityNotSupportedError")
+            raise AssertionError("usage must raise when accounting has no backend support")
         except Exception as exc:
-            assert "usage_accounting" in str(exc)
+            assert "usage_accounting" in str(exc) and "NET_ADMIN" in str(exc)
+            state = await driver.status()
+            assert state.health.value == "degraded"
+            assert "NET_ADMIN" in (state.message or "")
+    asyncio.run(run())
+
+
+def test_usage_accounting_owner_match_deltas() -> None:
+    """Real-chain math: kernel counters → per-tick deltas, deleted accounts
+    forgotten, uplink documented as 0 (payload of both directions in down)."""
+    async def run():
+        driver, backend = _driver()
+        await driver.start()
+        await driver.create_account(_account(1, "alice"))
+        await driver.create_account(_account(2, "bob"))
+        uid_a = backend.uid_of("zg-1-alice")
+        uid_b = backend.uid_of("zg-2-bob")
+        assert uid_a != uid_b
+
+        # tick 1: kernel counters appear → full counter counts as the delta
+        backend.counters[uid_a] = 1000
+        backend.counters[uid_b] = 500
+        r1 = {r.account_id: (r.uplink_bytes, r.downlink_bytes)
+              for r in await driver.get_usage()}
+        assert r1 == {"1.alice": (0, 1000), "2.bob": (0, 500)}
+        assert backend.synced_uids == {uid_a, uid_b}      # rules converged
+
+        # tick 2: grow one counter → only the growth is billed (no double count)
+        backend.counters[uid_a] = 1400
+        r2 = {r.account_id: (r.uplink_bytes, r.downlink_bytes)
+              for r in await driver.get_usage()}
+        assert r2 == {"1.alice": (0, 400), "2.bob": (0, 0)}
+
+        # counter reset (fresh chain) never produces a negative bill
+        backend.counters[uid_a] = 50
+        r3 = {r.account_id: (r.uplink_bytes, r.downlink_bytes)
+              for r in await driver.get_usage()}
+        assert r3["1.alice"] == (0, 0)
+
+        # deleted account: forgotten from tracker + out of the rule set
+        await driver.delete_account("2.bob")
+        r4 = {r.account_id: (r.uplink_bytes, r.downlink_bytes)
+              for r in await driver.get_usage()}
+        assert "2.bob" not in r4
+        assert backend.synced_uids == {uid_a}
+    asyncio.run(run())
 
     asyncio.run(run())
 

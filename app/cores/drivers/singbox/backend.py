@@ -86,35 +86,92 @@ class TrafficStatsSource(Protocol):
 
 
 class V2RayStatsSource:
-    """Production TrafficStatsSource over gRPC (lazy-imports xray_api)."""
+    """Production TrafficStatsSource over gRPC (lazy-imports xray_api).
+
+    DIALECT NEGOTIATION (alpha.7.4 — the field «unknown service
+    xray.app.stats.command.StatsService»): sing-box ≥ 1.12 registers its
+    StatsService as ``v2ray.core.app.stats.command.StatsService`` (see
+    ``experimental/v2rayapi/stats.go`` at every tag 1.12.x–1.13.x: the init()
+    renames the ServiceDesc) while ≤ 1.11 and the Xray core itself answer
+    ``xray.app.stats.command.StatsService``. The wire schema is byte-identical
+    (Stat{name:1,value:2}, QueryStatsRequest{pattern:1,reset:2},
+    QueryStatsResponse{stat:1}), so the vendored protobuf messages query BOTH
+    dialects; the first dialect that answers is cached for the process.
+    """
+
+    _DIALECTS = (
+        "xray.app.stats.command.StatsService",
+        "v2ray.core.app.stats.command.StatsService",
+    )
 
     def __init__(self, address: str):
         host, _, port = address.rpartition(":")
         self._address = (host or "127.0.0.1", int(port))
+        self._dialect: str | None = None
+
+    def _query_stats(self, channel: Any, dialect: str, pattern: str,
+                     pb2: Any) -> Any:
+        method = channel.unary_unary(
+            f"/{dialect}/QueryStats",
+            request_serializer=pb2.QueryStatsRequest.SerializeToString,
+            response_deserializer=pb2.QueryStatsResponse.FromString,
+        )
+        return method(pb2.QueryStatsRequest(pattern=pattern, reset=False),
+                      timeout=15)
 
     def query_user_counters(self) -> dict[str, tuple[int, int]]:
         try:
-            from xray_api import XRay
+            import grpc
+            from xray_api.proto.app.stats.command import command_pb2
         except ImportError as exc:  # pragma: no cover - packaging guard
             raise CoreError(
                 "xray_api (gRPC stats client) is not available — sing-box "
                 "per-user accounting needs the v2ray StatsService client."
             ) from exc
+        host, port = self._address
+        channel = grpc.insecure_channel(f"{host}:{port}")
         try:
-            client = XRay(*self._address)
+            # settled dialect first; before settlement try each known dialect
+            dialects = ([self._dialect] if self._dialect
+                        else list(self._DIALECTS))
+            response = None
+            last_unimplemented: Exception | None = None
+            for dialect in dialects:
+                try:
+                    response = self._query_stats(channel, dialect, "user>>>",
+                                                 command_pb2)
+                except grpc.RpcError as exc:
+                    if exc.code() == grpc.StatusCode.UNIMPLEMENTED:
+                        last_unimplemented = exc
+                        if self._dialect is None:
+                            continue  # unknown dialect → try the next one
+                    raise CoreError(
+                        f"sing-box stats API unreachable: "
+                        f"{exc.details() or exc}"
+                    ) from exc
+                self._dialect = dialect
+                break
+            if response is None:
+                raise CoreError(
+                    "sing-box stats API unreachable: the listener answers "
+                    "gRPC but knows none of the StatsService dialects "
+                    f"({', '.join(self._DIALECTS)}) — "
+                    f"{last_unimplemented.details() if last_unimplemented else '?'}"
+                )
             counters: dict[str, tuple[int, int]] = {}
-            for stat in client.get_users_stats():
-                if stat.type != "user":
-                    continue
-                up, down = counters.get(stat.name, (0, 0))
-                if stat.link == "uplink":
+            for stat in response.stat:
+                parts = stat.name.split(">>>")
+                if len(parts) != 4 or parts[0] != "user":
+                    continue  # only user>>><name>>>>traffic>>><uplink|downlink>
+                up, down = counters.get(parts[1], (0, 0))
+                if parts[3] == "uplink":
                     up = int(stat.value)
                 else:
                     down = int(stat.value)
-                counters[stat.name] = (up, down)
+                counters[parts[1]] = (up, down)
             return counters
-        except Exception as exc:
-            raise CoreError(f"sing-box stats API unreachable: {exc}") from exc
+        finally:
+            channel.close()
 
 
 class LocalSingBoxBackend:

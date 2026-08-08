@@ -313,7 +313,8 @@ def test_issue_portal_token_by_username_and_404():
                      headers=_auth(token))
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["path"].startswith("/zagros/sub/") and body["token"] in body["path"]
+    # alpha.7.4 item 12: the issued link is the CANONICAL /sub/<token>
+    assert body["path"].startswith("/sub/") and body["token"] in body["path"]
     r = _client.post("/api/zagros/users/by-username/nobody-here/subscription-token",
                      headers=_auth(token))
     assert r.status_code == 404
@@ -330,14 +331,21 @@ def test_portal_rotation_invalidates_old_link():
     p2 = _client.post(f"/api/zagros/users/by-username/{name}/subscription-token",
                       headers=_auth(token)).json()["path"]
     assert p1 != p2
-    # "path" is already the full PUBLIC mount path (/zagros/sub/...) — the
-    # portal router is mounted without the /api prefix (unversioned public
-    # link, Marzban /sub/ convention).
+    # "path" is already the full PUBLIC mount path (/sub/<token> canonical;
+    # /zagros/sub/<token> remains a forever-alias) — the portal router is
+    # mounted without the /api prefix (unversioned public link).
     r = _client.get(p1, headers={"accept": "text/html",
                                  "user-agent": "Mozilla/5.0"})
     assert r.status_code == 404  # rotated away (fail-closed)
     r = _client.get(p2, headers={"accept": "text/html",
                                  "user-agent": "Mozilla/5.0"})
+    assert r.status_code == 200 and "<html" in r.text.lower()
+
+    # alpha.7.4 item 12: the pre-7.4 URL shape keeps serving the same token
+    alias = p2.replace("/sub/", "/zagros/sub/", 1)
+    assert alias != p2
+    r = _client.get(alias, headers={"accept": "text/html",
+                                    "user-agent": "Mozilla/5.0"})
     assert r.status_code == 200 and "<html" in r.text.lower()
 
     # same token with a CLIENT user-agent → base64 link bundle instead of HTML

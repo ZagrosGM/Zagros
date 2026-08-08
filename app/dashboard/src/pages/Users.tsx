@@ -105,6 +105,15 @@ export default function Users() {
     },
     placeholderData: (prev) => prev,
   });
+  // item 14: real multi-core online signal (core sessions/presence; never
+  // a UI guess). unknown = some core failed its read, so "no session" is
+  // not asserted as "offline".
+  const onlineQ = useQuery({
+    queryKey: ["users-online"],
+    queryFn: () => api.get<{ states: Record<string, "online" | "offline" | "unknown">; collect_ts?: number; failed_cores: string[] }>("/zagros/users/online"),
+    refetchInterval: 15000,
+  });
+  const onlineMap = onlineQ.data?.states ?? {};
   const templatesQ = useQuery({
     queryKey: ["user_templates"],
     queryFn: () => api.get<UserTemplate[]>("/user_template"),
@@ -186,6 +195,13 @@ export default function Users() {
       id: "user", header: t("users.title"), cell: (u) => (
         <div className="flex min-w-0 items-center gap-2.5">
           <StatusDot tone={u.status === "active" ? "ok" : u.status === "disabled" ? "muted" : u.status === "limited" ? "warn" : "danger"} />
+          {/* item 14: online = session seen on ≥1 core; offline = no session & all cores answered; unknown = a core failed its read */}
+          <span
+            role="img"
+            aria-label={`presence ${onlineMap[u.username] ?? "unknown"}`}
+            title={onlineMap[u.username] === "online" ? "online (session on ≥1 core)" : onlineMap[u.username] === "offline" ? "offline (no session on any core)" : "presence unknown (a core failed its read)"}
+            className={`-ml-1 inline-block h-2 w-2 shrink-0 rounded-full ${onlineMap[u.username] === "online" ? "bg-ok" : onlineMap[u.username] === "offline" ? "bg-content-3/50" : "bg-warn"}`}
+          />
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
               <span className="truncate font-medium">{u.username}</span>
@@ -398,7 +414,7 @@ function PortalLinkSection({ username }: { username: string }) {
   return (
     <div className="sm:col-span-2 rounded-xl border border-brand/30 bg-brand-soft/20 p-3">
       <p className="mb-1.5 text-[11px] font-medium text-brand">
-        multi-core subscription portal — every core, one link (issuing rotates the old link)
+        {t("users.subPortalHint")}
       </p>
       <div className="flex items-center gap-2">
         {link ? (

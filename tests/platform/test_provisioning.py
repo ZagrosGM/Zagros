@@ -356,3 +356,62 @@ def test_grants_of_reports_selection(runtime, monkeypatch):
         assert grants == {"rec-one": ["wg0"], "rec-two": ["hy2"]}
 
     asyncio.run(_go())
+
+
+def test_deleted_inbound_cascades_revoke_and_prune(runtime, monkeypatch):
+    """Item 6A: deleting an inbounds through the studio must cascade into
+    materialized grants — full revocation when the last tag is gone, in-place
+    pruning when some remain. A later User Edit must never meet a ghost tag."""
+    async def _go():
+        from app.platform import provisioning
+
+        _stub_catalog(monkeypatch, _catalog(("rec-one", "wireguard", ["wg-a", "wg-b"])))
+        user = LegacyUser("cascade01", user_id=71)
+        pid = await provisioning.sync_user(runtime, user,
+                                           grants={"rec-one": ["wg-a", "wg-b"]})
+        accounts = [a for a in runtime.users.accounts_of(pid) if a["core_id"] == "rec-one"]
+        assert len(accounts) == 1
+        assert set(accounts[0]["settings"]["inbound_tags"]) == {"wg-a", "wg-b"}
+
+        # wg-b deleted → pruned to wg-a, excluded recomputed from the live set
+        _stub_catalog(monkeypatch, _catalog(("rec-one", "wireguard", ["wg-a"])))
+        report = await provisioning.reconcile_accounts_after_inbound_change(runtime, "rec-one")
+        assert report.get("pruned") == 1 and not report.get("revoked")
+        acc = runtime.users.accounts_of(pid)[0]
+        assert acc["settings"]["inbound_tags"] == ["wg-a"]
+        assert acc["settings"]["excluded_inbounds"] == []
+
+        # wg-a also deleted → account revoked on driver + store
+        _stub_catalog(monkeypatch, _catalog(("rec-one", "wireguard", ["wg-c"])))
+        report = await provisioning.reconcile_accounts_after_inbound_change(runtime, "rec-one")
+        assert report.get("revoked") == 1
+        assert [a for a in runtime.users.accounts_of(pid) if a["core_id"] == "rec-one"] == []
+        assert runtime.rec_one.deleted, "driver must hear the revocation"
+    asyncio.run(_go())
+
+
+def test_grant_save_with_dangling_tags_repairs_instead_of_422(runtime, monkeypatch):
+    """Item 6B: a grant set carrying ONLY ghosts (e.g. written before the
+    inbound was deleted) must not explode an unrelated Edit/Save — it is
+    skipped with a logged warning and the user's accounts stay untouched."""
+    async def _go():
+        from app.platform import provisioning
+
+        _stub_catalog(monkeypatch, _catalog(("rec-one", "wireguard", ["wg-a"])))
+        user = LegacyUser("cascade02", user_id=72)
+        pid = await provisioning.sync_user(runtime, user, grants={"rec-one": ["wg-a"]})
+        assert len([a for a in runtime.users.accounts_of(pid)
+                    if a["core_id"] == "rec-one"]) == 1
+
+        _stub_catalog(monkeypatch, _catalog(("rec-one", "wireguard", ["wg-a", "wg-new"])))
+        # ghost + valid mix: converges to the valid part (repair, no 422)
+        await provisioning.sync_user(runtime, user,
+                                     grants={"rec-one": ["wg-ghost", "wg-new"]})
+        acc = [a for a in runtime.users.accounts_of(pid) if a["core_id"] == "rec-one"][0]
+        assert acc["settings"]["inbound_tags"] == ["wg-new"]
+
+        # ghost ONLY: nothing valid to converge — accounts untouched, no exception
+        await provisioning.sync_user(runtime, user, grants={"rec-one": ["wg-ghost"]})
+        acc = [a for a in runtime.users.accounts_of(pid) if a["core_id"] == "rec-one"][0]
+        assert acc["settings"]["inbound_tags"] == ["wg-new"]
+    asyncio.run(_go())

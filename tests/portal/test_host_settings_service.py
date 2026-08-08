@@ -8,9 +8,13 @@ converters. Also pins the SQL store round-trip via the real model.
 """
 from __future__ import annotations
 
+# NOTE: sync tests driving coroutines through asyncio.run — the suite-wide
+# convention (the repo pins NO pytest-asyncio dependency; CI installs only
+# requirements.txt + pytest). Bare ``async def test_`` + pytest.mark.asyncio
+# only "works" on machines that happen to have the plugin and fails on a
+# clean runner with "async def functions are not natively supported".
+import asyncio
 import datetime as dt
-
-import pytest
 
 from app.cores.delivery import (
     ArtifactKind,
@@ -70,138 +74,145 @@ class _Provider:
 HY2_LINK = "hy2://pw@h2.example.com:443?sni=h2.example.com#base"
 
 
-@pytest.mark.asyncio
-async def test_build_links_expands_with_host_entries():
-    store = InMemoryCoreHostStore()
-    await store.replace_tags("hysteria2", {"hy2-in": [
-        HostEntry(remark="DC1 {USERNAME}", address="dc1.example.com"),
-        HostEntry(remark="DC2", address="dc2.example.com", port=8443),
-    ]})
-    svc = PortalService(_Provider([(_FakeDriver(HY2_LINK), _Account())]),
-                        InMemorySettingsStore(), host_store=store)
-    links, notes = await svc.build_links(7)
-    assert links is not None
-    assert len(links) == 2
-    assert "dc1.example.com:443" in links[0]
-    assert "dc2.example.com:8443" in links[1]
-    assert links[0].endswith("#" + "DC1%20alice")
+def test_build_links_expands_with_host_entries():
+    async def run():
+        store = InMemoryCoreHostStore()
+        await store.replace_tags("hysteria2", {"hy2-in": [
+            HostEntry(remark="DC1 {USERNAME}", address="dc1.example.com"),
+            HostEntry(remark="DC2", address="dc2.example.com", port=8443),
+        ]})
+        svc = PortalService(_Provider([(_FakeDriver(HY2_LINK), _Account())]),
+                            InMemorySettingsStore(), host_store=store)
+        links, notes = await svc.build_links(7)
+        assert links is not None
+        assert len(links) == 2
+        assert "dc1.example.com:443" in links[0]
+        assert "dc2.example.com:8443" in links[1]
+        assert links[0].endswith("#" + "DC1%20alice")
+    asyncio.run(run())
 
 
-@pytest.mark.asyncio
-async def test_build_links_without_entries_is_identical():
-    store = InMemoryCoreHostStore()
-    svc = PortalService(_Provider([(_FakeDriver(HY2_LINK), _Account())]),
-                        InMemorySettingsStore(), host_store=store)
-    links, _ = await svc.build_links(7)
-    assert links == [HY2_LINK]
+def test_build_links_without_entries_is_identical():
+    async def run():
+        store = InMemoryCoreHostStore()
+        svc = PortalService(_Provider([(_FakeDriver(HY2_LINK), _Account())]),
+                            InMemorySettingsStore(), host_store=store)
+        links, _ = await svc.build_links(7)
+        assert links == [HY2_LINK]
+    asyncio.run(run())
 
 
-@pytest.mark.asyncio
-async def test_no_host_store_is_identical_backcompat():
-    svc = PortalService(_Provider([(_FakeDriver(HY2_LINK), _Account())]),
-                        InMemorySettingsStore())
-    links, _ = await svc.build_links(7)
-    assert links == [HY2_LINK]
+def test_no_host_store_is_identical_backcompat():
+    async def run():
+        svc = PortalService(_Provider([(_FakeDriver(HY2_LINK), _Account())]),
+                            InMemorySettingsStore())
+        links, _ = await svc.build_links(7)
+        assert links == [HY2_LINK]
+    asyncio.run(run())
 
 
-@pytest.mark.asyncio
-async def test_builtin_xray_is_never_double_expanded():
-    store = InMemoryCoreHostStore()
-    await store.replace_tags("xray", {"V-WS": [HostEntry(address="dup.example.com")]})
-    xray_link = "vless://u@orig.example.com:443?type=tcp&security=none#L1"
-    driver = _FakeDriver(xray_link, core_id="xray")
-    svc = PortalService(_Provider([(driver, _Account("vless"))]),
-                        InMemorySettingsStore(), host_store=store)
-    links, _ = await svc.build_links(7)
-    assert links == [xray_link]
-    assert not any("dup.example.com" in l for l in links)
+def test_builtin_xray_is_never_double_expanded():
+    async def run():
+        store = InMemoryCoreHostStore()
+        await store.replace_tags("xray", {"V-WS": [HostEntry(address="dup.example.com")]})
+        xray_link = "vless://u@orig.example.com:443?type=tcp&security=none#L1"
+        driver = _FakeDriver(xray_link, core_id="xray")
+        svc = PortalService(_Provider([(driver, _Account("vless"))]),
+                            InMemorySettingsStore(), host_store=store)
+        links, _ = await svc.build_links(7)
+        assert links == [xray_link]
+        assert not any("dup.example.com" in l for l in links)
+    asyncio.run(run())
 
 
-@pytest.mark.asyncio
-async def test_expanded_links_flow_into_clash_and_singbox_formats():
-    from app.platform.sub_formats import to_clash_meta, to_sing_box
+def test_expanded_links_flow_into_clash_and_singbox_formats():
+    async def run():
+        from app.platform.sub_formats import to_clash_meta, to_sing_box
 
-    store = InMemoryCoreHostStore()
-    await store.replace_tags("hysteria2", {"hy2-in": [
-        HostEntry(remark="DC2", address="dc2.example.com", sni="cdn.example.com"),
-    ]})
-    svc = PortalService(_Provider([(_FakeDriver(HY2_LINK), _Account())]),
-                        InMemorySettingsStore(), host_store=store)
-    links, notes = await svc.build_links(7)
-    clash, _ = to_clash_meta(links, notes)
-    sb, _ = to_sing_box(links, notes)
-    assert "dc2.example.com" in clash and "cdn.example.com" in clash
-    assert "dc2.example.com" in sb and "cdn.example.com" in sb
-    assert "DC2" in clash and "DC2" in sb
+        store = InMemoryCoreHostStore()
+        await store.replace_tags("hysteria2", {"hy2-in": [
+            HostEntry(remark="DC2", address="dc2.example.com", sni="cdn.example.com"),
+        ]})
+        svc = PortalService(_Provider([(_FakeDriver(HY2_LINK), _Account())]),
+                            InMemorySettingsStore(), host_store=store)
+        links, notes = await svc.build_links(7)
+        clash, _ = to_clash_meta(links, notes)
+        sb, _ = to_sing_box(links, notes)
+        assert "dc2.example.com" in clash and "cdn.example.com" in clash
+        assert "dc2.example.com" in sb and "cdn.example.com" in sb
+        assert "DC2" in clash and "DC2" in sb
+    asyncio.run(run())
 
 
-@pytest.mark.asyncio
-async def test_build_page_expands_sections():
-    store = InMemoryCoreHostStore()
-    await store.replace_tags("hysteria2", {"hy2-in": [
-        HostEntry(remark="Portal DC", address="dc-p.example.com"),
-    ]})
-    svc = PortalService(_Provider([(_FakeDriver(HY2_LINK), _Account())]),
-                        InMemorySettingsStore(), host_store=store)
-    page = await svc.build_page(7)
-    assert page is not None
-    contents = [a.content for s in page.sections for a in s.artifacts]
-    assert any("dc-p.example.com" in c for c in contents)
+def test_build_page_expands_sections():
+    async def run():
+        store = InMemoryCoreHostStore()
+        await store.replace_tags("hysteria2", {"hy2-in": [
+            HostEntry(remark="Portal DC", address="dc-p.example.com"),
+        ]})
+        svc = PortalService(_Provider([(_FakeDriver(HY2_LINK), _Account())]),
+                            InMemorySettingsStore(), host_store=store)
+        page = await svc.build_page(7)
+        assert page is not None
+        contents = [a.content for s in page.sections for a in s.artifacts]
+        assert any("dc-p.example.com" in c for c in contents)
+    asyncio.run(run())
 
 
 # --------------------------------------------------------------------- #
 # SQL store round-trip (exercises the real CoreHostModel mapping)
 # --------------------------------------------------------------------- #
 
-@pytest.mark.asyncio
-async def test_sql_core_host_store_roundtrip(tmp_path):
-    from app.persistence import create_schema, create_session_factory
-    from app.persistence.repositories import SQLCoreHostStore
+def test_sql_core_host_store_roundtrip(tmp_path):
+    async def run():
+        from app.persistence import create_schema, create_session_factory
+        from app.persistence.repositories import SQLCoreHostStore
 
-    sf = create_session_factory(f"sqlite:///{tmp_path}/hosts.db")
-    create_schema(sf)
-    store = SQLCoreHostStore(sf)
+        sf = create_session_factory(f"sqlite:///{tmp_path}/hosts.db")
+        create_schema(sf)
+        store = SQLCoreHostStore(sf)
 
-    grouped = await store.list_grouped("wireguard")
-    assert grouped == {}
+        grouped = await store.list_grouped("wireguard")
+        assert grouped == {}
 
-    await store.replace_tags("wireguard", {"wireguard": [
-        HostEntry(remark="DC1-{USERNAME}", address="dc1.example.com", port=51830),
-        HostEntry(remark="full", address="dc2.example.com",
-                  allowinsecure=True, is_disabled=True,
-                  mux_enable=True, fragment_setting="1-3,1-3,tlshello",
-                  noise_setting="none", random_user_agent=True,
-                  use_sni_as_host=True),
-        HostEntry(remark="extras", address="dc3.example.com",
-                  extras={"vpn_mark": 7}),
-    ]})
-    grouped = await store.list_grouped("wireguard")
-    e1, e2, e3 = grouped["wireguard"]
-    assert (e1.remark, e1.address, e1.port) == ("DC1-{USERNAME}", "dc1.example.com", 51830)
-    assert e2.is_disabled is True and e2.allowinsecure is True
-    assert e2.mux_enable is True and e2.fragment_setting == "1-3,1-3,tlshello"
-    assert e2.noise_setting == "none" and e2.random_user_agent is True
-    assert e2.use_sni_as_host is True
-    assert e3.extras.get("vpn_mark") == 7          # unrecognized attrs preserved
+        await store.replace_tags("wireguard", {"wireguard": [
+            HostEntry(remark="DC1-{USERNAME}", address="dc1.example.com", port=51830),
+            HostEntry(remark="full", address="dc2.example.com",
+                      allowinsecure=True, is_disabled=True,
+                      mux_enable=True, fragment_setting="1-3,1-3,tlshello",
+                      noise_setting="none", random_user_agent=True,
+                      use_sni_as_host=True),
+            HostEntry(remark="extras", address="dc3.example.com",
+                      extras={"vpn_mark": 7}),
+        ]})
+        grouped = await store.list_grouped("wireguard")
+        e1, e2, e3 = grouped["wireguard"]
+        assert (e1.remark, e1.address, e1.port) == ("DC1-{USERNAME}", "dc1.example.com", 51830)
+        assert e2.is_disabled is True and e2.allowinsecure is True
+        assert e2.mux_enable is True and e2.fragment_setting == "1-3,1-3,tlshello"
+        assert e2.noise_setting == "none" and e2.random_user_agent is True
+        assert e2.use_sni_as_host is True
+        assert e3.extras.get("vpn_mark") == 7          # unrecognized attrs preserved
 
-    # replace ONLY the listed tag: a second tag keeps its rows
-    await store.replace_tags("wireguard", {"wg-alt": [HostEntry(address="alt.example.com")]})
-    grouped = await store.list_grouped("wireguard")
-    assert [e.address for e in grouped["wireguard"]] == \
-        ["dc1.example.com", "dc2.example.com", "dc3.example.com"]
-    assert [e.address for e in grouped["wg-alt"]] == ["alt.example.com"]
+        # replace ONLY the listed tag: a second tag keeps its rows
+        await store.replace_tags("wireguard", {"wg-alt": [HostEntry(address="alt.example.com")]})
+        grouped = await store.list_grouped("wireguard")
+        assert [e.address for e in grouped["wireguard"]] == \
+            ["dc1.example.com", "dc2.example.com", "dc3.example.com"]
+        assert [e.address for e in grouped["wg-alt"]] == ["alt.example.com"]
 
-    # explicit empty list clears a tag
-    await store.replace_tags("wireguard", {"wg-alt": []})
-    grouped = await store.list_grouped("wireguard")
-    assert "wg-alt" not in grouped or grouped["wg-alt"] == []
-    assert len(grouped["wireguard"]) == 3
+        # explicit empty list clears a tag
+        await store.replace_tags("wireguard", {"wg-alt": []})
+        grouped = await store.list_grouped("wireguard")
+        assert "wg-alt" not in grouped or grouped["wg-alt"] == []
+        assert len(grouped["wireguard"]) == 3
 
-    # priority = list order (sort column)
-    await store.replace_tags("wireguard", {"wireguard": [
-        HostEntry(remark="z-last", address="z.example.com"),
-        HostEntry(remark="a-first", address="a.example.com"),
-    ]})
-    grouped = await store.list_grouped("wireguard")
-    assert [e.address for e in grouped["wireguard"]] == \
-        ["z.example.com", "a.example.com"]
+        # priority = list order (sort column)
+        await store.replace_tags("wireguard", {"wireguard": [
+            HostEntry(remark="z-last", address="z.example.com"),
+            HostEntry(remark="a-first", address="a.example.com"),
+        ]})
+        grouped = await store.list_grouped("wireguard")
+        assert [e.address for e in grouped["wireguard"]] == \
+            ["z.example.com", "a.example.com"]
+    asyncio.run(run())

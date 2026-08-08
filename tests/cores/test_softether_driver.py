@@ -414,7 +414,7 @@ def test_install_source_build_last_resort_uses_live_tag() -> None:
     assert (Path(root, "vpnserver").stat().st_mode & 0o111) != 0
 
 
-def test_install_reports_every_failed_stage() -> None:
+def test_install_reports_every_failed_stage(tmp_path) -> None:
     import shutil
     from unittest import mock
 
@@ -428,6 +428,13 @@ def test_install_reports_every_failed_stage() -> None:
                            lambda repo, timeout=30.0: {"tag_name": "v1"}), \
          mock.patch.object(backend, "_ensure_build_deps",
                            lambda: (_ for _ in ()).throw(CoreError("no toolchain"))):
+        # Hermetic: _install_from_github prepares self._INSTALL_ROOT with a
+        # REAL makedirs before the (stubbed) download, so the default
+        # /usr/local/softether both leaks into the host filesystem and makes
+        # the outcome depend on ambient permissions (root locally, EACCES on
+        # CI runners). Point it at tmp so each stage fails ONLY from the
+        # injected fault — the thing this test actually pins.
+        backend._INSTALL_ROOT = str(tmp_path / "softether")
         try:
             backend.install_packages()
             raise AssertionError("install must fail when every stage fails")

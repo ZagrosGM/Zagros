@@ -65,30 +65,87 @@ def test_openvpn_preflight_reports_missing_tun_with_remedy(tmp_path, monkeypatch
     assert "NET_ADMIN" in msg and "devices" in msg  # actionable, not hidden
 
 
+def test_openvpn_preflight_structured_host_diagnosis(tmp_path, monkeypatch):
+    """Item (alpha.7.2): preflight diagnoses TUN device, NET_ADMIN, kernel
+    module AND container context — each failure with its own fix hint."""
+    import app.cores.netdiag as nd
+
+    backend = _ovpn_backend(tmp_path, monkeypatch)
+    monkeypatch.setattr("shutil.which", lambda t: "/usr/sbin/openvpn")
+    monkeypatch.setattr(nd, "tun_device_state", lambda: "missing")
+    monkeypatch.setattr(nd, "net_admin_present", lambda: False)
+    monkeypatch.setattr(nd, "kernel_module_present", lambda name: False)
+    monkeypatch.setattr(nd, "in_container", lambda: "docker")
+    with pytest.raises(CoreError) as ei:
+        backend.preflight_start()
+    msg = str(ei.value)
+    assert "host diagnosis:" in msg                       # structured block
+    assert "[FAIL] TUN device: /dev/net/tun does not exist" in msg
+    assert "[FAIL] CAP_NET_ADMIN" in msg
+    assert "[FAIL] tun kernel module" in msg
+    assert "host context" in msg and "docker" in msg
+    assert "devices: [/dev/net/tun:/dev/net/tun]" in msg   # per-host fix
+    assert "cap_add: [NET_ADMIN]" in msg
+    assert "modprobe tun" in msg
+
+    # unreadable device gets its own header wording
+    monkeypatch.setattr(nd, "tun_device_state", lambda: "unreadable")
+    with pytest.raises(CoreError) as ei2:
+        backend.preflight_start()
+    assert "exists but cannot be opened" in str(ei2.value)
+
+    # everything healthy → preflight silent
+    monkeypatch.setattr(nd, "tun_device_state", lambda: "ok")
+    monkeypatch.setattr(nd, "net_admin_present", lambda: True)
+    monkeypatch.setattr(nd, "kernel_module_present", lambda name: True)
+    backend.preflight_start()
+
+
 def test_openvpn_mgmt_wait_surfaces_process_death_not_socket_error(tmp_path, monkeypatch):
+    """Alpha.7.2 shape: one _Listener per tag; the same honesty contract —
+    a dead process surfaces its OWN log tail, never a bare socket error,
+    and the failure names the listener."""
     backend = _ovpn_backend(tmp_path, monkeypatch)
     monkeypatch.setattr(backend, "preflight_start", lambda: None)
+    backend.configure([{
+        "tag": "openvpn", "mgmt_port": 17599,
+        "server_conf": "port 1194\n", "hook_script": "#!/bin/sh\nexit 0\n",
+    }])
 
     class DeadProc:
         is_running = False
 
         def start(self): pass
 
+        def stop(self): pass
+
         def logs(self, tail=15):
             return ["Options error: --ca fails with 'ca.crt': No such file or directory"]
 
-    monkeypatch.setattr(backend, "_proc", DeadProc())
+    listener = backend._listeners["openvpn"]
+    listener.proc = DeadProc()
     with pytest.raises(CoreError) as ei:
-        backend.connect_management(timeout=0.1)
+        backend._connect_management(listener, timeout=0.1)
     msg = str(ei.value)
     assert "openvpn exited during startup" in msg
     assert "Options error" in msg                     # the REAL cause, verbatim
     assert "Connection refused" not in msg
 
+    # surfaced with the listener name when driven through start()
+    listener.proc = DeadProc()
+    with pytest.raises(CoreError) as ei2:
+        backend.start()
+    assert "listener 'openvpn'" in str(ei2.value)
+    assert "Options error" in str(ei2.value)
+
 
 def test_openvpn_mgmt_timeout_includes_recent_output(tmp_path, monkeypatch):
     backend = _ovpn_backend(tmp_path, monkeypatch)
     monkeypatch.setattr(backend, "preflight_start", lambda: None)
+    backend.configure([{
+        "tag": "openvpn", "mgmt_port": 17599,
+        "server_conf": "port 1194\n", "hook_script": "#!/bin/sh\nexit 0\n",
+    }])
 
     class AliveProc:
         is_running = True
@@ -98,9 +155,10 @@ def test_openvpn_mgmt_timeout_includes_recent_output(tmp_path, monkeypatch):
         def logs(self, tail=15):
             return ["NOTE: your local LAN uses ..."]
 
-    monkeypatch.setattr(backend, "_proc", AliveProc())
+    listener = backend._listeners["openvpn"]
+    listener.proc = AliveProc()
     with pytest.raises(CoreError) as ei:
-        backend.connect_management(timeout=0.05)
+        backend._connect_management(listener, timeout=0.05)
     assert "NOTE: your local LAN" in str(ei.value)
 
 
@@ -177,6 +235,55 @@ def test_wireguard_missing_dependencies_map_tools_to_packages(tmp_path):
         wb.shutil.which = orig_which
     assert got["ip"] == "iproute2" and got["iptables"] == "iptables"
     assert "wg-quick" not in got
+
+
+def test_wireguard_up_operation_not_permitted_gets_full_diagnosis(tmp_path, monkeypatch):
+    """Item (alpha.7.2): 'Operation not permitted' is expanded into the
+    structured host diagnosis — capability, kernel module, host context,
+    each with its fix — while the original error stays verbatim."""
+    import app.cores.netdiag as nd
+
+    backend = _wg_backend(tmp_path, monkeypatch)
+    monkeypatch.setattr(backend, "_ensure_host_tools", lambda: None)
+    monkeypatch.setattr(backend, "is_running", lambda: False)
+
+    def eperm(argv, *, input_text=None, timeout=30.0):
+        raise CoreError("[#] ip link add wgtest0 type wireguard\n"
+                        "RTNETLINK answers: Operation not permitted")
+    monkeypatch.setattr(backend, "_run", eperm)
+    monkeypatch.setattr(nd, "net_admin_present", lambda: False)
+    monkeypatch.setattr(nd, "kernel_module_present", lambda name: True)
+    monkeypatch.setattr(nd, "in_container", lambda: "docker")
+    with pytest.raises(CoreError) as ei:
+        backend.up("### wgtest0 ###\n")
+    msg = str(ei.value)
+    assert "could not be created" in msg
+    assert "Operation not permitted" in msg       # original error preserved
+    assert "host diagnosis:" in msg
+    assert "[FAIL] CAP_NET_ADMIN" in msg
+    assert "cap_add: [NET_ADMIN]" in msg
+    assert "wireguard kernel module" in msg        # module line present (ok)
+
+    # non-permission failures pass through untouched — no fake diagnosis
+    def other(argv, *, input_text=None, timeout=30.0):
+        raise CoreError("wg-quick: `wgtest0' already exists")
+    monkeypatch.setattr(backend, "_run", other)
+    with pytest.raises(CoreError) as ei2:
+        backend.up("### wgtest0 ###\n")
+    assert "already exists" in str(ei2.value)
+    assert "host diagnosis:" not in str(ei2.value)
+
+    # missing kernel module gets the dkms/provider hint instead
+    def eperm2(argv, *, input_text=None, timeout=30.0):
+        raise CoreError("RTNETLINK answers: Operation not supported")
+    monkeypatch.setattr(backend, "_run", eperm2)
+    monkeypatch.setattr(nd, "net_admin_present", lambda: True)
+    monkeypatch.setattr(nd, "kernel_module_present", lambda name: False)
+    monkeypatch.setattr(nd, "in_container", lambda: None)
+    # "operation not supported" is NOT a permission pattern → no diagnosis
+    with pytest.raises(CoreError) as ei3:
+        backend.up("### wgtest0 ###\n")
+    assert "host diagnosis:" not in str(ei3.value)
 
 
 # --------------------------------------------------------------------- #

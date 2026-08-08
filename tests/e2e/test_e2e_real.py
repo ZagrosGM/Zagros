@@ -3,8 +3,9 @@
 Scope discipline (honest, environment-aware):
 
 * Covered here with REAL binaries downloaded from the official GitHub
-  releases: **hysteria2, tuic** (fully in-process; the drivers own their
-  config), **sing-box** (install/start/status/logs), **xray** (install +
+  releases: **sing-box** (install/start/status/logs — and since
+  alpha.7.2 it also serves the Hysteria2/TUIC protocols natively, so
+  those lifecycle paths run through this same core), **xray** (install +
   start + status — its user-management path needs the gRPC API which the
   panel reaches through generated stubs, exercised in unit tests with
   fakes; here we assert the real process lifecycle).
@@ -88,117 +89,6 @@ class _E2EBase(unittest.TestCase):
 
         self.addCleanup(_stop)
         return drv
-
-
-class TestHysteria2Real(_E2EBase):
-    """Full lifecycle against the real apernet/hysteria binary."""
-
-    def test_full_scenario(self) -> None:
-        p_server, p_stats = _free(2)
-
-        async def run() -> None:
-            drv = self.make(
-                "hysteria2",
-                work_dir=str(self.tmp / "hy2"),
-                port=p_server,
-                traffic_listen=f"127.0.0.1:{p_stats}",
-                traffic_secret="e2e-secret",
-            )
-            # 1) install (real download) + 2) upgrade path (install again → already present)
-            await drv.install()
-            await drv.install()
-            # 3) start → running
-            await drv.start()
-            await asyncio.sleep(1.5)
-            status = await drv.status()
-            self.assertEqual(status.state, CoreState.RUNNING, status)
-            self.assertTrue(status.core_version)
-            # 4) create user (config render + real restart)
-            acc = self.account("hysteria2")
-            acc.settings["password"] = "e2e-real-secret"
-            await drv.create_account(acc)
-            await asyncio.sleep(0.8)
-            # 5) client config + delivery (real artifacts)
-            cfg = await drv.build_client_config(acc, node=None)
-            self.assertTrue(cfg.payload)
-            delivery = await drv.describe_delivery(acc)
-            self.assertTrue(delivery.sections)
-            # 6) suspend → resume (kick + config remove/add, real traffic API)
-            await drv.suspend_account(acc.account_id)
-            await asyncio.sleep(0.5)
-            await drv.resume_account(acc)
-            await asyncio.sleep(0.5)
-            # 7) usage accounting surface reachable (counters numeric, no fake)
-            usage = await drv.get_usage(since=None)
-            for rec in usage:
-                self.assertGreaterEqual(rec.uplink_bytes, 0)
-                self.assertGreaterEqual(rec.downlink_bytes, 0)
-            # 8) restart
-            await drv.restart()
-            await asyncio.sleep(1.0)
-            self.assertEqual((await drv.status()).state, CoreState.RUNNING)
-            # 9) crash failover: SIGKILL the child → panel must SEE it is down
-            proc = drv._backend._proc._process  # real PID of the managed child
-            if proc is not None:
-                os.kill(proc.pid, signal.SIGKILL)
-                await asyncio.sleep(1.0)
-                self.assertEqual((await drv.status()).state, CoreState.STOPPED)
-                # recover
-                await drv.start()
-                await asyncio.sleep(1.0)
-                self.assertEqual((await drv.status()).state, CoreState.RUNNING)
-            # 10) delete user + 11) stop
-            await drv.delete_account(acc.account_id)
-            await drv.stop()
-            self.assertEqual((await drv.status()).state, CoreState.STOPPED)
-
-        asyncio.run(run())
-
-
-class TestTUICReal(_E2EBase):
-    """Full lifecycle against the real tuic-server binary."""
-
-    def test_full_scenario(self) -> None:
-        p_server = _free(2)[1]
-
-        async def run() -> None:
-            drv = self.make(
-                "tuic",
-                work_dir=str(self.tmp / "tuic"),
-                port=p_server,
-                # keep the upstream-recommended wildcard listen [::]: explicit
-                # IPv4 binds crash tuic-server <=1.0.0 (documented in schema)
-            )
-            await drv.install()
-            await drv.start()
-            await asyncio.sleep(1.2)
-            status = await drv.status()
-            self.assertEqual(status.state, CoreState.RUNNING, status)
-            acc = self.account("tuic")
-            await drv.create_account(acc)   # config render + real restart
-            await asyncio.sleep(0.8)
-            cfg = await drv.build_client_config(acc, node=None)
-            self.assertTrue(cfg.payload)
-            self.assertIn("tuic://", str(cfg.payload))
-            # honest: no usage API in the protocol — the driver must refuse
-            # explicitly instead of fabricating zeros
-            from app.cores.exceptions import CapabilityNotSupportedError
-            from app.cores.types import Capability
-            with self.assertRaises(CapabilityNotSupportedError):
-                await drv.get_usage(since=None)
-            self.assertFalse(drv.supports(Capability.USAGE_ACCOUNTING))
-            await drv.suspend_account(acc.account_id)
-            await asyncio.sleep(0.5)
-            await drv.resume_account(acc)
-            await asyncio.sleep(0.5)
-            await drv.restart()
-            await asyncio.sleep(1.0)
-            self.assertEqual((await drv.status()).state, CoreState.RUNNING)
-            await drv.delete_account(acc.account_id)
-            await drv.stop()
-            self.assertEqual((await drv.status()).state, CoreState.STOPPED)
-
-        asyncio.run(run())
 
 
 class TestSingBoxReal(_E2EBase):

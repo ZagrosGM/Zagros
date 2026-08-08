@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from app.cores.base import BaseCoreDriver
 from app.cores.delivery import ArtifactKind, DeliveryArtifact, DeliverySection
 from app.cores.types import UserAccount
+from app.portal.hostengine import HostSettingsEngine, delivery_variables
 from app.portal.models import (
     ClientAuthMode,
     PageKind,
@@ -37,9 +38,27 @@ class PortalDataProvider(Protocol):
 class PortalService:
     """Builds :class:`PortalPage` respecting mode gates and honest failures."""
 
-    def __init__(self, provider: PortalDataProvider, settings: SettingsStore) -> None:
+    def __init__(self, provider: PortalDataProvider, settings: SettingsStore,
+                 *, host_store: Any | None = None) -> None:
         self._provider = provider
         self._settings = settings
+        # alpha.7.2 (item 13): optional Host-Settings store — when absent
+        # (tests, minimal boots) profiles pass through byte-identically.
+        self._host_store = host_store
+        self._host_engine = HostSettingsEngine()
+
+    async def _expand_hosts(self, core_id: str, profile, variables):
+        """Widen one delivery profile through the admin's Host Settings
+        (item 13).  The built-in xray core is SKIPPED — its links are
+        already expanded per legacy host entry by the driver itself
+        (Marzban-parity path); layering core_hosts over it would double
+        every link.  Cores without entries pass through unchanged."""
+        if self._host_store is None or core_id == "xray":
+            return profile
+        entries = await self._host_store.list_grouped(core_id)
+        if not entries:
+            return profile
+        return self._host_engine.expand(profile, entries, variables)
 
     async def build_page(self, user_id: int, *, lang: str | None = None) -> PortalPage | None:
         ctx = await self._provider.get_subscription_context(user_id)
@@ -66,9 +85,11 @@ class PortalService:
 
         sections: list[DeliverySection] = []
         notes: list[str] = []
+        variables = delivery_variables(ctx.user)
         for driver, account in ctx.accounts:
             try:
                 profile = await driver.describe_delivery(account)
+                profile = await self._expand_hosts(driver.metadata.id, profile, variables)
             except Exception as exc:  # noqa: BLE001 — honesty: show, don't crash the page
                 logger.warning("delivery description failed for core %s: %s",
                                driver.metadata.id, exc)
@@ -127,11 +148,13 @@ class PortalService:
             return [], []
         links: list[str] = []
         notes: list[str] = []
+        variables = delivery_variables(ctx.user)
         for driver, account in ctx.accounts:
             if not account.enabled:
                 continue
             try:
                 profile = await driver.describe_delivery(account)
+                profile = await self._expand_hosts(driver.metadata.id, profile, variables)
             except Exception as exc:  # noqa: BLE001 — honest, never crash the list
                 notes.append(f"{account.protocol}: temporarily unavailable ({exc.__class__.__name__})")
                 continue

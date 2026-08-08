@@ -172,6 +172,36 @@ class ConfigStudioService:
             node = node[seg]
         return False
 
+    async def _wizard_ops(self, driver: BaseCoreDriver,
+                          spec: InboundSpec) -> list[PatchOperation]:
+        """The patch set a wizard inbound would produce — shared by the
+        dry-run (preview) and the real apply so both see EXACTLY the same
+        document mutation."""
+        path = driver.metadata.studio_inbounds_path
+        entry_ops = self.wizard_patch(driver, spec)
+        if not path:
+            return entry_ops
+        doc = await self.get_document(driver.metadata.id, driver)
+        # getattr: third-party/metadata-mock drivers predate the field —
+        # absence must read as "unlimited", never AttributeError.
+        max_inbounds = getattr(driver.metadata, "studio_max_inbounds", None)
+        if self._path_missing(doc, path):
+            return [PatchOperation(op="add", path=path, value=[])] + entry_ops
+        if max_inbounds is not None:
+            existing = doc.get(path.strip("/"), [])
+            count = len(existing) if isinstance(existing, list) else 0
+            if count >= max_inbounds:
+                # replace the ONLY listener (wizard = configure-the-listener)
+                return [PatchOperation(op="replace", path=f"{path}/0",
+                                       value=entry_ops[0].value)]
+        return entry_ops
+
+    async def wizard_preview_inbound(self, driver: BaseCoreDriver,
+                                     spec: InboundSpec) -> PreviewResult:
+        """Item 6 Preview gate: the wizard's exact patch + schema validation
+        + unified diff WITHOUT persisting or materializing anything."""
+        return await self.preview(driver, await self._wizard_ops(driver, spec))
+
     async def wizard_add_inbound(self, driver: BaseCoreDriver,
                                  spec: InboundSpec) -> PreviewResult:
         """Full wizard flow: build patch → validate → apply → return diff.
@@ -179,31 +209,10 @@ class ConfigStudioService:
         Tolerant seeding: an empty document (core never started, store fresh)
         gets the inbound-list parent created first instead of 422ing.
 
-        Single-listener engines (``studio_max_inbounds == 1``: tuic, hy2,
-        wireguard, openvpn, ssh) physically bind ONE socket — the wizard
+        Single-listener engines (``studio_max_inbounds == 1``: wireguard,
+        openvpn, ssh) physically bind ONE socket — the wizard
         replaces that listener instead of appending a second entry the
         engine could never serve (the old flow appended; the driver's
         cardinality guard then died as an opaque 500).
         """
-        path = driver.metadata.studio_inbounds_path
-        entry_ops = self.wizard_patch(driver, spec)
-        if path:
-            doc = await self.get_document(driver.metadata.id, driver)
-            # getattr: third-party/metadata-mock drivers predate the field —
-            # absence must read as "unlimited", never AttributeError.
-            max_inbounds = getattr(driver.metadata, "studio_max_inbounds", None)
-            if self._path_missing(doc, path):
-                ops = [PatchOperation(op="add", path=path, value=[])] + entry_ops
-            elif max_inbounds is not None:
-                existing = doc.get(path.strip("/"), [])
-                count = len(existing) if isinstance(existing, list) else 0
-                if count >= max_inbounds:
-                    # replace the ONLY listener (wizard = configure-the-listener)
-                    entry = entry_ops[0].value
-                    ops = [PatchOperation(op="replace", path=f"{path}/0", value=entry)]
-                else:
-                    ops = entry_ops
-            else:
-                ops = entry_ops
-            return await self.apply(driver, ops)
-        return await self.apply(driver, entry_ops)
+        return await self.apply(driver, await self._wizard_ops(driver, spec))

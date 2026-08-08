@@ -69,21 +69,6 @@ def test_apt_update_precedes_install(pkg, monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------- #
-# 2. hysteria2 backend keeps settings
-# --------------------------------------------------------------------- #
-
-def test_hysteria2_backend_keeps_settings(tmp_path):
-    from app.cores.drivers.hysteria2.backend import LocalHysteria2Backend
-
-    backend = LocalHysteria2Backend({"release_version": "2.6.0",
-                                     "work_dir": str(tmp_path)})
-    assert backend.settings["release_version"] == "2.6.0"
-    # the reported crash was inside install_binary's pin resolution — the
-    # code path itself must also read settings without AttributeError
-    assert str(backend.settings.get("release_version") or "") == "2.6.0"
-
-
-# --------------------------------------------------------------------- #
 # 3. sing-box v2ray_api probe gates the experimental block
 # --------------------------------------------------------------------- #
 
@@ -184,40 +169,37 @@ def test_singbox_studio_users_stay_platform_driven_on_merge():
 
 
 # --------------------------------------------------------------------- #
-# 5. TUIC studio exposure
+# 5. TUIC studio exposure (alpha.7.2: hosted by the sing-box core)
 # --------------------------------------------------------------------- #
 
-def test_tuic_declares_studio_path_and_exports_single_inbound():
-    from app.cores.drivers.tuic.driver import TUICDriver
+def test_tuic_served_by_singbox_studio(tmp_path):
+    """The tuic protocol lives on the sing-box core now: a studio document
+    carrying a tuic listener is adopted into the rendered config (multi-
+    inbound — consolidation lifted the old exactly-one-listener limit)."""
+    from app.cores.drivers.singbox.driver import SingBoxDriver
 
-    assert TUICDriver.metadata.studio_inbounds_path == "/inbounds"
-
-    class FB:
-        def apply_config(self, c): pass
-        def is_running(self): return False
-
-    driver = TUICDriver({"work_dir": "/tmp/zagros-test-tuic"}, backend=FB())
-    doc = driver.export_config_document()
-    assert doc["inbounds"][0]["protocol"] == "tuic"
-    assert doc["inbounds"][0]["port"] == 8443
-
-
-def test_tuic_studio_apply_adopts_settings_and_enforces_cardinality():
-    from app.cores.drivers.tuic.driver import TUICDriver
-
-    applied = {}
+    applied: list[dict] = []
 
     class FB:
-        def apply_config(self, c): applied.update(c)
+        def apply_config(self, c): applied.append(c)
         def is_running(self): return False
 
-    driver = TUICDriver({"work_dir": "/tmp/zagros-test-tuic"}, backend=FB())
+    driver = SingBoxDriver({"work_dir": str(tmp_path)}, backend=FB())
+    from app.cores.types import UserAccount
+
+    asyncio.run(driver.create_account(UserAccount(
+        user_id=1, username="alice", account_id="1.alice.tuic",
+        protocol="tuic", settings={})))
     asyncio.run(driver.apply_studio_document(
-        {"inbounds": [{"tag": "tuic", "port": 9443, "congestion_control": "cubic"}]}))
-    assert driver.settings["port"] == 9443
-    assert applied["congestion_control"] == "cubic"
-    with pytest.raises(CoreError, match="exactly ONE listener"):
-        asyncio.run(driver.apply_studio_document({"inbounds": [{"port": 1}, {"port": 2}]}))
+        {"inbounds": [{"tag": "tuic", "protocol": "tuic", "port": 9443,
+                       "security": "tls", "sni": "cdn.example.com",
+                       "congestion_control": "cubic"}]}))
+    assert applied, "studio apply must publish the rendered config"
+    tuic_ib = [ib for ib in applied[-1]["inbounds"] if ib["type"] == "tuic"]
+    assert len(tuic_ib) == 1
+    assert tuic_ib[0]["listen_port"] == 9443
+    assert tuic_ib[0]["congestion_control"] == "cubic"
+    assert tuic_ib[0]["tls"]["enabled"] is True
 
 
 # --------------------------------------------------------------------- #

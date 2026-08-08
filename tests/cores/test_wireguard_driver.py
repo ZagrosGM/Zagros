@@ -294,6 +294,11 @@ def test_usage_deltas_and_reset_clamp() -> None:
 def test_online_detection_handshake_threshold() -> None:
     async def run() -> None:
         driver, backend = _driver()
+        # handshake freshness must be measured against the EXECUTION clock,
+        # not import time — the import-baked NOW drifts with suite length
+        # (longer suites pushed the age past the old tolerance and flaked).
+        backend.dump_text = DUMP_SAMPLE.replace(
+            str(NOW - 42), str(int(time.time()) - 42))
         await driver.start()
         await driver.create_account(_account(1, "alice", settings={
             "public_key": KEY_ALICE, "private_key": "p", "address": "10.66.66.2/32"}))
@@ -307,7 +312,7 @@ def test_online_detection_handshake_threshold() -> None:
         assert session.ip == "198.51.100.7"
         assert session.metadata["endpoint"] == "198.51.100.7:60123"
         age = session.metadata["latest_handshake_age_seconds"]
-        assert 42 <= age <= 42 + 30  # tolerate suite-time clock drift
+        assert 42 <= age <= 42 + 10  # fresh timestamp: only runtime drift
 
         # handshake older than threshold → offline (honestly unknown ≠ online)
         stale = DUMP_SAMPLE.replace(str(NOW - 42), str(NOW - 3600))
@@ -422,6 +427,112 @@ def test_concurrent_provisioning_is_race_safe() -> None:
         assert len(addrs) == 25, "every peer needs a unique tunnel address"
         assert len(backend.synced) >= 25  # each publish pushed live state
 
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------- #
+# alpha.7.2 — offline wizard + pure-python key material                  #
+# ---------------------------------------------------------------------- #
+
+def test_pure_key_material_matches_rfc7748_vector():
+    """public_from_private_pure == X25519 (RFC 7748 §6.1 vector) — the exact
+    math `wg pubkey` performs (X25519 clamps the scalar internally), now
+    computed without the binary so configuring needs no installed tools."""
+    import base64 as _b64
+
+    from app.cores.drivers.wireguard.backend import (
+        generate_keypair_pure,
+        generate_preshared_pure,
+        public_from_private_pure,
+    )
+
+    scalar = bytes.fromhex(
+        "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")
+    expected_pub = bytes.fromhex(
+        "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+    got = _b64.b64decode(
+        public_from_private_pure(_b64.b64encode(scalar).decode()))
+    assert got == expected_pub
+
+    priv, pub = generate_keypair_pure()
+    assert is_valid_key(priv) and is_valid_key(pub)
+    assert public_from_private_pure(priv) == pub
+    assert is_valid_key(generate_preshared_pure())
+    assert generate_keypair_pure()[0] != priv  # real randomness
+
+    try:
+        public_from_private_pure("not-a-key")
+        raise AssertionError("invalid key accepted")
+    except CoreError as exc:
+        assert "private key" in str(exc)
+
+
+def test_local_backend_key_material_needs_no_wg_binary(monkeypatch=None):
+    """LocalWireGuardBackend keys are pure python: no `wg` on PATH, no
+    subprocess — the configure path works on a bare host."""
+    import base64 as _b64
+
+    from app.cores.drivers.wireguard.backend import (
+        LocalWireGuardBackend, is_valid_key as _ivk, public_from_private_pure)
+
+    tmp = tempfile.mkdtemp(prefix="mzwg-keys-")
+    backend = LocalWireGuardBackend({"work_dir": tmp, "executable_wg": "definitely-not-wg"})
+    priv, pub = backend.generate_keypair()
+    assert _ivk(priv) and _ivk(pub)
+    assert public_from_private_pure(priv) == pub
+    # persisted identity round-trips (pubkey re-derived offline)
+    priv2, pub2 = backend.ensure_server_keys()
+    assert (priv2, pub2) == backend.ensure_server_keys()
+    scalar = _b64.b64encode(bytes.fromhex(
+        "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")).decode()
+    backend.write_server_private_key(scalar)
+    assert backend.ensure_server_keys()[0] == scalar
+
+
+def test_wizard_apply_on_stopped_core_needs_no_daemon():
+    """Item: building a WireGuard inbound via the studio must NOT require a
+    running core — apply persists settings, materializes the server
+    identity, and pushes NOTHING to the kernel while the daemon is down."""
+    async def run():
+        driver, backend = _driver()
+        backend.running = False
+        driver._server_private = None  # simulate never-started core
+        driver._server_public = None
+        doc = {"inbounds": [{
+            "tag": "wireguard", "protocol": "wireguard", "port": 51822,
+            "address": "10.77.0.0/24", "endpoint": "vpn.example.com",
+            "persistent_keepalive": 30,
+        }]}
+        await driver.apply_studio_document(doc)
+        assert driver.settings["port"] == 51822
+        assert driver.settings["subnet"] == "10.77.0.0/24"
+        assert driver.settings["advertise_host"] == "vpn.example.com"
+        assert driver.settings["peer_keepalive"] == 30
+        assert driver._server_private == "SERVER_PRIVATE"  # identity now known
+        assert backend.synced == [] and backend.up_calls == []   # zero pushes
+        # bring-up renders exactly the stored document
+        await driver.start()
+        assert backend.running and len(backend.up_calls) == 1
+        assert "ListenPort = 51822" in backend.up_calls[0]
+        assert "Address = 10.77.0.1/24" in backend.up_calls[0]
+    asyncio.run(run())
+
+
+def test_account_provisioning_on_stopped_core():
+    """Peers created while the daemon is down persist and appear in the
+    interface config at start (no sync attempts against a dead kernel if)."""
+    async def run():
+        driver, backend = _driver()
+        backend.running = False
+        driver._server_private = None
+        driver._server_public = None
+        account = _account(1, "offliner")
+        await driver.create_account(account)
+        assert account.settings.get("public_key") and account.settings.get("private_key")
+        assert str(account.settings.get("address") or "").startswith("10.66.66.")
+        assert backend.synced == []
+        await driver.start()
+        assert account.settings["public_key"] in backend.up_calls[0]
     asyncio.run(run())
 
 

@@ -179,12 +179,27 @@ def test_singbox_tuic_account_uuid_and_shape(tmp_path):
     assert entry == {"uuid": "legacy-uuid-1", "password": "pw"}   # NO name
 
 
-def test_singbox_create_account_requires_credentials_when_enabled(tmp_path):
+def test_singbox_create_account_provisions_credentials_when_missing(tmp_path):
+    """alpha.7.2 (batch item 10): no provision may fail for missing
+    credentials — the driver mints cryptographically random material INTO
+    the passed settings dict (the provisioning flow persists it back)."""
     from app.cores.drivers.singbox.driver import SingBoxDriver
 
     d = SingBoxDriver(settings={"work_dir": str(tmp_path)}, backend=_SBFakeBackend())
-    with pytest.raises(CoreError, match="missing credentials"):
-        asyncio.run(d.create_account(_acct("empty", "trojan")))
+    cases = {"trojan": "password", "shadowsocks": "password",
+             "hysteria2": "password", "vless": "id", "vmess": "id"}
+    for protocol, key in cases.items():
+        account = _acct("empty-" + protocol, protocol)
+        assert not account.settings.get(key)
+        asyncio.run(d.create_account(account))
+        value = account.settings[key]
+        assert isinstance(value, str) and len(value) >= 16, (protocol, key)
+        stored = d._accounts[account.account_id]
+        assert stored.settings.get(key) or stored.settings.get("password")
+    # tuic mints uuid AND password
+    account = _acct("empty-tuic", "tuic")
+    asyncio.run(d.create_account(account))
+    assert account.settings.get("uuid") and account.settings.get("password")
 
 
 def test_singbox_merge_strips_private_marker_keys(tmp_path):
@@ -329,14 +344,19 @@ class _OVPNFakeBackend:
     def is_running(self):
         return self.running
 
-    def apply_config(self, text):
-        self.configs.append(text)
+    def disconnect_log_path(self, tag: str) -> str:
+        return f"/tmp/ovpn-listeners/{tag}/disconnect-log.jsonl"
+
+    def configure(self, specs):
+        # materialized listener set — keep the rendered confs for assertions
+        self.configs = [str(s["server_conf"]) for s in specs]
+        self._specs = list(specs)
+
+    def set_auth_handler(self, handler):
+        self.auth_handler = handler
 
     def restart(self):
         self.restarts += 1
-
-    def install_hook_script(self, text):
-        return "/tmp/openvpn-disconnect.sh"
 
 
 def _ovpn_driver(tmp_path, **settings):
@@ -433,15 +453,24 @@ def test_openvpn_pki_upload_validated_and_matching_pair_written(tmp_path):
 
 
 def test_openvpn_render_reflects_auth_mode_and_push_options(tmp_path):
+    def _render(d):
+        listener = d._listeners()[0]
+        return d.render_server_conf(
+            listener, hook_path="/wd/hook.sh", mgmt_port=17506,
+            log_path="/wd/listeners/openvpn/disconnect-log.jsonl")
+
     d = _ovpn_driver(tmp_path, auth_mode="static", static_user="off", static_pass="pw",
                      compression="lz4-v2", topology="net30")
-    conf = d.render_server_conf("hook.sh")
+    conf = _render(d)
     assert "auth-user-pass-verify" in conf
     assert "topology net30" in conf
     assert "lz4-v2" in conf
+    assert "management 127.0.0.1 17506" in conf
     d2 = _ovpn_driver(tmp_path, auth_mode="management")
-    conf2 = d2.render_server_conf("hook.sh")
+    conf2 = _render(d2)
     assert "management-client-auth" in conf2
+    # shared PKI referenced by absolute path (per-listener cwd)
+    assert f"ca {tmp_path}/ovpn/ca.crt" in conf2
 
 
 # ===================================================================== #
@@ -539,61 +568,10 @@ def test_ssh_dropin_keeps_port_22_always(tmp_path):
 
 
 # ===================================================================== #
-# hysteria2 / tuic / softether
+# softether (hysteria2/tuic standalone-driver tests retired in alpha.7.2 —
+# both protocols now translate/apply through the sing-box studio path,
+# covered by the 26-cell matrix and tests/cores/test_consolidation.py)
 # ===================================================================== #
-
-def test_hysteria2_apply_maps_settings_and_rejects_two(tmp_path):
-    from app.cores.drivers.hysteria2.driver import Hysteria2Driver
-
-    backend = types.SimpleNamespace(
-        apply_config=lambda cfg: None,
-        is_running=lambda: False,
-        restart=lambda: None,
-    )
-    d = Hysteria2Driver(settings={"work_dir": str(tmp_path)}, backend=backend)
-    asyncio.run(d.apply_studio_document({"inbounds": [{
-        "protocol": "hysteria2", "port": 4431, "sni": "cdn.example.com",
-        "masquerade": "https://www.bing.com", "up_mbps": 100,
-        "down_mbps": 200, "obfs": "obfspass"}]}))
-    s = d.settings
-    assert s["port"] == 4431
-    assert s["advertise_sni"] == "cdn.example.com"
-    with pytest.raises(CoreError, match="exactly ONE listener"):
-        asyncio.run(d.apply_studio_document({"inbounds": [{}, {}]}))
-
-
-def test_tuic_apply_maps_zero_rtt_and_lists(tmp_path):
-    from app.cores.drivers.tuic.driver import TUICDriver
-
-    backend = types.SimpleNamespace(
-        apply_config=lambda cfg: None,
-        is_running=lambda: False,
-        restart=lambda: None,
-    )
-    d = TUICDriver(settings={"work_dir": str(tmp_path)}, backend=backend)
-    asyncio.run(d.apply_studio_document({"inbounds": [{
-        "protocol": "tuic", "port": 5443, "zero_rtt": True,
-        "congestion_control": "bbr", "ipv6": True}]}))
-    s = d.settings
-    assert s["port"] == 5443 and s["zero_rtt_handshake"] is True
-    assert s["congestion_control"] == "bbr"
-    with pytest.raises(CoreError, match="exactly ONE listener"):
-        asyncio.run(d.apply_studio_document({"inbounds": [{}, {}]}))
-
-
-def test_tuic_export_round_trips_zero_rtt(tmp_path):
-    from app.cores.drivers.tuic.driver import TUICDriver
-
-    backend = types.SimpleNamespace(
-        apply_config=lambda cfg: None,
-        is_running=lambda: False,
-        restart=lambda: None,
-    )
-    d = TUICDriver(settings={"work_dir": str(tmp_path),
-                             "zero_rtt_handshake": True}, backend=backend)
-    doc = d.export_config_document()
-    assert doc["inbounds"][0]["zero_rtt"] is True
-
 
 class _SEFakeBackend:
     def __init__(self, reachable=True):

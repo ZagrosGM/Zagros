@@ -391,32 +391,71 @@ class CoreManager:
         return [line async for line in driver.get_logs(tail=tail)]
 
     async def health_monitor(self, interval: float = 30.0) -> None:
-        """Poll RUNNING cores; publish CORE_HEALTH_CHANGED on transitions."""
+        """Poll installed cores; publish health transitions AND reconcile the
+        persisted lifecycle with the live probe truth.
+
+        Rationale (reported bug, alpha.7.2 item 3): a sing-box core whose
+        start() raised AFTER the process came up was marked ERROR while the
+        binary kept serving — and the UI kept showing "error", because the
+        persisted state outranked the probe and the old monitor only polled
+        RUNNING cores. The probe is the ground truth for liveness:
+
+        * live RUNNING  + recorded ERROR (or INSTALLED/STOPPED) → RUNNING
+          (the process is verifiably up — self-heal the record);
+        * live STOPPED  + recorded RUNNING → STOPPED (the core crashed or
+          was killed out-of-band — detected instead of shown green);
+        * live STOPPED  + recorded ERROR stays ERROR (a failed core must
+          not silently resurrect);
+        * probe EXCEPTION changes health to UNHEALTHY only — a flaky probe
+          must never flip lifecycle state.
+        """
         last_health: dict[str, HealthStatus] = {}
         try:
             while True:
-                for core_id in self.list_cores():
-                    if self._states.get(core_id) != CoreState.RUNNING:
-                        continue
-                    previous = last_health.get(core_id, HealthStatus.UNKNOWN)
-                    try:
-                        status = await asyncio.wait_for(
-                            self.get(core_id).health_check(), timeout=15
-                        )
-                        health = status.health
-                    except Exception as exc:
-                        logger.warning("Health check failed for core '%s': %s", core_id, exc)
-                        health = HealthStatus.UNHEALTHY
-                    if health != previous:
-                        last_health[core_id] = health
-                        await self._bus.emit(
-                            Event.CORE_HEALTH_CHANGED,
-                            {"core_id": core_id, "health": health.value},
-                        )
+                await self._health_cycle(last_health)
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
             logger.info("CoreManager health monitor stopped.")
             raise
+
+    async def _health_cycle(self, last_health: dict[str, HealthStatus]) -> None:
+        for core_id in self.list_cores():
+            recorded = self._states.get(core_id)
+            if recorded in (
+                CoreState.UNINSTALLED, CoreState.LOADED,
+                CoreState.STARTING, CoreState.STOPPING,
+            ):
+                continue  # transient/absent states are not probed
+            previous = last_health.get(core_id, HealthStatus.UNKNOWN)
+            try:
+                status = await asyncio.wait_for(
+                    self.get(core_id).health_check(), timeout=15
+                )
+                health = status.health
+            except Exception as exc:
+                logger.warning("Health check failed for core '%s': %s", core_id, exc)
+                health = HealthStatus.UNHEALTHY
+                status = None
+            if status is not None:
+                if status.state == CoreState.RUNNING and recorded != CoreState.RUNNING:
+                    logger.info(
+                        "core '%s' is live (probe) while recorded '%s' — "
+                        "reconciling to running", core_id, recorded,
+                    )
+                    await self._set_state(core_id, CoreState.RUNNING)
+                elif status.state != CoreState.RUNNING and recorded == CoreState.RUNNING:
+                    logger.warning(
+                        "core '%s' recorded running but probe says '%s' — "
+                        "marking stopped (crash or external kill detected)",
+                        core_id, status.state.value,
+                    )
+                    await self._set_state(core_id, CoreState.STOPPED)
+            if health != previous:
+                last_health[core_id] = health
+                await self._bus.emit(
+                    Event.CORE_HEALTH_CHANGED,
+                    {"core_id": core_id, "health": health.value},
+                )
 
     def start_health_monitor(self, interval: float = 30.0) -> asyncio.Task:
         if self._monitor_task and not self._monitor_task.done():

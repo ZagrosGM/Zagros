@@ -2,6 +2,7 @@
 import { clsx } from "clsx";
 import { forwardRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 import { AlertTriangle, Loader2, PackageOpen } from "lucide-react";
+import { copyText } from "../lib/clipboard";
 
 export const cn = (...args: Parameters<typeof clsx>) => clsx(...args);
 
@@ -270,7 +271,8 @@ export function CopyButton({ text, copiedLabel = "Copied!", copyLabel = "Copy" }
   const [done, setDone] = useStateBool();
   return (
     <Button variant="ghost" size="sm" onClick={async () => {
-      try { await navigator.clipboard.writeText(text); setDone(); } catch { /* clipboard perms */ }
+      // α7.2: copyText works without a secure context (plain-HTTP panels).
+      if (await copyText(text)) setDone();
     }}>
       {done ? copiedLabel : copyLabel}
     </Button>

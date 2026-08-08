@@ -293,10 +293,13 @@ async def _openvpn_profile() -> DeliveryProfile:
 
 
 async def _hysteria2_profile() -> DeliveryProfile:
-    from app.cores.drivers.hysteria2 import Hysteria2Driver
-    from tests.cores.fakes import FakeHy2Backend
-    driver = Hysteria2Driver({"work_dir": tempfile.mkdtemp(prefix="dlvhy-")},
-                             backend=FakeHy2Backend())
+    # consolidated (alpha.7.2): hysteria2 is served by the sing-box core
+    from app.cores.drivers.singbox import SingBoxDriver
+    from tests.cores.fakes import FakeSingBoxBackend, FakeV2RayStats
+    driver = SingBoxDriver(
+        {"work_dir": tempfile.mkdtemp(prefix="dlvhy-"),
+         "advertise_host": "vpn.example.com"},
+        backend=FakeSingBoxBackend(), stats=FakeV2RayStats())
     await driver.start()
     account = _acct(1, "alice", "hysteria2", {"password": "secret"})
     await driver.create_account(account)
@@ -304,10 +307,13 @@ async def _hysteria2_profile() -> DeliveryProfile:
 
 
 async def _tuic_profile() -> DeliveryProfile:
-    from app.cores.drivers.tuic import TUICDriver
-    from tests.cores.fakes import FakeTUICBackend
-    driver = TUICDriver({"work_dir": tempfile.mkdtemp(prefix="dlvtuic-")},
-                        backend=FakeTUICBackend())
+    # consolidated (alpha.7.2): tuic is served by the sing-box core
+    from app.cores.drivers.singbox import SingBoxDriver
+    from tests.cores.fakes import FakeSingBoxBackend, FakeV2RayStats
+    driver = SingBoxDriver(
+        {"work_dir": tempfile.mkdtemp(prefix="dlvtuic-"),
+         "advertise_host": "vpn.example.com"},
+        backend=FakeSingBoxBackend(), stats=FakeV2RayStats())
     await driver.start()
     account = _acct(1, "alice", "tuic")
     await driver.create_account(account)
@@ -332,24 +338,27 @@ async def _softether_profile() -> DeliveryProfile:
     return await driver.describe_delivery(account)
 
 
+# label → (expected profile core_id, builder). The hysteria2/tuic protocols
+# are served by the sing-box core since alpha.7.2 (consolidation), so their
+# profiles honestly report core_id "sing-box".
 _BUILDERS = {
-    "xray": _xray_profile,
-    "sing-box": _singbox_profile,
-    "wireguard": _wireguard_profile,
-    "openvpn": _openvpn_profile,
-    "hysteria2": _hysteria2_profile,
-    "tuic": _tuic_profile,
-    "ssh": _ssh_profile,
-    "softether": _softether_profile,
+    "xray": ("xray", _xray_profile),
+    "sing-box": ("sing-box", _singbox_profile),
+    "wireguard": ("wireguard", _wireguard_profile),
+    "openvpn": ("openvpn", _openvpn_profile),
+    "hysteria2 (via sing-box)": ("sing-box", _hysteria2_profile),
+    "tuic (via sing-box)": ("sing-box", _tuic_profile),
+    "ssh": ("ssh", _ssh_profile),
+    "softether": ("softether", _softether_profile),
 }
 
 _ALLOWED_LINK_SCHEMES = {"vless", "vmess", "trojan", "ss", "hysteria2", "hy2", "tuic"}
 
 
 def test_all_drivers_describe_delivery_conformance() -> None:
-    for core_id, builder in _BUILDERS.items():
+    for label, (core_id, builder) in _BUILDERS.items():
         profile = asyncio.run(builder())
-        assert profile.core_id == core_id, f"{core_id}: wrong profile core id"
+        assert profile.core_id == core_id, f"{label}: wrong profile core id"
         profile.validate_shape()
         for section in profile.sections:
             assert section.protocol, f"{core_id}: empty section protocol"
@@ -385,14 +394,19 @@ def test_xray_delivery_lists_all_inbounds_with_links() -> None:
 
 def test_wireguard_delivery_has_file_fields_and_qr() -> None:
     profile = asyncio.run(_wireguard_profile())
-    arts = profile.sections[0].artifacts
+    section = profile.sections[0]
+    arts = section.artifacts
     kinds = [a.kind for a in arts]
-    assert kinds == [ArtifactKind.FILE, ArtifactKind.FIELDS]
+    # item 15: field-rich sections — FILE + FIELDS + an honest how-to NOTE,
+    # and the section names its inbound for the Host Settings engine.
+    assert kinds == [ArtifactKind.FILE, ArtifactKind.FIELDS, ArtifactKind.NOTE]
+    assert section.inbound_tag == "wireguard"
     file_art = arts[0]
     assert file_art.qr and file_art.filename.endswith(".conf")
     assert "[Interface]" in file_art.content and "PrivateKey" in file_art.content
     fields = {f.key: f for f in arts[1].fields}
-    assert {"address", "public_key", "endpoint", "dns"} <= set(fields)
+    assert {"address", "public_key", "endpoint", "dns",
+            "allowed_ips", "keepalive"} <= set(fields)
     assert not fields["public_key"].secret             # server public key is public
     assert "PrivateKey" not in {f.label for f in arts[1].fields}
 

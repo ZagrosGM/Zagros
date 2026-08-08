@@ -54,9 +54,9 @@ class OpenVPNBackend(Protocol):
         Returns {"ca_crt": pem, "tls_crypt": key} for client profiles."""
         ...
 
-    def apply_config(self, server_conf: str) -> None: ...
-    def install_hook_script(self, script: str) -> str:
-        """Install the client-disconnect accounting hook; returns its path."""
+    def configure(self, specs: list[dict[str, Any]]) -> None:
+        """Materialize the whole listener set: one server.conf + accounting
+        hook per tag (multi-inbound, alpha.7.2)."""
         ...
 
     def install_packages(self) -> str: ...
@@ -75,23 +75,86 @@ class OpenVPNBackend(Protocol):
         ...
 
 
+class _Listener:
+    """One openvpn process bound to one tag: own config, own management
+    channel, own accounting hook/log (multi-inbound, alpha.7.2)."""
+
+    __slots__ = ("tag", "directory", "config_path", "disconnect_log",
+                 "hook_path", "mgmt_port", "proc", "mgmt")
+
+    def __init__(self, tag: str, directory: str, mgmt_port: int, executable: str):
+        self.tag = tag
+        self.directory = directory
+        self.config_path = os.path.join(directory, "server.conf")
+        self.disconnect_log = os.path.join(directory, "disconnect-log.jsonl")
+        self.hook_path = os.path.join(directory, "client-disconnect.sh")
+        self.mgmt_port = mgmt_port
+        self.proc = ManagedProcess(
+            [executable, "--config", self.config_path],
+            cwd=directory,
+        )
+        self.mgmt: ManagementClient | None = None
+
+
 class LocalOpenVPNBackend:
-    """Production backend for the OpenVPN driver."""
+    """Production backend for the OpenVPN driver.
+
+    Multi-inbound (alpha.7.2): the class manages a SET of listeners keyed
+    by tag — one openvpn process each (the protocol itself is one listener
+    per process; several ports ⇒ several processes, exactly how distros
+    run openvpn@server1/openvpn@server2). PKI (CA / server cert / tls-crypt
+    key) stays core-wide in work_dir and is shared by every listener."""
 
     def __init__(self, settings: dict[str, Any]):
         self.executable = settings.get("executable_path", "openvpn")
         self.work_dir = settings.get("work_dir", "/var/lib/zagros/cores/openvpn")
         self.mgmt_host = "127.0.0.1"
-        self.mgmt_port = int(settings.get("management_port", 17505))
-        self.config_path = os.path.join(self.work_dir, "server.conf")
-        self.disconnect_log = os.path.join(self.work_dir, "disconnect-log.jsonl")
-        self.hook_path = os.path.join(self.work_dir, "client-disconnect.sh")
+        self._base_mgmt_port = int(settings.get("management_port", 17505))
         os.makedirs(self.work_dir, exist_ok=True)
-        self._proc = ManagedProcess(
-            [self.executable, "--config", self.config_path],
-            cwd=self.work_dir,
-        )
-        self._mgmt: ManagementClient | None = None
+        self._listeners: dict[str, _Listener] = {}
+        self._order: list[str] = []
+
+    # ------------------------------------------------------------------ #
+    # listener-set materialization                                        #
+    # ------------------------------------------------------------------ #
+    def disconnect_log_path(self, tag: str) -> str:
+        return os.path.join(self.work_dir, "listeners", tag, "disconnect-log.jsonl")
+
+    @staticmethod
+    def _write_atomic(path: str, content: str, mode: int | None = None) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+
+    def configure(self, specs: list[dict[str, Any]]) -> None:
+        """Materialize the whole listener set (xray-style): write each
+        listener's server.conf + accounting hook, create process handles
+        for new tags, and STOP+drop listeners that left the set. Processes
+        are NOT (re)started here — the driver decides via start/restart."""
+        wanted = {str(spec["tag"]) for spec in specs}
+        for tag in list(self._order):
+            if tag not in wanted:
+                self._stop_listener(self._listeners.pop(tag))
+                self._order.remove(tag)
+        for spec in specs:
+            tag = str(spec["tag"])
+            directory = os.path.dirname(self.disconnect_log_path(tag))
+            listener = self._listeners.get(tag)
+            if listener is None:
+                listener = _Listener(tag, directory,
+                                     int(spec["mgmt_port"]), self.executable)
+                self._listeners[tag] = listener
+            else:
+                listener.mgmt_port = int(spec["mgmt_port"])
+            self._write_atomic(listener.config_path, str(spec["server_conf"]))
+            self._write_atomic(listener.hook_path, str(spec["hook_script"]),
+                               mode=0o755)
+        # preserve the tag order of the spec list
+        self._order = [str(s["tag"]) for s in specs]
 
     # ------------------------------------------------------------------ #
     # process
@@ -99,7 +162,11 @@ class LocalOpenVPNBackend:
     def preflight_start(self) -> None:
         """Root-cause readiness before any launch attempt. The field failure
         was a bare 'cannot reach openvpn management interface: Connection
-        refused' — which hid whichever of these actually died first."""
+        refused' — which hid whichever of these actually died first.
+
+        Network-stack readiness is a STRUCTURED diagnosis (alpha.7.2):
+        TUN device, CAP_NET_ADMIN, kernel module, container context — each
+        failed check ships its own host-specific fix, not a bare error."""
         if shutil.which(self.executable) is None and not os.path.exists(self.executable):
             # self-heal on Start (same contract as xray/sing-box): install,
             # then RE-verify — a failed package install must surface here,
@@ -111,32 +178,62 @@ class LocalOpenVPNBackend:
                     f"package install step — read the package-manager output "
                     f"in the core logs."
                 )
-        if not os.path.exists("/dev/net/tun"):
-            raise CoreError(
-                "/dev/net/tun is missing on this host — OpenVPN cannot create "
-                "a tunnel interface without it. If the panel runs in Docker, "
-                "grant the container the device and capability: "
-                "devices: [/dev/net/tun:/dev/net/tun], cap_add: [NET_ADMIN] "
-                "(the zagros compose template ships both since 1.0.0-alpha.7.1)."
-            )
+        from app.cores.netdiag import diagnose_tun, format_guidance, tun_device_state
+
+        checks = diagnose_tun("OpenVPN")
+        if any(not check.ok for check in checks):
+            state = tun_device_state()
+            if state == "missing":
+                header = ("/dev/net/tun is missing on this host — OpenVPN "
+                          "cannot create a tunnel interface without it.")
+            elif state == "unreadable":
+                header = ("/dev/net/tun exists but cannot be opened — a "
+                          "capability or device-mapping problem.")
+            else:
+                header = "OpenVPN cannot start a tunnel on this host."
+            raise CoreError(format_guidance(checks, header))
 
     def start(self) -> None:
         self.preflight_start()
-        self._proc.start()
-        self.connect_management()
+        if not self._order:
+            raise CoreError(
+                "openvpn has no listeners configured — create an inbound "
+                "in the studio (or via the wizard) before starting the core."
+            )
+        started: list[_Listener] = []
+        try:
+            for tag in self._order:
+                listener = self._listeners[tag]
+                try:
+                    listener.proc.start()
+                    self._connect_management(listener)
+                except CoreError as exc:
+                    raise CoreError(f"listener '{tag}': {exc}") from exc
+                started.append(listener)
+        except CoreError:
+            # never leave a half-up listener set behind
+            for listener in started:
+                self._stop_listener(listener)
+            raise
+
+    def _stop_listener(self, listener: _Listener) -> None:
+        if listener.mgmt is not None:
+            listener.mgmt.close()
+            listener.mgmt = None
+        listener.proc.stop()
 
     def stop(self) -> None:
-        if self._mgmt is not None:
-            self._mgmt.close()
-            self._mgmt = None
-        self._proc.stop()
+        for tag in self._order:
+            self._stop_listener(self._listeners[tag])
 
     def restart(self) -> None:
         self.stop()
         self.start()
 
     def is_running(self) -> bool:
-        return self._proc.is_running
+        return bool(self._order) and all(
+            self._listeners[tag].proc.is_running for tag in self._order
+        )
 
     def version(self) -> str | None:
         try:
@@ -151,10 +248,24 @@ class LocalOpenVPNBackend:
         return None
 
     def metrics(self) -> CoreMetrics:
-        return self._proc.metrics()
+        """Aggregate process metrics across the listener set."""
+        total = CoreMetrics()
+        for tag in self._order:
+            m = self._listeners[tag].proc.metrics()
+            total.cpu_percent += m.cpu_percent
+            total.memory_bytes += m.memory_bytes
+            total.network_rx_bytes += m.network_rx_bytes
+            total.network_tx_bytes += m.network_tx_bytes
+            total.active_accounts += m.active_accounts
+            total.active_sessions += m.active_sessions
+        return total
 
     def logs(self, tail: int = 200) -> Sequence[str]:
-        return self._proc.logs(tail)
+        lines: list[str] = []
+        for tag in self._order:
+            lines.extend(f"[{tag}] {line}"
+                         for line in self._listeners[tag].proc.logs(tail))
+        return lines[-tail:] if tail else lines
 
     # ------------------------------------------------------------------ #
     # setup: PKI / config / hook / packages
@@ -195,16 +306,16 @@ class LocalOpenVPNBackend:
         return {"ca_crt": ca_crt, "tls_crypt": tls_key}
 
     def apply_config(self, server_conf: str) -> None:
-        tmp = f"{self.config_path}.tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(server_conf)
-        os.replace(tmp, self.config_path)
-
-    def install_hook_script(self, script: str) -> str:
-        with open(self.hook_path, "w", encoding="utf-8") as fh:
-            fh.write(script)
-        os.chmod(self.hook_path, 0o755)
-        return self.hook_path
+        """Legacy single-listener shim retained for external callers; the
+        studio path uses configure(). Requires exactly one configured
+        listener so the target is unambiguous."""
+        if len(self._order) != 1:
+            raise CoreError(
+                "apply_config() is single-listener only — use configure() "
+                "with explicit tags on a multi-inbound core."
+            )
+        listener = self._listeners[self._order[0]]
+        self._write_atomic(listener.config_path, server_conf)
 
     def install_packages(self) -> str:
         for manager, argv in (
@@ -223,25 +334,26 @@ class LocalOpenVPNBackend:
         raise CoreError("no supported package manager found (apt/dnf/yum/pacman/apk).")
 
     # ------------------------------------------------------------------ #
-    # management channel
+    # management channel (one per listener)
     # ------------------------------------------------------------------ #
-    def connect_management(self, timeout: float = 15.0) -> None:
+    def _connect_management(self, listener: _Listener,
+                            timeout: float = 15.0) -> None:
         client = ManagementClient()
         deadline = time.monotonic() + timeout
         last_error: Exception | None = None
         while time.monotonic() < deadline:
-            if not self._proc.is_running:
+            if not listener.proc.is_running:
                 # openvpn DIED during boot (bad config, missing tun, port
                 # clash, …): the real reason lives in its own log, not in a
                 # socket error — surface it verbatim.
-                tail = "\n".join(self._proc.logs(15)) or "(no process output captured)"
+                tail = "\n".join(listener.proc.logs(15)) or "(no process output captured)"
                 raise CoreError(
                     f"openvpn exited during startup — management interface "
                     f"never came up. Process output:\n{tail}"
                 )
             try:
-                client.connect(self.mgmt_host, self.mgmt_port, timeout=3)
-                self._mgmt = client
+                client.connect(self.mgmt_host, listener.mgmt_port, timeout=3)
+                listener.mgmt = client
                 return
             except OSError as exc:  # core still booting
                 last_error = exc
@@ -249,32 +361,57 @@ class LocalOpenVPNBackend:
         raise CoreError(
             f"openvpn management interface did not answer within "
             f"{int(timeout)}s ({last_error}); the process is still alive — "
-            f"recent output:\n" + ("\n".join(self._proc.logs(15)) or "(none)")
+            f"recent output:\n" + ("\n".join(listener.proc.logs(15)) or "(none)")
         )
 
     def management_alive(self) -> bool:
-        if self._mgmt is None:
+        return bool(self._order) and all(
+            self._listener_alive(self._listeners[tag]) for tag in self._order
+        )
+
+    @staticmethod
+    def _listener_alive(listener: _Listener) -> bool:
+        if listener.mgmt is None:
             return False
         try:
-            self.command("pid", timeout=5)
+            listener.mgmt.command("pid", timeout=5)
             return True
         except CoreError:
             return False
 
-    def command(self, cmd: str, timeout: float = 30.0) -> str:
-        if self._mgmt is None:
+    def command(self, cmd: str, timeout: float = 30.0, *,
+                tag: str | None = None) -> str:
+        listener = (self._listeners.get(tag) if tag
+                    else (self._listeners[self._order[0]] if self._order else None))
+        if listener is None or listener.mgmt is None:
             raise CoreError("management interface is not connected.")
-        return self._mgmt.command(cmd, timeout=timeout)
+        return listener.mgmt.command(cmd, timeout=timeout)
 
     def status_clients(self) -> list[StatusClient]:
-        return parse_status3(self.command("status 3"))
+        """Union of live sessions across every listener (one account may be
+        connected to several ports at once — all are reported)."""
+        clients: list[StatusClient] = []
+        for tag in self._order:
+            listener = self._listeners[tag]
+            if listener.mgmt is None:
+                continue
+            clients.extend(parse_status3(listener.mgmt.command("status 3")))
+        return clients
 
     def kill_client(self, common_name: str) -> bool:
-        try:
-            out = self.command(f"kill {common_name}", timeout=10)
-            return out.startswith("SUCCESS:")
-        except CoreError:
-            return False
+        """Kill on every listener — the same CN may hold sessions on
+        several ports simultaneously."""
+        killed = False
+        for tag in self._order:
+            listener = self._listeners[tag]
+            if listener.mgmt is None:
+                continue
+            try:
+                out = listener.mgmt.command(f"kill {common_name}", timeout=10)
+                killed = killed or out.startswith("SUCCESS:")
+            except CoreError:
+                continue
+        return killed
 
     def set_auth_handler(self, handler: AuthCallback) -> None:
         def _bridge(request: AuthRequest) -> bool:
@@ -287,20 +424,39 @@ class LocalOpenVPNBackend:
             }
             return bool(handler(request.username, request.password, meta))
 
-        client = self._mgmt or ManagementClient()
-        if self._mgmt is None:
-            self._mgmt = client
-        self._mgmt.set_auth_handler(_bridge)
+        for tag in self._order:
+            listener = self._listeners[tag]
+            if listener.mgmt is not None:
+                listener.mgmt.set_auth_handler(_bridge)
 
     # ------------------------------------------------------------------ #
     # accounting
     # ------------------------------------------------------------------ #
     def read_disconnect_log(self) -> list[DisconnectRecord]:
-        if not os.path.exists(self.disconnect_log):
-            return []
-        tmp = f"{self.disconnect_log}.swap"
+        """Union of hook finals across the whole listener set. Orphaned
+        directories (listeners removed by the studio between polls) are
+        drained too — usage must never silently disappear with an inbound."""
+        roots = [listener.disconnect_log for listener in self._listeners.values()]
+        listeners_root = os.path.join(self.work_dir, "listeners")
         try:
-            os.replace(self.disconnect_log, tmp)   # atomic-ish: new appends go to a fresh file
+            for entry in os.listdir(listeners_root):
+                candidate = os.path.join(listeners_root, entry, "disconnect-log.jsonl")
+                if candidate not in roots and os.path.isfile(candidate):
+                    roots.append(candidate)
+        except OSError:
+            pass
+        records: list[DisconnectRecord] = []
+        for path in roots:
+            records.extend(self._read_one_log(path))
+        return records
+
+    @staticmethod
+    def _read_one_log(path: str) -> list[DisconnectRecord]:
+        if not os.path.exists(path):
+            return []
+        tmp = f"{path}.swap"
+        try:
+            os.replace(path, tmp)   # atomic-ish: new appends go to a fresh file
         except OSError:
             return []
         records: list[DisconnectRecord] = []

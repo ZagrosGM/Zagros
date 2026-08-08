@@ -4,7 +4,7 @@ import { clsx } from "clsx";
 import {
   Activity, Award, Boxes, ChevronLeft, Cpu, FileTerminal, Globe,
   HardDrive, LayoutDashboard, LayoutTemplate, LogOut, Menu, Moon, Network,
-  Radio, Route, Search, Settings, ShieldCheck, Store, Sun, TerminalSquare,
+  Radio, Route, Search, ServerCog, Settings, ShieldCheck, Store, Sun, TerminalSquare,
   Users, Waypoints, Wifi,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -32,6 +32,7 @@ const NAV = [
     { to: "/routing", icon: Route, key: "nav.routing" },
     { to: "/outbounds", icon: Network, key: "nav.outbounds" },
     { to: "/inbounds", icon: Waypoints, key: "nav.inbounds" },
+    { to: "/hosts", icon: ServerCog, key: "nav.hosts" },
     { to: "/dns", icon: Globe, key: "nav.dns" },
     { to: "/certificates", icon: ShieldCheck, key: "nav.certificates" },
   ]},

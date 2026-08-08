@@ -90,40 +90,88 @@ class LocalSoftEtherBackend:
         return proc.stdout or ""
 
     # ------------------------------------------------------------------ #
-    # setup — real SELF_INSTALL
+    # setup — real SELF_INSTALL (3-stage chain, alpha.7.2)
     # ------------------------------------------------------------------ #
+    # Every package manager present on the host gets an honest attempt —
+    # "didn't try dnf" was a field failure pattern. Candidates that do not
+    # exist on a distro fail fast and are REPORTED in the final error.
+    _PKG_MANAGERS: tuple[tuple[str, list[str], list[str] | None], ...] = (
+        ("apt-get", ["apt-get", "install", "-y", "softether-vpnserver"],
+         ["apt-get", "update"]),  # containers ship empty lists — refresh first
+        ("dnf", ["dnf", "install", "-y", "softether-vpnserver"], None),
+        ("yum", ["yum", "install", "-y", "softether-vpnserver"], None),
+        ("pacman", ["pacman", "-S", "--noconfirm", "softether-vpnserver"], None),
+        ("apk", ["apk", "add", "softether-vpnserver"], None),
+    )
+
+    # toolchain for the source-build stage, per manager (best effort; the
+    # exact package names of the mainstream distros)
+    _BUILD_DEPS: dict[str, tuple[list[str] | None, list[str]]] = {
+        "apt-get": (["apt-get", "update"],
+                    ["apt-get", "install", "-y", "build-essential", "cmake",
+                     "libssl-dev", "zlib1g-dev", "libreadline-dev", "libncurses-dev"]),
+        "dnf": (None, ["dnf", "install", "-y", "gcc", "gcc-c++", "make", "cmake",
+                       "openssl-devel", "zlib-devel", "readline-devel", "ncurses-devel"]),
+        "yum": (None, ["yum", "install", "-y", "gcc", "gcc-c++", "make", "cmake",
+                       "openssl-devel", "zlib-devel", "readline-devel", "ncurses-devel"]),
+        "pacman": (None, ["pacman", "-S", "--noconfirm", "base-devel", "cmake",
+                          "openssl", "zlib", "readline", "ncurses"]),
+        "apk": (None, ["apk", "add", "build-base", "cmake", "openssl-dev",
+                       "zlib-dev", "readline-dev", "ncurses-dev"]),
+    }
+
+    _INSTALL_ROOT = "/usr/local/softether"
+
     def install_packages(self) -> str:
         """Install SoftEther VPN Server for real; returns a human description.
 
-        Strategy chain (first success wins):
-        1. apt, on distros shipping it: ``apt-get update`` (containers ship
-           empty lists — the update is what makes the candidate exist) then
-           ``apt-get install -y softether-vpnserver``.
-        2. Official GitHub releases (SoftEtherVPN/SoftEtherVPN): the
-           ``softether-vpnserver-…-linux-<arch>-64bit.tar.gz`` asset — the
-           tarball bundles ``vpnserver`` + ``vpncmd`` + ``hamcore.se2``; laid
-           out under ``/usr/local/softether`` and symlinked onto PATH.
-        Raises CoreError with the attempted detail when everything failed.
+        Strategy chain (first success wins, EVERY attempt reported):
+        1. The host's package manager — apt/dnf/yum/pacman/apk are ALL
+           probed; success is verified by locating the vpnserver binary,
+           not by the package tool's exit code.
+        2. Official GitHub release binary (SoftEtherVPN/SoftEtherVPN): the
+           latest STABLE release is resolved live (zero hardcoded version).
+        3. Full source build from that same latest stable tag — toolchain
+           installed via the package manager, cmake build, artifacts laid
+           out under /usr/local/softether and symlinked onto PATH.
+        Raises CoreError with the per-stage detail when everything failed.
         """
         errors: list[str] = []
-        if shutil.which("apt-get"):
+        for manager, argv, refresh in self._PKG_MANAGERS:
+            if shutil.which(manager) is None:
+                continue
             try:
-                self._run(["apt-get", "update"], timeout=600)
-                self._run(["apt-get", "install", "-y", "softether-vpnserver"], timeout=900)
-                if shutil.which("vpnserver") or os.path.exists("/usr/lib/softether/vpnserver"):
-                    return "installed softether-vpnserver via apt"
-                errors.append("apt install completed but vpnserver not found on PATH")
+                if refresh:
+                    self._run(refresh, timeout=600)
+                self._run(argv, timeout=900)
+                if self.server_binary():
+                    return f"installed softether-vpnserver via {manager}"
+                errors.append(
+                    f"{manager}: install completed but vpnserver not found on PATH")
             except CoreError as exc:
-                errors.append(f"apt: {exc}")
-        # GitHub fallback is always eligible (official SoftEtherVPN releases)
+                errors.append(f"{manager}: {exc}")
         try:
             return self._install_from_github()
         except Exception as exc:  # noqa: BLE001 — report every attempt
-            errors.append(f"github: {exc}")
+            errors.append(f"github-release: {exc}")
+        try:
+            return self._install_from_source()
+        except Exception as exc:  # noqa: BLE001 — report every attempt
+            errors.append(f"source-build: {exc}")
         raise CoreError(
             "could not self-install SoftEther VPN Server — attempts: "
             + " | ".join(errors or ["no strategy applicable on this host"])
         )
+
+    def _link_on_path(self, root: str) -> None:
+        for name in ("vpnserver", "vpncmd"):
+            link = os.path.join("/usr/local/bin", name)
+            try:
+                if os.path.lexists(link):
+                    os.remove(link)
+                os.symlink(os.path.join(root, name), link)
+            except OSError as exc:
+                logger.warning("softether PATH link %s failed: %s", link, exc)
 
     def _install_from_github(self) -> str:
         from app.cores.github_install import host_arch, host_os, install_from_github
@@ -132,7 +180,7 @@ class LocalSoftEtherBackend:
         if system != "linux" or arch not in ("amd64", "arm64"):
             raise CoreError(f"no official SoftEther build for {system}/{arch}")
         arch_bits = ("x64-64bit",) if arch == "amd64" else ("arm64-64bit",)
-        root = "/usr/local/softether"
+        root = self._INSTALL_ROOT
         os.makedirs(root, exist_ok=True)
         tag = install_from_github(
             repo="SoftEtherVPN/SoftEtherVPN",
@@ -149,15 +197,77 @@ class LocalSoftEtherBackend:
             },
         )
         os.chmod(os.path.join(root, "vpncmd"), 0o755)
-        for name in ("vpnserver", "vpncmd"):
-            link = os.path.join("/usr/local/bin", name)
-            try:
-                if os.path.lexists(link):
-                    os.remove(link)
-                os.symlink(os.path.join(root, name), link)
-            except OSError as exc:
-                logger.warning("softether PATH link %s failed: %s", link, exc)
+        self._link_on_path(root)
         return f"installed SoftEther {tag} from GitHub releases"
+
+    def _ensure_build_deps(self) -> None:
+        for manager, (refresh, argv) in self._BUILD_DEPS.items():
+            if shutil.which(manager) is None:
+                continue
+            try:
+                if refresh:
+                    self._run(refresh, timeout=600)
+                self._run(argv, timeout=1800)
+                return
+            except CoreError as exc:
+                raise CoreError(f"build toolchain via {manager} failed: {exc}") from exc
+        raise CoreError(
+            "no supported package manager to install the build toolchain "
+            "(need: c/c++ compiler, cmake, openssl+zlib+readline+ncurses dev)."
+        )
+
+    def _install_from_source(self) -> str:
+        """Last-resort: compile the latest STABLE tag from source. The tag
+        is resolved live from GitHub (no version is ever hardcoded), the
+        tree is built with cmake, and only ``vpnserver`` / ``vpncmd`` /
+        ``hamcore.se2`` are installed (same layout as the binary stage)."""
+        import tarfile
+        import tempfile
+        import urllib.request
+
+        from app.cores.github_install import fetch_latest_release
+
+        self._ensure_build_deps()
+        release = fetch_latest_release("SoftEtherVPN/SoftEtherVPN")
+        tag = str(release.get("tag_name") or "").strip()
+        if not tag:
+            raise CoreError("could not resolve the latest SoftEther release tag.")
+        url = ("https://github.com/SoftEtherVPN/SoftEtherVPN/"
+               f"archive/refs/tags/{tag}.tar.gz")
+        work = tempfile.mkdtemp(prefix="zagros-softether-src-")
+        tarball = os.path.join(work, "src.tar.gz")
+        try:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": "zagros-panel/install"})
+            with urllib.request.urlopen(request, timeout=120) as response:
+                data = response.read()
+            with open(tarball, "wb") as fh:
+                fh.write(data)
+            with tarfile.open(tarball, "r:gz") as tar:
+                tar.extractall(work, filter="data")
+            roots = [d for d in os.listdir(work)
+                     if os.path.isdir(os.path.join(work, d)) and d != "__pycache__"]
+            if len(roots) != 1:
+                raise CoreError(f"unexpected source tarball layout: {roots!r}")
+            src_dir = os.path.join(work, roots[0])
+            build_dir = os.path.join(work, "build")
+            self._run(["cmake", "-S", src_dir, "-B", build_dir,
+                       "-DCMAKE_BUILD_TYPE=Release"], timeout=900)
+            self._run(["cmake", "--build", build_dir, "--parallel",
+                       str(os.cpu_count() or 2)], timeout=3600)
+            root = self._INSTALL_ROOT
+            os.makedirs(root, exist_ok=True)
+            for name in ("vpnserver", "vpncmd", "hamcore.se2"):
+                built = os.path.join(build_dir, name)
+                if not os.path.exists(built):
+                    raise CoreError(f"cmake build did not produce '{name}'")
+                shutil.copy2(built, os.path.join(root, name))
+            os.chmod(os.path.join(root, "vpnserver"), 0o755)
+            os.chmod(os.path.join(root, "vpncmd"), 0o755)
+            self._link_on_path(root)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        return f"built SoftEther {tag} from source (cmake)"
 
     def _run(self, argv: list[str], *, timeout: float = 120.0) -> str:
         try:

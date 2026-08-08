@@ -109,10 +109,25 @@ def env_runtime(tmp_path, monkeypatch):
 
     rt = PlatformRuntime.from_env()
     rt.verify_schema()
-    yield rt
 
+    # The legacy engine is process-global: depending on collection order it
+    # may bind the CWD default (db.sqlite3) — which an ABORTED earlier run
+    # can leave littered with this suite's dl_* rows (observed: UNIQUE
+    # constraint on the first insert, order-dependent). Treat setup like
+    # teardown: ensure the schema exists and sweep any leftover dl_* rows
+    # BEFORE the test, identically to the post-test sweep. Deterministic
+    # regardless of warm-up order.
     from app.db import GetDB
+    from app.db.base import Base as _LegacyBase, engine as _legacy_engine
     from app.db.models import User as LegacyUser
+
+    _LegacyBase.metadata.create_all(_legacy_engine)
+    with GetDB() as db:
+        db.query(LegacyUser).filter(LegacyUser.username.like("dl\\_%")).delete(
+            synchronize_session=False)
+        db.commit()
+
+    yield rt
 
     with GetDB() as db:
         db.query(LegacyUser).filter(LegacyUser.username.like("dl\\_%")).delete(

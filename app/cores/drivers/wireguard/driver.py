@@ -179,11 +179,19 @@ class WireGuardDriver(BaseCoreDriver):
         )
 
     async def _publish(self) -> None:
-        """Render desired state and push it to the kernel (syncconf live apply)."""
+        """Render desired state and push it to the kernel (syncconf live apply).
+
+        Offline-first (alpha.7.2): configuring the core — the studio wizard,
+        account provisioning — must NEVER require a running daemon. When the
+        interface is down the desired state simply persists; start() renders
+        it into the interface config at bring-up."""
         import asyncio
 
         if self._server_private is None:
-            return  # core not started; config lands on start()
+            return  # keys never materialized; config lands on start()
+        if not await asyncio.to_thread(self._backend.is_running):
+            self._last_sync_error = None
+            return  # stopped core: state persists, sync happens at start()
         config = self.render_server_config()
         try:
             await asyncio.to_thread(self._backend.sync, config)
@@ -261,6 +269,16 @@ class WireGuardDriver(BaseCoreDriver):
                 self._backend.write_server_private_key(private)
                 self._server_private, self._server_public = private, public
                 logger.info("wireguard: server private key replaced via studio.")
+        if self._server_private is None:
+            # Materialize the server identity at CONFIGURE time, not at start
+            # time: the export (and the user's config delivery) shows the
+            # public key immediately, and building the inbound never needs a
+            # running core. Key math is pure python — no wireguard-tools
+            # required on the host for this step.
+            self._server_private, self._server_public = await asyncio.to_thread(
+                self._backend.ensure_server_keys
+            )
+            logger.info("wireguard: server keypair materialized via studio (pre-start).")
         await self._publish()
 
     async def start(self) -> None:
@@ -537,13 +555,37 @@ class WireGuardDriver(BaseCoreDriver):
                 key="dns", label="DNS",
                 value=", ".join(str(d) for d in cfg["dns_servers"]),
             ),
+            DeliveryField(
+                key="allowed_ips", label="Allowed IPs",
+                value=", ".join(str(ip) for ip in (
+                    cfg.get("peer_allowed_ips") or ("0.0.0.0/0", "::/0"))),
+            ),
+            DeliveryField(
+                key="keepalive", label="Persistent Keepalive",
+                value=f"{int(cfg.get('peer_keepalive') or 25)} s",
+            ),
         ]
         if cfg.get("mtu"):
             fields.append(DeliveryField(key="mtu", label="MTU", value=str(int(cfg["mtu"]))))
+        # peer / key material (alpha.7.2 item 15): the account's OWN public
+        # key identifies the peer server-side; a preshared key only exists
+        # when the operator enabled them (use_preshared_keys) — secret
+        # either way, and honestly absent when never provisioned.
+        if account.settings.get("public_key"):
+            fields.append(DeliveryField(
+                key="client_public_key", label="Client Public Key (peer identity)",
+                value=str(account.settings["public_key"]),
+            ))
+        if account.settings.get("preshared_key"):
+            fields.append(DeliveryField(
+                key="preshared_key", label="Preshared Key",
+                value=str(account.settings["preshared_key"]), secret=True,
+            ))
         section = DeliverySection(
             protocol="wireguard",
             title=f"{self.metadata.name} · WireGuard",
             engine="wireguard",
+            inbound_tag="wireguard",
             artifacts=[
                 DeliveryArtifact(
                     kind=ArtifactKind.FILE,
@@ -555,6 +597,13 @@ class WireGuardDriver(BaseCoreDriver):
                 ),
                 DeliveryArtifact(
                     kind=ArtifactKind.FIELDS, label="Connection details", fields=fields,
+                ),
+                DeliveryArtifact(
+                    kind=ArtifactKind.NOTE,
+                    label="How to connect",
+                    note="Scan the QR code (or import the .conf file) with the "
+                         "WireGuard app. The interface private key only ever "
+                         "lives inside the file — it is not shown as a field.",
                 ),
             ],
         )

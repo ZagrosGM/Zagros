@@ -10,7 +10,124 @@ multi-core platform line.
 
 ---
 
-## [1.0.0-alpha.7.1] — 2026-08-07 — Hotfix: driver root-fixes + Studio wizard completion
+## [1.0.0-alpha.7.2] — 2026-08-08 — Multi-core consolidation, host settings, portal UX
+
+Field-driven batch: core architecture consolidation, hardened installers and
+preflight diagnostics, a real per-core subscription portal, Marzban-parity
+Host Settings, and a wave of dashboard fixes verified end-to-end in a real
+browser against a real panel boot.
+
+### Changed — core architecture (items 1, 14)
+
+* **Hysteria2 and TUIC no longer exist as standalone cores.** They are
+  inbound protocols on the sing-box core (`hysteria2`, `tuic` listeners),
+  exactly where upstream keeps them; the panel now hosts six engines:
+  xray, sing-box, wireguard, openvpn, ssh, softether.
+  - `app/cores/consolidation.py` migrates existing deployments: granter
+    mappings, inbound entries and core-access flags are re-keyed to
+    `sing-box` via `alembic` revision `0007_core_consolidation` — verified
+    end-to-end against a real alpha.7.1 database in a subprocess.
+* **Legacy xray subscription removed entirely.** The subscription surface is
+  the unified portal only; "Legacy Subscription" no longer exists in UI or
+  API vocabulary.
+
+### Added — Host Settings (item 13, Marzban-parity, independent implementation)
+
+* New main-menu **Host Settings** page: per-core, per-inbound host entries
+  with the full Marzban field set — Remark, Address, Host, SNI, Port, TLS,
+  ALPN, Fingerprint, Fragment, Noise, MUX, AllowInsecure, RandomUserAgent,
+  Wildcard, MultipleHost/MultipleSNI, variable expansion
+  (`{SERVER_IP}`,`{PROTOCOL}`,`{TRANSPORT}`,`{USERNAME}`, salt `*`),
+  priority ordering and per-user traffic overrides.
+* Engine: `app/portal/hostengine.py` expands delivery sections through the
+  host store (tag-exact matching; tagless sections expand only when the
+  mapping is unambiguous — the engine never guesses). xray is deliberately
+  skipped there (its legacy hosts table stays the single source for the
+  built-in engine — no double expansion).
+* Storage: `core_hosts` table gains `inbound_tag` (`0008_core_host_inbound_tag`),
+  widened SNI/host columns, ordered `list_grouped`, tag-scoped `replace_tags`.
+* Admin API: `GET/PUT /zagros/cores/{id}/hosts` (xray path maps to the legacy
+  hosts table + live catalog reload; engine cores validate against the real
+  inbound catalog — 404 unknown core/tag, 422 invalid port/security/ALPN/
+  fingerprint).
+
+### Added — subscription portal per-core UX (item 15)
+
+* xray/sing-box: one QR-able share **link per granted inbound**; every
+  section names its `inbound_tag` for the Host Settings engine.
+* OpenVPN: downloadable `.ovpn` **file per listener** + username/password +
+  server & security facts (transport, data ciphers, tls-crypt line, CA
+  SHA-256 fingerprint derived from the real CA DER).
+* WireGuard: QR-able `.conf` + address, server public key, endpoint, DNS,
+  MTU, Allowed IPs, keepalive, peer identity and the preshared key when the
+  operator enabled PSKs (secret; honestly absent otherwise).
+* SSH: host/port/username/password per granted listener.
+* SoftEther: one section **per compat transport** — L2TP/IPsec (+PSK),
+  SSTP, PPTP and the OpenVPN clone with full connection facts; a missing
+  advertise-host, an unset IPsec PSK or a disabled hub feature surfaces as
+  an honest NOTE artifact instead of failing the whole delivery.
+
+### Added — dashboard (items 6, 11, 12, 16)
+
+* **Inbound wizard UX**: 4-step schema-driven stepper (protocol → transport
+  → security → details & review) now with **Simple/Advanced modes**, per-field
+  validation (required/int/port/tag-uniqueness), an authoritative
+  **server-side preview** (new `POST /zagros/studio/{core}/wizard/preview`
+  dry-runs the exact create patch and shows the unified diff), and
+  **import-from-share-link** (new `POST /zagros/cores/{core}/wizard/import`
+  parses vless/vmess/trojan/ss/hysteria2/tuic links onto THIS core's
+  blueprint — never guesses a cell, honestly reports unmapped values).
+* User/core-access picker is now a **tree**: all cores listed with
+  tri-state checkboxes; a per-core ⋯ menu selects individual inbounds;
+  everything is selected by default.
+* **Username Generate button** in the user dialog: letters+digits,
+  configurable length (4–32), up to 8 API-verified uniqueness attempts.
+* The ⋯ row menus (Users/Admins/Templates) are portal-mounted floating
+  menus that never render behind the page and close on
+  Escape/outside-click/scroll; subscription **Copy works on plain-HTTP**
+  deployments (Clipboard API → textarea fallback).
+* Fixed a real click-blocking overflow: the username generate row could
+  overlap the status select — the row now uses grid tracks (caught by the
+  browser gate).
+
+### Fixed — installer & diagnostics (items 2–5)
+
+* SoftEther installs via a real 3-stage chain (package manager → pinned
+  GitHub release binary → full source compile) with no hardcoded version.
+* sing-box health check no longer reports Error while the core is Running
+  (state precedence fixed at the source).
+* OpenVPN preflight diagnoses the TUN device, NET_ADMIN, Docker
+  capabilities and kernel module with host-specific fix hints; WireGuard
+  "Operation not permitted" gets the same netdiag treatment.
+
+### Fixed — provisioning & wizard integrity (items 7–10)
+
+* "the wizard blueprint could not be loaded" eliminated: blueprints are
+  generated dynamically per call and the `singbox`/`sing-box` id mismatch
+  is aliased at the single canonical map.
+* OpenVPN and SSH are multi-inbound like xray (multiple listeners with
+  distinct tags and ports, applied additively) with port/subnet conflict
+  validation.
+* WireGuard inbounds can be authored while the core is stopped (keys
+  materialize offline and publish on the next start).
+* No provisioning may fail on missing credentials: SSH/OpenVPN/SoftEther
+  mint secure random passwords server-side (manual always possible).
+
+### Verification (item 17 gate, all green)
+
+* Python suite **599 passed / 7 skipped / 0 failed** (real-binary sing-box
+  checks self-skip when the pinned binary is absent).
+* CLI suite **237 passed / 0 failed** against the faithful docker double.
+* Dashboard `tsc --noEmit` clean; production build green.
+* Repo browser-smoke (Playwright): anonymous load → login → user create →
+  90 s soak → all 18 pages → overlay regression → 3× reload → logout/login.
+* Targeted alpha.7.2 browser verification (21 checks): wizard
+  import→preview→create→listed, mode toggle, per-field validation, tree
+  picker, username generate (shape + configurable length), ⋯ menu portal
+  placement + Escape, subscription copy feedback, subscription portal
+  links + QR + 200, Host Settings page, zero page errors.
+
+---
 
 Hotfix release. Every issue reported against `alpha.7` was fixed **at the
 root** — no workarounds, no hidden errors, fully backward compatible.

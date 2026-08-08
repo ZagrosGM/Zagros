@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import tempfile
 import traceback
 import types as _types
 from pathlib import Path
@@ -283,6 +284,179 @@ def test_softether_install_runs_package_strategies(monkeypatch) -> None:
 
     asyncio.run(run())
     assert calls[:1] == ["vpncmd"], calls
+
+
+# ---------------------------------------------------------------------- #
+# alpha.7.2 — 3-stage installer chain (pkg → GitHub latest → source)     #
+# ---------------------------------------------------------------------- #
+
+def _se_backend():
+    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
+    return LocalSoftEtherBackend({})
+
+
+def test_install_pkg_manager_first_success_short_circuits() -> None:
+    import shutil
+    from unittest import mock
+
+    backend = _se_backend()
+    calls: list[list[str]] = []
+    with mock.patch.object(shutil, "which",
+                           lambda n: "/usr/bin/apt-get" if n == "apt-get" else None), \
+         mock.patch.object(backend, "_run",
+                           lambda argv, timeout=120.0: (calls.append(list(argv)), "ok")[1]), \
+         mock.patch.object(backend, "server_binary",
+                           lambda: "/usr/lib/softether/vpnserver"):
+        out = backend.install_packages()
+    assert "apt-get" in out
+    assert calls[0] == ["apt-get", "update"]            # refresh first
+    assert calls[1] == ["apt-get", "install", "-y", "softether-vpnserver"]
+    # first success wins — no GitHub, no source stage
+
+
+def test_install_tries_every_manager_then_github(monkeypatch=None) -> None:
+    import shutil
+    from unittest import mock
+
+    import app.cores.github_install as gh
+
+    backend = _se_backend()
+    calls: list[list[str]] = []
+
+    def which(name):
+        return {"apt-get": "/usr/bin/apt-get", "dnf": "/usr/bin/dnf"}.get(name)
+
+    def failing(argv, timeout=120.0):
+        calls.append(list(argv))
+        if argv[0] == "apt-get" and argv[1] == "update":
+            return "ok"
+        raise CoreError("no candidate")
+
+    root = tempfile.mkdtemp(prefix="se-gh-")
+    for name in ("vpnserver", "vpncmd", "hamcore.se2"):
+        Path(root, name).write_text("x")
+    with mock.patch.object(shutil, "which", which), \
+         mock.patch.object(backend, "_run", failing), \
+         mock.patch.object(gh, "install_from_github",
+                           lambda **kw: "v5.02.5187"), \
+         mock.patch.object(backend, "_link_on_path", lambda r: None):
+        backend._INSTALL_ROOT = root
+        out = backend.install_packages()
+    assert out == "installed SoftEther v5.02.5187 from GitHub releases"
+    attempted = {c[0] for c in calls}
+    assert {"apt-get", "dnf"} <= attempted  # NOT apt-only anymore
+
+
+def test_install_source_build_last_resort_uses_live_tag() -> None:
+    import shutil
+    import tarfile
+    import urllib.request
+    from io import BytesIO
+    from unittest import mock
+
+    import app.cores.github_install as gh
+
+    backend = _se_backend()
+    calls: list[list[str]] = []
+    urls: list[str] = []
+
+    # real tiny tarball fixture: <tag>/Makefile
+    tar_buf = BytesIO()
+    with tarfile.open(fileobj=tar_buf, mode="w:gz") as tar:
+        import io as _io
+        info = tarfile.TarInfo("SoftEtherVPN-9.9.9-test/Makefile")
+        payload = b"all:\n\ttrue\n"
+        info.size = len(payload)
+        tar.addfile(info, _io.BytesIO(payload))
+    tar_bytes = tar_buf.getvalue()
+
+    class _Resp:
+        def read(self): return tar_bytes
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(request, timeout=0):
+        urls.append(request.full_url)
+        return _Resp()
+
+    def fake_run(argv, timeout=120.0):
+        calls.append(list(argv))
+        if argv and argv[0] == "apt-get":
+            raise CoreError("no candidate")
+        if argv[:2] == ["cmake", "--build"]:
+            build_dir = argv[2]
+            Path(build_dir).mkdir(parents=True, exist_ok=True)
+            for name in ("vpnserver", "vpncmd", "hamcore.se2"):
+                Path(build_dir, name).write_text("binary")
+            return "built"
+        return "ok"
+
+    root = tempfile.mkdtemp(prefix="se-src-root-")
+    with mock.patch.object(shutil, "which",
+                           lambda n: "/usr/bin/apt-get" if n == "apt-get" else None), \
+         mock.patch.object(backend, "_run", fake_run), \
+         mock.patch.object(backend, "_ensure_build_deps", lambda: None), \
+         mock.patch.object(gh, "install_from_github",
+                           lambda **kw: (_ for _ in ()).throw(CoreError("no asset"))), \
+         mock.patch.object(gh, "fetch_latest_release",
+                           lambda repo, timeout=30.0: {"tag_name": "v9.9.9-test"}), \
+         mock.patch.object(urllib.request, "urlopen", fake_urlopen), \
+         mock.patch.object(backend, "_link_on_path", lambda r: None):
+        backend._INSTALL_ROOT = root
+        out = backend.install_packages()
+    # zero hardcoding: the URL carries the LIVE-resolved tag
+    assert urls and "v9.9.9-test" in urls[0]
+    assert out == "built SoftEther v9.9.9-test from source (cmake)"
+    assert any(c[:2] == ["cmake", "-S"] for c in calls)
+    assert any(c[:2] == ["cmake", "--build"] for c in calls)
+    for name in ("vpnserver", "vpncmd", "hamcore.se2"):
+        assert Path(root, name).exists()
+    assert (Path(root, "vpnserver").stat().st_mode & 0o111) != 0
+
+
+def test_install_reports_every_failed_stage() -> None:
+    import shutil
+    from unittest import mock
+
+    import app.cores.github_install as gh
+
+    backend = _se_backend()
+    with mock.patch.object(shutil, "which", lambda n: None), \
+         mock.patch.object(gh, "install_from_github",
+                           lambda **kw: (_ for _ in ()).throw(CoreError("gh down"))), \
+         mock.patch.object(gh, "fetch_latest_release",
+                           lambda repo, timeout=30.0: {"tag_name": "v1"}), \
+         mock.patch.object(backend, "_ensure_build_deps",
+                           lambda: (_ for _ in ()).throw(CoreError("no toolchain"))):
+        try:
+            backend.install_packages()
+            raise AssertionError("install must fail when every stage fails")
+        except CoreError as exc:
+            msg = str(exc)
+            assert "github-release:" in msg and "source-build:" in msg
+            assert "gh down" in msg and "no toolchain" in msg
+
+
+def test_build_deps_per_manager_and_absence_error() -> None:
+    import shutil
+    from unittest import mock
+
+    backend = _se_backend()
+    calls: list[list[str]] = []
+    with mock.patch.object(shutil, "which",
+                           lambda n: "/usr/bin/dnf" if n == "dnf" else None), \
+         mock.patch.object(backend, "_run",
+                           lambda argv, timeout=120.0: (calls.append(list(argv)), "ok")[1]):
+        backend._ensure_build_deps()
+    assert calls and calls[0][0] == "dnf"
+    assert "cmake" in calls[0] and "gcc" in calls[0]
+
+    with mock.patch.object(shutil, "which", lambda n: None):
+        try:
+            backend._ensure_build_deps()
+            raise AssertionError("missing toolchain manager must raise")
+        except CoreError as exc:
+            assert "no supported package manager" in str(exc)
 
 
 # ---------------------------------------------------------------------- #

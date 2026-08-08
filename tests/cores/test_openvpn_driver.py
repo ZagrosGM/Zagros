@@ -48,18 +48,42 @@ STATUS3_SAMPLE = (
 
 STATUS3_ALICE_GREW = STATUS3_SAMPLE.replace("\t1000\t500\t", "\t1600\t500\t")
 
+# Real self-signed test CA (CN=Zagros Test CA) — describe_delivery derives
+# the CA fingerprint from actual DER, so fake "CA" text is invalid (7.2/15).
+TEST_CA_CRT = (
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIIDEzCCAfugAwIBAgIUYULfBbJOkPLeIiRrEi/j0GbsGPQwDQYJKoZIhvcNAQEL\n"
+    "BQAwGTEXMBUGA1UEAwwOWmFncm9zIFRlc3QgQ0EwHhcNMjYwODA3MjI0MTEyWhcN\n"
+    "MzYwODA0MjI0MTEyWjAZMRcwFQYDVQQDDA5aYWdyb3MgVGVzdCBDQTCCASIwDQYJ\n"
+    "KoZIhvcNAQEBBQADggEPADCCAQoCggEBAMULa8BLxMw6vshNPbA+nCTqn48JEE8s\n"
+    "ercHIrEOelKYb4WZjH2bAZmCCIIOwaOLuZkoizrTr1yJwSqABLIDaO1l35B5R8vP\n"
+    "VCUouYoxR/2LK1xedhlNo/LHsOxhiyA3AxuLDwVD5Id9Xw0ajsYdBPUq4/Etvryz\n"
+    "4OLM4FPFb2u34wL4GJVLDB2msVTyP3BECmABqoAzhVXqFAfPVfy1G8MMtjladVbX\n"
+    "1CI5nyTwZcBxunyBYBDf6GdUT1cdoCmQmonmCAsNQ7/Qfi6HxWOrR/+WV82wNRNP\n"
+    "ohc0I7jqPe7HXNr3DaP/b9CKEBCql6pFW/XztSUHq4AO+FjqSdcTousCAwEAAaNT\n"
+    "MFEwHQYDVR0OBBYEFJBIR37iqVOenMiHlSV2iVNfsf88MB8GA1UdIwQYMBaAFJBI\n"
+    "R37iqVOenMiHlSV2iVNfsf88MA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQEL\n"
+    "BQADggEBACCSXd+9Yo1SBCUG/KU+7ucO/PZ/9muobdla/zFNdLWDBKfDNkEwOod/\n"
+    "AJIdbsG9EPSxn/SYbW5uhRySGdsy2YmktIRTdIuIuW2joJ3Wh5CXGqihmTJC7gl6\n"
+    "kEAguDybf264JO9HCVrVIsT6goLXwm2NxDxRecF0yeJB7cq780ltzWjeLEDl9sI9\n"
+    "KdHOwXNWMaE1w8NZZia0IjeIgY2nH9SmUcBAbmc+Jp5W2ctV0joS2aKYARlQcMhK\n"
+    "fJ8oeYSSG2O71SKCY6vZFHmAWiSUAcU0kyiVK49y375aPs1gq27N0k+4Wszx+SPh\n"
+    "zaJ2oIKBQtMHmV5zCJHbgwTCIgUQXBA=\n"
+    "-----END CERTIFICATE-----\n"
+)
+
 
 class FakeBackend:
-    """Fake OpenVPNBackend: canned status, queued disconnect finals, recorded calls."""
-
-    disconnect_log = "disconnect-log.jsonl"
+    """Fake OpenVPNBackend: canned status, queued disconnect finals, recorded calls.
+    Multi-listener contract (alpha.7.2): configure() receives the rendered set."""
 
     def __init__(self, status_text: str = STATUS3_SAMPLE):
         self.status_text = status_text
         self.disconnects: list[DisconnectRecord] = []
-        self.config: str | None = None
-        self.hook: str | None = None
-        self.pki = {"ca_crt": "-----BEGIN CERTIFICATE-----\nFAKE-CA\n-----END CERTIFICATE-----",
+        self.configs: dict[str, str] = {}
+        self.hooks: dict[str, str] = {}
+        self.mgmt_ports: dict[str, int] = {}
+        self.pki = {"ca_crt": TEST_CA_CRT,
                     "tls_crypt": "-----BEGIN OpenVPN Static key V1-----\nFAKE-TA\n-----END OpenVPN Static key V1-----"}
         self.auth_handler = None
         self.killed: list[str] = []
@@ -78,8 +102,18 @@ class FakeBackend:
 
     # setup
     def ensure_pki(self): return self.pki
-    def apply_config(self, conf): self.config = conf
-    def install_hook_script(self, script): self.hook = script; return "/wd/client-disconnect.sh"
+    def disconnect_log_path(self, tag: str) -> str:
+        return f"/wd/listeners/{tag}/disconnect-log.jsonl"
+    def configure(self, specs):
+        self.configs = {str(s["tag"]): str(s["server_conf"]) for s in specs}
+        self.hooks = {str(s["tag"]): str(s["hook_script"]) for s in specs}
+        self.mgmt_ports = {str(s["tag"]): int(s["mgmt_port"]) for s in specs}
+    @property
+    def config(self):    # single-listener convenience view
+        return next(iter(getattr(self, "configs", {}).values()), None)
+    @property
+    def hook(self):
+        return next(iter(getattr(self, "hooks", {}).values()), None)
     def install_packages(self): self.installed = True; return "apt ok"
 
     # mgmt
@@ -202,9 +236,11 @@ def test_server_config_has_management_auth_hook_and_tls() -> None:
     assert "management-client-auth" in conf
     assert "username-as-common-name" in conf
     assert "client-cert-not-required" in conf
-    assert "client-disconnect /wd/client-disconnect.sh" in conf
-    assert "management 127.0.0.1 17505" in conf
-    assert "tls-crypt ta.key" in conf
+    assert "client-disconnect /wd/listeners/openvpn/client-disconnect.sh" in conf
+    assert "management 127.0.0.1 17506" in conf  # base 17505 + portal offset
+    # shared PKI via absolute paths (per-listener cwd since alpha.7.2)
+    assert "tls-crypt /var/lib/zagros/cores/openvpn/ta.key" in conf
+    assert "ca /var/lib/zagros/cores/openvpn/ca.crt" in conf
     assert 'push "dhcp-option DNS 1.1.1.1"' in conf
 
 
@@ -314,10 +350,10 @@ def test_client_profile_sealed_and_complete() -> None:
     assert cfg.engine == "openvpn" and cfg.payload["format"] == "ovpn"
     assert "remote 127.0.0.1 1194" in profile
     assert "auth-user-pass" in profile
-    assert "<ca>" in profile and "FAKE-CA" in profile
+    assert "<ca>" in profile and "BEGIN CERTIFICATE" in profile
     assert "<tls-crypt>" in profile and "FAKE-TA" in profile
     blob = repr(cfg) + repr(cfg.public_view())
-    assert "FAKE-CA" not in blob and "remote 127.0.0.1" not in blob
+    assert "BEGIN CERTIFICATE" not in blob and "remote 127.0.0.1" not in blob
 
 
 def test_validation_and_capability_honesty() -> None:
@@ -329,11 +365,14 @@ def test_validation_and_capability_honesty() -> None:
             raise AssertionError("non-ovpn protocol must be rejected")
         except CoreError:
             pass
-        try:
-            await driver.create_account(_account(settings={}))
-            raise AssertionError("missing password must be rejected")
-        except CoreError:
-            pass
+        # alpha.7.2: a password-less account NEVER fails provisioning —
+        # the panel mints a secure random password in place
+        bare = _account(settings={})
+        await driver.create_account(bare)
+        minted = str(bare.settings.get("password") or "")
+        assert len(minted) >= 20
+        await driver.create_account(bare)
+        assert bare.settings["password"] == minted  # stable — no churn
 
     asyncio.run(main())
     # honest capability matrix: none of these are claimed
@@ -357,6 +396,160 @@ def test_status_reports_degraded_when_mgmt_dead_and_install_passthrough() -> Non
         assert status.health == HealthStatus.HEALTHY and status.core_version == "2.5.9"
         backend.management_alive = lambda: False
         assert (await driver.status()).health == HealthStatus.DEGRADED
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------- #
+# alpha.7.2 — multi-inbound (xray-style: one process per port)           #
+# ---------------------------------------------------------------------- #
+
+def test_multi_inbound_apply_renders_each_listener() -> None:
+    """Two openvpn inbounds → two rendered server.confs with distinct
+    ports/protos/subnets AND distinct management ports (one process each)."""
+    driver, backend = _driver()
+
+    async def main():
+        await driver.apply_studio_document({"inbounds": [
+            {"tag": "ovpn-udp", "protocol": "ovpn", "port": 1194,
+             "transport": "udp", "subnet": "10.8.0.0"},
+            {"tag": "ovpn-tcp", "protocol": "ovpn", "port": 443,
+             "transport": "tcp", "subnet": "10.9.0.0", "cipher": "AES-128-GCM"},
+        ]})
+        await driver.start()
+
+    asyncio.run(main())
+    assert set(backend.configs) == {"ovpn-udp", "ovpn-tcp"}
+    udp, tcp = backend.configs["ovpn-udp"], backend.configs["ovpn-tcp"]
+    assert "port 1194" in udp and "proto udp" in udp
+    assert "port 443" in tcp and "proto tcp" in tcp
+    assert "server 10.8.0.0 255.255.255.0" in udp
+    assert "server 10.9.0.0 255.255.255.0" in tcp
+    # per-listener cipher (wizard) + template fallback from flat settings
+    assert "data-ciphers AES-128-GCM:AES-128-GCM" in tcp
+    # distinct management channels (base 17505 + ordinal)
+    assert backend.mgmt_ports == {"ovpn-udp": 17506, "ovpn-tcp": 17507}
+    assert "management 127.0.0.1 17506" in udp
+    assert "management 127.0.0.1 17507" in tcp
+    # export mirrors the set
+    doc = driver.export_config_document()
+    assert [e["tag"] for e in doc["inbounds"]] == ["ovpn-udp", "ovpn-tcp"]
+    assert doc["inbounds"][1]["transport"] == "tcp"
+    # wizard fields on flat settings mirror the FIRST listener
+    assert driver.settings["port"] == 1194 and driver.settings["proto"] == "udp"
+
+
+def test_multi_inbound_validation_names_offenders() -> None:
+    driver, backend = _driver()
+
+    async def main():
+        # same (port, proto)
+        try:
+            await driver.apply_studio_document({"inbounds": [
+                {"tag": "a", "protocol": "ovpn", "port": 1194},
+                {"tag": "b", "protocol": "ovpn", "port": 1194},
+            ]})
+            raise AssertionError("duplicate endpoint accepted")
+        except CoreError as exc:
+            assert "'a'" in str(exc) and "'b'" in str(exc) and "1194" in str(exc)
+        # same port is fine across udp/tcp (same as xray udp+tcp share)
+        await driver.apply_studio_document({"inbounds": [
+            {"tag": "a", "protocol": "ovpn", "port": 1194, "transport": "udp"},
+            {"tag": "b", "protocol": "ovpn", "port": 1194, "transport": "tcp",
+             "subnet": "10.9.0.0"},
+        ]})
+        # same tunnel subnet on two listeners → routing conflict
+        try:
+            await driver.apply_studio_document({"inbounds": [
+                {"tag": "a", "protocol": "ovpn", "port": 1194,
+                 "subnet": "10.8.0.0"},
+                {"tag": "b", "protocol": "ovpn", "port": 1195,
+                 "subnet": "10.8.0.0"},
+            ]})
+            raise AssertionError("duplicate subnet accepted")
+        except CoreError as exc:
+            assert "subnet" in str(exc) and "'b'" in str(exc)
+        # conflicting core-wide auth knobs → named field + both tags
+        try:
+            await driver.apply_studio_document({"inbounds": [
+                {"tag": "a", "protocol": "ovpn", "port": 1194,
+                 "auth_mode": "management"},
+                {"tag": "b", "protocol": "ovpn", "port": 1195,
+                 "subnet": "10.9.0.0", "auth_mode": "static"},
+            ]})
+            raise AssertionError("conflicting auth_mode accepted")
+        except CoreError as exc:
+            assert "auth_mode" in str(exc) and "'a'" in str(exc) and "'b'" in str(exc)
+
+    asyncio.run(main())
+    # exactly ONE configure() happened — the successful udp+tcp doc; every
+    # rejected document failed BEFORE touching the backend
+    assert sorted(backend.configs) == ["a", "b"]
+
+
+def test_multi_inbound_delivery_per_listener_and_grants() -> None:
+    driver, backend = _driver()
+
+    async def main():
+        await driver.apply_studio_document({"inbounds": [
+            {"tag": "ovpn-main", "protocol": "ovpn", "port": 1194},
+            {"tag": "ovpn-alt", "protocol": "ovpn", "port": 1443,
+             "transport": "tcp", "subnet": "10.9.0.0"},
+        ]})
+        await driver.start()
+        account = _account()
+        await driver.create_account(account)
+        profile = await driver.describe_delivery(account)
+        assert [s.title for s in profile.sections] == [
+            "ovpn-main · OpenVPN", "ovpn-alt · OpenVPN"]
+        files = [a for s in profile.sections for a in s.artifacts
+                 if a.kind.value == "file"]
+        assert files[0].filename == "alice-ovpn-main.ovpn"
+        assert files[1].filename == "alice-ovpn-alt.ovpn"
+        assert "remote 127.0.0.1 1194" in files[0].content
+        assert "proto udp" in files[0].content
+        assert "remote 127.0.0.1 1443" in files[1].content
+        assert "proto tcp" in files[1].content
+        # both sections share the same per-user credentials
+        for section in profile.sections:
+            fields = [f for a in section.artifacts if a.fields for f in a.fields]
+            assert any(f.key == "username" and f.value == "1.alice" for f in fields)
+        # whitelist narrows delivery to the granted inbound
+        granted = _account()
+        granted.settings["inbound_tags"] = ["ovpn-alt"]
+        await driver.create_account(granted)
+        narrowed = await driver.describe_delivery(granted)
+        assert [s.title for s in narrowed.sections] == ["ovpn-alt · OpenVPN"]
+        config = await driver.build_client_config(granted)
+        assert config.display_name == "OpenVPN · ovpn-alt"
+        assert "remote 127.0.0.1 1443" in config.payload["profile"]
+        # exclusion wins
+        granted.settings["excluded_inbounds"] = ["ovpn-alt"]
+        empty = await driver.describe_delivery(granted)
+        assert empty.sections == []
+        try:
+            await driver.build_client_config(granted)
+            raise AssertionError("client config for a fully excluded account")
+        except CoreError:
+            pass
+
+    asyncio.run(main())
+
+
+def test_removed_listener_config_materializes_offline() -> None:
+    """Studio apply on a STOPPED core materializes the set (offline-first,
+    alpha.7.2): files land now, processes come up at Start."""
+    driver, backend = _driver()
+
+    async def main():
+        assert not backend.is_running()
+        await driver.apply_studio_document({"inbounds": [
+            {"tag": "solo", "protocol": "ovpn", "port": 1294},
+        ]})
+        assert list(backend.configs) == ["solo"]   # configured while stopped
+        await driver.start()
+        assert backend.is_running()
+        assert "port 1294" in backend.configs["solo"]
 
     asyncio.run(main())
 

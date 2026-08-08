@@ -149,16 +149,59 @@ async def client_config(body: ConfigBody, runtime=Depends(get_runtime)):
 # Subscription portal (/zagros/sub/{token})
 # ---------------------------------------------------------------------- #
 
+async def _legacy_sub_user_id(token: str) -> int | None:
+    """Validate a LEGACY username token (pre-alpha.7.2
+    `create_subscription_token`) under the legacy rules (issued before the
+    user's created_at is invalid; `sub_revoked_at` revokes). Returns the
+    platform user id, or None when the token is not a valid legacy token.
+
+    This is the migration bridge: the legacy /sub/ endpoint is GONE, but
+    already-issued URLs (telegram bot messages, admin notes) must keep
+    working — they land on the one multi-core portal now."""
+    import asyncio as _asyncio
+
+    from app.utils.jwt import get_subscription_payload
+
+    sub = get_subscription_payload(token)
+    if not sub:
+        return None
+
+    def _resolve() -> int | None:
+        from app.db import crud
+        from app.db.base import SessionLocal
+
+        db = SessionLocal()
+        try:
+            dbuser = crud.get_user(db, sub["username"])
+            if not dbuser or dbuser.created_at > sub["created_at"]:
+                return None
+            if dbuser.sub_revoked_at and dbuser.sub_revoked_at > sub["created_at"]:
+                return None
+            return int(dbuser.id)
+        finally:
+            db.close()
+
+    return await _asyncio.to_thread(_resolve)
+
+
 async def _verify_and_serve(token, request, runtime,
                             accept_language, user_agent):
+    user_id: int | None = None
     try:
         payload = runtime.tokens.verify(token, expected_type="sub")
-    except TokenError as exc:
-        raise HTTPException(404, "subscription not found") from exc
-    user_id = int(payload["sub"])
-    # rotation invalidates older portal URLs immediately (fail-closed)
-    current_jti = await runtime.kv.get_value(f"portal.sub_jti.{user_id}")
-    if current_jti is None or payload.get("jti") != current_jti:
+    except TokenError:
+        payload = None
+    if payload is not None:
+        candidate = int(payload["sub"])
+        # rotation invalidates older portal URLs immediately (fail-closed)
+        current_jti = await runtime.kv.get_value(f"portal.sub_jti.{candidate}")
+        if current_jti is not None and payload.get("jti") == current_jti:
+            user_id = candidate
+    if user_id is None:
+        # legacy username token (issued pre-alpha.7.2) — same portal, one
+        # multi-core subscription surface, legacy revocation rules honored
+        user_id = await _legacy_sub_user_id(token)
+    if user_id is None:
         raise HTTPException(404, "subscription not found")
     return await _serve_subscription(runtime, user_id, request,
                                      accept_language, user_agent)
@@ -191,12 +234,48 @@ async def subscription_portal_custom_path(sub_path: str, token: str,
                                    accept_language, user_agent)
 
 
+def _legacy_user_snapshot(username: str):
+    """(used_traffic, data_limit, expire) from the legacy users row — the
+    single master counters (quota is singular by design), for the
+    `subscription-userinfo` response header the legacy endpoint sent."""
+    from app.db import crud
+    from app.db.base import SessionLocal
+
+    db = SessionLocal()
+    try:
+        dbuser = crud.get_user(db, username)
+        if dbuser is None:
+            return None
+        return (int(dbuser.used_traffic or 0),
+                int(dbuser.data_limit or 0),
+                int(dbuser.expire or 0))
+    finally:
+        db.close()
+
+
+def _track_subscription_fetch(username: str, user_agent: str) -> None:
+    """Keep `sub_updated_at` / `sub_last_user_agent` alive — the legacy
+    endpoint bumped them on every GET; the admin Users page shows them."""
+    from app.db import crud
+    from app.db.base import SessionLocal
+
+    db = SessionLocal()
+    try:
+        dbuser = crud.get_user(db, username)
+        if dbuser is not None:
+            crud.update_user_sub(db, dbuser, user_agent or "")
+    finally:
+        db.close()
+
+
 async def _serve_subscription(runtime, user_id: int, request: Request,
                               accept_language: str | None,
                               user_agent: str | None):
     # Content negotiation: subscription CLIENTS (v2rayNG, Streisand, sing-box,
     # Nekoray...) fetch the link list (base64 body, Marzban convention);
     # BROWSERS get the rich multi-core portal page.
+    import asyncio as _asyncio
+
     accept = request.headers.get("accept", "")
     ua = (user_agent or "").lower()
     # explicit ?format= always wins (browser may fetch clash/sing-box configs)
@@ -206,6 +285,31 @@ async def _serve_subscription(runtime, user_id: int, request: Request,
     lang = None
     if accept_language:
         lang = accept_language.split(",")[0].strip()[:5]
+
+    # legacy-continuity bookkeeping (alpha.7.2, item 14): the removed /sub/
+    # endpoint tracked every fetch and sent real quota headers — the portal
+    # is THE subscription surface now, so it owns the same duties.
+    username: str | None = None
+    userinfo_header = ""
+    try:
+        row = await _asyncio.to_thread(runtime.users.get_user, user_id)
+        username = row.username if row is not None else None
+    except Exception:  # noqa: BLE001 — bookkeeping must never kill delivery
+        username = None
+    if username:
+        try:
+            await _asyncio.to_thread(
+                _track_subscription_fetch, username, user_agent or "")
+        except Exception:  # noqa: BLE001 — never break a fetch on tracking
+            pass
+        try:
+            snapshot = await _asyncio.to_thread(_legacy_user_snapshot, username)
+            if snapshot is not None:
+                used, total, expire = snapshot
+                userinfo_header = (
+                    f"upload=0; download={used}; total={total}; expire={expire}")
+        except Exception:  # noqa: BLE001
+            userinfo_header = ""
 
     if is_browser:
         page = await runtime.portal.build_page(user_id, lang=lang)
@@ -229,6 +333,7 @@ async def _serve_subscription(runtime, user_id: int, request: Request,
             body, media_type="text/yaml; charset=utf-8",
             headers={
                 "profile-update-interval": "6",
+                "subscription-userinfo": userinfo_header,
                 "content-disposition": "attachment; filename=\"zagros.yaml\"",
             },
         )
@@ -238,6 +343,7 @@ async def _serve_subscription(runtime, user_id: int, request: Request,
             body, media_type="application/json; charset=utf-8",
             headers={
                 "profile-update-interval": "6",
+                "subscription-userinfo": userinfo_header,
                 "content-disposition": "attachment; filename=\"zagros.json\"",
             },
         )
@@ -248,7 +354,7 @@ async def _serve_subscription(runtime, user_id: int, request: Request,
     return PlainTextResponse(
         encoded,
         headers={
-            "subscription-userinfo": "",
+            "subscription-userinfo": userinfo_header,
             "profile-update-interval": "6",
             "content-disposition": "attachment; filename=\"zagros-subscription\"",
         },
@@ -371,6 +477,39 @@ async def studio_wizard_inbound(core_id: str, spec: InboundSpec,
         raise HTTPException(422, {"errors": result.errors})
     warning = await _materialize_studio(runtime, core_id, driver)
     return {**result.model_dump(), "materialized": warning is None, "notice": warning}
+
+
+class WizardImportBody(BaseModel):
+    link: str
+
+
+@zagros_admin_router.post("/studio/{core_id}/wizard/preview")
+async def studio_wizard_preview(core_id: str, spec: InboundSpec,
+                                runtime=Depends(get_runtime)):
+    """Item 6 Preview gate: validate the wizard spec (patch + schema + diff)
+    WITHOUT persisting or materializing — the stepper's review step calls
+    this so an invalid inbound is rejected BEFORE any document mutation."""
+    driver = _driver_or_404(runtime, core_id)
+    try:
+        result = await runtime.studio.wizard_preview_inbound(driver, spec)
+    except StudioError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return result
+
+
+@zagros_admin_router.post("/cores/{core_id}/wizard/import")
+async def core_wizard_import(core_id: str, body: WizardImportBody):
+    """Item 6 Import: parse a client share link into a blueprint-matched
+    wizard prefill spec (never guessed; unmapped values are reported)."""
+    from app.studio.wizard import wizard_supported
+    from app.studio.wizard_import import WizardImportError, import_link_spec
+
+    if not wizard_supported(core_id):
+        raise HTTPException(404, f"no inbound-wizard blueprint for core '{core_id}'")
+    try:
+        return import_link_spec(core_id, body.link)
+    except WizardImportError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 def _driver_or_404(runtime, core_id: str):

@@ -206,15 +206,32 @@ class LocalSystemSSHBackend:
         """Panel-owned sshd overrides. SAFETY CONTRACT: port 22 is always
         kept — a `Port` directive replaces the default listener set, and a
         panel that removed 22 would lock the operator out of their own box.
-        """
+
+        Multi-inbound (alpha.7.2): one `Port` line per panel listener
+        (settings['listeners']); the legacy single 'port' is the fallback
+        for pre-7.2 settings blobs."""
         s = self.settings
-        panel_port = int(s.get("port") or 22)
+        listeners: list[tuple[int, str]] = []  # (port, listen)
+        for row in (s.get("listeners") or []):
+            try:
+                port = int((row or {}).get("port"))
+            except (TypeError, ValueError):
+                continue
+            listen = str((row or {}).get("listen") or "0.0.0.0")
+            if 1 <= port <= 65535 and port != 22 and all(p != port for p, _ in listeners):
+                listeners.append((port, listen))
+        if not listeners:
+            panel_port = int(s.get("port") or 22)
+            if panel_port != 22:
+                listeners.append((panel_port, "0.0.0.0"))
         lines = [
             "# zagros-managed sshd drop-in — rewritten by the panel; do not edit by hand.",
             "Port 22  # operator access must never be locked out",
         ]
-        if panel_port != 22:
-            lines.append(f"Port {panel_port}")
+        for port, listen in listeners:
+            lines.append(f"Port {port}")
+            if listen not in ("", "0.0.0.0", "::"):
+                lines.append(f"ListenAddress {listen}")
         lines.append(
             "PasswordAuthentication " + ("yes" if s.get("password_auth", True) else "no")
         )

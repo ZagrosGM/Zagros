@@ -5,15 +5,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LayoutTemplate, MoreHorizontal, Pencil, Plus, RefreshCcw, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "../components/feedback";
-import { ConfirmDialog, Dialog } from "../components/overlays";
+import { ConfirmDialog, Dialog, RowMenu } from "../components/overlays";
 import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Skeleton, cn } from "../components/ui";
 import CoreAccessPicker from "../components/CoreAccessPicker";
 import { api, ApiError } from "../lib/api";
 import { useDigits, formatBytes } from "../lib/format";
 import { useT } from "../lib/i18n";
 import type { UserTemplate, InboundCatalogGroup } from "../lib/types";
-
-type InboundsGrouped = Record<string, { tag: string; port?: number | string; protocol?: string }[]>;
 
 interface TemplateForm {
   name: string;
@@ -37,16 +35,11 @@ export default function Templates() {
   const qc = useQueryClient();
   const [dialog, setDialog] = useState<{ mode: "create" } | { mode: "edit"; template: UserTemplate } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<UserTemplate | null>(null);
-  const [menuFor, setMenuFor] = useState<number | null>(null);
+  const [menu, setMenu] = useState<{ template: UserTemplate; anchor: HTMLElement } | null>(null);
 
   const templates = useQuery({
     queryKey: ["user_templates"],
     queryFn: () => api.get<UserTemplate[]>("/user_template"),
-  });
-  const inboundsQ = useQuery({
-    queryKey: ["inbounds"],
-    queryFn: () => api.get<InboundsGrouped>("/inbounds"),
-    staleTime: 60000,
   });
   const catalogQ = useQuery({
     queryKey: ["zagros", "inbounds-catalog"],
@@ -105,19 +98,11 @@ export default function Templates() {
                     </p>
                   </div>
                   <div className="relative" onClick={(e) => e.stopPropagation()}>
-                    <button aria-label="actions" onClick={() => setMenuFor(menuFor === tp.id ? null : tp.id)}
+                    <button aria-label="actions"
+                      onClick={(e) => setMenu((m) => (m?.template.id === tp.id ? null : { template: tp, anchor: e.currentTarget }))}
                       className="rounded-lg p-1.5 text-content-3 hover:bg-surface-3 hover:text-content">
                       <MoreHorizontal size={16} />
                     </button>
-                    {menuFor === tp.id && (
-                      <>
-                        <div className="fixed inset-0 z-30" onClick={() => setMenuFor(null)} />
-                        <div className="absolute end-0 top-8 z-40 w-44 overflow-hidden rounded-xl border border-border-strong bg-surface-1 py-1 shadow-pop">
-                          <MenuBtn icon={<Pencil size={14} />} label={t("common.edit")} onClick={() => { setMenuFor(null); setDialog({ mode: "edit", template: tp }); }} />
-                          <MenuBtn icon={<Trash2 size={14} />} label={t("common.delete")} danger onClick={() => { setMenuFor(null); setConfirmDelete(tp); }} />
-                        </div>
-                      </>
-                    )}
                   </div>
                 </div>
                 <div className="mt-3 flex flex-wrap gap-1.5">
@@ -134,12 +119,20 @@ export default function Templates() {
           })}
         </div>
       )}
+      {/* α7.2 (item 16): portal-mounted — never clipped by card overflow */}
+      <RowMenu open={!!menu} anchor={menu?.anchor ?? null} onClose={() => setMenu(null)} width={176}>
+        {menu && (
+          <>
+            <MenuBtn icon={<Pencil size={14} />} label={t("common.edit")} onClick={() => { const tp = menu.template; setMenu(null); setDialog({ mode: "edit", template: tp }); }} />
+            <MenuBtn icon={<Trash2 size={14} />} label={t("common.delete")} danger onClick={() => { const tp = menu.template; setMenu(null); setConfirmDelete(tp); }} />
+          </>
+        )}
+      </RowMenu>
 
       {dialog && (
         <TemplateDialog
           mode={dialog.mode}
           template={"template" in dialog ? dialog.template : undefined}
-          inbounds={inboundsQ.data ?? {}}
           catalog={catalogQ.data?.groups ?? []}
           onClose={() => setDialog(null)}
           onSaved={() => { setDialog(null); invalidate(); }}
@@ -171,9 +164,9 @@ function MenuBtn({ icon, label, onClick, danger }: { icon: React.ReactNode; labe
 
 // ---------------------------------------------------------------- dialog ---
 
-function TemplateDialog({ mode, template, inbounds, catalog, onClose, onSaved }: {
+function TemplateDialog({ mode, template, catalog, onClose, onSaved }: {
   mode: "create" | "edit"; template?: UserTemplate;
-  inbounds: InboundsGrouped; catalog: InboundCatalogGroup[];
+  catalog: InboundCatalogGroup[];
   onClose: () => void; onSaved: () => void;
 }) {
   const t = useT();
@@ -193,19 +186,9 @@ function TemplateDialog({ mode, template, inbounds, catalog, onClose, onSaved }:
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-
-  const protocols = Object.keys(inbounds);
-  const toggleProtocol = (p: string) => {
-    const next = { ...form.inbounds };
-    if (p in next) delete next[p];
-    else next[p] = []; // [] = every inbound of the protocol
-    setForm({ ...form, inbounds: next });
-  };
-  const toggleTag = (p: string, tag: string) => {
-    const cur = new Set(form.inbounds[p] ?? []);
-    cur.has(tag) ? cur.delete(tag) : cur.add(tag);
-    setForm({ ...form, inbounds: { ...form.inbounds, [p]: [...cur] } });
-  };
+  // an EMPTY legacy selection is the template wildcard ("all inbounds") until
+  // the admin actually touches the xray branch of the tree
+  const [xrayTouched, setXrayTouched] = useState(false);
 
   const save = async () => {
     setBusy(true); setError("");
@@ -238,7 +221,7 @@ function TemplateDialog({ mode, template, inbounds, catalog, onClose, onSaved }:
     <Dialog
       open onClose={onClose}
       title={mode === "create" ? t("templates.new") : `${t("common.edit")} — ${template?.name}`}
-      subtitle="inbound sets apply to every protocol the core offers — leave a protocol out to exclude it"
+      subtitle="data limits, expiry and the inbound tree pre-fill every user created from this template"
       wide
       footer={
         <>
@@ -268,57 +251,17 @@ function TemplateDialog({ mode, template, inbounds, catalog, onClose, onSaved }:
           <Input value={form.username_suffix} onChange={(e) => setForm({ ...form, username_suffix: e.target.value })} />
         </Field>
 
-        <Field label="other cores — include inbounds from ANY core in this template"
-          hint="users created from this template get real accounts on every selected core">
-          <CoreAccessPicker
-            groups={catalog}
-            value={form.coreAccess}
-            onChange={(next) => setForm({ ...form, coreAccess: next })}
-          />
-        </Field>
-
         <div className="sm:col-span-2">
-          <Field label={t("users.protocols")} hint={`${Object.keys(form.inbounds).length}/${protocols.length} — no selection = all inbounds of the chosen protocols`}>
-            <div className="space-y-2.5 rounded-xl border border-border p-3">
-              {protocols.length === 0 && <span className="text-xs text-content-3">no inbounds configured yet</span>}
-              {protocols.map((p) => {
-                const enabled = p in form.inbounds;
-                const tags = inbounds[p] ?? [];
-                const selected = new Set(form.inbounds[p] ?? []);
-                return (
-                  <div key={p} className={cn("rounded-xl border p-2.5 transition-colors",
-                    enabled ? "border-brand/50 bg-brand-soft/30" : "border-border")}>
-                    <button type="button" onClick={() => toggleProtocol(p)}
-                      className={cn("flex w-full items-center justify-between text-[13px] font-medium",
-                        enabled ? "text-brand" : "text-content-2 hover:text-content")}>
-                      <span className="inline-flex items-center gap-2">
-                        <span className={cn("h-2 w-2 rounded-full", enabled ? "bg-brand" : "bg-content-3")} />
-                        {p}
-                      </span>
-                      <span className="text-[11px] font-normal text-content-3">
-                        {enabled ? (selected.size ? `${selected.size}/${tags.length} tags` : "all tags") : `${tags.length} tags`}
-                      </span>
-                    </button>
-                    {enabled && tags.length > 1 && (
-                      <div className="mt-2 flex flex-wrap gap-1.5 border-t border-border pt-2">
-                        {tags.map((tag) => {
-                          const name = tag.tag;
-                          const on = selected.has(name);
-                          return (
-                            <button key={name} type="button" onClick={() => toggleTag(p, name)}
-                              className={cn("rounded-lg border px-2.5 py-1 text-[11px] transition-colors",
-                                on ? "border-brand bg-brand-soft text-brand"
-                                   : "border-border-strong text-content-2 hover:border-brand/50")}>
-                              {name}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+          <Field label={t("users.protocols")}
+            hint="pick inbounds from ANY core — users created from this template get real accounts on every selected core; an untouched xray branch means all xray inbounds">
+            <CoreAccessPicker
+              groups={catalog}
+              value={form.coreAccess}
+              onChange={(next) => setForm({ ...form, coreAccess: next })}
+              xrayValue={form.inbounds}
+              onXrayChange={(next) => { setXrayTouched(true); setForm({ ...form, inbounds: next }); }}
+              xrayWildcardAll={!xrayTouched}
+            />
           </Field>
         </div>
       </div>

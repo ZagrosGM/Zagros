@@ -139,8 +139,21 @@ async def _core_view(runtime, core_id: str, status_by_id: dict) -> dict:
 
     state = stored_entry.get("state")
     state_value = state.value if isinstance(state, CoreState) else state
-    if state_value is None and status is not None:
-        state_value = status.state.value if isinstance(status.state, CoreState) else str(status.state)
+    if status is not None:
+        # The live probe is the ground truth for liveness (alpha.7.2 item 3):
+        # * a live RUNNING probe ALWAYS wins over the persisted record — a
+        #   recorded "error" from a start that died after the process came
+        #   up must not paint the healthy core as Error;
+        # * a stopped probe contradicts only states that CLAIM the core is
+        #   up-ish (running/error/starting) — a freshly INSTALLED core is
+        #   genuinely installed-not-stopped, so its record stands.
+        # (The health monitor additionally reconciles the record itself.)
+        live = status.state.value if isinstance(status.state, CoreState) else str(status.state)
+        if live == CoreState.RUNNING.value:
+            state_value = live
+        elif state_value in (CoreState.RUNNING.value, CoreState.ERROR.value,
+                             CoreState.STARTING.value) and live:
+            state_value = live
     enabled = stored_entry.get("enabled", manager.is_enabled(core_id))
     view = {
         "id": meta.id,
@@ -845,3 +858,232 @@ async def panel_info(runtime=Depends(get_runtime)):
         "database_driver": (runtime.database_url.split(":", 1)[0]
                             if ":" in runtime.database_url else "unknown"),
     }
+
+
+# --------------------------------------------------------------------- #
+# host settings (alpha.7.2, item 13) — Marzban-parity, panel-native
+# --------------------------------------------------------------------- #
+#
+# ONE feature, TWO storage backends, honest by construction:
+#   * xray       → the legacy ``hosts`` table. The xray driver's delivery
+#                  path already expands links per legacy host entry
+#                  (Marzban byte-parity); these endpoints manage exactly
+#                  that table and refresh ``xray.hosts`` after writes.
+#   * every other core → the P3 ``core_hosts`` table consumed by the
+#                  cross-core Host Settings engine at the delivery layer.
+# Priority (item 13): an entry's position inside its tag's list IS its
+# priority — persisted (core_hosts.sort / row order) and honored by both
+# expansion paths.
+
+class HostEntryBody(BaseModel):
+    """One host variant — the full Marzban-parity field set."""
+
+    remark: str = ""
+    address: str = ""
+    port: int | None = None
+    sni: str | None = None
+    host: str | None = None
+    path: str | None = None
+    security: str | None = None           # inbound_default / none / tls
+    alpn: str | None = None
+    fingerprint: str | None = None
+    allowinsecure: bool | None = None
+    is_disabled: bool = False
+    mux_enable: bool = False
+    fragment_setting: str | None = None
+    noise_setting: str | None = None
+    random_user_agent: bool = False
+    use_sni_as_host: bool = False
+
+    model_config = {"extra": "allow"}     # unrecognized attrs round-trip
+
+
+class HostsPutBody(BaseModel):
+    hosts: dict[str, list[HostEntryBody]]
+
+
+_HOST_SECURITIES = {"inbound_default", "none", "tls"}
+
+
+def _normalize_security(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None  # inbound default
+    value = value.strip().lower()
+    if value not in _HOST_SECURITIES:
+        raise HTTPException(422, f"invalid security '{value}' — "
+                            f"one of {sorted(_HOST_SECURITIES)} (or empty)")
+    return value
+
+
+def _validate_entry(e: HostEntryBody, *, for_xray: bool) -> None:
+    if e.port is not None and not (1 <= e.port <= 65535):
+        raise HTTPException(422, f"invalid port {e.port}")
+    e.security = _normalize_security(e.security)
+    if for_xray:
+        # the legacy columns are single-value enums — validate membership
+        from app.models.proxy import ProxyHostALPN, ProxyHostFingerprint
+
+        if e.alpn:
+            try:
+                ProxyHostALPN(e.alpn)
+            except ValueError:
+                raise HTTPException(422, f"invalid alpn '{e.alpn}'") from None
+        if e.fingerprint:
+            try:
+                ProxyHostFingerprint(e.fingerprint)
+            except ValueError:
+                raise HTTPException(422, f"invalid fingerprint '{e.fingerprint}'") from None
+
+
+def _entry_wire(e) -> dict[str, Any]:
+    """HostEntry | HostEntryBody | legacy ProxyHost → one wire shape."""
+    get = (lambda k, d=None: getattr(e, k, d))
+    out = {
+        "remark": get("remark", "") or "",
+        "address": get("address", "") or "",
+        "port": get("port"),
+        "sni": get("sni"),
+        "host": get("host") if get("host") is not None else get("host_header"),
+        "path": get("path"),
+        "security": get("security"),
+        "alpn": get("alpn"),
+        "fingerprint": get("fingerprint"),
+        "allowinsecure": get("allowinsecure"),
+        "is_disabled": bool(get("is_disabled", False)),
+        "mux_enable": bool(get("mux_enable", False)),
+        "fragment_setting": get("fragment_setting"),
+        "noise_setting": get("noise_setting"),
+        "random_user_agent": bool(get("random_user_agent", False)),
+        "use_sni_as_host": bool(get("use_sni_as_host", False)),
+    }
+    extras = getattr(e, "extras", None) or getattr(e, "model_extra", None) or {}
+    out.update(extras)
+    return out
+
+
+async def _known_catalog(runtime) -> dict[str, Any]:
+    from app.platform.inbounds import catalog as _catalog
+
+    return {g.core_id: g for g in await _catalog(runtime)}
+
+
+@zagros_admin_router.get("/cores/{core_id}/hosts")
+async def host_settings_get(core_id: str, runtime=Depends(get_runtime)):
+    """``{inbound_tag: [entries in priority order]}`` for one core."""
+    if core_id == "xray":
+        return _xray_hosts_get()
+    groups = await _known_catalog(runtime)
+    if core_id not in groups:
+        raise HTTPException(404, f"unknown core '{core_id}'")
+    grouped = await runtime.core_hosts.list_grouped(core_id)
+    return {tag: [_entry_wire(e) for e in entries]
+            for tag, entries in grouped.items()}
+
+
+@zagros_admin_router.put("/cores/{core_id}/hosts")
+async def host_settings_put(body: HostsPutBody, core_id: str,
+                            runtime=Depends(get_runtime)):
+    """Bulk-partial replace: only the listed tags are touched; an empty list
+    clears a tag; every tag keeps its rows otherwise. List order is the
+    priority (item 13)."""
+    if core_id == "xray":
+        return _xray_hosts_put(body)
+    groups = await _known_catalog(runtime)
+    if core_id not in groups:
+        raise HTTPException(404, f"unknown core '{core_id}'")
+    known_tags = {i.tag for i in groups[core_id].inbounds}
+    for tag, entries in body.hosts.items():
+        if tag not in known_tags:
+            raise HTTPException(404, f"unknown inbound tag '{tag}' on core "
+                                f"'{core_id}'")
+        for e in entries:
+            _validate_entry(e, for_xray=False)
+    from app.portal.hostengine import HostEntry
+
+    await runtime.core_hosts.replace_tags(core_id, {
+        tag: [HostEntry(**{k: v for k, v in e.model_dump().items()
+                           if k in HostEntry.__dataclass_fields__} | {"extras": e.model_extra or {}})
+              for e in entries]
+        for tag, entries in body.hosts.items()
+    })
+    grouped = await runtime.core_hosts.list_grouped(core_id)
+    return {tag: [_entry_wire(e) for e in entries]
+            for tag, entries in grouped.items()}
+
+
+# ---- built-in xray: legacy hosts table, managed independently --------- #
+
+def _xray_stack():
+    try:
+        from app import xray as _xray_mod  # noqa: PLC0415 — lazy by design
+        from app.db import GetDB, crud     # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            503, f"the legacy xray stack is unavailable on this install: "
+            f"{exc.__class__.__name__}") from exc
+    return _xray_mod, GetDB, crud
+
+
+def _xray_host_wire(row) -> dict[str, Any]:
+    def _enum(v):
+        return getattr(v, "value", v)
+    return {
+        "remark": row.remark or "",
+        "address": row.address or "",
+        "port": row.port,
+        "sni": row.sni,
+        "host": row.host,
+        "path": row.path,
+        "security": _enum(row.security) or "inbound_default",
+        "alpn": _enum(row.alpn) or "",
+        "fingerprint": _enum(row.fingerprint) or "",
+        "allowinsecure": row.allowinsecure,
+        "is_disabled": bool(row.is_disabled),
+        "mux_enable": bool(row.mux_enable),
+        "fragment_setting": row.fragment_setting,
+        "noise_setting": row.noise_setting,
+        "random_user_agent": bool(row.random_user_agent),
+        "use_sni_as_host": bool(row.use_sni_as_host),
+    }
+
+
+def _xray_hosts_get() -> dict[str, list[dict[str, Any]]]:
+    _xray_mod, GetDB, crud = _xray_stack()
+    tags = [inb.get("tag")
+            for items in _xray_mod.config.inbounds_by_protocol.values()
+            for inb in items if isinstance(inb, dict) and inb.get("tag")]
+    out: dict[str, list[dict[str, Any]]] = {}
+    with GetDB() as db:
+        for tag in dict.fromkeys(tags):
+            out[tag] = [_xray_host_wire(h) for h in crud.get_hosts(db, tag)]
+    return out
+
+
+def _xray_hosts_put(body: HostsPutBody) -> dict[str, list[dict[str, Any]]]:
+    _xray_mod, GetDB, crud = _xray_stack()
+    known_tags = {inb.get("tag")
+                  for items in _xray_mod.config.inbounds_by_protocol.values()
+                  for inb in items if isinstance(inb, dict)}
+    for tag, entries in body.hosts.items():
+        if tag not in known_tags:
+            raise HTTPException(404, f"unknown xray inbound tag '{tag}'")
+        for e in entries:
+            _validate_entry(e, for_xray=True)
+    from app.models.proxy import ProxyHost as ProxyHostModify
+
+    with GetDB() as db:
+        for tag, entries in body.hosts.items():
+            models = []
+            for e in entries:
+                data = {k: v for k, v in e.model_dump().items() if k != "extras"}
+                # legacy model carries enum instances, not raw strings
+                try:
+                    models.append(ProxyHostModify(**data))
+                except Exception as exc:  # noqa: BLE001 — real validator error
+                    raise HTTPException(422, str(exc)) from exc
+            crud.update_hosts(db, tag, models)
+    try:
+        _xray_mod.hosts.update()          # delivery cache refresh
+    except Exception:  # noqa: BLE001 — rows are persisted; cache refreshes on reload
+        pass
+    return _xray_hosts_get()

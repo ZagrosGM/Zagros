@@ -71,6 +71,11 @@ class DeliverySection(BaseModel):
     engine: str                           # recommended client engine family
     artifacts: list[DeliveryArtifact] = Field(default_factory=list)
     note: str | None = None
+    # alpha.7.2 (item 13): which core inbound produced this section — the
+    # Host Settings engine keys its per-tag expansion on it. ``None`` on
+    # tagless single-inbound presenters (the engine applies the only
+    # defined tag unambiguously then).
+    inbound_tag: str | None = None
 
 
 class DeliveryProfile(BaseModel):
@@ -113,10 +118,33 @@ def _query(params: dict[str, Any]) -> str:
     return "&".join(parts)
 
 
+def _transport_params(transport: dict[str, Any], network: str,
+                      params: dict[str, Any]) -> None:
+    """path/host/serviceName params per transport — without them the client
+    silently falls back to defaults and connects to the WRONG listener
+    (the alpha.7.1 emitters added these only for ws; httpupgrade/grpc/h2
+    links were broken)."""
+    if network in ("ws", "httpupgrade"):
+        params["path"] = transport.get("path") or "/"
+        host = (transport.get("headers") or {}).get("Host") or transport.get("host")
+        if isinstance(host, list):
+            host = host[0] if host else None
+        params["host"] = host
+    elif network == "grpc":
+        params["serviceName"] = transport.get("service_name")
+    elif network == "http":
+        params["path"] = transport.get("path")
+        host = transport.get("host")
+        if isinstance(host, list):
+            host = host[0] if host else None
+        params["host"] = host
+
+
 def share_url_for_outbound(outbound: dict[str, Any], remark: str) -> str:
     """Encode a sing-box-shaped outbound fragment as a standard share link.
 
-    Supported: ``vless``, ``vmess``, ``trojan``, ``shadowsocks``.
+    Supported: ``vless``, ``vmess``, ``trojan``, ``shadowsocks``,
+    ``hysteria2``, ``tuic``.
     Anything else raises :class:`ShareLinkError` — the presenter turns that
     into an honest NOTE artifact instead of guessing a URL scheme.
     """
@@ -147,13 +175,13 @@ def share_url_for_outbound(outbound: dict[str, Any], remark: str) -> str:
             if reality.get("enabled"):
                 params["pbk"] = reality.get("public_key")
                 params["sid"] = reality.get("short_id")
+            if tls.get("insecure"):
+                params["allowInsecure"] = "1"
         else:
             params["security"] = "none"
         if outbound.get("flow"):
             params["flow"] = outbound["flow"]
-        if network == "ws":
-            params["path"] = transport.get("path")
-            params["host"] = (transport.get("headers") or {}).get("Host")
+        _transport_params(transport, network, params)
         return f"vless://{uuid}@{server}:{port}?{_query(params)}#{tag}"
 
     if otype == "vmess":
@@ -161,12 +189,21 @@ def share_url_for_outbound(outbound: dict[str, Any], remark: str) -> str:
         if not uuid:
             raise ShareLinkError("vmess outbound lacks uuid")
         tls_on = bool(tls.get("enabled"))
+        host = (transport.get("headers") or {}).get("Host") or transport.get("host") or ""
+        if isinstance(host, list):
+            host = host[0] if host else ""
+        if network == "grpc":
+            path = str(transport.get("service_name") or "")
+        elif network in ("ws", "httpupgrade", "http"):
+            path = str(transport.get("path") or "")
+        else:
+            path = ""
         doc = {
             "v": "2", "ps": remark, "add": server, "port": str(port),
             "id": uuid, "aid": "0", "scy": "auto",
             "net": network, "type": "none",
-            "host": (transport.get("headers") or {}).get("Host", ""),
-            "path": transport.get("path", "") if network == "ws" else "",
+            "host": host,
+            "path": path,
             "tls": "tls" if tls_on else "",
             "sni": tls.get("server_name", "") if tls_on else "",
             "alpn": ",".join(tls.get("alpn") or []) if tls_on else "",
@@ -187,11 +224,11 @@ def share_url_for_outbound(outbound: dict[str, Any], remark: str) -> str:
             params["alpn"] = tls.get("alpn")
             utls = tls.get("utls") or {}
             params["fp"] = utls.get("fingerprint") if utls.get("enabled") else None
+            if tls.get("insecure"):
+                params["allowInsecure"] = "1"
         else:
             params["security"] = "none"
-        if network == "ws":
-            params["path"] = transport.get("path")
-            params["host"] = (transport.get("headers") or {}).get("Host")
+        _transport_params(transport, network, params)
         return f"trojan://{quote(str(password), safe='')}@{server}:{port}?{_query(params)}#{tag}"
 
     if otype == "shadowsocks":
@@ -202,6 +239,39 @@ def share_url_for_outbound(outbound: dict[str, Any], remark: str) -> str:
             f"{method}:{password}".encode("utf-8")
         ).decode("ascii").rstrip("=")
         return f"ss://{userinfo}@{server}:{port}#{tag}"
+
+    if otype == "hysteria2":
+        password = outbound.get("password")
+        if password is None:
+            raise ShareLinkError("hysteria2 outbound lacks password")
+        params = {}
+        if tls.get("server_name"):
+            params["sni"] = tls.get("server_name")
+        obfs = outbound.get("obfs") or {}
+        if obfs.get("password"):
+            # only salamander exists in clients' obfs vocabulary today
+            params["obfs"] = obfs.get("type") or "salamander"
+            params["obfs-password"] = obfs["password"]
+        if tls.get("alpn"):
+            params["alpn"] = tls.get("alpn")
+        if tls.get("insecure"):
+            params["insecure"] = "1"
+        return f"hy2://{quote(str(password), safe='')}@{server}:{port}?{_query(params)}#{tag}"
+
+    if otype == "tuic":
+        uuid, password = outbound.get("uuid"), outbound.get("password")
+        if not uuid or password is None:
+            raise ShareLinkError("tuic outbound lacks uuid/password")
+        params = {"congestion_control": outbound.get("congestion_control") or "bbr",
+                  "udp_relay_mode": "native"}
+        if tls.get("server_name"):
+            params["sni"] = tls.get("server_name")
+        if tls.get("alpn"):
+            params["alpn"] = tls.get("alpn")
+        if tls.get("insecure"):
+            params["allow_insecure"] = "1"
+        auth = quote(str(uuid), safe="") + ":" + quote(str(password), safe="")
+        return f"tuic://{auth}@{server}:{port}?{_query(params)}#{tag}"
 
     raise ShareLinkError(f"no share-link encoding implemented for '{otype}'")
 

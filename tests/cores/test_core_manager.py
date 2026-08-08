@@ -456,6 +456,98 @@ def test_get_logs_and_status_all() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# health-monitor lifecycle reconciliation (alpha.7.2 item 3):
+# a healthy RUNNING process must never be displayed as Error
+# --------------------------------------------------------------------------- #
+
+def test_health_cycle_heals_error_state_when_probe_is_running() -> None:
+    """Reported bug: start() raised AFTER the process came up → recorded
+    ERROR while the binary served on. The monitor's probe is ground truth:
+    one cycle flips the record back to RUNNING (and persists/emits it)."""
+    async def main() -> None:
+        mgr, store, bus = _make_manager()
+        seen: list[dict] = []
+
+        async def spy(payload: dict) -> None:
+            seen.append(payload)
+
+        bus.subscribe(Event.CORE_STATE_CHANGED, spy)
+        await mgr.install_core("fakebox")
+
+        driver = mgr.get("fakebox")
+        driver.running = True                           # process IS up
+        mgr._states["fakebox"] = CoreState.ERROR        # ...but record says error
+        await store.save_state("fakebox", state=CoreState.ERROR, enabled=True)
+
+        await mgr._health_cycle({})
+        assert mgr._states["fakebox"] == CoreState.RUNNING
+        persisted = (await store.load())["fakebox"]["state"]
+        assert persisted == CoreState.RUNNING.value
+        assert any(p.get("state") == CoreState.RUNNING.value
+                   and p.get("core_id") == "fakebox" for p in seen)
+
+    asyncio.run(main())
+
+
+def test_health_cycle_detects_crash_when_probe_is_stopped() -> None:
+    """Recorded RUNNING + probe says stopped = crashed/killed out-of-band —
+    mark STOPPED instead of showing a green card for a dead core."""
+    async def main() -> None:
+        mgr, store, _ = _make_manager()
+        await mgr.install_core("fakebox")
+        await mgr.start_core("fakebox")      # recorded RUNNING, really up
+        mgr.get("fakebox").running = False   # ...then the process dies
+
+        await mgr._health_cycle({})
+        assert mgr._states["fakebox"] == CoreState.STOPPED
+        persisted = (await store.load())["fakebox"]["state"]
+        assert persisted == CoreState.STOPPED.value
+
+    asyncio.run(main())
+
+
+def test_health_cycle_keeps_error_when_probe_is_stopped() -> None:
+    """A FAILED core (recorded ERROR, process down) must not resurrect."""
+    async def main() -> None:
+        mgr, _, _ = _make_manager()
+        await mgr.install_core("fakebox")
+        mgr._states["fakebox"] = CoreState.ERROR
+        mgr.get("fakebox").running = False
+
+        await mgr._health_cycle({})
+        assert mgr._states["fakebox"] == CoreState.ERROR
+
+    asyncio.run(main())
+
+
+def test_health_cycle_probe_exception_never_flips_lifecycle() -> None:
+    """A flaky probe degrades health only — lifecycle MUST stay put."""
+    async def main() -> None:
+        mgr, _, bus = _make_manager()
+        seen: list[dict] = []
+
+        async def spy(payload: dict) -> None:
+            seen.append(payload)
+
+        bus.subscribe(Event.CORE_HEALTH_CHANGED, spy)
+        await mgr.install_core("fakebox")
+        await mgr.start_core("fakebox")
+
+        async def boom():
+            raise RuntimeError("probe exploded")
+
+        mgr.get("fakebox").health_check = boom
+        tracker: dict[str, HealthStatus] = {}
+        await mgr._health_cycle(tracker)
+        assert mgr._states["fakebox"] == CoreState.RUNNING
+        assert tracker["fakebox"] == HealthStatus.UNHEALTHY
+        assert any(p.get("health") == HealthStatus.UNHEALTHY.value
+                   and p.get("core_id") == "fakebox" for p in seen)
+
+    asyncio.run(main())
+
+
+# --------------------------------------------------------------------------- #
 # standalone runner
 # --------------------------------------------------------------------------- #
 

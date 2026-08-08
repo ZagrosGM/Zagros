@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
@@ -299,6 +300,14 @@ class SoftEtherDriver(BaseCoreDriver):
         if not account.settings.get("password"):
             raise CoreError(f"SoftEther account '{account.account_id}' needs settings.password.")
 
+    def _provision_credentials(self, account: UserAccount) -> None:
+        """alpha.7.2 (item 10): a password-less SoftEther account must NEVER
+        fail provisioning — mint a secure random password in place (the
+        apply_grants registry persists it like SSH/OpenVPN)."""
+        if not account.settings.get("password"):
+            account.settings = dict(account.settings)
+            account.settings["password"] = secrets.token_urlsafe(18)
+
     async def _kick_user_sessions(self, account_id: str) -> None:
         try:
             for session in await asyncio.to_thread(self._backend.session_list):
@@ -310,7 +319,7 @@ class SoftEtherDriver(BaseCoreDriver):
 
     async def create_account(self, account: UserAccount) -> None:
         self._ensure_supported(account.protocol)
-        self._ensure_credentials(account)
+        self._provision_credentials(account)
         existing = await asyncio.to_thread(self._backend.user_list)
         if account.account_id not in existing:
             await asyncio.to_thread(self._backend.user_create, account.account_id,
@@ -326,7 +335,7 @@ class SoftEtherDriver(BaseCoreDriver):
 
     async def update_account(self, account: UserAccount) -> None:
         self._ensure_supported(account.protocol)
-        self._ensure_credentials(account)
+        self._provision_credentials(account)
         previous = self._accounts.get(account.account_id)
         if previous is None or account.account_id not in (
                 await asyncio.to_thread(self._backend.user_list)):
@@ -422,6 +431,122 @@ class SoftEtherDriver(BaseCoreDriver):
                 },
             ))
         return out
+
+    # ------------------------------------------------------------------ #
+    # delivery (item 15): every granted compat transport, honestly
+    # ------------------------------------------------------------------ #
+
+    #: per-transport presentation facts — ports mirror EXACTLY what
+    #: apply_studio_document converges on the hub (no invented settings).
+    _TRANSPORTS = {
+        "l2tp": {"catalog_tag": "l2tp", "title": "VPN (L2TP/IPsec)",
+                 "port": "UDP 500 · 4500 · 1701", "feature": "feature_l2tp",
+                 "needs_psk": True},
+        "sstp": {"catalog_tag": "sstp", "title": "VPN (SSTP)",
+                 "port": "443/tcp", "feature": "feature_sstp", "needs_psk": False},
+        "pptp": {"catalog_tag": "pptp", "title": "VPN (PPTP)",
+                 "port": "1723/tcp", "feature": "feature_pptp", "needs_psk": False},
+        "ovpn": {"catalog_tag": "softether", "title": "VPN (OpenVPN clone)",
+                 "port": None,  # from settings.ovpn_ports
+                 "feature": "feature_ovpn", "needs_psk": False},
+    }
+
+    def _granted_transports(self, account: UserAccount) -> list[str]:
+        """Grant-aware transport view (same convention as sing-box/ssh):
+        inbound_tags whitelists, excluded_inbounds blacklists; catalog
+        tags are l2tp/sstp/pptp/softether; default = every transport."""
+        wanted = set(account.settings.get("inbound_tags") or [])
+        excluded = set(account.settings.get("excluded_inbounds") or [])
+        out = []
+        for proto, facts in self._TRANSPORTS.items():
+            tag = facts["catalog_tag"]
+            if wanted and tag not in wanted:
+                continue
+            if tag in excluded:
+                continue
+            out.append(proto)
+        return out
+
+    async def describe_delivery(
+        self,
+        account: UserAccount,
+        context: "DeliveryContext | None" = None,
+    ) -> "DeliveryProfile":
+        """SoftEther delivery (item 15): one section per GRANTED compat
+        transport — L2TP/IPsec (+PSK), SSTP, PPTP and the OpenVPN clone —
+        with full connection fields. Missing server facts (advertise_host,
+        an unset IPsec PSK, a disabled hub feature) become honest NOTE
+        artifacts instead of failing the whole delivery."""
+        from app.cores.delivery import (
+            ArtifactKind,
+            DeliveryArtifact,
+            DeliveryField,
+            DeliveryProfile,
+            DeliverySection,
+        )
+
+        self._ensure_supported(account.protocol)
+        self._provision_credentials(account)
+        s = self.settings
+        server = s.get("advertise_host")
+        password = str(account.settings["password"])
+        profile = DeliveryProfile(core_id=self.metadata.id)
+
+        for proto in self._granted_transports(account):
+            facts = self._TRANSPORTS[proto]
+            port = (facts["port"]
+                    or f"{str(s.get('ovpn_ports') or '1194').split(',')[0].strip()}/tcp")
+            fields = [
+                DeliveryField(key="host", label="Server",
+                              value=str(server) if server else "—"),
+                DeliveryField(key="port", label="Port", value=port),
+                DeliveryField(key="username", label="Username",
+                              value=account.account_id),
+                DeliveryField(key="password", label="Password",
+                              value=password, secret=True),
+                DeliveryField(key="hub", label="Virtual Hub",
+                              value=str(s["hub"])),
+            ]
+            notes: list[str] = []
+            if facts["needs_psk"]:
+                psk = str(s.get("ipsec_psk") or "")
+                if psk:
+                    fields.append(DeliveryField(key="ipsec_psk",
+                                                label="IPsec Pre-Shared Key",
+                                                value=psk, secret=True))
+                else:
+                    notes.append("L2TP/IPsec needs a pre-shared key — the admin "
+                                 "must set ipsec_psk (studio → SoftEther → L2TP) "
+                                 "before clients can connect.")
+            if not server:
+                notes.append("The server address is not configured yet "
+                             "(settings.advertise_host) — clients cannot dial "
+                             "until the admin sets it.")
+            if not s.get(facts["feature"]):
+                notes.append(f"The '{proto}' feature is currently OFF on the hub "
+                             "— enable it in the SoftEther studio document.")
+            artifacts: list[DeliveryArtifact] = [
+                DeliveryArtifact(kind=ArtifactKind.FIELDS, label=facts["title"],
+                                 fields=tuple(fields)),
+            ]
+            for text in notes:
+                artifacts.append(DeliveryArtifact(
+                    kind=ArtifactKind.NOTE, label="Attention", note=text))
+            profile.sections.append(DeliverySection(
+                protocol=proto, title=f"{self.metadata.name} · {facts['title']}",
+                engine="softether", inbound_tag=facts["catalog_tag"],
+                artifacts=artifacts,
+            ))
+        if not profile.sections:
+            profile.sections.append(DeliverySection(
+                protocol=account.protocol,
+                title=self.metadata.name, engine="softether",
+                artifacts=[DeliveryArtifact(
+                    kind=ArtifactKind.NOTE, label="No transports granted",
+                    note="No SoftEther transport is assigned to this account — "
+                         "select one in the user's core access.")],
+            ))
+        return profile
 
     # ------------------------------------------------------------------ #
     # client config (sealed delivery only)

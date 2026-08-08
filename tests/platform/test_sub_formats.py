@@ -7,6 +7,8 @@ format cannot express is named in notes — never fabricated, never silent.
 from __future__ import annotations
 
 import importlib.util
+import os
+import shutil
 import json
 import sys
 from pathlib import Path
@@ -100,7 +102,11 @@ def test_sing_box_json_is_valid_and_exact():
     outbounds = doc["outbounds"]
     selector = outbounds[0]
     assert selector["type"] == "selector" and selector["tag"] == "select"
-    proxy_tags = [o["tag"] for o in outbounds[1:-3]]
+    # modern shape (sing-box 1.13): only `direct` trails the proxy outbounds —
+    # no legacy `block`/`dns` special outbounds (removed upstream)
+    proxy_tags = [o["tag"] for o in outbounds[1:-1]]
+    assert outbounds[-1]["type"] == "direct"
+    assert not any(o.get("type") in ("block", "dns") for o in outbounds)
     assert len(proxy_tags) == len(set(proxy_tags)) == 6
     assert selector["default"] == proxy_tags[0]
     assert set(proxy_tags) <= set(selector["outbounds"])
@@ -123,6 +129,70 @@ def test_sing_box_json_is_valid_and_exact():
 
     assert doc["route"]["final"] == "select"
     assert any("garbage" in n for n in notes)
+
+
+def test_sing_box_quic_protocols_always_emit_tls():
+    """hy2/tuic are TLS-mandatory in sing-box — links carry no `security`
+    param, yet the rendered outbound MUST still carry a valid tls block
+    (verified against the real binary; the old renderer dropped it and
+    produced an unbootable config)."""
+    from app.platform.sub_formats import to_sing_box
+
+    text, _ = to_sing_box([
+        "hysteria2://pw@hy.example.com:8443?sni=hy.example.com&insecure=1#H",
+        "hy2://pw@hy2.example.com:443?obfs=salamander&obfs-password=x#H2",
+        "tuic://abcd-1234:pw@tu.example.com:10443?sni=tu.example.com"
+        "&allow_insecure=1#T",
+    ])
+    doc = json.loads(text)
+    hy2 = next(o for o in doc["outbounds"] if o.get("type") == "hysteria2"
+               and o["server"] == "hy.example.com")
+    assert hy2["tls"]["enabled"] is True
+    assert hy2["tls"]["server_name"] == "hy.example.com"
+    assert hy2["tls"]["insecure"] is True
+    tuic = next(o for o in doc["outbounds"] if o.get("type") == "tuic")
+    assert tuic["tls"]["enabled"] is True
+    assert tuic["tls"]["server_name"] == "tu.example.com"
+    assert tuic["tls"]["insecure"] is True
+
+
+_SINGBOX_BIN = os.environ.get("ZAGROS_SINGBOX_BIN") or shutil.which("sing-box") \
+    or ("/tmp/sbcheck/sb112" if os.path.exists("/tmp/sbcheck/sb112") else None)
+
+
+@pytest.mark.skipif(not _SINGBOX_BIN,
+                    reason="real sing-box binary unavailable "
+                           "(set ZAGROS_SINGBOX_BIN to enable)")
+def test_rendered_config_passes_real_binary_check(tmp_path):
+    """The subscription sing-box config must be BOOTABLE — validated with
+    `sing-box check` on the real binary (the legacy special outbounds that
+    1.13 removed used to fail this; never again silently)."""
+    import subprocess
+
+    from app.cores.drivers.singbox.driver import _x25519_keypair
+    from app.platform.sub_formats import to_sing_box
+
+    # the shared LINKS fixture uses placeholder ids/keys; the real binary
+    # fully validates them, so this check runs over structurally REAL links
+    # (genuine x25519 reality key + RFC4122 uuids).
+    _, real_pub = _x25519_keypair()
+    links = [
+        "vless://b831381d-6324-4d53-ad4f-8cda48b30811@de.example.com:443"
+        f"?security=reality&sni=www.microsoft.com&pbk={real_pub}&sid=ab12"
+        "&type=tcp&flow=xtls-rprx-vision#VLESS",
+        "hysteria2://pw@hy.example.com:8443?sni=hy.example.com&insecure=1#HY2",
+        "tuic://b831381d-6324-4d53-ad4f-8cda48b30811:pw@tu.example.com:10443"
+        "?sni=tu.example.com&congestion_control=bbr#TUIC",
+        "ss://YWVzLTEyOC1nY206cHc@ss.example.com:8388#SS",
+    ]
+    text, notes = to_sing_box(links, [])
+    cfg = tmp_path / "sub.json"
+    cfg.write_text(text)
+    proc = subprocess.run([_SINGBOX_BIN, "check", "-c", str(cfg)],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, (
+        f"subscription config failed {_SINGBOX_BIN} check:\n"
+        f"{proc.stdout}\n{proc.stderr}\n{text[:1500]}")
 
 
 def test_empty_set_renders_valid_documents():

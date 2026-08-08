@@ -111,11 +111,17 @@ class CoreHostModel(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     core_id: Mapped[str] = mapped_column(String(32), index=True)
+    # alpha.7.2 (item 13): which inbound of the core this host variant
+    # belongs to — marzban-era rows backfilled from extras by migration
+    # 0008; "" never matches a live tag (inert by design).
+    inbound_tag: Mapped[str] = mapped_column(String(256), default="", server_default="")
     remark: Mapped[str] = mapped_column(String(256))
     address: Mapped[str] = mapped_column(String(256))
     port: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    sni: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    host_header: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # comma multi-value lists (MultipleSNI/MultipleHost) need room — 1000,
+    # mirroring the legacy hosts table (e7b869e999b4)
+    sni: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    host_header: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     path: Mapped[str | None] = mapped_column(String(256), nullable=True)
     security: Mapped[str | None] = mapped_column(String(32), nullable=True)
     alpn: Mapped[str | None] = mapped_column(String(128), nullable=True)

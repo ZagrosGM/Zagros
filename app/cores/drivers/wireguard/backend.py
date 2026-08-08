@@ -11,6 +11,7 @@ through ``wg-quick``.
 """
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import shutil
@@ -18,8 +19,12 @@ import subprocess
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import x25519
+
 from app.cores.drivers.wireguard.wgtool import (
     WireGuardDump,
+    is_valid_key,
     parse_wg_dump,
     strip_config,
 )
@@ -27,6 +32,50 @@ from app.cores.exceptions import CoreError
 from app.cores.types import CoreMetrics
 
 logger = logging.getLogger("zagros.cores.drivers.wireguard")
+
+
+# ---------------------------------------------------------------------- #
+# pure-python key material (alpha.7.2)                                    #
+# ---------------------------------------------------------------------- #
+# WireGuard keys are RFC 7748 X25519 scalars — deriving/generating them
+# never needed the `wg` binary; shelling out only made the CONFIGURE path
+# (studio wizard, account provisioning) depend on wireguard-tools being
+# installed on the host. That violated the rule that building an inbound
+# must not require a running — or even installed — core. Key material is
+# now computed in-process; the `wg` binary is touched exclusively by
+# interface operations (up / syncconf / down / dump).
+def public_from_private_pure(private: str) -> str:
+    """base64(X25519 public) for a base64 WireGuard private key.
+
+    Bit-for-bit identical to `wg pubkey` (X25519 clamps the scalar
+    internally, exactly like the kernel/tooling does)."""
+    candidate = (private or "").strip()
+    if not is_valid_key(candidate):
+        raise CoreError(
+            "not a valid WireGuard private key (base64, 32 bytes)."
+        )
+    raw = base64.b64decode(candidate)
+    private_key = x25519.X25519PrivateKey.from_private_bytes(raw)
+    public_raw = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    return base64.b64encode(public_raw).decode("ascii")
+
+
+def generate_keypair_pure() -> tuple[str, str]:
+    """(private, public) — same shape/convention as `wg genkey`+`wg pubkey`:
+    32 random bytes, clamped, base64-encoded."""
+    raw = bytearray(os.urandom(32))
+    raw[0] &= 248
+    raw[31] &= 127
+    raw[31] |= 64
+    private = base64.b64encode(bytes(raw)).decode("ascii")
+    return private, public_from_private_pure(private)
+
+
+def generate_preshared_pure() -> str:
+    """base64(32 random bytes) — exactly what `wg genpsk` produces."""
+    return base64.b64encode(os.urandom(32)).decode("ascii")
 
 
 @runtime_checkable
@@ -176,17 +225,18 @@ class LocalWireGuardBackend:
         raise CoreError("no supported package manager found (apt/dnf/yum/pacman).")
 
     def generate_keypair(self) -> tuple[str, str]:
-        private = self._run([self.executable, "genkey"]).strip()
-        public = self._run([self.executable, "pubkey"], input_text=private).strip()
-        return private, public
+        # pure python (alpha.7.2): the configure/provision path must work on
+        # a host where wireguard-tools is not installed yet.
+        return generate_keypair_pure()
 
     def generate_preshared(self) -> str:
-        return self._run([self.executable, "genpsk"]).strip()
+        return generate_preshared_pure()
 
     def public_from_private(self, private: str) -> str:
         """Derive the public key for an operator-supplied private key (the
-        studio wizard accepts a custom server key)."""
-        return self._run([self.executable, "pubkey"], input_text=private.strip()).strip()
+        studio wizard accepts a custom server key). Pure python — identical
+        to `wg pubkey`, but never fails on a missing binary."""
+        return public_from_private_pure(private)
 
     def write_server_private_key(self, private: str) -> None:
         """Persist an operator-supplied server private key (0600), replacing
@@ -198,8 +248,7 @@ class LocalWireGuardBackend:
         if os.path.exists(self.key_path):
             with open(self.key_path, encoding="utf-8") as fh:
                 private = fh.read().strip()
-            public = self._run([self.executable, "pubkey"], input_text=private).strip()
-            return private, public
+            return private, public_from_private_pure(private)
         private, public = self.generate_keypair()
         self._atomic_write(self.key_path, private + "\n", mode=0o600)
         logger.info("wireguard: generated new server keypair (%s).", self.key_path)
@@ -208,13 +257,38 @@ class LocalWireGuardBackend:
     # ------------------------------------------------------------------ #
     # lifecycle
     # ------------------------------------------------------------------ #
+    def _run_up(self) -> None:
+        """wg-quick up with STRUCTURED failure diagnosis (alpha.7.2): a bare
+        'Operation not permitted' tells the operator nothing — run the
+        NET_ADMIN/kernel-module/container probes and attach the per-check
+        fixes for THIS host."""
+        try:
+            self._run([self.quick, "up", self.config_path], timeout=60)
+        except CoreError as exc:
+            text = str(exc).lower()
+            if not any(pattern in text for pattern in (
+                    "operation not permitted", "not permitted", "eperm",
+                    "permission denied", "access denied")):
+                raise
+            from app.cores.netdiag import (
+                diagnose_net_admin_kernel,
+                format_guidance,
+            )
+
+            checks = diagnose_net_admin_kernel("wireguard", "WireGuard")
+            raise CoreError(format_guidance(
+                checks,
+                f"wireguard interface '{self.interface}' could not be "
+                f"created — {exc}",
+            )) from exc
+
     def up(self, config_text: str) -> None:
         self._ensure_host_tools()
         self._atomic_write(self.config_path, config_text)
         if self.is_running():
             self.sync(config_text)
             return
-        self._run([self.quick, "up", self.config_path], timeout=60)
+        self._run_up()
 
     def sync(self, config_text: str) -> None:
         self._atomic_write(self.config_path, config_text)
@@ -224,7 +298,7 @@ class LocalWireGuardBackend:
             self._run([self.executable, "syncconf", self.interface, self.stripped_path])
         except CoreError:
             # interface not up yet (or just died) — bring it back with full config
-            self._run([self.quick, "up", self.config_path], timeout=60)
+            self._run_up()
 
     def down(self) -> None:
         try:

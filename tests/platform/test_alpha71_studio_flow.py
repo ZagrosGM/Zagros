@@ -197,9 +197,9 @@ def test_materialize_studio_maps_core_error_to_422():
         ),
     )
     with pytest.raises(HTTPException) as ei:
-        asyncio.run(_materialize_studio(runtime, "tuic", _RejectDriver()))
+        asyncio.run(_materialize_studio(runtime, "wireguard", _RejectDriver()))
     assert ei.value.status_code == 422
-    assert "tuic:" in str(ei.value.detail)
+    assert "wireguard:" in str(ei.value.detail)
     assert "ONE listener" in str(ei.value.detail)
 
 
@@ -499,10 +499,18 @@ def _walk(obj):
 
 
 def test_every_core_has_a_blueprint():
-    for core in ("xray", "singbox", "hysteria2", "tuic", "openvpn",
+    # canonical ids ONLY (alpha.7.2 item 7: the dashboard addresses cores by
+    # their real ids — "sing-box" — and those must resolve, not 404)
+    for core in ("xray", "sing-box", "openvpn",
                  "wireguard", "ssh", "softether"):
         bp = blueprint_for(core)
         assert bp and bp["core_id"] == core and bp["protocols"], core
+    # legacy alias keeps working but normalizes to the canonical id
+    bp = blueprint_for("singbox")
+    assert bp["core_id"] == "sing-box" and bp["protocols"]
+    # a genuinely wizardless engine fails loudly
+    with pytest.raises(KeyError):
+        blueprint_for("does-not-exist")
 
 
 def test_xray_blueprint_matrix():

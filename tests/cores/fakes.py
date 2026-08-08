@@ -84,8 +84,35 @@ class FakeV2RayStats:
 # openvpn                                                                #
 # ---------------------------------------------------------------------- #
 
+# Real self-signed test CA (openssl req -x509, CN=Zagros Test CA) — the
+# driver's describe_delivery derives the CA fingerprint from real DER, so a
+# fake "CA" blob is no longer a valid fixture (alpha.7.2, item 15).
+TEST_CA_CRT = (
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIIDEzCCAfugAwIBAgIUYULfBbJOkPLeIiRrEi/j0GbsGPQwDQYJKoZIhvcNAQEL\n"
+    "BQAwGTEXMBUGA1UEAwwOWmFncm9zIFRlc3QgQ0EwHhcNMjYwODA3MjI0MTEyWhcN\n"
+    "MzYwODA0MjI0MTEyWjAZMRcwFQYDVQQDDA5aYWdyb3MgVGVzdCBDQTCCASIwDQYJ\n"
+    "KoZIhvcNAQEBBQADggEPADCCAQoCggEBAMULa8BLxMw6vshNPbA+nCTqn48JEE8s\n"
+    "ercHIrEOelKYb4WZjH2bAZmCCIIOwaOLuZkoizrTr1yJwSqABLIDaO1l35B5R8vP\n"
+    "VCUouYoxR/2LK1xedhlNo/LHsOxhiyA3AxuLDwVD5Id9Xw0ajsYdBPUq4/Etvryz\n"
+    "4OLM4FPFb2u34wL4GJVLDB2msVTyP3BECmABqoAzhVXqFAfPVfy1G8MMtjladVbX\n"
+    "1CI5nyTwZcBxunyBYBDf6GdUT1cdoCmQmonmCAsNQ7/Qfi6HxWOrR/+WV82wNRNP\n"
+    "ohc0I7jqPe7HXNr3DaP/b9CKEBCql6pFW/XztSUHq4AO+FjqSdcTousCAwEAAaNT\n"
+    "MFEwHQYDVR0OBBYEFJBIR37iqVOenMiHlSV2iVNfsf88MB8GA1UdIwQYMBaAFJBI\n"
+    "R37iqVOenMiHlSV2iVNfsf88MA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQEL\n"
+    "BQADggEBACCSXd+9Yo1SBCUG/KU+7ucO/PZ/9muobdla/zFNdLWDBKfDNkEwOod/\n"
+    "AJIdbsG9EPSxn/SYbW5uhRySGdsy2YmktIRTdIuIuW2joJ3Wh5CXGqihmTJC7gl6\n"
+    "kEAguDybf264JO9HCVrVIsT6goLXwm2NxDxRecF0yeJB7cq780ltzWjeLEDl9sI9\n"
+    "KdHOwXNWMaE1w8NZZia0IjeIgY2nH9SmUcBAbmc+Jp5W2ctV0joS2aKYARlQcMhK\n"
+    "fJ8oeYSSG2O71SKCY6vZFHmAWiSUAcU0kyiVK49y375aPs1gq27N0k+4Wszx+SPh\n"
+    "zaJ2oIKBQtMHmV5zCJHbgwTCIgUQXBA=\n"
+    "-----END CERTIFICATE-----\n"
+)
+
+
 class FakeOpenVPNBackend:
-    disconnect_log = "disconnect-log.jsonl"
+    """Multi-listener fake (alpha.7.2): mirrors LocalOpenVPNBackend's
+    configure() contract — one server.conf + hook per tag."""
 
     def __init__(self, status_text: str = ""):
         self.status_text = status_text
@@ -93,7 +120,24 @@ class FakeOpenVPNBackend:
         self.auth_handler = None
         self.running = True
         self.disconnects: list = []
-        self.config = ""
+        self.configs: dict[str, str] = {}
+        self.hooks: dict[str, str] = {}
+        self.mgmt_ports: dict[str, int] = {}
+        self.configure_calls = 0
+
+    def disconnect_log_path(self, tag: str) -> str:
+        return f"/wd/listeners/{tag}/disconnect-log.jsonl"
+
+    def configure(self, specs: list[dict[str, Any]]) -> None:
+        self.configure_calls += 1
+        self.configs = {str(s["tag"]): str(s["server_conf"]) for s in specs}
+        self.hooks = {str(s["tag"]): str(s["hook_script"]) for s in specs}
+        self.mgmt_ports = {str(s["tag"]): int(s["mgmt_port"]) for s in specs}
+
+    @property
+    def config(self) -> str:
+        """Convenience single-listener view (legacy assertions)."""
+        return next(iter(self.configs.values()), "")
 
     def start(self): self.running = True
     def stop(self): self.running = False
@@ -104,12 +148,11 @@ class FakeOpenVPNBackend:
     def logs(self, tail: int = 200): return []
     def management_alive(self): return True
     def install_packages(self): return "ok"
+    def command(self, cmd, timeout=30.0, *, tag=None): return ""
 
     def ensure_pki(self) -> dict[str, str]:
-        return {"ca_crt": "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
+        return {"ca_crt": TEST_CA_CRT,
                 "tls_crypt": "TLS-KEY"}
-    def apply_config(self, server_conf: str) -> None: self.config = server_conf
-    def install_hook_script(self, script: str) -> str: return "/tmp/hook.sh"
     def set_auth_handler(self, handler) -> None: self.auth_handler = handler
     def status_clients(self) -> list[StatusClient]: return parse_status3(self.status_text)
     def kill_client(self, common_name: str) -> bool:
@@ -141,6 +184,13 @@ class FakeWireGuardBackend:
         return (f"priv-{self._counter}", ("%02d" % self._counter).ljust(43, "K") + "=")
 
     def generate_preshared(self): return "P" * 43 + "="
+
+    def public_from_private(self, private):
+        from app.cores.drivers.wireguard.backend import public_from_private_pure
+        return public_from_private_pure(private)
+
+    def write_server_private_key(self, private):
+        self.server_private_written = private
 
     def up(self, config_text: str):
         self.synced.append(config_text)
@@ -176,56 +226,6 @@ class FailingBackend(FakeXrayBackend):
 
     def remove_user(self, tag, email):
         raise self.exc
-
-
-# ---------------------------------------------------------------------- #
-# hysteria2                                                              #
-# ---------------------------------------------------------------------- #
-
-class FakeHy2Backend:
-    def __init__(self):
-        self.configs: list[str] = []
-        self.running = False
-        self.restarts = 0
-        self._traffic: dict[str, tuple[int, int]] = {}
-        self._online: dict[str, int] = {}
-        self.kicked: list[list[str]] = []
-
-    def start(self): self.running = True
-    def stop(self): self.running = False
-    def restart(self): self.restarts += 1
-    def is_running(self): return self.running
-    def version(self): return "v2.6.1"
-    def metrics(self): return CoreMetrics()
-    def logs(self, tail: int = 200): return []
-    def install_binary(self): return "v2.6.1"
-    def ensure_tls(self, cn: str): return ("/fake/server.crt", "/fake/server.key")
-    def apply_config(self, yaml_text: str): self.configs.append(yaml_text)
-    def traffic(self): return dict(self._traffic)
-    def online(self): return dict(self._online)
-    def kick(self, users): self.kicked.append(list(users))
-
-
-# ---------------------------------------------------------------------- #
-# tuic                                                                   #
-# ---------------------------------------------------------------------- #
-
-class FakeTUICBackend:
-    def __init__(self):
-        self.configs: list[dict] = []
-        self.running = False
-        self.restarts = 0
-
-    def start(self): self.running = True
-    def stop(self): self.running = False
-    def restart(self): self.restarts += 1
-    def is_running(self): return self.running
-    def version(self): return "tuic-server 1.0.0"
-    def metrics(self): return CoreMetrics()
-    def logs(self, tail: int = 200): return []
-    def install_binary(self): return "1.0.0"
-    def ensure_tls(self, cn: str): return ("/fake/tuic.crt", "/fake/tuic.key")
-    def apply_config(self, config): self.configs.append(config)
 
 
 # ---------------------------------------------------------------------- #

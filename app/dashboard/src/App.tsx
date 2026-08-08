@@ -15,6 +15,7 @@ const Cores = lazy(() => import("./pages/Cores"));
 const Routing = lazy(() => import("./pages/Routing"));
 const Outbounds = lazy(() => import("./pages/Outbounds"));
 const Inbounds = lazy(() => import("./pages/Inbounds"));
+const Hosts = lazy(() => import("./pages/Hosts"));
 const Dns = lazy(() => import("./pages/Dns"));
 const Certificates = lazy(() => import("./pages/Certificates"));
 const Sessions = lazy(() => import("./pages/Sessions"));
@@ -52,6 +53,7 @@ export default function App() {
           <Route path="routing" element={<Suspense fallback={<PageFallback />}><Routing /></Suspense>} />
           <Route path="outbounds" element={<Suspense fallback={<PageFallback />}><Outbounds /></Suspense>} />
           <Route path="inbounds" element={<Suspense fallback={<PageFallback />}><Inbounds /></Suspense>} />
+          <Route path="hosts" element={<Suspense fallback={<PageFallback />}><Hosts /></Suspense>} />
           <Route path="dns" element={<Suspense fallback={<PageFallback />}><Dns /></Suspense>} />
           <Route path="certificates" element={<Suspense fallback={<PageFallback />}><Certificates /></Suspense>} />
           <Route path="sessions" element={<Suspense fallback={<PageFallback />}><Sessions /></Suspense>} />

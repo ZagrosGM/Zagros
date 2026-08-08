@@ -10,7 +10,7 @@ import {
 import { useMemo, useState } from "react";
 import { DataTable, type Column } from "../components/DataTable";
 import { toast } from "../components/feedback";
-import { ConfirmDialog, Dialog } from "../components/overlays";
+import { ConfirmDialog, Dialog, RowMenu } from "../components/overlays";
 import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Progress, Skeleton, Switch, cn } from "../components/ui";
 import { api, ApiError } from "../lib/api";
 import { useDigits, formatBytes, formatDate, formatRelative } from "../lib/format";
@@ -43,7 +43,7 @@ export default function Admins() {
   const qc = useQueryClient();
   const [dialog, setDialog] = useState<{ mode: "create" } | { mode: "edit"; admin: AdminUser } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<AdminUser | null>(null);
-  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [menu, setMenu] = useState<{ admin: AdminUser; anchor: HTMLElement } | null>(null);
 
   const admins = useQuery({
     queryKey: ["admins"],
@@ -138,32 +138,38 @@ export default function Admins() {
       id: "actions", header: "", width: "44px",
       cell: (a) => (
         <div className="relative" onClick={(e) => e.stopPropagation()}>
-          <button aria-label="actions" onClick={() => setMenuFor(menuFor === a.username ? null : a.username)}
+          <button aria-label="actions"
+            onClick={(e) => setMenu((m) => (m?.admin.username === a.username ? null : { admin: a, anchor: e.currentTarget }))}
             className="rounded-lg p-1.5 text-content-3 hover:bg-surface-3 hover:text-content">
             <MoreHorizontal size={16} />
           </button>
-          {menuFor === a.username && (
-            <>
-              <div className="fixed inset-0 z-30" onClick={() => setMenuFor(null)} />
-              <div className="absolute end-0 top-8 z-40 w-52 overflow-hidden rounded-xl border border-border-strong bg-surface-1 py-1 shadow-pop">
-                <MenuItem icon={<Pencil size={14} />} label={t("common.edit")} onClick={() => { setMenuFor(null); setDialog({ mode: "edit", admin: a }); }} />
-                <MenuItem icon={<Ban size={14} />} label="disable all users" onClick={() => { setMenuFor(null); usersAction.mutate({ username: a.username, action: "disable" }); }} />
-                <MenuItem icon={<Check size={14} />} label="activate all users" onClick={() => { setMenuFor(null); usersAction.mutate({ username: a.username, action: "activate" }); }} />
-                <MenuItem icon={<Eraser size={14} />} label="reset usage counter" onClick={() => { setMenuFor(null); resetUsage.mutate(a.username); }} />
-                {!a.is_sudo && (
-                  <>
-                    <div className="my-1 border-t border-border" />
-                    <MenuItem icon={<Trash2 size={14} />} label={t("common.delete")} danger
-                      onClick={() => { setMenuFor(null); setConfirmDelete(a); }} />
-                  </>
-                )}
-              </div>
-            </>
-          )}
         </div>
       ),
     },
   ];
+
+  // α7.2 (item 16): single portal-mounted row menu — never clipped by the
+  // table's scroll container.
+  const ma = menu?.admin;
+  const rowMenu = (
+    <RowMenu open={!!menu} anchor={menu?.anchor ?? null} onClose={() => setMenu(null)} width={208}>
+      {ma && (
+        <>
+          <MenuItem icon={<Pencil size={14} />} label={t("common.edit")} onClick={() => { setMenu(null); setDialog({ mode: "edit", admin: ma }); }} />
+          <MenuItem icon={<Ban size={14} />} label="disable all users" onClick={() => { setMenu(null); usersAction.mutate({ username: ma.username, action: "disable" }); }} />
+          <MenuItem icon={<Check size={14} />} label="activate all users" onClick={() => { setMenu(null); usersAction.mutate({ username: ma.username, action: "activate" }); }} />
+          <MenuItem icon={<Eraser size={14} />} label="reset usage counter" onClick={() => { setMenu(null); resetUsage.mutate(ma.username); }} />
+          {!ma.is_sudo && (
+            <>
+              <div className="my-1 border-t border-border" />
+              <MenuItem icon={<Trash2 size={14} />} label={t("common.delete")} danger
+                onClick={() => { setMenu(null); setConfirmDelete(ma); }} />
+            </>
+          )}
+        </>
+      )}
+    </RowMenu>
+  );
 
   return (
     <div className="space-y-4 animate-fade-up">
@@ -195,6 +201,7 @@ export default function Admins() {
             action={<Button size="sm" onClick={() => setDialog({ mode: "create" })}><Plus size={14} />{t("admins.new")}</Button>} />}
         />
       )}
+      {rowMenu}
 
       {dialog && (
         <AdminDialog

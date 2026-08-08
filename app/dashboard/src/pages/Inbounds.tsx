@@ -2,7 +2,7 @@
 // structured spec through the studio service (preview → apply); no JSON is
 // ever shown to the operator.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronLeft, Eye, Plus, Trash2, Waypoints, Wand2 } from "lucide-react";
+import { CheckCircle2, ChevronLeft, Eye, FileUp, Link2, Loader2, Plus, Trash2, Waypoints, Wand2, XCircle } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "../components/feedback";
 import { ConfirmDialog, Dialog } from "../components/overlays";
@@ -39,6 +39,14 @@ export default function Inbounds() {
     queryFn: () => api.get<{ cores: CoreView[] }>("/zagros/cores"),
   });
   const effectiveCore = coreId || cores.data?.cores[0]?.id || "";
+
+  // wizard capability is a FUNCTION of the selected core (dynamic, from the
+  // backend's own metadata — never hardcode a per-core assumption here)
+  const selectedCore = useMemo(
+    () => (cores.data?.cores ?? []).find((c) => c.id === effectiveCore) ?? null,
+    [cores.data, effectiveCore],
+  );
+  const wizardCapable = selectedCore?.studio_inbounds_path != null;
 
   const raw = useQuery({
     queryKey: ["zagros", "studio", "raw", effectiveCore],
@@ -83,7 +91,10 @@ export default function Inbounds() {
             {!cores.data?.cores?.length && <option value="">—</option>}
           </Select>
         </Field>
-        <Button size="sm" onClick={() => setWizard(true)} disabled={!effectiveCore}><Wand2 size={13} /> add inbound</Button>
+        <Button size="sm" onClick={() => setWizard(true)}
+          disabled={!effectiveCore || !wizardCapable}
+          title={wizardCapable ? undefined : "this core does not expose studio inbounds — the wizard is unavailable for it"}>
+          <Wand2 size={13} /> add inbound</Button>
       </div>
 
       {!effectiveCore ? (
@@ -93,8 +104,12 @@ export default function Inbounds() {
       ) : inbounds.length === 0 ? (
         <Card>
           <EmptyState title="No inbounds on this core"
-            hint="Run the wizard for a protocol-specific, validated creation flow — no hand-written config."
-            action={<Button size="sm" onClick={() => setWizard(true)}><Wand2 size={13} /> launch wizard</Button>} />
+            hint={wizardCapable
+              ? "Run the wizard for a protocol-specific, validated creation flow — no hand-written config."
+              : "This core does not expose studio inbounds, so no wizard is offered for it."}
+            action={wizardCapable
+              ? <Button size="sm" onClick={() => setWizard(true)}><Wand2 size={13} /> launch wizard</Button>
+              : undefined} />
         </Card>
       ) : (
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -114,14 +129,16 @@ export default function Inbounds() {
               </Button>
             </Card>
           ))}
-          <button onClick={() => setWizard(true)}
-            className="grid min-h-[92px] place-items-center rounded-2xl border border-dashed border-border-strong text-content-3 transition-colors hover:border-brand hover:text-brand">
-            <span className="flex items-center gap-2 text-sm"><Plus size={16} /> add inbound</span>
-          </button>
+          {wizardCapable && (
+            <button onClick={() => setWizard(true)}
+              className="grid min-h-[92px] place-items-center rounded-2xl border border-dashed border-border-strong text-content-3 transition-colors hover:border-brand hover:text-brand">
+              <span className="flex items-center gap-2 text-sm"><Plus size={16} /> add inbound</span>
+            </button>
+          )}
         </div>
       )}
 
-      {wizard && effectiveCore && (
+      {wizard && effectiveCore && wizardCapable && (
         <WizardDialog coreId={effectiveCore} existingTags={inbounds.map((i) => i.tag)}
           onClose={() => setWizard(false)}
           onDone={() => {
@@ -144,11 +161,24 @@ export default function Inbounds() {
   );
 }
 
+interface WizardImportResult {
+  tag: string; protocol: string; listen: string | null; port: number;
+  transport: string; security: string;
+  settings: Record<string, string | number | boolean | string[]>;
+  unmapped: { key: string; value: string; reason: string }[];
+  source_name?: string;
+}
+interface WizardPreviewResult { valid: boolean; errors: string[]; diff?: string | null }
+
 function WizardDialog({ coreId, existingTags, onClose, onDone }: {
   coreId: string; existingTags: string[]; onClose: () => void; onDone: () => void;
 }) {
   const t = useT();
   const [step, setStep] = useState(0);
+  // item 6: Simple/Advanced — Simple asks only what genuinely has no sane
+  // default (tag auto-derived, listen fixed to 0.0.0.0, defaulted optional
+  // fields hidden); Advanced shows everything a Marzban-style admin expects.
+  const [advanced, setAdvanced] = useState(false);
   const [proto, setProto] = useState<WizardProtocol | null>(null);
   const [transport, setTransport] = useState<WizardTransport | null>(null);
   const [security, setSecurity] = useState<WizardSecurity | null>(null);
@@ -156,8 +186,15 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
   const [listen, setListen] = useState("0.0.0.0");
   const [port, setPort] = useState(443);
   const [fields, setFields] = useState<Record<string, string | string[]>>({});
+  const [touched, setTouched] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // item 6 Import: prefill the stepper from an existing client share link
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState("");
+  const [importNote, setImportNote] = useState<string[]>([]);
 
   const schema = useQuery({
     queryKey: ["zagros", "wizard-schema", coreId],
@@ -171,7 +208,7 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
   const effSecurity = security ?? effTransport?.securities[0] ?? null;
 
   const pickProto = (p: WizardProtocol) => {
-    setProto(p); setTransport(null); setSecurity(null); setFields({}); setPort(p.default_port || 443);
+    setProto(p); setTransport(null); setSecurity(null); setFields({}); setTouched(new Set()); setPort(p.default_port || 443);
   };
   const pickTransport = (tr: WizardTransport) => { setTransport(tr); setSecurity(null); };
 
@@ -195,6 +232,37 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
     };
   }, [effProto, effTransport, effSecurity, tag, listen, port, fields]);
 
+  // item 6 Validation: schema-driven, per-field, BEFORE the server round
+  // (required fields, int parse, port range, tag uniqueness); honesty rule —
+  // the preview call below is still the authoritative server-side verdict.
+  const fieldErrors = useMemo(() => {
+    const errs: Record<string, string> = {};
+    for (const f of effSecurity?.fields ?? []) {
+      const raw = fields[f.key];
+      const empty = raw === undefined || raw === "" || (Array.isArray(raw) && raw.length === 0);
+      const val = raw === undefined ? f.default : raw;
+      if (f.required && (val === undefined || val === "" || (Array.isArray(val) && val.length === 0)))
+        errs[f.key] = "required";
+      else if (!empty && f.type === "int" && !/^-?\d+$/.test(String(raw)))
+        errs[f.key] = "must be an integer";
+    }
+    return errs;
+  }, [effSecurity, fields]);
+  const missingRequired = (effSecurity?.fields ?? []).filter((f) => {
+    const val = fields[f.key] === undefined ? f.default : fields[f.key];
+    return f.required && (val === undefined || val === "" || (Array.isArray(val) && val.length === 0));
+  });
+
+  // item 6 Preview: server-side dry-run of the EXACT create patch (shared
+  // backend path with apply) — schema verdict + unified diff, nothing saved.
+  const specKey = JSON.stringify(spec);
+  const preview = useQuery({
+    queryKey: ["zagros", "wizard-preview", coreId, specKey],
+    queryFn: () => api.post<WizardPreviewResult>(`/zagros/studio/${coreId}/wizard/preview`, spec),
+    enabled: !!spec && step === 3 && missingRequired.length === 0,
+    retry: false,
+  });
+
   const submit = async () => {
     if (!spec) return;
     setBusy(true); setError("");
@@ -210,12 +278,43 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
     }
   };
 
+  const doImport = async () => {
+    const link = importText.trim();
+    if (!link || !schema.data) return;
+    setImportBusy(true); setImportError(""); setImportNote([]);
+    try {
+      const res = await api.post<WizardImportResult>(`/zagros/cores/${coreId}/wizard/import`, { link });
+      const p = schema.data.protocols.find((x) => x.id === res.protocol);
+      const tr = p?.transports.find((x) => x.id === res.transport);
+      const sec = tr?.securities.find((x) => x.id === res.security);
+      if (!p || !tr || !sec) throw new Error("imported cell missing from the fetched blueprint — refetch the schema");
+      setProto(p); setTransport(tr); setSecurity(sec);
+      const mapped: Record<string, string | string[]> = {};
+      for (const [k, v] of Object.entries(res.settings)) {
+        mapped[k] = Array.isArray(v) ? v.map(String) : typeof v === "boolean" ? String(v) : String(v);
+      }
+      setFields(mapped); setTouched(new Set());
+      setTag(res.tag); setPort(res.port);
+      if (res.listen) setListen(res.listen);
+      if (res.unmapped.length) {
+        setImportNote(res.unmapped.map((u) => `${u.key} = ${u.value} — ${u.reason}`));
+      }
+      setImportOpen(false); setImportText("");
+      setStep(3); // review before create — never auto-apply an import
+    } catch (e) {
+      setImportError(e instanceof ApiError ? e.message : e instanceof Error ? e.message : t("common.error"));
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
   const stepNames = ["choose protocol", "transport", "security", "details & review"];
+  const formInvalid = missingRequired.length > 0 || Object.keys(fieldErrors).length > 0;
   const invalid =
     step === 0 ? !effProto
     : step === 1 ? !effTransport
     : step === 2 ? !effSecurity
-    : !spec || !port || port < 1 || port > 65535 || existingTags.includes(spec.tag);
+    : !spec || !port || port < 1 || port > 65535 || existingTags.includes(spec.tag) || formInvalid;
 
   const renderChoice = (
     <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
@@ -233,23 +332,87 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
     </div>
   );
 
+  // a field earns its place in Simple mode when it is required, has no
+  // default (the server cannot guess it), or the operator already set it —
+  // everything else lives under Advanced (full Marzban-style control).
+  const fieldVisible = (f: WizardField) =>
+    advanced || !!f.required || f.default === undefined ||
+    (fields[f.key] !== undefined && fields[f.key] !== "" &&
+     !(Array.isArray(fields[f.key]) && (fields[f.key] as string[]).length === 0));
+
   return (
     <Dialog open onClose={onClose} wide
       title={<span className="inline-flex items-center gap-2"><Wand2 size={16} className="text-brand" /> inbound wizard — {coreId}</span>}
-      subtitle={`step ${step + 1} of 4 — ${stepNames[step]}`}
+      subtitle={`step ${step + 1} of 4 — ${stepNames[step]}${advanced ? "" : " · simple"}`}
+      headerActions={
+        <div className="flex items-center gap-1.5">
+          <Button variant="ghost" size="sm" onClick={() => { setImportOpen((v) => !v); setImportError(""); }}
+            title="prefill the wizard from an existing client share link">
+            <Link2 size={13} /> import</Button>
+          <div className="flex overflow-hidden rounded-lg border border-border" role="group" aria-label="wizard mode">
+            {(["simple", "advanced"] as const).map((m) => (
+              <button key={m} onClick={() => setAdvanced(m === "advanced")}
+                className={`px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                  (m === "advanced") === advanced ? "bg-brand-soft text-brand" : "text-content-3 hover:text-content-2"}`}>
+                {m}
+              </button>
+            ))}
+          </div>
+        </div>
+      }
       footer={
         <>
           {step > 0 && <Button variant="ghost" onClick={() => setStep(step - 1)}><ChevronLeft size={14} /> back</Button>}
           <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
           {step < 3
             ? <Button onClick={() => setStep(step + 1)} disabled={invalid}>continue</Button>
-            : <Button onClick={submit} loading={busy} disabled={invalid}><Wand2 size={14} /> create inbound</Button>}
+            : <Button onClick={submit} loading={busy}
+                disabled={invalid || (!!preview.data && !preview.data.valid)}
+                title={preview.data && !preview.data.valid ? "server validation failed — fix the fields first" : undefined}>
+                <Wand2 size={14} /> create inbound</Button>}
         </>
       }>
+      {importOpen && (
+        <div className="mb-3 space-y-2 rounded-xl border border-border p-3">
+          <p className="flex items-center gap-1.5 text-[12px] font-medium text-content-2">
+            <FileUp size={13} className="text-brand" /> import from a share link
+            <span className="text-content-3">— vless / vmess / trojan / ss / hysteria2 / tuic</span>
+          </p>
+          <Textarea rows={2} dir="ltr" className="font-mono text-[11px]"
+            placeholder="vless://…?type=ws&security=tls#name"
+            value={importText} onChange={(e) => setImportText(e.target.value)} />
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={doImport} loading={importBusy} disabled={!importText.trim()}>
+              <Link2 size={13} /> parse &amp; prefill</Button>
+            <span className="text-[11px] text-content-3">
+              the link's credentials belong to a user account — only listener facts are imported;
+              anything unmappable is reported, never guessed.
+            </span>
+          </div>
+          {importError && <p role="alert" className="rounded-lg border border-danger/30 bg-danger-soft px-2.5 py-1.5 text-[11px] text-danger">{importError}</p>}
+        </div>
+      )}
+      {importNote.length > 0 && (
+        <div className="mb-3 rounded-xl border border-border-strong bg-surface-2 px-3 py-2">
+          <p className="mb-1 text-[11px] font-semibold text-content-2">imported with notes (nothing guessed):</p>
+          <ul className="list-inside list-disc font-mono text-[10.5px] text-content-3" dir="ltr">
+            {importNote.map((n) => <li key={n}>{n}</li>)}
+          </ul>
+        </div>
+      )}
       {schema.isLoading && <div className="space-y-2"><Skeleton className="h-10" /><Skeleton className="h-24" /></div>}
       {schema.isError && (
         <div role="alert" className="flex items-center justify-between gap-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">
-          <span>the wizard blueprint could not be loaded from the panel.</span>
+          {/* the REAL backend error, not a canned sentence (alpha.7.2):
+              e.g. a 404 when the core exposes no wizard blueprint, or the
+              panel's actual 5xx detail — actionable feedback for the user */}
+          <span>
+            {schema.error instanceof ApiError
+              ? `${schema.error.message} (HTTP ${schema.error.status})`
+              : schema.error instanceof Error
+                ? schema.error.message
+                : t("common.error")}
+          </span>
           <Button variant="ghost" size="sm" onClick={() => schema.refetch()}>retry</Button>
         </div>
       )}
@@ -265,34 +428,47 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
             ))}
           </div>
           <div className="grid gap-4 sm:grid-cols-3">
-            <Field label="tag" hint={existingTags.includes(spec.tag) ? "this tag already exists" : "unique on this core"}>
-              <Input value={tag} placeholder={spec.tag} onChange={(e) => setTag(e.target.value)} dir="ltr" invalid={existingTags.includes(spec.tag)} />
-            </Field>
-            <Field label="listen">
-              <Select value={listen} onChange={(e) => setListen(e.target.value)}>
-                <option value="0.0.0.0">0.0.0.0 (all)</option>
-                <option value="127.0.0.1">127.0.0.1</option>
-              </Select>
-            </Field>
-            <Field label="port" required>
-              <Input type="number" min={1} max={65535} value={port} onChange={(e) => setPort(Number(e.target.value))} dir="ltr" />
+            {advanced && (
+              <Field label="tag" hint={existingTags.includes(spec.tag) ? "this tag already exists" : "unique on this core"}>
+                <Input value={tag} placeholder={spec.tag} onChange={(e) => setTag(e.target.value)} dir="ltr" invalid={existingTags.includes(spec.tag)} />
+              </Field>
+            )}
+            {advanced && (
+              <Field label="listen">
+                <Select value={listen} onChange={(e) => setListen(e.target.value)}>
+                  <option value="0.0.0.0">0.0.0.0 (all)</option>
+                  <option value="127.0.0.1">127.0.0.1</option>
+                </Select>
+              </Field>
+            )}
+            <Field label="port" required
+              hint={!port || port < 1 || port > 65535 ? "1–65535" : undefined}>
+              <Input type="number" min={1} max={65535} value={port}
+                onChange={(e) => setPort(Number(e.target.value))} dir="ltr"
+                invalid={!port || port < 1 || port > 65535} />
             </Field>
           </div>
-          {effSecurity && effSecurity.fields.length > 0 && (
+          {effSecurity && effSecurity.fields.some(fieldVisible) && (
             <div className="grid gap-4 rounded-xl border border-border p-3.5 sm:grid-cols-3">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-content-3 sm:col-span-3">
                 {effProto?.label} / {effTransport?.label} / {effSecurity.label} — settings
+                {!advanced && <span className="ms-1.5 normal-case tracking-normal">(showing only what needs a decision — switch to advanced for the rest)</span>}
               </p>
-              {effSecurity.fields.map((f) => (
-                <Field key={f.key} label={f.label} required={f.required} hint={f.help}>
+              {effSecurity.fields.filter(fieldVisible).map((f) => {
+                const err = fieldErrors[f.key];
+                const showErr = !!err && (touched.has(f.key) || !!err && f.required && fields[f.key] !== undefined);
+                const mark = () => setTouched((cur) => new Set(cur).add(f.key));
+                return (
+                <Field key={f.key} label={f.label} required={f.required}
+                  hint={showErr ? err : f.help}>
                   {f.type === "select" ? (
                     <Select value={(fields[f.key] as string) ?? String(f.default ?? f.options?.[0] ?? "")}
-                      onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })}>
+                      onChange={(e) => { setFields({ ...fields, [f.key]: e.target.value }); mark(); }}>
                       {f.options?.map((o) => <option key={o} value={o}>{o || "—"}</option>)}
                     </Select>
                   ) : f.type === "bool" ? (
                     <Select value={(fields[f.key] as string) ?? String(f.default ?? "false")}
-                      onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })}>
+                      onChange={(e) => { setFields({ ...fields, [f.key]: e.target.value }); mark(); }}>
                       <option value="true">yes</option>
                       <option value="false">no</option>
                     </Select>
@@ -301,7 +477,8 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
                       <Textarea rows={f.type === "file" ? 5 : 3}
                         placeholder={f.placeholder}
                         value={(fields[f.key] as string) ?? String(f.default ?? "")}
-                        onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })} dir="ltr"
+                        onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })}
+                        onBlur={mark} dir="ltr"
                         className="font-mono text-[11px]" />
                       {f.type === "file" && (
                         <label className="mt-1.5 inline-flex cursor-pointer items-center gap-1.5 text-[11px] text-brand hover:underline">
@@ -325,7 +502,7 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
                         const on = cur.includes(o);
                         return (
                           <button key={o} type="button"
-                            onClick={() => setFields({ ...fields, [f.key]: on ? cur.filter((x) => x !== o) : [...cur, o] })}
+                            onClick={() => { setFields({ ...fields, [f.key]: on ? cur.filter((x) => x !== o) : [...cur, o] }); mark(); }}
                             className={`rounded-lg border px-2.5 py-1 text-[11.5px] ${on ? "border-brand bg-brand-soft text-brand" : "border-border text-content-2"}`}>
                             {o}
                           </button>
@@ -336,10 +513,12 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
                     <Input type={f.type === "int" ? "number" : f.type === "password" ? "password" : "text"}
                       placeholder={f.placeholder}
                       value={(fields[f.key] as string) ?? String(f.default ?? "")}
-                      onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })} dir="ltr" />
+                      onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })}
+                      onBlur={mark} dir="ltr" invalid={showErr} />
                   )}
                 </Field>
-              ))}
+                );
+              })}
             </div>
           )}
           <div className="rounded-xl bg-surface-2 p-3.5 text-[12px] text-content-2">
@@ -351,6 +530,42 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
               <b>{coreId}</b> schema and materialized into its configuration. New users need it granted in their core access.
             </p>
           </div>
+          {/* item 6 Preview — authoritative server-side verdict on the EXACT
+              patch create would apply; the button stays enabled until the
+              server definitively rejects, and then it cannot create. */}
+          {missingRequired.length > 0 ? (
+            <p className="flex items-center gap-1.5 rounded-xl border border-border px-3 py-2 text-[11.5px] text-content-3">
+              <XCircle size={13} /> fill {missingRequired.length} required field(s) to run the server-side preview
+            </p>
+          ) : preview.isPending ? (
+            <p className="flex items-center gap-1.5 rounded-xl border border-border px-3 py-2 text-[11.5px] text-content-3">
+              <Loader2 size={13} className="animate-spin" /> server-side preview of the exact patch…
+            </p>
+          ) : preview.isError ? (
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-[11.5px] text-danger">
+              <span>{preview.error instanceof ApiError ? preview.error.message : "preview request failed"}</span>
+              <Button variant="ghost" size="sm" onClick={() => preview.refetch()}>retry</Button>
+            </div>
+          ) : preview.data?.valid ? (
+            <div className="rounded-xl border border-ok/30 bg-ok-soft px-3 py-2 text-[11.5px]">
+              <p className="flex items-center gap-1.5 font-medium text-ok">
+                <CheckCircle2 size={13} /> server validation passed — this exact patch will be applied:
+              </p>
+              {preview.data.diff && (
+                <details className="mt-1.5">
+                  <summary className="cursor-pointer text-content-3 hover:text-content-2">view diff</summary>
+                  <pre className="mt-1 max-h-44 overflow-auto rounded-lg bg-surface-1 p-2 font-mono text-[10px] text-content-2" dir="ltr">{preview.data.diff}</pre>
+                </details>
+              )}
+            </div>
+          ) : preview.data ? (
+            <div className="rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-[11.5px] text-danger">
+              <p className="flex items-center gap-1.5 font-medium"><XCircle size={13} /> server validation rejected this inbound:</p>
+              <ul className="mt-1 list-inside list-disc font-mono text-[10.5px]" dir="ltr">
+                {preview.data.errors.map((e) => <li key={e}>{e}</li>)}
+              </ul>
+            </div>
+          ) : null}
         </div>
       )}
       {error && <p role="alert" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}

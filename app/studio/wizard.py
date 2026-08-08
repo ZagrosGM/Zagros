@@ -350,6 +350,9 @@ def _openvpn_blueprint() -> list[Protocol]:
         _tr("udp", "UDP", [_none([
             _f("topology", "topology", "select",
                options=["subnet", "net30", "p2p"], default="subnet"),
+            _f("subnet", "tunnel subnet (IPv4 network)", default="10.8.0.0",
+               help="each inbound needs its OWN subnet (client routing)"),
+            _f("netmask", "tunnel netmask", default="255.255.255.0"),
             _f("cipher", "data cipher", "select",
                options=["AES-256-GCM", "AES-128-GCM", "CHACHA20-POLY1305"],
                default="AES-256-GCM"),
@@ -383,6 +386,9 @@ def _openvpn_blueprint() -> list[Protocol]:
         _tr("tcp", "TCP", [_none([
             _f("topology", "topology", "select",
                options=["subnet", "net30", "p2p"], default="subnet"),
+            _f("subnet", "tunnel subnet (IPv4 network)", default="10.9.0.0",
+               help="each inbound needs its OWN subnet (client routing)"),
+            _f("netmask", "tunnel netmask", default="255.255.255.0"),
             _f("cipher", "data cipher", "select",
                options=["AES-256-GCM", "AES-128-GCM", "CHACHA20-POLY1305"],
                default="AES-256-GCM"),
@@ -456,30 +462,43 @@ def _softether_blueprint() -> list[Protocol]:
 
 
 # --------------------------------------------------------------------- #
-# registry
+# registry — keyed by the CORES' canonical ids (their `metadata.id`),
+# with accepted aliases. Field-reported bug (alpha.7.2 item 7): this used
+# to key the sing-box blueprint on "singbox" while the real core id (and
+# the dashboard URL) is "sing-box" — every wizard-schema fetch for the
+# panel's primary core 404'd with "the wizard blueprint could not be
+# loaded". Ids now resolve through one canonical map.
 # --------------------------------------------------------------------- #
 
+_BLUEPRINTS = {
+    "xray": _xray_blueprint,
+    "sing-box": _singbox_blueprint,
+    "wireguard": _wireguard_blueprint,
+    "openvpn": _openvpn_blueprint,
+    "ssh": _ssh_blueprint,
+    "softether": _softether_blueprint,
+}
+
+_ALIASES = {
+    "singbox": "sing-box",
+}
+
+
+def wizard_supported(core_id: str) -> bool:
+    """True when an inbound-wizard blueprint exists for this core id."""
+    cid = _ALIASES.get(core_id.lower(), core_id.lower())
+    return cid in _BLUEPRINTS
+
+
 def blueprint_for(core_id: str) -> dict[str, Any]:
-    """The wizard blueprint for one core; KeyError on unknown engine."""
-    cid = core_id.lower()
-    if cid == "xray":
-        protocols = _xray_blueprint()
-    elif cid == "singbox":
-        protocols = _singbox_blueprint()
-    elif cid == "hysteria2":
-        protocols = [_hy2_protocol()]
-    elif cid == "tuic":
-        protocols = [_tuic_protocol()]
-    elif cid == "wireguard":
-        protocols = _wireguard_blueprint()
-    elif cid == "openvpn":
-        protocols = _openvpn_blueprint()
-    elif cid == "ssh":
-        protocols = _ssh_blueprint()
-    elif cid == "softether":
-        protocols = _softether_blueprint()
-    else:
+    """The wizard blueprint for one core, built dynamically per call
+    (never a cached static blob); KeyError on a genuinely wizardless engine.
+    The returned ``core_id`` is always the canonical id."""
+    cid = _ALIASES.get(core_id.lower(), core_id.lower())
+    builder = _BLUEPRINTS.get(cid)
+    if builder is None:
         raise KeyError(core_id)
+    protocols = builder()
     # transport field libraries ride along every security of that transport
     for p in protocols:
         for t in p["transports"]:

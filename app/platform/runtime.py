@@ -73,6 +73,9 @@ class PlatformRuntime:
         self.refresh_tokens = SQLRefreshTokenStore(self.session_factory)
         self.portal_settings = SQLPortalSettingsStore(self.session_factory)
         self.studio_store = SQLStudioStore(self.session_factory)
+        # item 13: cross-core Host Settings entries (delivery expansion)
+        from app.persistence.repositories import SQLCoreHostStore
+        self.core_hosts = SQLCoreHostStore(self.session_factory)
 
         # multicore
         self.core_manager = CoreManager(store=self.core_state)
@@ -84,7 +87,8 @@ class PlatformRuntime:
         self.online_data = SQLOnlineDataAdapter(
             self.session_factory, self.users, self.quota, self.core_manager
         )
-        self.portal = PortalService(self.online_data, self.portal_settings)
+        self.portal = PortalService(self.online_data, self.portal_settings,
+                                    host_store=self.core_hosts)
         token_secret = hashlib.sha256(
             b"zagros/client-tokens/v1|" + self.cipher._key
         ).digest()

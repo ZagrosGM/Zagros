@@ -4,11 +4,12 @@ Each core lives in its own subpackage and self-registers on import:
 
     drivers/
     ├── xray/          # XrayDriver       (port of legacy app/xray)
-    ├── singbox/       # SingBoxDriver    (config-render + v2ray stats API)
+    ├── singbox/       # SingBoxDriver    (config-render + v2ray stats API;
+    │                   #  serves Hysteria2 + TUIC natively since alpha.7.2 —
+    │                   #  the standalone hy2/tuic cores folded into it, see
+    │                   #  app/cores/consolidation.py for the rationale)
     ├── wireguard/     # WireGuardDriver  (wg syncconf, key rotation, QR)
     ├── openvpn/       # OpenVPNDriver    (management interface)
-    ├── hysteria2/     # Hysteria2Driver  (official traffic stats API)
-    ├── tuic/          # TUICDriver       (config-render, honest no-stats)
     ├── ssh/           # SSHTunnelDriver  (real unix accounts)
     └── softether/     # SoftEtherDriver  (vpncmd hub management)
 

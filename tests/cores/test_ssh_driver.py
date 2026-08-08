@@ -121,14 +121,17 @@ def test_user_lifecycle_commands() -> None:
         assert backend.users["zg-1-alice"] == "n3wpass"
         assert "zg-1-alice" in backend.killed
 
-        # missing password is a real error, not a silent skip
-        try:
-            await driver.create_account(
-                UserAccount(user_id=9, username="nopw", account_id="9.nopw",
-                            protocol="ssh", settings={}))
-            raise AssertionError("password-less account must raise")
-        except CoreError:
-            pass
+        # alpha.7.2: a password-less account NEVER fails provisioning —
+        # the panel mints a secure random password in place
+        nopw = UserAccount(user_id=9, username="nopw", account_id="9.nopw",
+                           protocol="ssh", settings={})
+        await driver.create_account(nopw)
+        minted = str(nopw.settings.get("password") or "")
+        assert len(minted) >= 20 and minted != "s3cret"
+        assert backend.users["zg-9-nopw"] == minted
+        # stable across calls — no silent churn
+        await driver.create_account(nopw)
+        assert nopw.settings["password"] == minted
 
     asyncio.run(run())
 
@@ -223,6 +226,129 @@ def test_client_config_sealed_payload() -> None:
         assert config.payload["username"] == "zg-1-alice"
         assert "s3cret" not in repr(config)
 
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------- #
+# alpha.7.2 — multi-inbound (xray-style)                                 #
+# ---------------------------------------------------------------------- #
+
+def test_multi_inbound_apply_and_dropin() -> None:
+    """Two ssh inbounds (distinct tags/ports) land in settings AND in the
+    drop-in as two `Port` lines — exactly like xray's multi-inbound."""
+    from app.cores.drivers.ssh.backend import LocalSystemSSHBackend
+
+    async def run():
+        driver, backend = _driver()
+        await driver.apply_studio_document({"inbounds": [
+            {"tag": "ssh-main", "protocol": "ssh", "port": 2022,
+             "authentication": "both"},
+            {"tag": "ssh-alt", "protocol": "ssh", "port": 2222},
+        ]})
+        assert driver.settings["listeners"] == [
+            {"tag": "ssh-main", "port": 2022},
+            {"tag": "ssh-alt", "port": 2222},
+        ]
+        assert driver.settings["port"] == 2022  # legacy mirror = first
+        # export reflects BOTH entries
+        doc = driver.export_config_document()
+        assert [e["tag"] for e in doc["inbounds"]] == ["ssh-main", "ssh-alt"]
+        assert [e["port"] for e in doc["inbounds"]] == [2022, 2222]
+    asyncio.run(run())
+
+    # the REAL drop-in renders both listeners (pure string render)
+    backend_real = LocalSystemSSHBackend({
+        "dropin_path": "/nonexistent-dir/zagros.conf",
+        "listeners": [
+            {"tag": "ssh-main", "port": 2022},
+            {"tag": "ssh-alt", "port": 2222, "listen": "10.0.0.5"},
+        ],
+    })
+    text = backend_real.render_dropin()
+    assert "Port 22" in text.splitlines()[1]      # operator access kept
+    assert "Port 2022" in text and "Port 2222" in text
+    assert "ListenAddress 10.0.0.5" in text
+
+
+def test_multi_inbound_validation_errors() -> None:
+    async def run():
+        driver, _ = _driver()
+        # duplicate tag
+        try:
+            await driver.apply_studio_document({"inbounds": [
+                {"tag": "a", "protocol": "ssh", "port": 2022},
+                {"tag": "a", "protocol": "ssh", "port": 2023},
+            ]})
+            raise AssertionError("duplicate tag accepted")
+        except CoreError as exc:
+            assert "duplicate" in str(exc) and "'a'" in str(exc)
+        # duplicate port (both named in the message)
+        try:
+            await driver.apply_studio_document({"inbounds": [
+                {"tag": "a", "protocol": "ssh", "port": 2022},
+                {"tag": "b", "protocol": "ssh", "port": 2022},
+            ]})
+            raise AssertionError("duplicate port accepted")
+        except CoreError as exc:
+            assert "2022" in str(exc) and "'b'" in str(exc)
+        # reserved operator port
+        try:
+            await driver.apply_studio_document({"inbounds": [
+                {"tag": "a", "protocol": "ssh", "port": 22},
+            ]})
+            raise AssertionError("port 22 accepted")
+        except CoreError as exc:
+            assert "reserved" in str(exc)
+        # conflicting daemon-wide knob → named field + both tags, no leak
+        try:
+            await driver.apply_studio_document({"inbounds": [
+                {"tag": "a", "protocol": "ssh", "port": 2022, "max_sessions": 5},
+                {"tag": "b", "protocol": "ssh", "port": 2023, "max_sessions": 9},
+            ]})
+            raise AssertionError("conflicting max_sessions accepted")
+        except CoreError as exc:
+            assert "max_sessions" in str(exc)
+            assert "'a'" in str(exc) and "'b'" in str(exc)
+        # identical values across entries are fine
+        await driver.apply_studio_document({"inbounds": [
+            {"tag": "a", "protocol": "ssh", "port": 2022, "max_sessions": 5},
+            {"tag": "b", "protocol": "ssh", "port": 2023, "max_sessions": "5"},
+        ]})
+        assert driver.settings["max_sessions"] == 5
+        # nothing half-applied by the failed attempts above
+    asyncio.run(run())
+
+
+def test_multi_inbound_delivery_honors_grants() -> None:
+    async def run():
+        driver, backend = _driver()
+        await driver.apply_studio_document({"inbounds": [
+            {"tag": "ssh-main", "protocol": "ssh", "port": 2022},
+            {"tag": "ssh-alt", "protocol": "ssh", "port": 2222},
+        ]})
+        account = _account(1, "alice")
+        await driver.create_account(account)
+        profile = await driver.describe_delivery(driver._accounts["1.alice"])
+        assert len(profile.sections) == 2
+        ports = {f.value for s in profile.sections
+                 for a in s.artifacts if a.fields
+                 for f in a.fields if f.key == "port"}
+        assert ports == {"2022", "2222"}
+        # whitelist narrows to the granted inbound
+        account2 = _account(2, "bob")
+        account2.settings["inbound_tags"] = ["ssh-alt"]
+        await driver.create_account(account2)
+        profile2 = await driver.describe_delivery(driver._accounts["2.bob"])
+        assert [s.title for s in profile2.sections] == ["ssh-alt · SSH Tunnel"]
+        # exclusion wins over the whitelist
+        account2.settings["excluded_inbounds"] = ["ssh-alt"]
+        profile3 = await driver.describe_delivery(driver._accounts["2.bob"])
+        assert profile3.sections == []
+        try:
+            await driver.build_client_config(driver._accounts["2.bob"])
+            raise AssertionError("client config for excluded inbound")
+        except CoreError:
+            pass
     asyncio.run(run())
 
 

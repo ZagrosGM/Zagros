@@ -17,6 +17,8 @@ Real capabilities used (no pretend features):
 from __future__ import annotations
 
 import asyncio
+import logging
+import secrets
 from datetime import datetime, timezone
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
@@ -35,6 +37,8 @@ from app.cores.types import (
     UsageRecord,
     UserAccount,
 )
+
+logger = logging.getLogger("zagros.cores.drivers.openvpn")
 
 _DISCONNECT_HOOK = """#!/bin/sh
 # zagros openvpn accounting hook -- authoritative per-session final counters.
@@ -100,6 +104,12 @@ class OpenVPNDriver(BaseCoreDriver):
                                      "description": "raw server.conf lines appended "
                                                     "(operator escape hatch, e.g. "
                                                     "'max-clients 512')"},
+                "listeners": {"type": "array",
+                              "description": "listener set (xray-style multi-inbound, "
+                                             "alpha.7.2): [{'tag', 'port', 'proto', "
+                                             "'subnet'?, 'cipher'?, ...}] — empty = "
+                                             "derive ONE listener from the legacy flat "
+                                             "port/proto/subnet keys"},
             },
         },
         default_settings={
@@ -123,18 +133,30 @@ class OpenVPNDriver(BaseCoreDriver):
             "static_user": "",
             "static_pass": "",
             "extra_directives": "",
+            "listeners": [],
         },
         homepage="https://openvpn.net/community/",
         provides=set(),
         requires=set(),
-        # ONE server listener set per core — studio manages it as a
-        # single-entry inbound (apply re-renders server.conf + restarts).
+        # openvpn is one listener PER PROCESS — multi-inbound = one process
+        # per port (openvpn@server style), panel-managed as N inbounds with
+        # distinct tags (alpha.7.2), applied like xray (no replace).
         studio_inbounds_path="/inbounds",
-        studio_max_inbounds=1,
     )
 
     def __init__(self, settings: dict[str, Any] | None = None, *, backend: Any | None = None):
         super().__init__(settings)
+        # multi-inbound bridge (alpha.7.2): persisted pre-7.2 settings carry
+        # no "listeners" — derive ONE listener from the legacy flat
+        # port/proto/subnet/… keys so the served config is bit-identical.
+        if not self.settings.get("listeners"):
+            self.settings["listeners"] = [self._listener_from_flat(self.settings)]
+        else:
+            # normalize + fill optional knobs from the flat template
+            self.settings["listeners"] = [
+                self._normalize_listener(row, self.settings)
+                for row in self.settings["listeners"]
+            ]
         if backend is None:
             from app.cores.drivers.openvpn.backend import LocalOpenVPNBackend
 
@@ -144,100 +166,281 @@ class OpenVPNDriver(BaseCoreDriver):
         self._device_meta: dict[str, dict[str, Any]] = {}
         self._usage = SessionUsageTracker()
         self._pki: dict[str, str] | None = None
+        self._ca_fp: tuple[str, str] | None = None  # (pem, fingerprint) memo
+
+    # ------------------------------------------------------------------ #
+    # listener set (one openvpn process per inbound — xray-style)          #
+    # ------------------------------------------------------------------ #
+    _LISTENER_KEYS = (
+        # per-listener knobs (flat settings stay the TEMPLATE for new
+        # listeners created by the wizard's Add-Inbound flow)
+        "port", "proto", "listen", "subnet", "netmask", "topology",
+        "cipher", "cipher_fallback", "auth_digest", "compression",
+        "redirect_gateway", "dns_servers", "extra_directives",
+    )
+
+    @classmethod
+    def _listener_from_flat(cls, s: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "tag": "openvpn",
+            "port": int(s.get("port") or 1194),
+            "proto": str(s.get("proto") or "udp"),
+            "listen": str(s.get("listen") or "0.0.0.0"),
+            "subnet": str(s.get("subnet") or "10.8.0.0"),
+            "netmask": str(s.get("netmask") or "255.255.255.0"),
+            "topology": str(s.get("topology") or "subnet"),
+            "cipher": str(s.get("cipher") or "AES-256-GCM"),
+            "cipher_fallback": str(s.get("cipher_fallback") or "AES-128-GCM"),
+            "auth_digest": str(s.get("auth_digest") or ""),
+            "compression": str(s.get("compression") or ""),
+            "redirect_gateway": bool(s.get("redirect_gateway", True)),
+            "dns_servers": list(s.get("dns_servers") or ["1.1.1.1", "8.8.8.8"]),
+            "extra_directives": str(s.get("extra_directives") or ""),
+        }
+
+    @classmethod
+    def _normalize_listener(cls, row: Any, s: dict[str, Any]) -> dict[str, Any]:
+        template = cls._listener_from_flat(s)
+        if not isinstance(row, dict):
+            return template
+        out = dict(template)
+        for key in cls._LISTENER_KEYS:
+            if row.get(key) is not None:
+                out[key] = row[key]
+        out["port"] = int(out["port"])
+        out["dns_servers"] = list(out.get("dns_servers") or [])
+        tag = str(row.get("tag") or "").strip()
+        out["tag"] = tag or f"ovpn-{out['port']}-{out['proto']}"
+        return out
+
+    def _listeners(self) -> list[dict[str, Any]]:
+        listeners = self.settings.get("listeners") or []
+        if not listeners:
+            listeners = [self._listener_from_flat(self.settings)]
+        return [dict(l) for l in listeners]
+
+    def _listener_mgmt_ports(self) -> dict[str, int]:
+        """Deterministic management ports: an explicit per-listener
+        'management_port' wins; otherwise base + 1-based ordinal. Never
+        collides with another listener's mgmt port."""
+        base = int(self.settings.get("management_port") or 17505)
+        out: dict[str, int] = {}
+        used: set[int] = set()
+        for idx, listener in enumerate(self._listeners()):
+            explicit = listener.get("management_port")
+            port = (int(explicit) if explicit is not None and str(explicit) != ""
+                    else base + idx + 1)
+            out[listener["tag"]] = port
+            used.add(port)
+        return out
+
+    def _granted_listeners(self, account: UserAccount) -> list[dict[str, Any]]:
+        """Grant-aware view (same convention as sing-box): inbound_tags
+        whitelists, excluded_inbounds blacklists."""
+        wanted = set(account.settings.get("inbound_tags") or [])
+        excluded = set(account.settings.get("excluded_inbounds") or [])
+        out = [l for l in self._listeners() if not wanted or l["tag"] in wanted]
+        return [l for l in out if l["tag"] not in excluded]
+
+    def _validate_listener_set(self, listeners: list[dict[str, Any]]) -> None:
+        """Cardinality/port/subnet uniqueness guards — a routing conflict is
+        reported with BOTH offender names, never as a later boot mystery."""
+        if not listeners:
+            raise CoreError("openvpn needs at least ONE inbound (listener).")
+        seen_tags: set[str] = set()
+        seen_endpoints: dict[tuple[int, str], str] = {}
+        seen_subnets: dict[str, str] = {}
+        for listener in listeners:
+            tag = listener["tag"]
+            port = int(listener["port"])
+            proto = str(listener["proto"])
+            if not 1 <= port <= 65535:
+                raise CoreError(f"openvpn listener '{tag}': port out of range ({port}).")
+            if proto not in ("udp", "tcp"):
+                raise CoreError(f"openvpn listener '{tag}': serves udp or tcp, not '{proto}'.")
+            if tag in seen_tags:
+                raise CoreError(f"duplicate openvpn inbound name '{tag}'.")
+            endpoint = (port, proto)
+            if endpoint in seen_endpoints:
+                raise CoreError(
+                    f"openvpn inbounds '{seen_endpoints[endpoint]}' and '{tag}' "
+                    f"share {proto} port {port} — like xray, every inbound "
+                    f"needs its OWN (port, protocol) pair."
+                )
+            subnet = str(listener.get("subnet") or "")
+            if subnet in seen_subnets and subnet:
+                raise CoreError(
+                    f"openvpn inbounds '{seen_subnets[subnet]}' and '{tag}' "
+                    f"share tunnel subnet {subnet} — two daemons announcing "
+                    f"the same network kills client routing."
+                )
+            seen_tags.add(tag)
+            seen_endpoints[endpoint] = tag
+            if subnet:
+                seen_subnets[subnet] = tag
 
     # ------------------------------------------------------------------ #
     # Config Studio bridge (single-listener engine; apply re-renders
     # server.conf, restarts when running, same validated path as Start)
     # ------------------------------------------------------------------ #
     def export_config_document(self) -> dict[str, Any]:
-        """Studio seed: the openvpn listener modelled as a one-entry inbound
-        (pure settings read; secrets never exported — wizard write-only)."""
+        """Studio seed: one entry per listener (xray-style); the core-wide
+        knobs (auth mode / static creds) mirrored on every entry. Secrets
+        are never exported — wizard write-only."""
         s = self.settings
-        return {
-            "inbounds": [{
-                "tag": "openvpn",
+        entries = []
+        for listener in self._listeners():
+            entries.append({
+                "tag": listener["tag"],
                 "protocol": "ovpn",
-                "listen": s.get("listen") or "0.0.0.0",
-                "port": int(s.get("port") or 1194),
-                "transport": s.get("proto") or "udp",
-                "topology": s.get("topology") or "subnet",
-                "cipher": s.get("cipher") or "AES-256-GCM",
-                "auth": s.get("auth_digest") or "",
-                "compression": s.get("compression") or "",
+                "listen": listener["listen"],
+                "port": int(listener["port"]),
+                "transport": listener["proto"],
+                "topology": listener["topology"],
+                "cipher": listener["cipher"],
+                "auth": listener["auth_digest"],
+                "compression": listener["compression"],
                 "auth_mode": s.get("auth_mode") or "management",
                 "username": "",
                 "password": "",
-                "redirect_gateway": bool(s.get("redirect_gateway", True)),
-                "dns": ", ".join(str(d) for d in (s.get("dns_servers") or [])),
+                "redirect_gateway": bool(listener["redirect_gateway"]),
+                "dns": ", ".join(str(d) for d in (listener["dns_servers"] or [])),
+                "subnet": listener["subnet"],
+                "netmask": listener["netmask"],
                 "has_static_credentials": bool(s.get("static_user")),
                 "has_ca_certificate": bool(s.get("ca_crt_text")),
-            }],
-        }
+            })
+        return {"inbounds": entries}
 
     async def apply_studio_document(self, document: dict[str, Any]) -> None:
+        """Adopt the studio document's entries as THE listener set —
+        xray-style multi-inbound: N entries, distinct tags, distinct
+        (port, transport) pairs, distinct tunnel subnets (one openvpn
+        process per entry). Auth-mode/static-creds are core-wide: entries
+        may carry them, a CONFLICTING pair is a hard error naming the field
+        and both tags — never silent last-write-wins. Apply re-renders all
+        server.conf files and restarts the set when running."""
         inbounds = (document or {}).get("inbounds") or []
-        if len(inbounds) != 1:
+        if not inbounds:
             raise CoreError(
-                f"openvpn serves exactly ONE listener set; the studio document "
-                f"carries {len(inbounds)} inbounds — keep exactly one."
+                "an openvpn core needs at least ONE inbound — the studio "
+                "document carries none."
             )
-        ib = inbounds[0]
-        if str(ib.get("protocol") or "ovpn") not in ("ovpn", "openvpn"):
-            raise CoreError(f"an openvpn core cannot host a '{ib.get('protocol')}' listener.")
         s = self.settings
-        if ib.get("port") is not None:
-            port = int(ib["port"])
-            if not 1 <= port <= 65535:
-                raise CoreError(f"openvpn port out of range: {port}")
-            s["port"] = port
-        if ib.get("listen"):
-            s["listen"] = str(ib["listen"])
-        transport = str(ib.get("transport") or ib.get("proto") or "").lower()
-        if transport in ("udp", "tcp"):
-            s["proto"] = transport
-        elif transport:
-            raise CoreError(f"openvpn serves udp or tcp, not '{transport}'.")
-        if ib.get("topology"):
-            topology = str(ib["topology"])
-            if topology not in ("subnet", "net30", "p2p"):
-                raise CoreError(f"unknown openvpn topology '{topology}' "
-                                "(subnet / net30 / p2p).")
-            s["topology"] = topology
-        if ib.get("cipher"):
-            s["cipher"] = str(ib["cipher"])
-        if ib.get("cipher_fallback"):
-            s["cipher_fallback"] = str(ib["cipher_fallback"])
-        if ib.get("auth") is not None:
-            s["auth_digest"] = str(ib["auth"])
-        if ib.get("compression") is not None:
-            compression = str(ib["compression"])
-            if compression not in ("", "lz4-v2", "lzo"):
-                raise CoreError(f"unknown openvpn compression '{compression}'.")
-            s["compression"] = compression
-        if ib.get("dns") is not None:
-            s["dns_servers"] = [d.strip() for d in str(ib["dns"]).split(",") if d.strip()]
-        if ib.get("redirect_gateway") is not None:
-            s["redirect_gateway"] = bool(ib["redirect_gateway"])
-        auth_mode = str(ib.get("auth_mode") or "").lower()
+        template = self._listener_from_flat(s)
+
+        # 1) per-entry parse + structural validation (fail BEFORE mutating)
+        listeners: list[dict[str, Any]] = []
+        for ib in inbounds:
+            if str(ib.get("protocol") or "ovpn") not in ("ovpn", "openvpn"):
+                raise CoreError(f"an openvpn core cannot host a '{ib.get('protocol')}' listener.")
+            tag = str(ib.get("tag") or "").strip()
+            entry = dict(template)  # flat settings = template for omitted knobs
+            if ib.get("port") is not None:
+                try:
+                    entry["port"] = int(ib["port"])
+                except (TypeError, ValueError):
+                    raise CoreError(
+                        f"openvpn inbound '{tag or '?'}': invalid port {ib.get('port')!r}."
+                    ) from None
+            if ib.get("listen"):
+                entry["listen"] = str(ib["listen"])
+            transport = str(ib.get("transport") or ib.get("proto") or "").lower()
+            if transport in ("udp", "tcp"):
+                entry["proto"] = transport
+            elif transport:
+                raise CoreError(
+                    f"openvpn inbound '{tag or '?'}' serves udp or tcp, not '{transport}'.")
+            if ib.get("topology"):
+                topology = str(ib["topology"])
+                if topology not in ("subnet", "net30", "p2p"):
+                    raise CoreError(f"unknown openvpn topology '{topology}' "
+                                    "(subnet / net30 / p2p).")
+                entry["topology"] = topology
+            if ib.get("subnet"):
+                entry["subnet"] = str(ib["subnet"]).strip()
+            if ib.get("netmask"):
+                netmask = str(ib["netmask"]).strip()
+                parts = netmask.split(".")
+                if len(parts) != 4 or any(
+                        not p.isdigit() or not 0 <= int(p) <= 255 for p in parts):
+                    raise CoreError(
+                        f"openvpn inbound '{tag or '?'}': netmask '{netmask}' "
+                        f"is not a dotted IPv4 mask.")
+                entry["netmask"] = netmask
+            if ib.get("cipher"):
+                entry["cipher"] = str(ib["cipher"])
+            if ib.get("cipher_fallback"):
+                entry["cipher_fallback"] = str(ib["cipher_fallback"])
+            if ib.get("auth") is not None:
+                entry["auth_digest"] = str(ib["auth"])
+            if ib.get("compression") is not None:
+                compression = str(ib["compression"])
+                if compression not in ("", "lz4-v2", "lzo"):
+                    raise CoreError(f"unknown openvpn compression '{compression}'.")
+                entry["compression"] = compression
+            if ib.get("dns") is not None:
+                entry["dns_servers"] = [d.strip() for d in str(ib["dns"]).split(",")
+                                        if d.strip()]
+            if ib.get("redirect_gateway") is not None:
+                entry["redirect_gateway"] = bool(ib["redirect_gateway"])
+            if str(ib.get("extra_directives") or ""):
+                entry["extra_directives"] = str(ib["extra_directives"])
+            entry["tag"] = tag or f"ovpn-{entry['port']}-{entry['proto']}"
+            listeners.append(entry)
+        self._validate_listener_set(listeners)
+
+        # 2) core-wide knobs — identical values only; conflicts are named
+        def _shared(field: str) -> Any:
+            base_value: Any = None
+            base_tag: str | None = None
+            for ib, listener in zip(inbounds, listeners):
+                value = ib.get(field)
+                if value is None or value == "":
+                    continue
+                value = str(value).strip().lower() if field == "auth_mode" else value
+                if base_tag is None:
+                    base_tag, base_value = listener["tag"], value
+                elif value != base_value:
+                    raise CoreError(
+                        f"'{field}' is a core-wide openvpn setting but inbound "
+                        f"'{base_tag}' and inbound '{listener['tag']}' disagree — "
+                        f"the PKI and the auth database are shared by every "
+                        f"listener, so keep the value identical on all entries."
+                    )
+            return base_value
+
+        auth_mode = _shared("auth_mode")
         if auth_mode in ("management", "static"):
             s["auth_mode"] = auth_mode
-        if ib.get("username"):
-            s["static_user"] = str(ib["username"])
-        if ib.get("password"):
-            s["static_pass"] = str(ib["password"])
+        elif auth_mode:
+            raise CoreError(f"unknown openvpn auth_mode '{auth_mode}'.")
+        username = _shared("username")
+        if username:
+            s["static_user"] = str(username)
+        password = _shared("password")
+        if password:
+            s["static_pass"] = str(password)
         if s.get("auth_mode") == "static":
             # validated eagerly — a shared-cred server without the creds is
             # a brick (the install raises with a clear message)
             self._install_static_auth()
-        if str(ib.get("extra_directives") or ""):
-            s["extra_directives"] = str(ib["extra_directives"])
         # PKI uploads (CA / server cert / server key — operator-owned chains
-        # replace the panel-generated PKI); private key never in the export
-        self._materialize_uploaded_pki(
-            ca_pem=ib.get("ca_certificate") or ib.get("ca"),
-            cert_pem=ib.get("certificate"),
-            key_pem=ib.get("certificate_key"),
-        )
+        # replace the panel-generated PKI for EVERY listener); private key
+        # never in the export
+        for ib in inbounds:
+            self._materialize_uploaded_pki(
+                ca_pem=ib.get("ca_certificate") or ib.get("ca"),
+                cert_pem=ib.get("certificate"),
+                key_pem=ib.get("certificate_key"),
+            )
+
+        # 3) persist the set; legacy flat keys mirror the FIRST listener so
+        #    pre-7.2 consumers (and the listener template) stay meaningful.
+        s["listeners"] = [dict(l) for l in listeners]
+        first = listeners[0]
+        for key in self._LISTENER_KEYS:
+            s[key] = first[key]
         await self._publish()
 
     def _materialize_uploaded_pki(self, *, ca_pem: Any, cert_pem: Any,
@@ -299,48 +502,80 @@ class OpenVPNDriver(BaseCoreDriver):
         os.replace(tmp, path)
 
     async def _publish(self) -> None:
-        """Re-render server.conf into the backend; restart when running."""
+        """Materialize the whole listener set into the backend; restart the
+        set when running (apply semantics identical to xray: every inbound
+        of the document is live afterwards)."""
         running = await asyncio.to_thread(self._backend.is_running)
         if not running:
-            return  # stopped core: settings land on next start()
-        log_path = getattr(self._backend, "disconnect_log", "disconnect-log.jsonl")
-        hook_path = await asyncio.to_thread(
-            self._backend.install_hook_script, self._render_hook(log_path)
-        )
-        await asyncio.to_thread(
-            self._backend.apply_config, self.render_server_conf(hook_path)
-        )
+            # stopped core: persist the materialized set anyway so Start
+            # renders exactly what the studio last saved (offline-friendly,
+            # same rule as wireguard since alpha.7.2)
+            await asyncio.to_thread(self._backend.configure, self._listener_specs())
+            return
+        await asyncio.to_thread(self._backend.configure, self._listener_specs())
         await asyncio.to_thread(self._backend.restart)
+        await asyncio.to_thread(self._backend.set_auth_handler, self._authorize)
+
+    def _listener_specs(self) -> list[dict[str, Any]]:
+        """configure() payload: fully rendered conf + hook per listener,
+        with deterministic per-listener management ports and log paths."""
+        mgmt_ports = self._listener_mgmt_ports()
+        specs: list[dict[str, Any]] = []
+        for listener in self._listeners():
+            log_path = self._backend.disconnect_log_path(listener["tag"])
+            specs.append({
+                "tag": listener["tag"],
+                "mgmt_port": mgmt_ports[listener["tag"]],
+                "server_conf": self.render_server_conf(
+                    listener,
+                    hook_path=self._backend_hook_path(log_path, listener["tag"]),
+                    mgmt_port=mgmt_ports[listener["tag"]],
+                    log_path=log_path,
+                ),
+                "hook_script": self._render_hook(log_path),
+            })
+        return specs
+
+    def _backend_hook_path(self, log_path: str, tag: str) -> str:
+        return str(log_path).replace("disconnect-log.jsonl", "client-disconnect.sh")
 
     # ------------------------------------------------------------------ #
     # config rendering
     # ------------------------------------------------------------------ #
-    def render_server_conf(self, hook_path: str) -> str:
+    def render_server_conf(self, listener: dict[str, Any], hook_path: str,
+                           mgmt_port: int, log_path: str) -> str:
+        """Render ONE listener's server.conf (one openvpn process each).
+        PKI paths are absolute: the shared CA/certs live in work_dir while
+        each process runs with its own per-listener cwd."""
         s = self.settings
+        work_dir = str(s.get("work_dir") or ".")
         pushes = []
-        if s["redirect_gateway"]:
+        if listener["redirect_gateway"]:
             pushes.append('push "redirect-gateway def1 bypass-dhcp"')
-        pushes += [f'push "dhcp-option DNS {dns}"' for dns in s["dns_servers"]]
-        cipher = str(s.get("cipher") or "AES-256-GCM")
-        fallback = str(s.get("cipher_fallback") or "AES-128-GCM")
+        pushes += [f'push "dhcp-option DNS {dns}"' for dns in listener["dns_servers"]]
+        cipher = str(listener.get("cipher") or "AES-256-GCM")
+        fallback = str(listener.get("cipher_fallback") or "AES-128-GCM")
+        import os
         lines = [
-            f"port {s['port']}",
-            f"proto {s['proto']}",
+            f"port {listener['port']}",
+            f"proto {listener['proto']}",
             "dev tun",
-            f"topology {s.get('topology') or 'subnet'}",
-            f"server {s['subnet']} {s['netmask']}",
-            "ifconfig-pool-persist ipp.txt",
-            "ca ca.crt", "cert server.crt", "key server.key",
+            f"topology {listener.get('topology') or 'subnet'}",
+            f"server {listener['subnet']} {listener['netmask']}",
+            f"ifconfig-pool-persist {os.path.join(os.path.dirname(str(log_path)), 'ipp.txt')}",
+            f"ca {os.path.join(work_dir, 'ca.crt')}",
+            f"cert {os.path.join(work_dir, 'server.crt')}",
+            f"key {os.path.join(work_dir, 'server.key')}",
             "dh none",
-            "tls-crypt ta.key",
+            f"tls-crypt {os.path.join(work_dir, 'ta.key')}",
             f"data-ciphers {cipher}:{fallback}",
             f"data-ciphers-fallback {fallback}",
             "tls-version-min 1.2",
-            f"management {self._mgmt_addr()}",
+            f"management 127.0.0.1 {int(mgmt_port)}",
         ]
-        if str(s.get("auth_digest") or ""):
-            lines.append(f"auth {s['auth_digest']}")
-        compression = str(s.get("compression") or "")
+        if str(listener.get("auth_digest") or ""):
+            lines.append(f"auth {listener['auth_digest']}")
+        compression = str(listener.get("compression") or "")
         if compression:
             lines += ["allow-compression yes", f"compress {compression}",
                       f'push "compress {compression}"']
@@ -364,7 +599,7 @@ class OpenVPNDriver(BaseCoreDriver):
             "persist-key", "persist-tun",
             "verb 3",
         ]
-        extra = str(s.get("extra_directives") or "").strip()
+        extra = str(listener.get("extra_directives") or "").strip()
         if extra:
             lines.append("# operator extra directives (studio)")
             lines += [ln.rstrip() for ln in extra.splitlines() if ln.strip()]
@@ -421,14 +656,10 @@ want_pass="${creds#*:}"
     # lifecycle
     # ------------------------------------------------------------------ #
     async def start(self) -> None:
-        log_path = getattr(self._backend, "disconnect_log", "disconnect-log.jsonl")
-        hook_path = await asyncio.to_thread(
-            self._backend.install_hook_script, self._render_hook(log_path)
-        )
         self._pki = await asyncio.to_thread(self._backend.ensure_pki)
         if str(self.settings.get("auth_mode") or "management") == "static":
             await asyncio.to_thread(self._install_static_auth)
-        await asyncio.to_thread(self._backend.apply_config, self.render_server_conf(hook_path))
+        await asyncio.to_thread(self._backend.configure, self._listener_specs())
         await asyncio.to_thread(self._backend.start)
         await asyncio.to_thread(self._backend.set_auth_handler, self._authorize)
 
@@ -491,6 +722,18 @@ want_pass="${creds#*:}"
         if protocol != "ovpn":
             raise CoreError(f"OpenVPN core only serves protocol 'ovpn', got '{protocol}'.")
 
+    def _provision_credentials(self, account: UserAccount) -> None:
+        """Alpha.7.2 contract: provisioning NEVER fails on a missing
+        password — in management auth mode the panel mints a secure random
+        one IN PLACE (the grant path persists it back, same contract as
+        sing-box). Static auth mode needs nothing per-user at all."""
+        if str(self.settings.get("auth_mode") or "management") == "static":
+            return
+        if not account.settings.get("password"):
+            account.settings["password"] = secrets.token_urlsafe(18)
+            logger.info("openvpn: minted a random password for account '%s'.",
+                        account.account_id)
+
     def _ensure_credentials(self, account: UserAccount) -> None:
         # static auth_mode authenticates EVERY client with the shared pair;
         # a per-user password is only mandatory in management auth mode
@@ -507,6 +750,7 @@ want_pass="${creds#*:}"
 
     async def create_account(self, account: UserAccount) -> None:
         self._ensure_supported(account.protocol)
+        self._provision_credentials(account)
         self._ensure_credentials(account)
         self._accounts[account.account_id] = account
         if not account.enabled:
@@ -514,6 +758,7 @@ want_pass="${creds#*:}"
 
     async def update_account(self, account: UserAccount) -> None:
         self._ensure_supported(account.protocol)
+        self._provision_credentials(account)
         self._ensure_credentials(account)
         previous = self._accounts.get(account.account_id)
         self._accounts[account.account_id] = account
@@ -540,6 +785,9 @@ want_pass="${creds#*:}"
         self._accounts[account.account_id] = account.model_copy(update={"enabled": True})
 
     async def sync_accounts(self, accounts: list[UserAccount]) -> None:
+        for account in accounts:
+            if account.protocol == "ovpn":
+                self._provision_credentials(account)
         self._accounts = {a.account_id: a for a in accounts if a.protocol == "ovpn"}
         live = {a.account_id for a in self._accounts.values() if a.enabled}
         try:
@@ -635,9 +883,10 @@ want_pass="${creds#*:}"
             return None
 
     # ------------------------------------------------------------------ #
-    # client config (sealed delivery only)
+    # client config + delivery (one profile per granted listener)          #
     # ------------------------------------------------------------------ #
-    def render_client_profile(self, account: UserAccount) -> str:
+    def render_client_profile(self, account: UserAccount,
+                              listener: dict[str, Any]) -> str:
         self._ensure_supported(account.protocol)
         self._ensure_credentials(account)
         if self._pki is None:
@@ -646,29 +895,56 @@ want_pass="${creds#*:}"
         return "\n".join([
             "client",
             "dev tun",
-            f"proto {s['proto']}",
-            f"remote {s['advertise_host']} {s['port']}",
+            f"proto {listener['proto']}",
+            f"remote {s['advertise_host']} {listener['port']}",
             "resolv-retry infinite",
             "nobind",
             "persist-key", "persist-tun",
             "remote-cert-tls server",
             "auth-user-pass",
-            f"data-ciphers {s.get('cipher') or 'AES-256-GCM'}:"
-            f"{s.get('cipher_fallback') or 'AES-128-GCM'}",
-            f"data-ciphers-fallback {s.get('cipher_fallback') or 'AES-128-GCM'}",
-            *([f"compress {s['compression']}"] if str(s.get("compression") or "") else []),
+            f"data-ciphers {listener.get('cipher') or 'AES-256-GCM'}:"
+            f"{listener.get('cipher_fallback') or 'AES-128-GCM'}",
+            f"data-ciphers-fallback {listener.get('cipher_fallback') or 'AES-128-GCM'}",
+            *([f"compress {listener['compression']}"]
+              if str(listener.get("compression") or "") else []),
             "verb 3",
             "<ca>", self._pki["ca_crt"].strip(), "</ca>",
             "<tls-crypt>", self._pki["tls_crypt"].strip(), "</tls-crypt>",
             "",
         ])
 
+    def _ca_fingerprint(self) -> str:
+        """SHA-256 fingerprint of the shared CA certificate (DER, hex, short
+        form) — memoized per PEM so the portal does not re-derive it for
+        every listener section. A corrupt PKI is reported honestly, never
+        swallowed."""
+        if self._pki is None:
+            return ""
+        pem = str(self._pki.get("ca_crt") or "")
+        if not pem.strip():
+            return ""
+        if self._ca_fp is None or self._ca_fp[0] != pem:
+            import hashlib
+            import ssl
+
+            try:
+                der = ssl.PEM_cert_to_DER_cert(pem)
+            except ValueError as exc:
+                raise CoreError(
+                    f"openvpn: the provisioned CA certificate is not valid PEM ({exc})."
+                ) from exc
+            self._ca_fp = (pem, hashlib.sha256(der).hexdigest()[:16].upper())
+        return self._ca_fp[1]
+
     async def describe_delivery(
         self,
         account: UserAccount,
         context: "DeliveryContext | None" = None,
     ) -> "DeliveryProfile":
-        """OpenVPN delivery: downloadable .ovpn profile + auth credentials."""
+        """OpenVPN delivery: one section per GRANTED listener — downloadable
+        .ovpn profile + auth credentials + server/security facts (xray-style
+        one-entry-per-inbound; the PKI and the auth database are shared
+        across them)."""
         from app.cores.delivery import (
             ArtifactKind,
             DeliveryArtifact,
@@ -678,59 +954,97 @@ want_pass="${creds#*:}"
         )
 
         self._ensure_supported(account.protocol)
+        self._provision_credentials(account)
         self._ensure_credentials(account)
-        config = await self.build_client_config(account, node=None)
-        section = DeliverySection(
-            protocol="ovpn",
-            title=f"{self.metadata.name} · OpenVPN",
-            engine="openvpn",
-            artifacts=[
-                DeliveryArtifact(
-                    kind=ArtifactKind.FILE,
-                    label="OpenVPN profile",
-                    content=str(config.payload["profile"]),
-                    filename=f"{account.username}.ovpn",
-                    mime="application/x-openvpn-profile",
-                ),
-                DeliveryArtifact(
-                    kind=ArtifactKind.FIELDS,
-                    label="Authentication",
-                    fields=(
-                        [
-                            DeliveryField(key="username", label="Username (shared)",
-                                          value=str(self.settings.get("static_user") or "")),
-                            DeliveryField(key="password", label="Password (shared)",
-                                          value=str(self.settings.get("static_pass") or ""),
-                                          secret=True),
-                        ]
-                        if str(self.settings.get("auth_mode") or "management") == "static"
-                        else [
-                            DeliveryField(key="username", label="Username",
-                                          value=account.account_id),
-                            DeliveryField(key="password", label="Password",
-                                          value=str(account.settings["password"]),
-                                          secret=True),
-                        ]
-                    ),
-                ),
-                DeliveryArtifact(
-                    kind=ArtifactKind.NOTE,
-                    label="How to connect",
-                    note="Import the .ovpn profile into any OpenVPN client and "
-                         "enter the username/password when prompted.",
-                ),
-            ],
+        static = str(self.settings.get("auth_mode") or "management") == "static"
+        auth_fields = (
+            [
+                DeliveryField(key="username", label="Username (shared)",
+                              value=str(self.settings.get("static_user") or "")),
+                DeliveryField(key="password", label="Password (shared)",
+                              value=str(self.settings.get("static_pass") or ""),
+                              secret=True),
+            ]
+            if static
+            else [
+                DeliveryField(key="username", label="Username",
+                              value=account.account_id),
+                DeliveryField(key="password", label="Password",
+                              value=str(account.settings["password"]),
+                              secret=True),
+            ]
         )
-        return DeliveryProfile(core_id=self.metadata.id, sections=[section])
+        sections: list[DeliverySection] = []
+        advertise_host = str(self.settings.get("advertise_host") or "")
+        for listener in self._granted_listeners(account):
+            profile = self.render_client_profile(account, listener)
+            cipher_line = (
+                f"{listener.get('cipher') or 'AES-256-GCM'}:"
+                f"{listener.get('cipher_fallback') or 'AES-128-GCM'}"
+            )
+            security_fields = [
+                DeliveryField(key="server", label="Server",
+                              value=f"{advertise_host}:{listener['port']}"),
+                DeliveryField(key="transport", label="Transport",
+                              value=str(listener["proto"]).upper()),
+                DeliveryField(key="cipher", label="Data ciphers",
+                              value=cipher_line),
+                DeliveryField(key="tls", label="TLS",
+                              value="tls-crypt · remote-cert-tls server"),
+            ]
+            ca_fp = self._ca_fingerprint()
+            if ca_fp:
+                security_fields.append(
+                    DeliveryField(key="ca_fingerprint",
+                                  label="CA fingerprint (SHA-256)",
+                                  value=ca_fp))
+            sections.append(DeliverySection(
+                protocol="ovpn",
+                title=f"{listener['tag']} · OpenVPN",
+                engine="openvpn",
+                inbound_tag=listener["tag"],
+                artifacts=[
+                    DeliveryArtifact(
+                        kind=ArtifactKind.FILE,
+                        label="OpenVPN profile",
+                        content=profile,
+                        filename=f"{account.username}-{listener['tag']}.ovpn",
+                        mime="application/x-openvpn-profile",
+                    ),
+                    DeliveryArtifact(
+                        kind=ArtifactKind.FIELDS,
+                        label="Authentication",
+                        fields=tuple(auth_fields),
+                    ),
+                    DeliveryArtifact(
+                        kind=ArtifactKind.FIELDS,
+                        label="Server & security",
+                        fields=tuple(security_fields),
+                    ),
+                    DeliveryArtifact(
+                        kind=ArtifactKind.NOTE,
+                        label="How to connect",
+                        note="Import the .ovpn profile into any OpenVPN client and "
+                             "enter the username/password when prompted.",
+                    ),
+                ],
+            ))
+        return DeliveryProfile(core_id=self.metadata.id, sections=sections)
 
     async def build_client_config(
         self, account: UserAccount, node: Any | None = None
     ) -> ClientConfig:
-        profile = self.render_client_profile(account)
+        self._ensure_supported(account.protocol)
+        listeners = self._granted_listeners(account)
+        if not listeners:
+            raise CoreError(
+                f"openvpn account '{account.account_id}' has no granted inbound."
+            )
+        profile = self.render_client_profile(account, listeners[0])
         return ClientConfig(
             core_id=self.metadata.id,
             protocol="ovpn",
             engine="openvpn",
             payload={"format": "ovpn", "profile": profile, "auth": "user-pass"},
-            display_name="OpenVPN",
+            display_name=f"OpenVPN · {listeners[0]['tag']}",
         )

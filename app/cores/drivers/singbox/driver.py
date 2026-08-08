@@ -56,6 +56,11 @@ _INBOUND_KEYS: dict[str, set[str]] = {
     "vmess": {"id"},
     "trojan": {"password"},
     "shadowsocks": {"password"},
+    # consolidated cores (alpha.7.2): the standalone hysteria2/tuic engines
+    # folded into sing-box — the protocols are served natively, so account
+    # management, usage accounting and delivery live here now.
+    "hysteria2": {"password"},
+    "tuic": {"uuid", "password"},
 }
 _PROTOCOLS = set(_INBOUND_KEYS)
 
@@ -82,9 +87,13 @@ class SingBoxDriver(BaseCoreDriver):
         id="sing-box",
         name="sing-box",
         description=(
-            "Universal proxy platform by SagerNet. Config-render driver; the "
-            "richest native outbound set (wireguard, hysteria2, tuic, "
-            "shadowsocks, socks, http) — the panel's prime chain target."
+            "Universal proxy platform by SagerNet. Config-render driver; "
+            "natively serves vless/vmess/trojan/shadowsocks plus the "
+            "consolidated Hysteria2 and TUIC v5 protocols (alpha.7.2: the "
+            "standalone hy2/tuic cores folded in — one verified matrix, "
+            "unified per-user accounting), and still the richest native "
+            "outbound set (wireguard, hysteria2, tuic, shadowsocks, socks, "
+            "http) — the panel's prime chain target."
         ),
         protocols=sorted(_PROTOCOLS),
         capabilities={
@@ -123,7 +132,8 @@ class SingBoxDriver(BaseCoreDriver):
             "executable_path": "sing-box",
             "work_dir": "/var/lib/zagros/cores/sing-box",
             "listen": "::",
-            "ports": {"vless": 10001, "vmess": 10002, "trojan": 10003, "shadowsocks": 10004},
+            "ports": {"vless": 10001, "vmess": 10002, "trojan": 10003, "shadowsocks": 10004,
+                      "hysteria2": 4430, "tuic": 5443},
             "advertise_host": "127.0.0.1",
             "ss_method": "aes-128-gcm",
             "final_outbound": "direct",
@@ -161,6 +171,12 @@ class SingBoxDriver(BaseCoreDriver):
         self._studio_doc: dict[str, Any] | None = None  # set by apply_studio_document
         self._studio_link_meta: dict[str, dict[str, Any]] = {}  # per-tag link metadata
         self._stats_error: str | None = None
+        # alpha.7.2 consolidation: persisted alpha.7.1 settings rows carry a
+        # `ports` map WITHOUT the hysteria2/tuic keys — deep-merge the seed
+        # defaults so the derived (pre-studio) render path never KeyErrors.
+        port_defaults = dict(self.metadata.default_settings.get("ports") or {})
+        self.settings["ports"] = {**port_defaults, **(self.settings.get("ports") or {})}
+        self._self_signed_tags: set[str] = set()  # tags whose cert the panel minted
 
     # ------------------------------------------------------------------ #
     # config rendering + publishing
@@ -169,7 +185,10 @@ class SingBoxDriver(BaseCoreDriver):
     def _user_entry(account: UserAccount) -> dict[str, Any]:
         protocol = account.protocol
         entry: dict[str, Any] = {"name": account.account_id}
-        if protocol in ("vless", "vmess"):
+        if protocol == "hysteria2":
+            # sing-box hysteria2 users are {name, password}
+            entry["password"] = str(account.settings["password"])
+        elif protocol in ("vless", "vmess"):
             entry["uuid"] = str(account.settings["id"])
             if protocol == "vless" and account.settings.get("flow"):
                 entry["flow"] = account.settings["flow"]
@@ -210,6 +229,18 @@ class SingBoxDriver(BaseCoreDriver):
                 psk = self._ss_server_psk()  # mandatory iPSK for 2022 ciphers
                 if psk:
                     ss_extra["password"] = psk
+            tls_extra: dict[str, Any] = {}
+            if protocol in ("hysteria2", "tuic"):
+                # TLS is MANDATORY for both protocols in sing-box (unlike the
+                # classic four) — a derived listener mints the panel
+                # self-signed pair exactly like the studio path does.
+                tag = f"{protocol}-in"
+                cert_path, key_path = self._studio_materialize_certificate(tag, None, None)
+                self._self_signed_tags.add(tag)
+                tls_extra["tls"] = {"enabled": True, "server_name": "",
+                                    "certificate_path": cert_path, "key_path": key_path}
+                if protocol == "tuic":
+                    tls_extra["congestion_control"] = "bbr"
             inbounds.append({
                 "type": protocol,
                 "tag": f"{protocol}-in",
@@ -217,6 +248,7 @@ class SingBoxDriver(BaseCoreDriver):
                 "listen_port": int(ports[protocol]),
                 "users": users,
                 **ss_extra,
+                **tls_extra,
             })
         for (protocol, port), _ep in sorted(self._chain_listeners.items()):
             inbounds.append({
@@ -261,11 +293,13 @@ class SingBoxDriver(BaseCoreDriver):
             # metadata (reality public key, client flow hint, …) must NOT
             # leak into the rendered document; keep it in the side map the
             # delivery path reads instead (probe vs real binary, alpha.7.1)
+            if tag in self._self_signed_tags:
+                ib["_self_signed_cert"] = True  # delivery emits insecure=1 honestly
             meta = {k: ib.pop(k) for k in list(ib) if k.startswith("_")}
             if meta:
                 self._studio_link_meta[tag] = meta
             ptype = ib.get("type")
-            if ptype in _PROTOCOLS or ptype == "hysteria2" or ptype == "tuic":
+            if ptype in _PROTOCOLS:
                 users = [
                     self._user_entry(a)
                     for a in self._accounts.values()
@@ -403,7 +437,7 @@ class SingBoxDriver(BaseCoreDriver):
                  "transport", "security",
                  "path", "host", "headers", "service_name", "authority",
                  "sni", "alpn", "method", "flow", "fingerprint", "public_key",
-                 "congestion_control", "up_mbps", "down_mbps", "obfs",
+                 "congestion_control", "zero_rtt", "up_mbps", "down_mbps", "obfs",
                  "cipher", "ports", "ipsec_psk", "certificate", "certificate_key",
                  "mode", "username", "password", "auth", "padding_scheme",
                  "masquerade"}
@@ -487,6 +521,12 @@ class SingBoxDriver(BaseCoreDriver):
                 "Trojan without TLS is not offered — the protocol's identity IS "
                 "the TLS layer; pick TLS or REALITY."
             )
+        elif proto in ("hysteria2", "tuic") and security not in ("", "tls"):
+            raise CoreError(
+                f"TLS is mandatory for {proto} in sing-box (QUIC handshake is "
+                f"TLS1.3); '{security}' is not servable — use the TLS security "
+                "(the only one the wizard offers for these protocols)."
+            )
         if proto == "naive" and not raw.get("username"):
             raise CoreError("naive (HTTPS/2 proxy) needs username+password users.")
         if security == "reality" or raw.get("public_key"):
@@ -511,7 +551,7 @@ class SingBoxDriver(BaseCoreDriver):
                 **({"alpn": alpn} if alpn else {}),
             }
             ib["_reality_public_key"] = public  # → side map (delivery), never rendered
-        elif security == "tls" or proto in ("naive", "anytls"):
+        elif security == "tls" or proto in ("naive", "anytls", "hysteria2", "tuic"):
             cert_path, key_path = self._studio_materialize_certificate(
                 str(raw["tag"]), raw.get("certificate"), raw.get("certificate_key"),
             )
@@ -565,6 +605,11 @@ class SingBoxDriver(BaseCoreDriver):
         if proto == "tuic":
             if raw.get("congestion_control"):
                 ib["congestion_control"] = raw["congestion_control"]
+            if raw.get("zero_rtt"):
+                # verified against the real binary: sing-box tuic inbounds
+                # accept zero_rtt_handshake (1.12.4 + vendored 1.13.16,
+                # `sing-box check` green on both)
+                ib["zero_rtt_handshake"] = True
         return ib
 
     def _studio_materialize_certificate(
@@ -587,11 +632,13 @@ class SingBoxDriver(BaseCoreDriver):
         key_path = os.path.join(cert_dir, f"{safe_tag}.key")
         if cert_pem:
             cert_text, key_text = str(cert_pem), str(key_pem)
+            self._self_signed_tags.discard(tag)
         else:
             from app.utils.crypto import generate_certificate
 
             pair = generate_certificate()
             cert_text, key_text = pair["cert"], pair["key"]
+            self._self_signed_tags.add(tag)
         os.makedirs(cert_dir, exist_ok=True)
         for path, text, mode in (
             (cert_path, cert_text, 0o644),
@@ -736,8 +783,32 @@ class SingBoxDriver(BaseCoreDriver):
                 f"Protocol '{protocol}' is not supported by the sing-box core ({sorted(_PROTOCOLS)})."
             )
 
+    @staticmethod
+    def _provision_credentials(account: UserAccount) -> None:
+        """Mint missing credentials IN PLACE (the settings dict is shared
+        with the caller, so provisioning persists the generated material —
+        the same contract the TUIC core used). No account may ever fail a
+        grant for lack of credentials (batch item 10): the panel generates
+        cryptographically random ones, the operator/subscription sees the
+        same stored values forever after."""
+        import secrets as _secrets
+        import uuid as _uuid
+
+        s = account.settings
+        proto = account.protocol
+        if proto in ("vless", "vmess") and not s.get("id"):
+            s["id"] = str(_uuid.uuid4())
+        elif proto == "tuic":
+            if not (s.get("uuid") or s.get("id")):
+                s["uuid"] = str(_uuid.uuid4())
+            if not s.get("password"):
+                s["password"] = _secrets.token_hex(16)
+        elif proto in ("trojan", "shadowsocks", "hysteria2") and not s.get("password"):
+            s["password"] = _secrets.token_urlsafe(18)
+
     async def create_account(self, account: UserAccount) -> None:
         self._ensure_supported(account.protocol)
+        self._provision_credentials(account)
         account = self._normalize_account(account)
         key = account.settings.get("id") or account.settings.get("password") \
             or account.settings.get("uuid")
@@ -751,6 +822,7 @@ class SingBoxDriver(BaseCoreDriver):
 
     async def update_account(self, account: UserAccount) -> None:
         self._ensure_supported(account.protocol)
+        self._provision_credentials(account)
         self._accounts[account.account_id] = self._normalize_account(account)
         await self._republish()
 
@@ -771,11 +843,17 @@ class SingBoxDriver(BaseCoreDriver):
         await self._republish()
 
     async def sync_accounts(self, accounts: list[UserAccount]) -> None:
-        """Config-render cores converge best by rebuilding user state wholesale."""
+        """Config-render cores converge best by rebuilding user state wholesale.
+
+        Replay-time rows come from the encrypted store and ALWAYS carry their
+        credentials already; provisioning still runs defensively (a row
+        written by an older build without creds gets healed, not dropped)."""
+        for a in accounts:
+            self._provision_credentials(a)
         self._accounts = {
             a.account_id: self._normalize_account(a)
             for a in accounts
-            if a.protocol in _PROTOCOLS or a.protocol in ("hysteria2", "tuic")
+            if a.protocol in _PROTOCOLS
         }
         await self._republish()
 
@@ -1102,39 +1180,241 @@ class SingBoxDriver(BaseCoreDriver):
         return self._chain_listeners[key]
 
     # ------------------------------------------------------------------ #
-    # client config (sealed delivery only)
+    # client config + delivery — composed from the RENDERED listeners so a
+    # share link can never disagree with what the binary serves. Grant
+    # selection (inbound_tags / excluded_inbounds) is honored per inbound;
+    # the consolidated hysteria2/tuic protocols get the same treatment.
     # ------------------------------------------------------------------ #
+    def _selected_inbounds(
+        self, account: UserAccount
+    ) -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
+        """(tag, native inbound, link-meta) triples this account may use.
+
+        The render includes the account itself (temporarily, read-only):
+        delivery only ever describes listeners that would actually serve the
+        asking account — an account awaiting its first sync thus still gets
+        a correct link set instead of an empty list."""
+        injected = account.account_id not in self._accounts
+        if injected:
+            self._accounts = {**self._accounts, account.account_id: account}
+        try:
+            rendered = self.render_config()  # refreshes _studio_link_meta
+        finally:
+            if injected:
+                self._accounts.pop(account.account_id, None)
+        selected = account.settings.get("inbound_tags")
+        selected = {str(t) for t in selected} if selected else None
+        excluded = {str(t) for t in account.settings.get("excluded_inbounds") or []}
+        out: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+        for ib in rendered.get("inbounds", []):
+            tag = str(ib.get("tag") or "")
+            if tag.startswith("zg-chain-"):
+                continue
+            if ib.get("type") != account.protocol:
+                continue
+            if tag in excluded:
+                continue
+            if selected is not None and tag not in selected:
+                continue
+            out.append((tag, ib, dict(self._studio_link_meta.get(tag) or {})))
+        return out
+
+    def _compose_outbound(
+        self, account: UserAccount, tag: str, ib: dict[str, Any], meta: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Mirror one rendered listener into a client outbound fragment
+        (share-link shape consumed by ``share_url_for_outbound``)."""
+        proto = str(ib["type"])
+        server = str(self.settings.get("advertise_host") or "").strip() \
+            or str(ib.get("listen") or "").strip()
+        if server in ("::", "0.0.0.0", "[::]", ""):
+            raise CoreError(
+                "no advertise_host configured for the sing-box core and the "
+                f"inbound '{tag}' listens on a wildcard address — set "
+                "advertise_host in the core settings so clients know where "
+                "to connect."
+            )
+        outbound: dict[str, Any] = {
+            "type": proto, "tag": f"{tag}-svc",
+            "server": server, "server_port": int(ib.get("listen_port") or 0),
+        }
+        # credentials — exactly what the listener expects
+        if proto in ("vless", "vmess"):
+            outbound["uuid"] = str(account.settings.get("id") or account.settings.get("uuid"))
+            flow = meta.get("_client_flow") or account.settings.get("flow")
+            if proto == "vless" and flow:
+                outbound["flow"] = flow
+        elif proto == "tuic":
+            outbound["uuid"] = str(account.settings.get("uuid") or account.settings.get("id"))
+            outbound["password"] = str(account.settings["password"])
+        else:  # trojan / shadowsocks / hysteria2
+            outbound["password"] = str(account.settings["password"])
+            if proto == "shadowsocks":
+                method = str(ib.get("method") or self.settings["ss_method"])
+                outbound["method"] = self._ss_checked_method(method)
+                if ib.get("password"):
+                    # SIP022 multi-user form: ss:// encodes method:iPSK:uPSK
+                    outbound["password"] = f"{ib['password']}:{account.settings['password']}"
+        # TLS — mirror the listener (reality pubkey rides the side map)
+        tls = ib.get("tls") or {}
+        if tls.get("enabled"):
+            tls_out: dict[str, Any] = {"enabled": True}
+            if tls.get("server_name"):
+                tls_out["server_name"] = tls["server_name"]
+            if tls.get("alpn"):
+                tls_out["alpn"] = list(tls["alpn"])
+            reality = tls.get("reality") or {}
+            if reality.get("enabled"):
+                tls_out["reality"] = {
+                    "enabled": True,
+                    "public_key": str(meta.get("_reality_public_key") or ""),
+                    "short_id": (reality.get("short_id") or [""])[0],
+                }
+            if meta.get("_self_signed_cert") or tag in self._self_signed_tags:
+                tls_out["insecure"] = True
+            outbound["tls"] = tls_out
+        else:
+            outbound["tls"] = {"enabled": False}
+        # transport — mirror the listener
+        transport = ib.get("transport") or {}
+        net = transport.get("type")
+        if net in ("ws", "httpupgrade"):
+            outbound["transport"] = {
+                "type": net,
+                "path": transport.get("path") or "/",
+                **({"headers": transport["headers"]} if transport.get("headers") else {}),
+                **({"host": transport["host"]} if transport.get("host") else {}),
+            }
+        elif net == "grpc":
+            outbound["transport"] = {
+                "type": "grpc",
+                "service_name": transport.get("service_name") or "",
+            }
+        elif net == "http":
+            outbound["transport"] = {
+                "type": "http",
+                **({"path": transport["path"]} if transport.get("path") else {}),
+                **({"host": transport["host"]} if transport.get("host") else {}),
+            }
+        # protocol extras
+        if proto == "hysteria2":
+            obfs = ib.get("obfs") or {}
+            if obfs.get("password"):
+                outbound["obfs"] = {
+                    "type": obfs.get("type") or "salamander",
+                    "password": str(obfs["password"]),
+                }
+        if proto == "tuic" and ib.get("congestion_control"):
+            outbound["congestion_control"] = ib["congestion_control"]
+        return outbound
+
+    @staticmethod
+    def _protocol_display(protocol: str) -> str:
+        return {"hysteria2": "Hysteria 2", "tuic": "TUIC v5"}.get(
+            protocol, protocol.upper())
+
+    async def describe_delivery(
+        self, account: UserAccount, context: Any | None = None
+    ) -> "DeliveryProfile":
+        """One section per usable inbound (grant-filtered), each with its
+        QR-able share link per protocol variant; credentials ride along once
+        as a FIELDS artifact for manual client entry."""
+        from app.cores.delivery import (
+            ArtifactKind,
+            DeliveryArtifact,
+            DeliveryField,
+            DeliveryProfile,
+            DeliverySection,
+            ShareLinkError,
+            share_url_for_outbound,
+        )
+
+        self._ensure_supported(account.protocol)
+        account = self._normalize_account(account)
+        triples = self._selected_inbounds(account)
+        display = self._protocol_display(account.protocol)
+        profile = DeliveryProfile(core_id=self.metadata.id)
+        if not triples:
+            section = DeliverySection(
+                protocol=account.protocol,
+                title=f"{self.metadata.name} · {display}",
+                engine="sing-box",
+                artifacts=[DeliveryArtifact(
+                    kind=ArtifactKind.NOTE, label="Unavailable",
+                    note=(
+                        f"No sing-box inbound for protocol '{account.protocol}' "
+                        "is assigned to this account — ask the administrator to "
+                        "select one in the user's core access."
+                    ),
+                )],
+            )
+            profile.sections.append(section)
+            return profile
+
+        creds_fields: list[DeliveryField] = []
+        if account.protocol in ("vless", "vmess", "tuic"):
+            creds_fields.append(DeliveryField(
+                key="uuid", label="UUID",
+                value=str(account.settings.get("id") or account.settings.get("uuid")),
+                secret=True))
+        if account.protocol in ("trojan", "shadowsocks", "hysteria2", "tuic"):
+            creds_fields.append(DeliveryField(
+                key="password", label="Password",
+                value=str(account.settings["password"]), secret=True))
+        if account.protocol == "shadowsocks":
+            method = str(self.settings["ss_method"])
+            creds_fields.append(DeliveryField(key="method", label="Cipher", value=method))
+
+        for index, (tag, ib, meta) in enumerate(triples):
+            remark = f"{display} · {tag}"
+            section = DeliverySection(
+                protocol=account.protocol,
+                title=f"{self.metadata.name} · {remark}",
+                engine="sing-box",
+                inbound_tag=tag,
+            )
+            outbound = self._compose_outbound(account, tag, ib, meta)
+            try:
+                link = share_url_for_outbound(outbound, remark)
+            except ShareLinkError as exc:
+                section.artifacts.append(DeliveryArtifact(
+                    kind=ArtifactKind.NOTE, label=remark,
+                    note=f"Share link unavailable: {exc}",
+                ))
+            else:
+                section.artifacts.append(DeliveryArtifact(
+                    kind=ArtifactKind.LINK, label=remark, content=link, qr=True,
+                ))
+            if index == 0 and creds_fields:
+                section.artifacts.append(DeliveryArtifact(
+                    kind=ArtifactKind.FIELDS, label="Credentials (manual setup)",
+                    fields=creds_fields,
+                ))
+            profile.sections.append(section)
+        return profile
+
     async def build_client_config(
         self, account: UserAccount, node: Any | None = None
     ) -> ClientConfig:
+        """Sealed single-config view (first usable inbound) — kept for the
+        generic ClientConfig consumers; the rich view is describe_delivery."""
         self._ensure_supported(account.protocol)
-        host = self.settings["advertise_host"]
-        port = int(self.settings["ports"][account.protocol])
-        outbound: dict[str, Any] = {
-            "type": account.protocol,
-            "tag": f"{account.protocol}-svc",
-            "server": host,
-            "server_port": port,
-        }
-        if account.protocol in ("vless", "vmess"):
-            outbound["uuid"] = str(account.settings["id"])
-            if account.protocol == "vless" and account.settings.get("flow"):
-                outbound["flow"] = account.settings["flow"]
-        else:
-            outbound["password"] = account.settings["password"]
-            if account.protocol == "shadowsocks":
-                outbound["method"] = self._ss_checked_method(str(self.settings["ss_method"]))
-                psk = self._ss_server_psk()
-                if psk:
-                    # SIP022 multi-user form: ss:// encodes method:iPSK:uPSK
-                    outbound["password"] = f"{psk}:{account.settings['password']}"
-        outbound["tls"] = {"enabled": False}
+        account = self._normalize_account(account)
+        triples = self._selected_inbounds(account)
+        if not triples:
+            raise CoreError(
+                f"No sing-box inbound available for protocol '{account.protocol}' "
+                "(grant selection empty or no such listener configured)."
+            )
+        tag, ib, meta = triples[0]
+        display = self._protocol_display(account.protocol)
+        outbound = self._compose_outbound(account, tag, ib, meta)
         return ClientConfig(
             core_id=self.metadata.id,
             protocol=account.protocol,
             engine="sing-box",
             payload={"outbounds": [outbound]},
-            display_name=f"{account.protocol} · sing-box",
+            display_name=f"{display} · {tag}",
         )
 
 

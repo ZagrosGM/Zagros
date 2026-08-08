@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
@@ -72,6 +73,12 @@ class SSHTunnelDriver(BaseCoreDriver):
                 "shell": {"type": "string", "default": "/bin/bash"},
                 "create_home": {"type": "boolean", "default": False},
                 "port": {"type": "integer", "default": 2022},
+                "listeners": {"type": "array",
+                              "description": "sshd listener set (xray-style "
+                                             "multi-inbound): [{'tag': str, "
+                                             "'port': int}[, ...]] — empty = "
+                                             "derive from the legacy 'port' "
+                                             "setting (alpha.7.2)"},
                 "advertise_host": {"type": "string"},
                 "password_auth": {"type": "boolean", "default": True},
                 "pubkey_auth": {"type": "boolean", "default": True},
@@ -91,6 +98,7 @@ class SSHTunnelDriver(BaseCoreDriver):
             "shell": "/bin/bash",
             "create_home": False,
             "port": 2022,
+            "listeners": [],
             "advertise_host": "127.0.0.1",
             "password_auth": True,
             "pubkey_auth": True,
@@ -102,14 +110,19 @@ class SSHTunnelDriver(BaseCoreDriver):
         homepage="https://www.openssh.com/",
         provides=set(),
         requires=set(),
-        # sshd binds ONE listener set per daemon — the studio manages it as
-        # a single-entry inbound (drop-in rewrite + reload per apply).
+        # sshd natively serves ANY number of `Port` directives from one
+        # daemon — multi-inbound exactly like xray (alpha.7.2): N entries,
+        # distinct tags, distinct ports, one drop-in rewrite + reload.
         studio_inbounds_path="/inbounds",
-        studio_max_inbounds=1,
     )
 
     def __init__(self, settings: dict[str, Any] | None = None, *, backend: Any | None = None):
         super().__init__(settings)
+        # multi-inbound settings bridge (alpha.7.2): a persisted pre-7.2
+        # settings blob has no "listeners" — derive it from the legacy
+        # single "port" so old cores keep answering on their port.
+        self._listeners = self._derive_listeners(self.settings)
+        self.settings["listeners"] = [dict(l) for l in self._listeners]
         if backend is None:
             from app.cores.drivers.ssh.backend import LocalSystemSSHBackend
 
@@ -117,6 +130,60 @@ class SSHTunnelDriver(BaseCoreDriver):
         self._backend = backend
         self._accounts: dict[str, UserAccount] = {}
         self._chain_users: dict[str, tuple[str, str]] = {}
+
+    # ------------------------------------------------------------------ #
+    # listeners (xray-style multi-inbound over the ONE sshd listener set)   #
+    # ------------------------------------------------------------------ #
+    _RESERVED_PORT = 22  # operator access — always kept, never panel-owned
+
+    @classmethod
+    def _derive_listeners(cls, settings: dict[str, Any]) -> list[dict[str, Any]]:
+        """settings['listeners'] normalized; empty/missing → single listener
+        seeded from the legacy 'port' key (pre-alpha.7.2 compatibility)."""
+        raw = settings.get("listeners") or []
+        out: list[dict[str, Any]] = []
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            try:
+                port = int(row.get("port"))
+            except (TypeError, ValueError):
+                continue
+            tag = str(row.get("tag") or "").strip() or f"ssh-{port}"
+            entry: dict[str, Any] = {"tag": tag, "port": port}
+            if row.get("listen"):
+                entry["listen"] = str(row["listen"])
+            out.append(entry)
+        if not out:
+            port = int(settings.get("port") or 2022)
+            out.append({"tag": "ssh", "port": port})
+        return out
+
+    @classmethod
+    def _validate_listener_set(cls, listeners: list[dict[str, Any]]) -> None:
+        """Cardinality/uniqueness guards — named offenders in the error."""
+        if not listeners:
+            raise CoreError("ssh needs at least ONE listener (inbound).")
+        seen_tags: set[str] = set()
+        seen_ports: set[int] = set()
+        for listener in listeners:
+            tag, port = listener["tag"], listener["port"]
+            if not 1 <= int(port) <= 65535:
+                raise CoreError(f"ssh listener '{tag}': port out of range ({port}).")
+            if int(port) == cls._RESERVED_PORT:
+                raise CoreError(
+                    f"ssh listener '{tag}': port 22 is reserved for operator "
+                    f"access — the panel never binds its own listener there."
+                )
+            if tag in seen_tags:
+                raise CoreError(f"duplicate ssh inbound name '{tag}'.")
+            if int(port) in seen_ports:
+                raise CoreError(
+                    f"ssh listeners share port {port} — like xray, every "
+                    f"inbound needs its OWN port (check '{tag}')."
+                )
+            seen_tags.add(tag)
+            seen_ports.add(int(port))
 
     # ------------------------------------------------------------------ #
     # lifecycle — sshd is owned by systemd; we check, not control
@@ -168,19 +235,22 @@ class SSHTunnelDriver(BaseCoreDriver):
     # Config Studio bridge (sshd single listener — drop-in rewrite + reload)
     # ------------------------------------------------------------------ #
     def export_config_document(self) -> dict[str, Any]:
-        """Studio seed: the sshd listener modelled as a one-entry inbound
-        (pure settings read — the wizard rewrites exactly these levers)."""
+        """Studio seed: one entry per sshd listener (xray-style); daemon-wide
+        knobs (auth/shell/sftp/…) mirrored on every entry — the apply path
+        rejects conflicting values because ONE sshd serves them all."""
         s = self.settings
         password_auth = bool(s.get("password_auth", True))
         pubkey_auth = bool(s.get("pubkey_auth", True))
-        return {
-            "inbounds": [{
-                "tag": "ssh",
+        authentication = ("both" if password_auth and pubkey_auth
+                          else "password" if password_auth else "publickey")
+        entries = []
+        for listener in self._listeners:
+            entries.append({
+                "tag": listener["tag"],
                 "protocol": "ssh",
-                "listen": "0.0.0.0",
-                "port": int(s.get("port") or 2022),
-                "authentication": ("both" if password_auth and pubkey_auth
-                                   else "password" if password_auth else "publickey"),
+                "listen": listener.get("listen") or "0.0.0.0",
+                "port": int(listener["port"]),
+                "authentication": authentication,
                 "password": "",
                 "public_key": "",
                 "shell": s.get("shell") or "/bin/bash",
@@ -190,49 +260,119 @@ class SSHTunnelDriver(BaseCoreDriver):
                 "has_default_password": bool(s.get("default_password")),
                 "has_default_key": bool(s.get("default_authorized_key")),
                 "has_banner": bool(s.get("banner")),
-            }],
-        }
+            })
+        return {"inbounds": entries}
 
     async def apply_studio_document(self, document: dict[str, Any]) -> None:
-        """Adopt the studio document's single entry as THE sshd config:
-        settings updated → drop-in rewritten → sshd validated+reloaded
-        (non-disruptive when already running — port 22 is never removed)."""
+        """Adopt the studio document's entries as THE sshd listener set —
+        xray-style multi-inbound: N entries, distinct tags, distinct ports,
+        served by the ONE sshd via repeated `Port` directives (drop-in
+        rewrite + validated reload; port 22 is never removed).
+
+        Auth/shell/sftp knobs are physically daemon-wide: entries may carry
+        them, but a CONFLICTING pair is a hard error naming the field and
+        both tags — never a silent last-write-wins."""
         inbounds = (document or {}).get("inbounds") or []
-        if len(inbounds) != 1:
+        if not inbounds:
             raise CoreError(
-                f"sshd serves ONE listener set; the studio document carries "
-                f"{len(inbounds)} inbounds — keep exactly one."
+                "an ssh core needs at least ONE inbound — the studio document "
+                "carries none."
             )
-        ib = inbounds[0]
-        if str(ib.get("protocol") or "ssh") != "ssh":
-            raise CoreError(f"an ssh core cannot host a '{ib.get('protocol')}' listener.")
         s = self.settings
-        if ib.get("port") is not None:
-            port = int(ib["port"])
-            if not 1 <= port <= 65535:
-                raise CoreError(f"ssh port out of range: {port}")
-            s["port"] = port
-        authentication = str(ib.get("authentication") or "").lower()
+
+        # 1) structural pass (fail BEFORE touching any setting). Port stays
+        # optional per entry (alpha.7.1 partial-update contract): missing →
+        # inherit the current listener of the same name, else the legacy
+        # single port. Blank tag → "ssh" for a single-entry doc (legacy
+        # shape), deterministic ssh-<port> otherwise.
+        listeners: list[dict[str, Any]] = []
+        single = len(inbounds) == 1
+        for ib in inbounds:
+            if str(ib.get("protocol") or "ssh") != "ssh":
+                raise CoreError(f"an ssh core cannot host a '{ib.get('protocol')}' listener.")
+            tag = str(ib.get("tag") or "").strip()
+            raw_port = ib.get("port")
+            if raw_port is None:
+                probe = tag or "ssh"
+                existing = next(
+                    (l for l in self._listeners if l["tag"] == probe), None)
+                port = (int(existing["port"]) if existing
+                        else int(s.get("port") or 2022))
+            else:
+                try:
+                    port = int(raw_port)
+                except (TypeError, ValueError):
+                    raise CoreError(
+                        f"ssh inbound '{tag or '?'}': invalid port {raw_port!r}."
+                    ) from None
+            entry = {"tag": tag or ("ssh" if single else f"ssh-{port}"),
+                     "port": port}
+            if ib.get("listen"):
+                entry["listen"] = str(ib["listen"])
+            listeners.append(entry)
+        self._validate_listener_set(listeners)
+
+        # 2) daemon-wide knobs — identical values only; conflicts are named
+        def _norm(field: str, value: Any) -> Any:
+            if field == "max_sessions":
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return value
+            if field == "sftp":
+                if isinstance(value, str):
+                    return value.strip().lower() in ("1", "true", "yes", "on")
+                return bool(value)
+            if field == "authentication":
+                return str(value).strip().lower()
+            return value
+
+        def _shared(field: str) -> Any:
+            base_value: Any = None
+            base_tag: str | None = None
+            for ib, listener in zip(inbounds, listeners):
+                value = ib.get(field)
+                if value is None or value == "":
+                    continue
+                value = _norm(field, value)
+                if base_tag is None:
+                    base_tag, base_value = listener["tag"], value
+                elif value != base_value:
+                    raise CoreError(
+                        f"'{field}' is a daemon-wide sshd setting but inbound "
+                        f"'{base_tag}' and inbound '{listener['tag']}' "
+                        f"disagree — ONE sshd serves every listener, so keep "
+                        f"the value identical on all entries."
+                    )
+            return base_value
+
+        authentication = _shared("authentication")
         if authentication in ("password", "publickey", "both"):
             s["password_auth"] = authentication in ("password", "both")
             s["pubkey_auth"] = authentication in ("publickey", "both")
+        elif authentication:
+            raise CoreError(f"unknown ssh authentication mode '{authentication}'.")
         if not s["password_auth"] and not s["pubkey_auth"]:
             raise CoreError(
                 "refusing an sshd with BOTH password AND public-key auth off — "
                 "nobody (including you) could ever log in."
             )
-        if ib.get("shell"):
-            s["shell"] = str(ib["shell"])
-        if ib.get("sftp") is not None:
-            s["sftp"] = bool(ib["sftp"])
-        if ib.get("max_sessions") is not None:
-            s["max_sessions"] = int(ib["max_sessions"])
-        if str(ib.get("password") or ""):
-            s["default_password"] = str(ib["password"])
-        if str(ib.get("banner") or ""):
-            s["banner"] = str(ib["banner"])
-        if str(ib.get("public_key") or ""):
-            s["default_authorized_key"] = str(ib["public_key"])
+        shell = _shared("shell")
+        if shell:
+            s["shell"] = str(shell)
+        if _shared("sftp") is not None:
+            s["sftp"] = bool(_shared("sftp"))
+        if _shared("max_sessions") is not None:
+            s["max_sessions"] = int(_shared("max_sessions"))
+        password = _shared("password")
+        if str(password or ""):
+            s["default_password"] = str(password)
+        banner = _shared("banner")
+        if str(banner or ""):
+            s["banner"] = str(banner)
+        public_key = str(_shared("public_key") or "")
+        if public_key:
+            s["default_authorized_key"] = public_key
             # install for accounts that already exist as well
             for account in list(self._accounts.values()):
                 name = self._unix_name(account)
@@ -240,9 +380,19 @@ class SSHTunnelDriver(BaseCoreDriver):
                     await asyncio.to_thread(
                         self._backend.authorize_key, name, s["default_authorized_key"]
                     )
+
+        # 3) persist the listener set (legacy 'port' mirrors the first one)
+        s["listeners"] = [dict(l) for l in listeners]
+        self._listeners = [dict(l) for l in listeners]
+        s["port"] = listeners[0]["port"]
+
         # push through the same validated path the Start button uses
         how = await asyncio.to_thread(self._backend.ensure_service)
-        logger.info("ssh: studio document applied — sshd via %s", how)
+        logger.info(
+            "ssh: studio document applied — %d listener%s (%s), sshd via %s",
+            len(listeners), "" if len(listeners) == 1 else "s",
+            ", ".join(f"{l['tag']}:{l['port']}" for l in listeners), how,
+        )
 
     # ------------------------------------------------------------------ #
     # user management — real unix accounts
@@ -257,6 +407,17 @@ class SSHTunnelDriver(BaseCoreDriver):
         except ValueError as exc:
             raise CoreError(str(exc)) from exc
 
+    def _provision_credentials(self, account: UserAccount) -> None:
+        """Alpha.7.2 contract: provisioning NEVER fails on a missing
+        password — the panel mints a secure random one IN PLACE (the grant
+        path persists it back, same contract as sing-box). The studio-set
+        default password stays the intentional shared fallback (operator's
+        explicit choice), so it suppresses minting."""
+        if not account.settings.get("password") and not self.settings.get("default_password"):
+            account.settings["password"] = secrets.token_urlsafe(18)
+            logger.info("ssh: minted a random password for account '%s'.",
+                        account.account_id)
+
     def _ensure_credentials(self, account: UserAccount) -> None:
         if not account.settings.get("password") and not self.settings.get("default_password"):
             raise CoreError(f"SSH account '{account.account_id}' needs settings.password.")
@@ -270,6 +431,7 @@ class SSHTunnelDriver(BaseCoreDriver):
 
     async def create_account(self, account: UserAccount) -> None:
         self._ensure_supported(account.protocol)
+        self._provision_credentials(account)
         self._ensure_credentials(account)
         password = self._account_password(account)
         name = self._unix_name(account)
@@ -295,6 +457,7 @@ class SSHTunnelDriver(BaseCoreDriver):
 
     async def update_account(self, account: UserAccount) -> None:
         self._ensure_supported(account.protocol)
+        self._provision_credentials(account)
         self._ensure_credentials(account)
         previous = self._accounts.get(account.account_id)
         name = self._unix_name(account)
@@ -338,7 +501,12 @@ class SSHTunnelDriver(BaseCoreDriver):
 
     async def sync_accounts(self, accounts: list[UserAccount]) -> None:
         # reconcile: (re)create desired accounts; delete panel accounts that
-        # are no longer desired (only zg-* names are ever touched)
+        # are no longer desired (only zg-* names are ever touched).
+        # alpha.7.2: every granted account qualifies — credentials are
+        # provisioned first (alpha.7.1 skipped password-less accounts, which
+        # made the grant fail downstream; now nothing may fail).
+        for account in accounts:
+            self._provision_credentials(account)
         desired = {a.account_id for a in accounts if a.settings.get("password")}
         for account in accounts:
             if account.account_id in desired:
@@ -387,14 +555,82 @@ class SSHTunnelDriver(BaseCoreDriver):
         return out
 
     # ------------------------------------------------------------------ #
-    # client config (sealed delivery only)
+    # client config + delivery (sealed delivery; one section per granted   #
+    # listener — xray-style)                                               #
     # ------------------------------------------------------------------ #
+    def _granted_listeners(self, account: UserAccount) -> list[dict[str, Any]]:
+        """Grant-aware listener view (same convention as sing-box):
+        inbound_tags whitelists, excluded_inbounds blacklists."""
+        wanted = set(account.settings.get("inbound_tags") or [])
+        excluded = set(account.settings.get("excluded_inbounds") or [])
+        out = [l for l in self._listeners if not wanted or l["tag"] in wanted]
+        return [l for l in out if l["tag"] not in excluded]
+
+    async def describe_delivery(
+        self,
+        account: UserAccount,
+        context: "DeliveryContext | None" = None,
+    ) -> "DeliveryProfile":
+        """SSH delivery: per-listener connection FIELDS — one section per
+        granted inbound, exactly like xray emits one link per inbound."""
+        from app.cores.delivery import (
+            ArtifactKind,
+            DeliveryArtifact,
+            DeliveryField,
+            DeliveryProfile,
+            DeliverySection,
+        )
+
+        self._ensure_supported(account.protocol)
+        self._ensure_credentials(account)
+        s = self.settings
+        username = self._unix_name(account)
+        password = self._account_password(account)
+        sections: list[DeliverySection] = []
+        for listener in self._granted_listeners(account):
+            sections.append(DeliverySection(
+                protocol="ssh",
+                title=f"{listener['tag']} · SSH Tunnel",
+                engine="ssh",
+                inbound_tag=listener["tag"],
+                artifacts=[
+                    DeliveryArtifact(
+                        kind=ArtifactKind.FIELDS,
+                        label="Connection",
+                        fields=(
+                            DeliveryField(key="host", label="Host",
+                                          value=str(s["advertise_host"])),
+                            DeliveryField(key="port", label="Port",
+                                          value=str(listener["port"])),
+                            DeliveryField(key="username", label="Username",
+                                          value=username),
+                            DeliveryField(key="password", label="Password",
+                                          value=password, secret=True),
+                        ),
+                    ),
+                    DeliveryArtifact(
+                        kind=ArtifactKind.NOTE,
+                        label="How to connect",
+                        note=(f"ssh -p {listener['port']} {username}@<server> — "
+                              "add -D 1080 for a SOCKS proxy, or -L/-R for "
+                              "port forwards. Key-based login works when a "
+                              "public key is installed for your account."),
+                    ),
+                ],
+            ))
+        return DeliveryProfile(core_id=self.metadata.id, sections=sections)
+
     async def build_client_config(
         self, account: UserAccount, node: Any | None = None
     ) -> ClientConfig:
         self._ensure_supported(account.protocol)
         self._ensure_credentials(account)
         s = self.settings
+        listeners = self._granted_listeners(account)
+        if not listeners:
+            raise CoreError(
+                f"ssh account '{account.account_id}' has no granted inbound."
+            )
         return ClientConfig(
             core_id=self.metadata.id,
             protocol="ssh",
@@ -402,12 +638,12 @@ class SSHTunnelDriver(BaseCoreDriver):
             payload={
                 "format": "ssh",
                 "host": s["advertise_host"],
-                "port": int(s["port"]),
+                "port": int(listeners[0]["port"]),
                 "username": self._unix_name(account),
-                "password": str(account.settings["password"]),
+                "password": self._account_password(account),
                 "hint": "ssh -D 1080 (SOCKS) or ssh -L/-R port forwards",
             },
-            display_name="SSH Tunnel",
+            display_name=f"SSH Tunnel · {listeners[0]['tag']}",
         )
 
     # ------------------------------------------------------------------ #

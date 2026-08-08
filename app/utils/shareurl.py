@@ -77,6 +77,18 @@ def _fragment_name(parsed) -> str:
     return unquote(parsed.fragment).strip() if parsed.fragment else ""
 
 
+# alpha.7.2 (item 13): v2rayN/sing-box share-link client hints that Host
+# Settings can inject. Named-key passthrough ONLY — the format boundary
+# stays strict; anything else is still dropped on parse.
+_EXTRA_HINTS = ("fragment", "noise", "xmux")
+
+
+def _apply_extra_hints(settings: dict, q: dict[str, str]) -> None:
+    for hint in _EXTRA_HINTS:
+        if q.get(hint):
+            settings[hint] = q[hint]
+
+
 def _split_userinfo_host(parsed, scheme: str):
     userinfo = parsed.username or ""
     host = parsed.hostname or ""
@@ -149,6 +161,7 @@ def _parse_vless(url: str) -> ParsedShareURL:
         settings["encryption"] = q["encryption"]
     transport = _apply_transport(settings, q)
     security = _apply_security(settings, q)
+    _apply_extra_hints(settings, q)
     return ParsedShareURL(kind=OutboundKind.VLESS, settings=settings,
                           name_hint=_fragment_name(parsed), protocol="vless",
                           transport=transport, security=security)
@@ -169,6 +182,7 @@ def _parse_trojan(url: str) -> ParsedShareURL:
         # trojan is TLS-by-design; links that omit `security` still mean TLS
         settings["security"] = security = "tls"
         settings.setdefault("sni", q.get("sni") or q.get("peer") or host)
+    _apply_extra_hints(settings, q)
     return ParsedShareURL(kind=OutboundKind.TROJAN, settings=settings,
                           name_hint=_fragment_name(parsed), protocol="trojan",
                           transport=transport, security=security)
@@ -211,6 +225,8 @@ def _parse_vmess(url: str) -> ParsedShareURL:
     qlike = {k: v for k, v in qlike.items() if v not in ("", None)}
     transport = _apply_transport(settings, qlike)
     security = _apply_security(settings, qlike)
+    if payload.get("fragment"):
+        settings["fragment"] = str(payload["fragment"])
     name = str(payload.get("ps") or payload.get("remarks") or "")
     return ParsedShareURL(kind=OutboundKind.VMESS, settings=settings,
                           name_hint=name, protocol="vmess",

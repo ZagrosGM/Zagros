@@ -8,7 +8,7 @@ stack (fastapi/apscheduler/xray singletons) into their interpreter.
 """
 import logging
 
-__version__ = "1.0.0-alpha.7.1"  # Zagros begins a new version line after the rebrand
+__version__ = "1.0.0-alpha.7.2"  # Zagros begins a new version line after the rebrand
 
 
 _building = False
@@ -65,7 +65,7 @@ def _build_app_inner():
     from fastapi.responses import JSONResponse
     from fastapi.routing import APIRoute
 
-    from config import ALLOWED_ORIGINS, DOCS, TRUSTED_HOSTS, XRAY_SUBSCRIPTION_PATH
+    from config import ALLOWED_ORIGINS, DOCS, TRUSTED_HOSTS
 
     app = FastAPI(
         title="Zagros API",
@@ -160,25 +160,9 @@ def _build_app_inner():
 
     @app.on_event("startup")
     def on_startup():
-        # Newer Starlette wraps included routers in _IncludedRouter objects
-        # (no .path). Walk the route tree defensively instead of assuming
-        # every entry is a plain route.
-        def _all_paths(routes):
-            for route in routes:
-                pth = getattr(route, "path", None)
-                if pth:
-                    yield pth
-                nested = getattr(route, "routes", None)
-                if nested:
-                    yield from _all_paths(nested)
-
-        paths = [f"{p}/" for p in _all_paths(app.routes)]
-        paths.append("/api/")
-        if f"/{XRAY_SUBSCRIPTION_PATH}/" in paths:
-            raise ValueError(
-                f"you can't use /{XRAY_SUBSCRIPTION_PATH}/ as subscription path, "
-                f"it is reserved for {app.title}"
-            )
+        # alpha.7.2: the legacy xray-only subscription endpoint (/<XRAY_SUBSCRIPTION_PATH>/<token>)
+        # was REMOVED — the multi-core portal (/zagros/sub/<token>) is the
+        # only subscription surface; no reserved-path guard is needed here.
         scheduler.start()
 
     @app.on_event("shutdown")

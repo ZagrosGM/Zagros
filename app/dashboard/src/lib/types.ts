@@ -144,6 +144,8 @@ export interface CoreView {
   config_schema?: Record<string, unknown> | null;
   description?: string | null;
   homepage?: string | null;
+  /** non-null ⇒ the core hosts studio inbounds (wizard-capable) */
+  studio_inbounds_path?: string | null;
 }
 
 export interface CoreRegistryEntry {

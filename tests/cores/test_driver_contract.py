@@ -88,16 +88,6 @@ def _build(core_id: str, tmp: str) -> tuple[BaseCoreDriver, Any]:
 
         return WireGuardDriver(settings={"work_dir": work},
                                backend=fakes.FakeWireGuardBackend()), None
-    if core_id == "hysteria2":
-        from app.cores.drivers.hysteria2 import Hysteria2Driver
-
-        return Hysteria2Driver(settings={"work_dir": work},
-                               backend=fakes.FakeHy2Backend()), None
-    if core_id == "tuic":
-        from app.cores.drivers.tuic import TUICDriver
-
-        return TUICDriver(settings={"work_dir": work},
-                          backend=fakes.FakeTUICBackend()), None
     if core_id == "ssh":
         from app.cores.drivers.ssh import SSHTunnelDriver
 
@@ -159,7 +149,12 @@ def _sample_account(driver: BaseCoreDriver, user: int = 7, name: str = "probe") 
 
 def test_registry_unique_and_metadata_sane() -> None:
     assert len(_DRIVERS) == len(set(_DRIVERS)), "duplicate core ids in registry"
-    assert len(_DRIVERS) >= 8, f"expected >= 8 built-in drivers, got {_DRIVERS}"
+    # alpha.7.2 consolidation: 6 engines (xray, sing-box, wireguard,
+    # openvpn, ssh, softether) — hysteria2/tuic folded INTO sing-box
+    assert len(_DRIVERS) >= 6, f"expected >= 6 built-in drivers, got {_DRIVERS}"
+    assert "hysteria2" not in _DRIVERS and "tuic" not in _DRIVERS, (
+        "standalone hysteria2/tuic cores must stay removed (consolidation)")
+    assert "sing-box" in _DRIVERS, "sing-box core missing from the registry"
     for core_id in _DRIVERS:
         cls = get_driver_class(core_id)
         md = cls.metadata

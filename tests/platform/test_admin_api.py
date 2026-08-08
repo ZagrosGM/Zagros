@@ -220,6 +220,33 @@ class TestCores:
         r = client.post(f"/api/zagros/cores/{fake}/stop")
         assert r.json()["state"] == "stopped"
 
+    def test_view_never_shows_error_for_a_live_core(self, stack):
+        """alpha.7.2 item 3: a recorded ERROR (start died after the process
+        came up) must not paint the healthy, running core as Error — the
+        live probe wins in the view layer, the monitor reconciles the row."""
+        client, rt, fake = stack["client"], stack["rt"], stack["plain"]
+        r = client.post(f"/api/zagros/cores/{fake}/start")
+        assert r.json()["state"] == "running"
+
+        from app.cores.types import CoreState
+
+        mgr = rt.core_manager
+        mgr._states[fake] = CoreState.ERROR  # simulated stuck record
+        stored = mgr._states[fake]
+        assert stored == CoreState.ERROR
+
+        view = client.get(f"/api/zagros/cores/{fake}").json()
+        assert view["state"] == "running", view
+        assert view["health"] == "healthy"
+
+        # one monitor cycle heals the record itself
+        import asyncio
+
+        asyncio.run(mgr._health_cycle({}))
+        assert mgr._states[fake] == CoreState.RUNNING
+        # leave the fixture clean for other tests
+        client.post(f"/api/zagros/cores/{fake}/stop")
+
         r = client.post(f"/api/zagros/cores/{fake}/uninstall", json={"purge": False})
         assert r.json()["ok"] is True
         assert client.get(f"/api/zagros/cores/{fake}").status_code in (404, 500)

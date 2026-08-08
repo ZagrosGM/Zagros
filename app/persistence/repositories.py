@@ -22,6 +22,7 @@ from app.cores.types import CoreState, UsageRecord
 from app.portal.models import PortalSettings
 from app.persistence.cipher import SecretsCipher
 from app.persistence.models import (
+    CoreHostModel,
     CoreModel,
     DeviceModel,
     DeviceSessionModel,
@@ -721,3 +722,127 @@ class InMemorySettingsKV:
 
     async def set_value(self, key: str, value: Any) -> None:
         self._data[key] = value
+
+
+# --------------------------------------------------------------------- #
+# core host settings (delivery-layer "Host Settings" engine entries)
+# --------------------------------------------------------------------- #
+
+class SQLCoreHostStore:
+    """Admin Host-Settings entries keyed by ``(core_id, inbound_tag)``.
+
+    Rows live in the P3 ``core_hosts`` table.  The engine consumes
+    :class:`app.portal.hostengine.HostEntry` objects; this adapter owns the
+    model ↔ row mapping both ways.  ``sort`` persists **priority** — the
+    position of an entry inside its tag's list (item 13) — so the API's
+    list order IS the expansion order.
+    """
+
+    #: (core_id, tag) → known extras keys promoted onto HostEntry fields;
+    #: every OTHER extras key round-trips through HostEntry.extras verbatim
+    #: (marzban-era attributes we do not interpret stay preserved).
+    _KNOWN_EXTRAS = ("mux_enable", "fragment_setting", "noise_setting",
+                     "random_user_agent", "use_sni_as_host")
+
+    def __init__(self, session_factory) -> None:
+        self._sf = session_factory
+
+    # ---- mapping helpers -------------------------------------------- #
+    @staticmethod
+    def _to_entry(row) -> "HostEntry":
+        from app.portal.hostengine import HostEntry
+
+        extras = dict(row.extras or {})
+        known = {k: extras.pop(k) for k in SQLCoreHostStore._KNOWN_EXTRAS
+                 if k in extras}
+        return HostEntry(
+            remark=row.remark or "",
+            address=row.address or "",
+            port=row.port,
+            sni=row.sni,
+            host=row.host_header,
+            path=row.path,
+            security=row.security,
+            alpn=row.alpn,
+            fingerprint=row.fingerprint,
+            allowinsecure=extras.pop("allowinsecure", None),
+            is_disabled=bool(extras.pop("is_disabled", False)),
+            mux_enable=bool(known.get("mux_enable", False)),
+            fragment_setting=known.get("fragment_setting"),
+            noise_setting=known.get("noise_setting"),
+            random_user_agent=bool(known.get("random_user_agent", False)),
+            use_sni_as_host=bool(known.get("use_sni_as_host", False)),
+            extras=extras,
+        )
+
+    @staticmethod
+    def _to_row(core_id: str, tag: str, sort: int, entry: "HostEntry") -> "CoreHostModel":
+        extras = dict(entry.extras or {})
+        if entry.allowinsecure is not None:
+            extras["allowinsecure"] = bool(entry.allowinsecure)
+        if entry.is_disabled:
+            extras["is_disabled"] = True
+        for key in SQLCoreHostStore._KNOWN_EXTRAS:
+            value = getattr(entry, key)
+            if value not in (None, False, ""):
+                extras[key] = value
+        return CoreHostModel(
+            core_id=core_id, inbound_tag=tag, sort=sort,
+            remark=entry.remark, address=entry.address, port=entry.port,
+            sni=entry.sni, host_header=entry.host, path=entry.path,
+            security=entry.security, alpn=entry.alpn,
+            fingerprint=entry.fingerprint, extras=extras,
+        )
+
+    # ---- port ------------------------------------------------------- #
+    async def list_grouped(self, core_id: str) -> dict[str, list["HostEntry"]]:
+        """``{inbound_tag: [entries in priority order]}`` for one core."""
+        def _sync():
+            with self._sf() as s:
+                rows = (s.query(CoreHostModel)
+                        .filter(CoreHostModel.core_id == core_id)
+                        .order_by(CoreHostModel.inbound_tag,
+                                  CoreHostModel.sort, CoreHostModel.id)
+                        .all())
+                grouped: dict[str, list] = {}
+                for row in rows:
+                    grouped.setdefault(row.inbound_tag, []).append(self._to_entry(row))
+                return grouped
+        return await asyncio.to_thread(_sync)
+
+    async def replace_tags(self, core_id: str,
+                           tags: dict[str, list["HostEntry"]]) -> None:
+        """Replace ONLY the listed tags' rows (item 13 bulk PUT semantics):
+        a tag absent from ``tags`` keeps its rows untouched; a tag mapped
+        to ``[]`` is cleared; list order is persisted as priority (sort).
+        """
+        def _sync() -> None:
+            with self._sf() as s:
+                for tag, entries in tags.items():
+                    (s.query(CoreHostModel)
+                     .filter(CoreHostModel.core_id == core_id,
+                             CoreHostModel.inbound_tag == tag)
+                     .delete(synchronize_session=False))
+                    for sort, entry in enumerate(entries):
+                        s.add(self._to_row(core_id, tag, sort, entry))
+                s.commit()
+        return await asyncio.to_thread(_sync)
+
+
+class InMemoryCoreHostStore:
+    """Non-persistent counterpart (unit tests + dev boots)."""
+
+    def __init__(self) -> None:
+        self._data: dict[str, dict[str, list]] = {}
+
+    async def list_grouped(self, core_id: str) -> dict[str, list]:
+        return {tag: list(entries)
+                for tag, entries in self._data.get(core_id, {}).items()}
+
+    async def replace_tags(self, core_id: str, tags: dict[str, list]) -> None:
+        grouped = self._data.setdefault(core_id, {})
+        for tag, entries in tags.items():
+            if entries:
+                grouped[tag] = list(entries)
+            else:
+                grouped.pop(tag, None)

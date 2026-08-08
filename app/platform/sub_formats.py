@@ -185,13 +185,25 @@ def to_clash_meta(links: list[str], extra_notes: list[str] | None = None) -> tup
 # sing-box (SFA / SFI / SFM)
 # --------------------------------------------------------------------- #
 
-def _sb_tls(s: dict[str, Any]) -> dict[str, Any] | None:
+def _sb_tls(s: dict[str, Any], *, always: bool = False) -> dict[str, Any] | None:
     security = s.get("security") or "none"
     if security not in ("tls", "reality"):
-        return None
+        if not always:
+            return None
+        # hysteria2/tuic links carry NO `security` param, yet the protocols
+        # are TLS-mandatory — a sing-box outbound without the tls block is
+        # invalid (verified against the real binary: `sing-box check`
+        # rejects it). Emit the mandatory TLS block with whatever link
+        # params exist (sni/alpn/insecure ride the query string instead).
+        security = "tls"
     tls: dict[str, Any] = {"enabled": True}
     if s.get("sni"):
         tls["server_name"] = s["sni"]
+    alpn = s.get("alpn")
+    if alpn:
+        tls["alpn"] = [a for a in str(alpn).split(",") if a]
+    if s.get("allow_insecure"):
+        tls["insecure"] = True
     if security == "reality":
         tls["utls"] = {"enabled": True, "fingerprint": "chrome"}
         tls["reality"] = {
@@ -245,7 +257,7 @@ def _sb_outbound(name: str, ob: Any) -> dict[str, Any] | None:
     else:
         return None
 
-    tls = _sb_tls(s)
+    tls = _sb_tls(s, always=proto in ("hysteria2", "tuic"))
     if tls is not None and proto != "shadowsocks":
         out["tls"] = tls
     transport = _sb_transport(s)
@@ -255,7 +267,14 @@ def _sb_outbound(name: str, ob: Any) -> dict[str, Any] | None:
 
 
 def to_sing_box(links: list[str], extra_notes: list[str] | None = None) -> tuple[str, list[str]]:
-    """Complete sing-box 1.8+ config JSON; returns (json_text, notes)."""
+    """Complete sing-box 1.12+/1.13 config JSON; returns (json_text, notes).
+
+    Renderer contract (verified with `sing-box check` against stock 1.12.4
+    AND 1.13.16 on the consolidated protocol set): new-format DNS servers,
+    the ``hijack-dns`` rule ACTION (the legacy ``dns``/``block`` special
+    outbounds were removed upstream in 1.13 — emitting them produced an
+    unbootable subscription config for every sing-box client).
+    """
     parsed, notes = parse_named(links)
     notes = list(extra_notes or []) + notes
 
@@ -276,14 +295,7 @@ def to_sing_box(links: list[str], extra_notes: list[str] | None = None) -> tuple
     }
     config = {
         "log": {"level": "warn", "timestamp": True},
-        "dns": {
-            "servers": [
-                {"tag": "google", "address": "tls://8.8.8.8"},
-                {"tag": "local", "address": "underlying", "detour": "direct"},
-            ],
-            "strategy": "prefer_ipv4",
-            "final": "google",
-        },
+        "dns": {"servers": [{"type": "local", "tag": "dns-local"}]},
         "inbounds": [
             {"type": "mixed", "tag": "mixed-in",
              "listen": "127.0.0.1", "listen_port": 2080},
@@ -292,11 +304,9 @@ def to_sing_box(links: list[str], extra_notes: list[str] | None = None) -> tuple
             selector,
             *outbounds,
             {"type": "direct", "tag": "direct"},
-            {"type": "block", "tag": "block"},
-            {"type": "dns", "tag": "dns-out"},
         ],
         "route": {
-            "rules": [{"protocol": "dns", "outbound": "dns-out"}],
+            "rules": [{"protocol": "dns", "action": "hijack-dns"}],
             "final": "select",
             "auto_detect_interface": True,
         },

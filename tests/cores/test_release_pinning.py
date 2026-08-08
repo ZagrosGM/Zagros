@@ -50,22 +50,24 @@ def test_xray_install_latest_when_no_version(monkeypatch, tmp_path) -> None:
     assert captured["pinned"] is None
 
 
-def test_hysteria2_install_pins_exact_version(monkeypatch, tmp_path) -> None:
+def test_singbox_install_pins_exact_version(monkeypatch, tmp_path) -> None:
     from app.cores import github_install
-    from app.cores.drivers.hysteria2.backend import LocalHysteria2Backend
+    from app.cores.drivers.singbox.backend import LocalSingBoxBackend
 
     captured: dict = {}
 
     def fake_install(**kwargs):
         captured.update(kwargs)
-        # pretend the binary landed where install_binary promised
-        Path(kwargs["target_executable"]).write_bytes(b"x")
-        return "v2.6.1"
+        # executable stub that passes the post-install `sing-box check` probe
+        target = Path(kwargs["target_executable"])
+        target.write_text("#!/bin/sh\nexit 0\n")
+        target.chmod(0o755)
+        return "v1.12.4"
 
     monkeypatch.setattr(github_install, "install_from_github", fake_install)
-    backend = LocalHysteria2Backend({
-        "work_dir": str(tmp_path), "executable_path": "hysteria",
-        "release_version": "2.6.1",
+    backend = LocalSingBoxBackend({
+        "work_dir": str(tmp_path), "executable_path": "sing-box",
+        "release_version": "1.12.4",
     })
     try:
         tag = backend.install_binary()
@@ -73,6 +75,7 @@ def test_hysteria2_install_pins_exact_version(monkeypatch, tmp_path) -> None:
         # host without the right asset table must not fail the assertion path
         assert captured.get("pinned") is None
         return
-    assert tag == "v2.6.1"
+    assert tag == "v1.12.4"
     pinned = captured.get("pinned")
-    assert pinned is not None and pinned[0] == "v2.6.1"
+    # vendor build first (stats-enabled), upstream tag as the fallback
+    assert pinned is not None and pinned[0] in ("vendor-singbox-1.12.4", "v1.12.4")

@@ -3,16 +3,19 @@
 // application login), per-user quick actions. No JSON anywhere.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Ban, Check, ChevronDown, Copy, ExternalLink, Filter, Link2, MoreHorizontal,
+  Ban, Check, ChevronDown, Copy, Dices, ExternalLink, Filter, Link2, MoreHorizontal,
   Plus, RefreshCcw, Search, Trash2, UserPlus, Users as UsersIcon,
 } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { DataTable, type Column } from "../components/DataTable";
 import { toast } from "../components/feedback";
-import { ConfirmDialog, Dialog } from "../components/overlays";
+import { ConfirmDialog, Dialog, RowMenu } from "../components/overlays";
 import { Badge, Button, Card, EmptyState, Field, Input, Progress, Select, StatusDot, Switch, Tooltip, cn } from "../components/ui";
 import CoreAccessPicker from "../components/CoreAccessPicker";
 import { api, ApiError } from "../lib/api";
+import { copyText } from "../lib/clipboard";
+import { XRAY_CORE_ID, allCoreAccess, allLegacySelected } from "../lib/inboundTree";
+import { randomUsername } from "../lib/username";
 import { useDigits, formatBytes, formatDate, formatRelative, usagePercent } from "../lib/format";
 import { useT } from "../lib/i18n";
 import type { User, UsersResponse, UserStatus, UserTemplate , InboundCatalogGroup } from "../lib/types";
@@ -87,7 +90,8 @@ export default function Users() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dialog, setDialog] = useState<{ mode: "create" } | { mode: "edit"; user: User } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<User | null>(null);
-  const [menuFor, setMenuFor] = useState<string | null>(null);
+  // α7.2: the row menu is portal-mounted (RowMenu) → track the anchor element
+  const [menu, setMenu] = useState<{ user: User; anchor: HTMLElement } | null>(null);
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["users", search, statusFilter, ownerFilter],
@@ -100,13 +104,6 @@ export default function Users() {
       return api.get<UsersResponse>(`/users${qs ? `?${qs}` : ""}`);
     },
     placeholderData: (prev) => prev,
-  });
-  // legacy API: inbounds grouped by protocol (tag-level picking in the dialog)
-  type InboundsGrouped = Record<string, { tag: string; port?: number | string; protocol?: string }[]>;
-  const inboundsQ = useQuery({
-    queryKey: ["inbounds"],
-    queryFn: () => api.get<InboundsGrouped>("/inbounds"),
-    retry: false, staleTime: 60000,
   });
   const templatesQ = useQuery({
     queryKey: ["user_templates"],
@@ -138,7 +135,6 @@ export default function Users() {
 
   const users = useMemo(() => data?.users ?? [], [data]);
   const owners = useMemo(() => [...new Set(users.map((u) => u.admin).filter(Boolean))] as string[], [users]);
-  const inboundsGrouped = useMemo(() => inboundsQ.data ?? {}, [inboundsQ.data]);
   const catalogQ = useQuery({
     queryKey: ["zagros", "inbounds-catalog"],
     queryFn: () => api.get<{ groups: InboundCatalogGroup[] }>("/zagros/inbounds"),
@@ -160,10 +156,12 @@ export default function Users() {
     invalidate();
   };
 
-  const copySub = (u: User) => {
+  // α7.2 (item 16): copyText falls back to execCommand on plain-HTTP panels
+  // where navigator.clipboard does not exist at all; report the real result.
+  const copySub = async (u: User) => {
     const link = absolutizeSub(u.subscription_url ?? u.sub_url);
     if (!link) return toast.error("no subscription link");
-    navigator.clipboard.writeText(link).then(() => toast.ok(t("common.copied")), () => toast.error(t("common.error")));
+    (await copyText(link)) ? toast.ok(t("common.copied")) : toast.error(t("common.error"));
   };
 
   const allChecked = users.length > 0 && users.every((u) => selected.has(u.username));
@@ -244,28 +242,33 @@ export default function Users() {
       cell: (u) => (
         <div className="relative flex items-center justify-end gap-0.5" onClick={(e) => e.stopPropagation()}>
           <CopySubButton u={u} copySub={copySub} />
-          <button aria-label="actions" onClick={() => setMenuFor(menuFor === u.username ? null : u.username)}
+          <button aria-label="actions"
+            onClick={(e) => setMenu((m) => (m?.user.username === u.username ? null : { user: u, anchor: e.currentTarget }))}
             className="rounded-lg p-1.5 text-content-3 hover:bg-surface-3 hover:text-content">
             <MoreHorizontal size={16} />
           </button>
-          {menuFor === u.username && (
-            <>
-              <div className="fixed inset-0 z-30" onClick={() => setMenuFor(null)} />
-              <div className="absolute end-0 top-8 z-40 w-48 overflow-hidden rounded-xl border border-border-strong bg-surface-1 py-1 shadow-pop">
-                <MenuItem icon={<ExternalLink size={14} />} label={t("common.edit")} onClick={() => { setMenuFor(null); setDialog({ mode: "edit", user: u }); }} />
-                <MenuItem icon={<Copy size={14} />} label={t("users.copySub")} onClick={() => { setMenuFor(null); copySub(u); }} />
-                <MenuItem icon={<RefreshCcw size={14} />} label={t("users.resetUsage")} onClick={() => { setMenuFor(null); resetUsage.mutate(u.username); }} />
-                <MenuItem icon={<Link2 size={14} />} label={t("users.revokeSub")} onClick={() => { setMenuFor(null); revokeSub.mutate(u.username); }} />
-                <div className="my-1 border-t border-border" />
-                <MenuItem icon={<Trash2 size={14} />} label={t("common.delete")} danger
-                  onClick={() => { setMenuFor(null); setConfirmDelete(u); }} />
-              </div>
-            </>
-          )}
         </div>
       ),
     },
   ];
+
+  // One portal-mounted menu instance for the whole table (never clipped).
+  const mu = menu?.user;
+  const rowMenu = (
+    <RowMenu open={!!menu} anchor={menu?.anchor ?? null} onClose={() => setMenu(null)}>
+      {mu && (
+        <>
+          <MenuItem icon={<ExternalLink size={14} />} label={t("common.edit")} onClick={() => { setMenu(null); setDialog({ mode: "edit", user: mu }); }} />
+          <MenuItem icon={<Copy size={14} />} label={t("users.copySub")} onClick={() => { setMenu(null); copySub(mu); }} />
+          <MenuItem icon={<RefreshCcw size={14} />} label={t("users.resetUsage")} onClick={() => { setMenu(null); resetUsage.mutate(mu.username); }} />
+          <MenuItem icon={<Link2 size={14} />} label={t("users.revokeSub")} onClick={() => { setMenu(null); revokeSub.mutate(mu.username); }} />
+          <div className="my-1 border-t border-border" />
+          <MenuItem icon={<Trash2 size={14} />} label={t("common.delete")} danger
+            onClick={() => { setMenu(null); setConfirmDelete(mu); }} />
+        </>
+      )}
+    </RowMenu>
+  );
 
   return (
     <div className="space-y-4 animate-fade-up">
@@ -334,12 +337,12 @@ export default function Users() {
             action={!search && statusFilter === "all" ? <Button size="sm" onClick={() => setDialog({ mode: "create" })}><Plus size={14} />{t("users.new")}</Button> : undefined} />}
         />
       )}
+      {rowMenu}
 
       {dialog && (
         <UserDialog
           mode={dialog.mode}
           user={"user" in dialog ? dialog.user : undefined}
-          inbounds={inboundsGrouped}
           catalog={catalogQ.data?.groups ?? []}
           templates={templates}
           onClose={() => setDialog(null)}
@@ -372,8 +375,6 @@ function MenuItem({ icon, label, onClick, danger }: { icon: React.ReactNode; lab
 
 // ---------------------------------------------------------------- dialog ---
 
-type InboundsGrouped = Record<string, { tag: string; port?: number | string; protocol?: string }[]>;
-
 function PortalLinkSection({ username }: { username: string }) {
   const t = useT();
   const [link, setLink] = useState<string | null>(null);
@@ -403,7 +404,7 @@ function PortalLinkSection({ username }: { username: string }) {
         {link ? (
           <>
             <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-content-2" dir="ltr">{link}</code>
-            <Button variant="secondary" size="sm" onClick={() => navigator.clipboard.writeText(link).then(() => toast.ok(t("common.copied")))}>
+            <Button variant="secondary" size="sm" onClick={async () => (await copyText(link)) ? toast.ok(t("common.copied")) : toast.error(t("common.error"))}>
               <Copy size={13} /> {t("common.copy")}
             </Button>
           </>
@@ -417,9 +418,9 @@ function PortalLinkSection({ username }: { username: string }) {
   );
 }
 
-function UserDialog({ mode, user, inbounds, catalog, templates, onClose, onSaved }: {
+function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
   mode: "create" | "edit"; user?: User;
-  inbounds: InboundsGrouped; catalog: InboundCatalogGroup[]; templates: UserTemplate[];
+  catalog: InboundCatalogGroup[]; templates: UserTemplate[];
   onClose: () => void; onSaved: () => void;
 }) {
   const t = useT();
@@ -443,10 +444,54 @@ function UserDialog({ mode, user, inbounds, catalog, templates, onClose, onSaved
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const qc = useQueryClient();
+  // α7.2 (item 12): username generator state
+  const [genLen, setGenLen] = useState(8);
+  const [genBusy, setGenBusy] = useState(false);
 
-  const protocols = Object.keys(inbounds);
   const chosen = Object.keys(form.inbounds);
   const subUrl = absolutizeSub(user?.subscription_url ?? user?.sub_url);
+
+  // α7.2 (item 11): on CREATE everything is pre-selected once the catalog
+  // arrives (without clobbering a template pre-fill or admin edits).
+  const prefilled = useRef(false);
+  useEffect(() => {
+    if (mode !== "create" || prefilled.current || !catalog.length) return;
+    prefilled.current = true;
+    setForm((f) => {
+      const xg = catalog.find((g) => g.core_id === XRAY_CORE_ID);
+      return {
+        ...f,
+        inbounds: Object.keys(f.inbounds).length ? f.inbounds : (xg ? allLegacySelected(xg) : f.inbounds),
+        coreAccess: Object.keys(f.coreAccess).length ? f.coreAccess : allCoreAccess(catalog),
+      };
+    });
+  }, [mode, catalog]);
+
+  // α7.2 (item 12): letters+digits at a configurable length, verified unique
+  // against the real user API before filling the field.
+  const generateUsername = async () => {
+    setGenBusy(true);
+    try {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const name = randomUsername(genLen);
+        try {
+          await api.get(`/user/${encodeURIComponent(name)}`);
+          continue; // taken — regenerate
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 404) {
+            setForm((f) => ({ ...f, username: name }));
+            return;
+          }
+          throw e; // real failure (500, network…) — surface it honestly
+        }
+      }
+      toast.error("could not find a free username — try again");
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : t("common.error"));
+    } finally {
+      setGenBusy(false);
+    }
+  };
 
   // Template pre-fill (mode 1): data limit, expiry, username affixes and
   // the template's inbound sets flow into the form in one click.
@@ -463,18 +508,6 @@ function UserDialog({ mode, user, inbounds, catalog, templates, onClose, onSaved
       inbounds: structuredClone(tp.inbounds ?? {}),
       coreAccess: { ...form.coreAccess, ...structuredClone(tp.core_access ?? {}) },
     });
-  };
-
-  const toggleProtocol = (p: string) => {
-    const next = { ...form.inbounds };
-    if (p in next) delete next[p];
-    else next[p] = []; // [] = every inbound of that protocol
-    setForm({ ...form, inbounds: next });
-  };
-  const toggleTag = (p: string, tag: string) => {
-    const cur = new Set(form.inbounds[p] ?? []);
-    cur.has(tag) ? cur.delete(tag) : cur.add(tag);
-    setForm({ ...form, inbounds: { ...form.inbounds, [p]: [...cur] } });
   };
 
   const save = async () => {
@@ -540,9 +573,29 @@ function UserDialog({ mode, user, inbounds, catalog, templates, onClose, onSaved
       }
     >
       <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="username" required>
-          <Input id="username" value={form.username} disabled={mode === "edit"} autoComplete="off"
-            onChange={(e) => setForm({ ...form, username: e.target.value })} />
+        <Field label="username" required
+          hint={mode === "create" ? "letters + digits — or generate a random one" : undefined}>
+          <div className={mode === "create"
+            ? "grid grid-cols-[minmax(0,1fr)_4rem_auto] items-center gap-2"
+            : ""}>
+            <Input id="username" value={form.username} disabled={mode === "edit"} autoComplete="off"
+              /* grid tracks, not flex: the <input>'s intrinsic width made the
+                 flex row overflow INTO the status select (clicks on generate
+                 landed on the select — caught by the browser gate) */
+              onChange={(e) => setForm({ ...form, username: e.target.value })} />
+            {mode === "create" && (
+              <>
+                <Input type="number" min={4} max={32} value={genLen} aria-label="username length"
+                  title="generated username length (4–32)"
+                  className="w-16"
+                  onChange={(e) => setGenLen(Math.max(4, Math.min(32, parseInt(e.target.value, 10) || 8)))} />
+                <Button type="button" variant="secondary" size="sm" onClick={generateUsername}
+                  loading={genBusy} title="generate a unique random username">
+                  <Dices size={14} /> generate
+                </Button>
+              </>
+            )}
+          </div>
         </Field>
         <Field label={t("common.status")}>
           <Select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value as UserStatus })}>
@@ -603,54 +656,15 @@ function UserDialog({ mode, user, inbounds, catalog, templates, onClose, onSaved
 
         <div className="sm:col-span-2">
           <Field label={t("users.protocols")}
-            hint={protocols.length === 0 ? "no inbounds configured yet" : `${chosen.length}/${protocols.length} protocols`}>
-            <div className="space-y-2.5 rounded-xl border border-border p-3">
-              {protocols.length === 0 && <span className="text-xs text-content-3">—</span>}
-              {protocols.map((p) => {
-                const enabled = p in form.inbounds;
-                const tags = inbounds[p] ?? [];
-                const selected = new Set(form.inbounds[p] ?? []);
-                return (
-                  <div key={p} className={cn("rounded-xl border p-2.5 transition-colors",
-                    enabled ? "border-brand/50 bg-brand-soft/30" : "border-border")}>
-                    <button type="button" onClick={() => toggleProtocol(p)}
-                      className={cn("flex w-full items-center justify-between text-[13px] font-medium",
-                        enabled ? "text-brand" : "text-content-2 hover:text-content")}>
-                      <span className="inline-flex items-center gap-2">
-                        <span className={cn("h-2 w-2 rounded-full", enabled ? "bg-brand" : "bg-content-3")} />
-                        {p}
-                      </span>
-                      <span className="text-[11px] font-normal text-content-3">
-                        {enabled ? (selected.size ? `${selected.size}/${tags.length} tags` : "all tags") : `${tags.length} tags`}
-                      </span>
-                    </button>
-                    {enabled && tags.length > 1 && (
-                      <div className="mt-2 flex flex-wrap gap-1.5 border-t border-border pt-2">
-                        {tags.map((tag) => {
-                          const on = selected.has(tag.tag);
-                          return (
-                            <button key={tag.tag} type="button" onClick={() => toggleTag(p, tag.tag)}
-                              className={cn("rounded-lg border px-2.5 py-1 text-[11px] transition-colors",
-                                on ? "border-brand bg-brand-soft text-brand"
-                                   : "border-border-strong text-content-2 hover:border-brand/50")}>
-                              {tag.tag}{tag.port ? ` :${tag.port}` : ""}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </Field>
-
-          <Field label="other cores — assign inbounds from ANY core to this user"
-            hint="these are real accounts on each selected core, sharing this user's quota, expiry and status">
+            hint={chosen.length === 0
+              ? "select at least one protocol on the xray row — accounts on other cores share this user's quota, expiry and status"
+              : `${chosen.length} protocol${chosen.length > 1 ? "s" : ""} on xray · every selected core gets a real account`}>
             <CoreAccessPicker
               groups={catalog}
               value={form.coreAccess}
               onChange={(next) => setForm({ ...form, coreAccess: next })}
+              xrayValue={form.inbounds}
+              onXrayChange={(next) => setForm({ ...form, inbounds: next })}
             />
           </Field>
         </div>
@@ -666,10 +680,10 @@ function UserDialog({ mode, user, inbounds, catalog, templates, onClose, onSaved
 
         {mode === "edit" && subUrl && (
           <div className="sm:col-span-2 rounded-xl border border-border bg-surface-2 p-3">
-            <p className="mb-1.5 text-[11px] font-medium text-content-3">{t("users.qr")} — legacy (xray only)</p>
+            <p className="mb-1.5 text-[11px] font-medium text-content-3">{t("users.qr")} — every core, one link</p>
             <div className="flex items-center gap-2">
               <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-content-2" dir="ltr">{subUrl}</code>
-              <Button variant="secondary" size="sm" onClick={() => navigator.clipboard.writeText(subUrl).then(() => toast.ok(t("common.copied")))}>
+              <Button variant="secondary" size="sm" onClick={async () => (await copyText(subUrl)) ? toast.ok(t("common.copied")) : toast.error(t("common.error"))}>
                 <Copy size={13} /> {t("common.copy")}
               </Button>
             </div>

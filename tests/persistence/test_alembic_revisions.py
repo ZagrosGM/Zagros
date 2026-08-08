@@ -76,7 +76,7 @@ def test_0002_seeds_required_singletons() -> None:
         assert uplink == 0
         (head,) = sqlite3.connect(base / "zagros.db").execute(
             "SELECT version_num FROM alembic_version").fetchone()
-        assert head == "0006_device_limit"
+        assert head == "0008_core_host_inbound_tag"
 
 
 def test_0002_reseed_never_rotates_keys() -> None:
@@ -137,7 +137,7 @@ def test_0003_adds_extras_to_preexisting_databases() -> None:
             "SELECT extras FROM core_hosts WHERE remark = 'old'").fetchone()
         assert extras_val == "{}", "old rows must be backfilled to {}"
         (head,) = db.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert head == "0006_device_limit"
+        assert head == "0008_core_host_inbound_tag"
 
 
 def test_0004_adds_governance_columns_to_preexisting_databases() -> None:
@@ -241,3 +241,50 @@ def test_0006_adds_device_limit_to_preexisting_databases() -> None:
             "SELECT username, device_limit, device_limit_disabled FROM users WHERE id = 1"
         ).fetchone()
         assert row == ("old-user", None, 0), "pre-existing user row must not be touched"
+
+
+def test_0008_promotes_marzban_extras_to_inbound_tags() -> None:
+    """0008: marzban-era core_hosts rows (inbound tag stashed in extras by
+    0003) become live, queryable host-settings entries; idempotent replay
+    is a no-op; tag-less rows stay inert ('')."""
+    import sqlite3
+
+    base = Path(tempfile.mkdtemp(prefix="zgalembic-"))
+    platform_url, legacy_url = (
+        f"sqlite:///{base}/zagros.db", f"sqlite:///{base}/legacy.db")
+    _upgrade(platform_url, legacy_url)
+
+    # fresh databases get the column + index straight from head
+    with sqlite3.connect(base / "zagros.db") as db:
+        cols = {r[1] for r in db.execute("PRAGMA table_info(core_hosts)")}
+        idx = {r[1] for r in db.execute("PRAGMA index_list(core_hosts)")}
+    assert "inbound_tag" in cols and "ix_core_hosts_inbound_tag" in idx
+
+    # emulate a database created BEFORE the column existed, stamped at 0007
+    with sqlite3.connect(base / "zagros.db") as db:
+        db.execute("DROP INDEX IF EXISTS ix_core_hosts_inbound_tag")
+        db.execute("ALTER TABLE core_hosts DROP COLUMN inbound_tag")
+        db.execute(
+            "INSERT INTO core_hosts (core_id, remark, address, sort, extras) "
+            "VALUES ('xray', 'old', 'old.example.com', 0, "
+            "'{\"inbound_tag\": \"VLESS-TCP\"}')")
+        db.execute(
+            "INSERT INTO core_hosts (core_id, remark, address, sort, extras) "
+            "VALUES ('xray', 'inert', 'inert.example.com', 1, '{}')")
+        db.execute("UPDATE alembic_version SET version_num = '0007_core_consolidation'")
+        db.commit()
+
+    _upgrade(platform_url, legacy_url)
+    with sqlite3.connect(base / "zagros.db") as db:
+        rows = {r[0]: r[1] for r in db.execute(
+            "SELECT remark, inbound_tag FROM core_hosts") }
+        (head,) = db.execute("SELECT version_num FROM alembic_version").fetchone()
+    assert rows["old"] == "VLESS-TCP", "extras tag must be promoted"
+    assert rows["inert"] == "", "tag-less rows stay inert — never guessed"
+    assert head == "0008_core_host_inbound_tag"
+
+    # replay is a no-op (column/index guards)
+    _upgrade(platform_url, legacy_url)
+    with sqlite3.connect(base / "zagros.db") as db:
+        (head,) = db.execute("SELECT version_num FROM alembic_version").fetchone()
+    assert head == "0008_core_host_inbound_tag"

@@ -216,3 +216,27 @@ class ConfigStudioService:
         cardinality guard then died as an opaque 500).
         """
         return await self.apply(driver, await self._wizard_ops(driver, spec))
+
+    async def wizard_update_inbound(self, driver: BaseCoreDriver, tag: str,
+                                    spec: InboundSpec) -> PreviewResult:
+        """Item 11 — Edit an EXISTING inbound through the wizard: replace its
+        document entry with the wizard-built one (the SAME entry builder as
+        create, so shape stays identical); every earlier value must ride in
+        the spec — nothing is silently reset. A missing tag is a loud 404,
+        never a silent append."""
+        path = driver.metadata.studio_inbounds_path
+        if not path:
+            raise StudioError(f"core '{driver.metadata.id}' exposes no studio inbounds")
+        doc = await self.get_document(driver.metadata.id, driver)
+        items = doc.get(path.strip("/"), []) if isinstance(doc, dict) else []
+        idx = next(
+            (i for i, e in enumerate(items)
+             if isinstance(e, dict) and e.get("tag") == tag),
+            None,
+        )
+        if idx is None:
+            raise StudioError(
+                f"core '{driver.metadata.id}' has no inbound tagged '{tag}'")
+        entry = self.wizard_patch(driver, spec)[0].value
+        return await self.apply(driver, [PatchOperation(
+            op="replace", path=f"{path}/{idx}", value=entry)])

@@ -43,6 +43,16 @@ class CertificateInfo(BaseModel):
     self_signed: bool
     has_key: bool
     serial: str = ""
+    #: stable identifier = path relative to the panel data dir (posix). The
+    #: inventory scans the WHOLE tree (core work dirs materialize certs too,
+    #: e.g. <data>/cores/sing-box/certs/tuic.crt) — a bare NAME cannot
+    #: address those, which is why Delete-by-name answered "not found"
+    #: (alpha.7.4 item 18). Delete addresses certs by `id`.
+    id: str = ""
+    #: True when stored in the managed layout <data>/certs/<name>/ (import /
+    #: self-signed) — those delete as a directory; scanned core certs delete
+    #: as the single file (+ matching private key sibling).
+    managed: bool = False
 
 
 def _certs_root(data_dir: str) -> Path:
@@ -111,8 +121,11 @@ def scan(data_dir: str, *, max_depth: int = 5) -> list[CertificateInfo]:
                 info = _info_from(path, _parse_cert(path))
             except ValueError:
                 continue  # PEM-shaped files that aren't certs (keys, bundles)
-            if path.parent.parent == certs_root:  # managed layout: certs/<name>/<file>
+            managed = path.parent.parent == certs_root  # certs/<name>/<file>
+            info.managed = managed
+            if managed:
                 info.name = path.parent.name
+            info.id = path.relative_to(root).as_posix()
             if info.name in emitted:
                 continue  # one row per name (fullchain/ca variants collapse)
             emitted.add(info.name)
@@ -148,7 +161,10 @@ def import_cert(data_dir: str, name: str, cert_pem: str, key_pem: str,
         raise ValueError("certificate and private key do NOT match — import refused")
     dest = _certs_root(data_dir) / name
     _store_pair(dest, cert_pem.encode(), key_pem.encode(), overwrite=overwrite)
-    return _info_from(dest / "fullchain.pem", cert, name=name)
+    info = _info_from(dest / "fullchain.pem", cert, name=name)
+    info.managed = True
+    info.id = (dest / "fullchain.pem").relative_to(Path(data_dir)).as_posix()
+    return info
 
 
 def self_signed(data_dir: str, name: str, common_name: str, *,
@@ -180,16 +196,56 @@ def self_signed(data_dir: str, name: str, common_name: str, *,
         serialization.NoEncryption())
     dest = _certs_root(data_dir) / name
     _store_pair(dest, cert_pem, key_pem, overwrite=overwrite)
-    return _info_from(dest / "fullchain.pem", cert, name=name)
+    info = _info_from(dest / "fullchain.pem", cert, name=name)
+    info.managed = True
+    info.id = (dest / "fullchain.pem").relative_to(Path(data_dir)).as_posix()
+    return info
 
 
-def remove(data_dir: str, name: str) -> None:
-    """Delete a managed certificate directory (confined to <data>/certs/)."""
-    name = _safe_name(name)
-    dest = (_certs_root(data_dir) / name).resolve()
-    root = _certs_root(data_dir).resolve()
-    if dest == root or root not in dest.parents:
-        raise ValueError("refusing to delete outside the certificates directory")
-    if not dest.exists():
-        raise FileNotFoundError(f"certificate '{name}' not found")
-    shutil.rmtree(dest)
+def remove(data_dir: str, ident: str) -> None:
+    """Delete a certificate by IDENTIFIER (path-safe, always under data_dir).
+
+    * managed name (no '/', e.g. ``panel.example.com``) → its whole
+      ``<data>/certs/<name>/`` directory (legacy caller contract);
+    * inventory ``id`` (``certs/<name>/fullchain.pem`` or a core-materialized
+      file like ``cores/sing-box/certs/tuic.crt``) → exactly that file plus
+      the matching private-key sibling, with the now-empty managed directory
+      cleaned up as well. Anything else is refused, honestly.
+    """
+    data_root = Path(data_dir).resolve()
+    if "/" not in ident and "\\" not in ident:
+        name = _safe_name(ident)
+        dest = (_certs_root(data_dir) / name).resolve()
+        root = _certs_root(data_dir).resolve()
+        if dest == root or root not in dest.parents:
+            raise ValueError("refusing to delete outside the certificates directory")
+        if not dest.exists():
+            raise FileNotFoundError(f"certificate '{ident}' not found")
+        shutil.rmtree(dest)
+        return
+
+    target = (data_root / ident).resolve()
+    if data_root not in target.parents:
+        raise ValueError("refusing to delete outside the panel data directory")
+    if target.suffix.lower() not in (".crt", ".pem"):
+        raise ValueError("certificate ids must address a .crt/.pem file")
+    if not target.exists():
+        raise FileNotFoundError(f"certificate '{ident}' not found")
+    target.unlink()
+    # matching key sibling of the same cert pair (managed: key.pem; scanned:
+    # <stem>.key) — a half-deleted pair is a broken pair.
+    for sibling in (target.parent / "key.pem",
+                    target.with_suffix("").with_suffix(".key")):
+        try:
+            if sibling.exists():
+                sibling.unlink()
+        except OSError:
+            pass
+    # tidy: an emptied managed directory disappears as a unit
+    try:
+        managed_parent = (_certs_root(data_dir) / target.parent.name).resolve()
+        if (target.parent.resolve() == managed_parent
+                and managed_parent.is_dir() and not any(managed_parent.iterdir())):
+            managed_parent.rmdir()
+    except OSError:
+        pass

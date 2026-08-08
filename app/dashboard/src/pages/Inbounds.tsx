@@ -2,8 +2,8 @@
 // structured spec through the studio service (preview → apply); no JSON is
 // ever shown to the operator.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, ChevronLeft, Eye, FileUp, Link2, Loader2, Plus, Trash2, Waypoints, Wand2, XCircle } from "lucide-react";
-import { useMemo, useState } from "react";
+import { CheckCircle2, ChevronLeft, Copy, Eye, FileUp, Link2, Loader2, Pencil, Plus, Trash2, Waypoints, Wand2, XCircle } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "../components/feedback";
 import { ConfirmDialog, Dialog } from "../components/overlays";
 import { Badge, Button, Card, CardHeader, EmptyState, Field, Input, Select, Skeleton, Textarea } from "../components/ui";
@@ -19,6 +19,9 @@ interface WizardField {
   key: string; label: string; type: "string" | "int" | "bool" | "select" | "multiselect" | "password" | "textarea" | "file";
   required?: boolean; default?: string | number | boolean | string[];
   options?: string[]; placeholder?: string; help?: string;
+  /** schema-driven UX grouping (alpha.7.4 item 8): which panel the field
+   *  belongs to — the stepper renders groups, not a flat wall */
+  section?: "general" | "transport" | "tls" | "reality" | "certificate" | "advanced";
 }
 interface WizardSecurity { id: string; label: string; fields: WizardField[] }
 interface WizardTransport { id: string; label: string; securities: WizardSecurity[] }
@@ -31,7 +34,7 @@ export default function Inbounds() {
   const t = useT();
   const qc = useQueryClient();
   const [coreId, setCoreId] = useState<string>("");
-  const [wizard, setWizard] = useState(false);
+  const [wizard, setWizard] = useState<null | { mode: "create" | "edit" | "clone"; row?: InboundRow }>(null);
   const [deleteFor, setDeleteFor] = useState<InboundRow | null>(null);
 
   const cores = useQuery({
@@ -91,7 +94,7 @@ export default function Inbounds() {
             {!cores.data?.cores?.length && <option value="">—</option>}
           </Select>
         </Field>
-        <Button size="sm" onClick={() => setWizard(true)}
+        <Button size="sm" onClick={() => setWizard({ mode: "create" })}
           disabled={!effectiveCore || !wizardCapable}
           title={wizardCapable ? undefined : "this core does not expose studio inbounds — the wizard is unavailable for it"}>
           <Wand2 size={13} /> add inbound</Button>
@@ -108,7 +111,7 @@ export default function Inbounds() {
               ? "Run the wizard for a protocol-specific, validated creation flow — no hand-written config."
               : "This core does not expose studio inbounds, so no wizard is offered for it."}
             action={wizardCapable
-              ? <Button size="sm" onClick={() => setWizard(true)}><Wand2 size={13} /> launch wizard</Button>
+              ? <Button size="sm" onClick={() => setWizard({ mode: "create" })}><Wand2 size={13} /> launch wizard</Button>
               : undefined} />
         </Card>
       ) : (
@@ -124,13 +127,29 @@ export default function Inbounds() {
                   {String(ib.listen ?? "0.0.0.0")}:{String(ib.port)}
                 </p>
               </div>
-              <Button variant="ghost" size="icon" aria-label={`remove ${ib.tag}`} onClick={() => setDeleteFor(ib)}>
-                <Trash2 size={14} />
-              </Button>
+              <div className="flex shrink-0 flex-col gap-0.5">
+                {wizardCapable && (
+                  <>
+                    <Button variant="ghost" size="icon" aria-label={`edit ${ib.tag}`}
+                      title="edit this inbound through the wizard"
+                      onClick={() => setWizard({ mode: "edit", row: ib })}>
+                      <Pencil size={13} />
+                    </Button>
+                    <Button variant="ghost" size="icon" aria-label={`clone ${ib.tag}`}
+                      title="clone into a new inbound"
+                      onClick={() => setWizard({ mode: "clone", row: ib })}>
+                      <Copy size={13} />
+                    </Button>
+                  </>
+                )}
+                <Button variant="ghost" size="icon" aria-label={`remove ${ib.tag}`} onClick={() => setDeleteFor(ib)}>
+                  <Trash2 size={14} />
+                </Button>
+              </div>
             </Card>
           ))}
           {wizardCapable && (
-            <button onClick={() => setWizard(true)}
+            <button onClick={() => setWizard({ mode: "create" })}
               className="grid min-h-[92px] place-items-center rounded-2xl border border-dashed border-border-strong text-content-3 transition-colors hover:border-brand hover:text-brand">
               <span className="flex items-center gap-2 text-sm"><Plus size={16} /> add inbound</span>
             </button>
@@ -140,9 +159,10 @@ export default function Inbounds() {
 
       {wizard && effectiveCore && wizardCapable && (
         <WizardDialog coreId={effectiveCore} existingTags={inbounds.map((i) => i.tag)}
-          onClose={() => setWizard(false)}
+          mode={wizard.mode} initial={wizard.row}
+          onClose={() => setWizard(null)}
           onDone={() => {
-            setWizard(false);
+            setWizard(null);
             qc.invalidateQueries({ queryKey: ["zagros", "studio", "raw", effectiveCore] });
             qc.invalidateQueries({ queryKey: ["inbounds"] });
           }} />
@@ -170,8 +190,13 @@ interface WizardImportResult {
 }
 interface WizardPreviewResult { valid: boolean; errors: string[]; diff?: string | null }
 
-function WizardDialog({ coreId, existingTags, onClose, onDone }: {
-  coreId: string; existingTags: string[]; onClose: () => void; onDone: () => void;
+function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose, onDone }: {
+  coreId: string; existingTags: string[];
+  /** item 11: Create | Edit | Clone — Edit replaces the existing document
+   *  entry in place; Clone pre-fills everything but the tag */
+  mode?: "create" | "edit" | "clone";
+  initial?: InboundRow;
+  onClose: () => void; onDone: () => void;
 }) {
   const t = useT();
   const [step, setStep] = useState(0);
@@ -201,16 +226,51 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
     queryFn: () => api.get<WizardSchema>(`/zagros/cores/${coreId}/wizard-schema`),
     retry: false, staleTime: 600000,
   });
+  // item 10: managed certs for the Certificate section (pick existing OR paste)
+  const certsQ = useQuery({
+    queryKey: ["zagros", "certificates"],
+    queryFn: () => api.get<{ certificates: { name: string; managed: boolean; expired: boolean }[] }>("/zagros/certificates"),
+    staleTime: 60000,
+  });
+  const [certRef, setCertRef] = useState("");
 
   // sensible defaults once the blueprint lands / whenever an ancestor changes
   const effProto = proto ?? schema.data?.protocols[0] ?? null;
   const effTransport = transport ?? effProto?.transports[0] ?? null;
   const effSecurity = security ?? effTransport?.securities[0] ?? null;
 
+  // item 11 prefill (Edit/Clone): replay the existing document entry into the
+  // wizard EXACTLY — no field may reset without the operator touching it.
+  useEffect(() => {
+    if (!initial || !schema.data) return;
+    const p = schema.data.protocols.find((x) => x.id === initial.protocol);
+    const tr = p?.transports.find((x) => x.id === String(initial.transport ?? ""));
+    const sec = tr?.securities.find((x) => x.id === String(initial.security ?? ""));
+    if (!p || !tr || !sec) {
+      setError(`inbound "${initial.tag}" was not wizard-authored (or its blueprint changed) — edit it in Advanced Mode`);
+      return;
+    }
+    setProto(p); setTransport(tr); setSecurity(sec);
+    setTag(mode === "clone" ? `${initial.tag}-copy` : String(initial.tag));
+    if (typeof initial.listen === "string" && initial.listen) setListen(initial.listen);
+    const portNum = Number(initial.port);
+    if (portNum > 0) setPort(portNum);
+    const known = new Set(sec.fields.map((f) => f.key));
+    const restored: Record<string, string | string[]> = {};
+    for (const [k, v] of Object.entries(initial)) {
+      if (!known.has(k) || v === undefined || v === null) continue;
+      if (k === "certificate" || k === "certificate_key") continue; // secrets never round-trip
+      restored[k] = Array.isArray(v) ? (v as unknown[]).map(String) : String(v);
+    }
+    setFields(restored);
+    setStep(3); // review-first for edits
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initial, schema.data]);
+
   const pickProto = (p: WizardProtocol) => {
-    setProto(p); setTransport(null); setSecurity(null); setFields({}); setTouched(new Set()); setPort(p.default_port || 443);
+    setProto(p); setTransport(null); setSecurity(null); setFields({}); setTouched(new Set()); setCertRef(""); setPort(p.default_port || 443);
   };
-  const pickTransport = (tr: WizardTransport) => { setTransport(tr); setSecurity(null); };
+  const pickTransport = (tr: WizardTransport) => { setTransport(tr); setSecurity(null); setCertRef(""); };
 
   const spec = useMemo(() => {
     if (!effProto || !effTransport || !effSecurity) return null;
@@ -221,8 +281,11 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
     for (const f of effSecurity.fields) {
       const v = fields[f.key];
       if (v === undefined || v === "") continue;
+      // a selected managed certificate wins over pasted content (item 10)
+      if (certRef && (f.key === "certificate" || f.key === "certificate_key")) continue;
       settings[f.key] = f.type === "int" ? Number(v) : f.type === "bool" ? v === "true" : v;
     }
+    if (certRef) settings.certificate_ref = certRef;
     return {
       tag: tag.trim() || `${effProto.id}-${port}`,
       protocol: effProto.id,
@@ -230,7 +293,7 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
       port: Number(port),
       settings,
     };
-  }, [effProto, effTransport, effSecurity, tag, listen, port, fields]);
+  }, [effProto, effTransport, effSecurity, tag, listen, port, fields, certRef]);
 
   // item 6 Validation: schema-driven, per-field, BEFORE the server round
   // (required fields, int parse, port range, tag uniqueness); honesty rule —
@@ -267,10 +330,16 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
     if (!spec) return;
     setBusy(true); setError("");
     try {
-      const res = await api.post<{ materialized?: boolean; notice?: string }>(`/zagros/studio/${coreId}/wizard/inbound`, spec);
-      toast.ok(res.materialized === false
-        ? `inbound "${spec.tag}" saved on ${coreId} (applies on next start)`
-        : `inbound "${spec.tag}" created on ${coreId}`);
+      const res = mode === "edit" && initial
+        ? await api.put<{ materialized?: boolean; notice?: string }>(
+            `/zagros/studio/${coreId}/wizard/inbound/${encodeURIComponent(String(initial.tag))}`, spec)
+        : await api.post<{ materialized?: boolean; notice?: string }>(`/zagros/studio/${coreId}/wizard/inbound`, spec);
+      toast.ok(
+        mode === "edit"
+          ? `inbound "${spec.tag}" updated on ${coreId}${res.materialized === false ? " (applies on next start)" : ""}`
+          : res.materialized === false
+            ? `inbound "${spec.tag}" saved on ${coreId} (applies on next start)`
+            : `inbound "${spec.tag}" created on ${coreId}`);
       onDone();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : t("common.error"));
@@ -310,11 +379,15 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
 
   const stepNames = ["choose protocol", "transport", "security", "details & review"];
   const formInvalid = missingRequired.length > 0 || Object.keys(fieldErrors).length > 0;
+  // Edit keeps its own tag (replace-in-place); Create/Clone need a fresh one
+  const tagClash = mode === "edit"
+    ? existingTags.includes(spec?.tag ?? "") && spec?.tag !== initial?.tag
+    : existingTags.includes(spec?.tag ?? "");
   const invalid =
     step === 0 ? !effProto
     : step === 1 ? !effTransport
     : step === 2 ? !effSecurity
-    : !spec || !port || port < 1 || port > 65535 || existingTags.includes(spec.tag) || formInvalid;
+    : !spec || !port || port < 1 || port > 65535 || tagClash || formInvalid;
 
   const renderChoice = (
     <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
@@ -325,7 +398,9 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
           <button key={o.id} onClick={() => (step === 0 ? pickProto(o as WizardProtocol) : step === 1 ? pickTransport(o as WizardTransport) : setSecurity(o as WizardSecurity))}
             className={`rounded-xl border p-3 text-start transition-colors ${active ? "border-brand bg-brand-soft" : "border-border hover:border-border-strong"}`}>
             <p className="text-[13px] font-semibold">{o.label}</p>
-            {o.default_port ? <p className="mt-1 text-[10.5px] text-content-3">:{o.default_port}</p> : null}
+            {/* item 7: never show a FAKE port — before creation there IS no
+                port; the number only appears once typed (or imported) */}
+            {step === 0 && <p className="mt-1 text-[10.5px] text-content-3">port not configured</p>}
           </button>
         );
       })}
@@ -342,7 +417,7 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
 
   return (
     <Dialog open onClose={onClose} wide
-      title={<span className="inline-flex items-center gap-2"><Wand2 size={16} className="text-brand" /> inbound wizard — {coreId}</span>}
+      title={<span className="inline-flex items-center gap-2"><Wand2 size={16} className="text-brand" /> {mode === "edit" ? "edit inbound" : mode === "clone" ? "clone inbound" : "inbound wizard"} — {coreId}</span>}
       subtitle={`step ${step + 1} of 4 — ${stepNames[step]}${advanced ? "" : " · simple"}`}
       headerActions={
         <div className="flex items-center gap-1.5">
@@ -369,7 +444,7 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
             : <Button onClick={submit} loading={busy}
                 disabled={invalid || (!!preview.data && !preview.data.valid)}
                 title={preview.data && !preview.data.valid ? "server validation failed — fix the fields first" : undefined}>
-                <Wand2 size={14} /> create inbound</Button>}
+                <Wand2 size={14} /> {mode === "edit" ? "save changes" : "create inbound"}</Button>}
         </>
       }>
       {importOpen && (
@@ -394,7 +469,7 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
       )}
       {importNote.length > 0 && (
         <div className="mb-3 rounded-xl border border-border-strong bg-surface-2 px-3 py-2">
-          <p className="mb-1 text-[11px] font-semibold text-content-2">imported with notes (nothing guessed):</p>
+          <p className="mb-1 text-[11px] font-semibold text-content-2">unmapped / warnings (imported facts only — nothing guessed, nothing dropped silently):</p>
           <ul className="list-inside list-disc font-mono text-[10.5px] text-content-3" dir="ltr">
             {importNote.map((n) => <li key={n}>{n}</li>)}
           </ul>
@@ -428,11 +503,9 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
             ))}
           </div>
           <div className="grid gap-4 sm:grid-cols-3">
-            {advanced && (
-              <Field label="tag" hint={existingTags.includes(spec.tag) ? "this tag already exists" : "unique on this core"}>
-                <Input value={tag} placeholder={spec.tag} onChange={(e) => setTag(e.target.value)} dir="ltr" invalid={existingTags.includes(spec.tag)} />
-              </Field>
-            )}
+            <Field label="tag" hint={tagClash ? "this tag already exists" : mode === "edit" ? "unchanged tag = replace in place" : "unique on this core"}>
+                <Input value={tag} placeholder={spec.tag} onChange={(e) => setTag(e.target.value)} dir="ltr" invalid={tagClash} />
+            </Field>
             {advanced && (
               <Field label="listen">
                 <Select value={listen} onChange={(e) => setListen(e.target.value)}>
@@ -448,13 +521,40 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
                 invalid={!port || port < 1 || port > 65535} />
             </Field>
           </div>
-          {effSecurity && effSecurity.fields.some(fieldVisible) && (
-            <div className="grid gap-4 rounded-xl border border-border p-3.5 sm:grid-cols-3">
+          {/* items 8+10: schema-driven GROUPS instead of a flat field wall —
+             General / Transport / TLS / REALITY / Certificate / Advanced.
+             A protocol renders only the groups its cell actually carries. */}
+          {effSecurity && (["general", "transport", "tls", "reality", "certificate", "advanced"] as const).map((sec) => {
+            const groupFields = effSecurity.fields.filter((f) => (f.section ?? "advanced") === sec && fieldVisible(f));
+            if (!groupFields.length) return null;
+            const titles: Record<string, string> = {
+              general: "General", transport: "Transport", tls: "TLS / Security",
+              reality: "REALITY", certificate: "Certificate", advanced: "Advanced",
+            };
+            return (
+            <div key={sec} className="grid gap-4 rounded-xl border border-border p-3.5 sm:grid-cols-3">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-content-3 sm:col-span-3">
-                {effProto?.label} / {effTransport?.label} / {effSecurity.label} — settings
-                {!advanced && <span className="ms-1.5 normal-case tracking-normal">(showing only what needs a decision — switch to advanced for the rest)</span>}
+                {titles[sec]}
+                {!advanced && sec !== "general" && <span className="ms-1.5 normal-case tracking-normal">(showing only what needs a decision — switch to advanced for the rest)</span>}
               </p>
-              {effSecurity.fields.filter(fieldVisible).map((f) => {
+              {sec === "certificate" && (
+                <Field label="certificate source"
+                  hint="choose a stored certificate — or leave empty and paste (or auto-generate) below">
+                  <Select value={certRef}
+                    onChange={(e) => { setCertRef(e.target.value); if (e.target.value) setFields((cur) => { const n = { ...cur }; delete n.certificate; delete n.certificate_key; return n; }); }}>
+                    <option value="">— paste content / auto-generate —</option>
+                    {(certsQ.data?.certificates ?? []).filter((c) => c.managed).map((c) => (
+                      <option key={c.name} value={c.name}>{c.name}{c.expired ? " (EXPIRED)" : ""}</option>
+                    ))}
+                  </Select>
+                </Field>
+              )}
+              {sec === "certificate" && certRef && (
+                <p className="sm:col-span-3 rounded-lg border border-brand/30 bg-brand-soft/30 px-2.5 py-1.5 text-[11px] text-brand">
+                  using stored certificate «{certRef}» — validated server-side (PEM pair + match + expiry) before applying.
+                </p>
+              )}
+              {groupFields.filter((f) => !(certRef && (f.key === "certificate" || f.key === "certificate_key"))).map((f) => {
                 const err = fieldErrors[f.key];
                 const showErr = !!err && (touched.has(f.key) || !!err && f.required && fields[f.key] !== undefined);
                 const mark = () => setTouched((cur) => new Set(cur).add(f.key));
@@ -520,7 +620,8 @@ function WizardDialog({ coreId, existingTags, onClose, onDone }: {
                 );
               })}
             </div>
-          )}
+            );
+          })}
           <div className="rounded-xl bg-surface-2 p-3.5 text-[12px] text-content-2">
             <p className="mb-1 flex items-center gap-1.5 font-medium"><Eye size={13} className="text-brand" /> summary</p>
             <p>

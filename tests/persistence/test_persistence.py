@@ -171,6 +171,32 @@ def test_usage_journal_appends_with_attribution() -> None:
     asyncio.run(run())
 
 
+def test_usage_journal_totals_by_core() -> None:
+    """Item 17: per-core totals = exact GROUP-BY sum of journaled deltas."""
+    from app.cores.types import UsageRecord
+    from app.persistence.repositories import SQLUsageJournal, UserRepository
+
+    sf = _factory("journal-totals.db")
+    repo = UserRepository(sf)
+    repo.upsert_user(username="alice")
+    journal = SQLUsageJournal(sf)
+
+    async def run():
+        user = repo.get_user_by_username("alice")
+        owners = {("sing-box", "7.alice"): user.id, ("wg", "p1"): user.id}
+        for batch in (
+            [UsageRecord(core_id="sing-box", account_id="7.alice",
+                         uplink_bytes=5, downlink_bytes=100),
+             UsageRecord(core_id="wg", account_id="p1", uplink_bytes=3, downlink_bytes=30)],
+            [UsageRecord(core_id="sing-box", account_id="7.alice",
+                         uplink_bytes=5, downlink_bytes=50)],
+        ):
+            await journal.append(batch, owners)
+        totals = await journal.totals_by_core()
+        assert totals == {"sing-box": (10, 150), "wg": (3, 30)}
+    asyncio.run(run())
+
+
 # ---------------------------------------------------------------------- #
 # devices & sessions
 # ---------------------------------------------------------------------- #

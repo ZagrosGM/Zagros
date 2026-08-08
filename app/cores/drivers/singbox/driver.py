@@ -623,6 +623,33 @@ class SingBoxDriver(BaseCoreDriver):
             raise CoreError(
                 f"TLS inbound '{tag}': upload certificate AND private key together."
             )
+        if cert_pem:
+            # REAL validation (item 10): parse the pair and require a match
+            # BEFORE writing anything — a malformed/mismatched pair fails the
+            # preview/apply with a precise reason instead of a cryptic
+            # sing-box start error. Expiry is reported, never hidden.
+            from datetime import datetime, timezone
+
+            from cryptography import x509
+            from cryptography.hazmat.primitives import serialization
+
+            try:
+                cert = x509.load_pem_x509_certificate(str(cert_pem).encode())
+            except ValueError as exc:
+                raise CoreError(f"TLS inbound '{tag}': certificate is not a valid PEM ({exc}).") from exc
+            try:
+                key = serialization.load_pem_private_key(
+                    str(key_pem).encode(), password=None)
+            except ValueError as exc:
+                raise CoreError(f"TLS inbound '{tag}': private key is not a valid unencrypted PEM ({exc}).") from exc
+            if cert.public_key().public_numbers() != key.public_key().public_numbers():
+                raise CoreError(
+                    f"TLS inbound '{tag}': certificate and private key do NOT match.")
+            days = (cert.not_valid_after_utc - datetime.now(timezone.utc)).days
+            if days <= 0:
+                raise CoreError(f"TLS inbound '{tag}': certificate is EXPIRED.")
+            if days < 30:
+                logger.warning("sing-box inbound %s TLS certificate expires in %d days", tag, days)
         import re as _re
 
         safe_tag = _re.sub(r"[^A-Za-z0-9_.-]+", "_", tag)
@@ -728,6 +755,10 @@ class SingBoxDriver(BaseCoreDriver):
     # lifecycle
     # ------------------------------------------------------------------ #
     async def start(self) -> None:
+        # fresh config goes live now — any earlier stats-listener error is
+        # stale by definition (the listener field was dying on a pre-start
+        # socket); the next probe-driven tick settles the verdict freshly.
+        self._stats_error = None
         await asyncio.to_thread(self._backend.apply_config, self.render_config())
         await asyncio.to_thread(self._backend.start)
 

@@ -67,42 +67,42 @@ def _f(key: str, label: str, type_: str = "string", **kw: Any) -> Field:
 _FINGERPRINTS = ["chrome", "firefox", "safari", "ios", "android", "edge", "random", "randomized"]
 _ALPN = ["h2", "http/1.1", "h2,http/1.1", "h3"]
 
-WS_FIELDS = [_f("path", "WebSocket path", placeholder="/ws", default="/ws"),
-             _f("host", "Host header", placeholder="cdn.example.com")]
-HUP_FIELDS = [_f("path", "HTTPUpgrade path", placeholder="/up", default="/up"),
-              _f("host", "Host header", placeholder="cdn.example.com")]
-GRPC_FIELDS = [_f("service_name", "gRPC service name", placeholder="grpc-service", required=True),
-               _f("authority", "authority (optional)")]
-XHTTP_FIELDS = [_f("path", "XHTTP path", placeholder="/xh", default="/xh"),
-                _f("host", "Host header", placeholder="cdn.example.com"),
+WS_FIELDS = [_f("path", "WebSocket path", placeholder="/ws", default="/ws", section="transport"),
+             _f("host", "Host header", placeholder="cdn.example.com", section="transport")]
+HUP_FIELDS = [_f("path", "HTTPUpgrade path", placeholder="/up", default="/up", section="transport"),
+              _f("host", "Host header", placeholder="cdn.example.com", section="transport")]
+GRPC_FIELDS = [_f("service_name", "gRPC service name", placeholder="grpc-service", required=True, section="transport"),
+               _f("authority", "authority (optional)", section="transport")]
+XHTTP_FIELDS = [_f("path", "XHTTP path", placeholder="/xh", default="/xh", section="transport"),
+                _f("host", "Host header", placeholder="cdn.example.com", section="transport"),
                 _f("mode", "mode", "select", options=["auto", "packet-up", "stream-up", "stream-one"],
-                   default="auto")]
-H2_FIELDS = [_f("path", "HTTP/2 path", placeholder="/h2", default="/h2"),
-             _f("host", "HTTP/2 host", placeholder="cdn.example.com")]
-MKCP_FIELDS = [_f("mtu", "MTU", "int", default=1350, placeholder="1350"),
-               _f("tti", "TTI (ms)", "int", default=50, placeholder="50"),
-               _f("congestion", "congestion control", "bool", default=False,
+                   default="auto", section="transport")]
+H2_FIELDS = [_f("path", "HTTP/2 path", placeholder="/h2", default="/h2", section="transport"),
+             _f("host", "HTTP/2 host", placeholder="cdn.example.com", section="transport")]
+MKCP_FIELDS = [_f("mtu", "MTU", "int", default=1350, placeholder="1350", section="transport"),
+               _f("tti", "TTI (ms)", "int", default=50, placeholder="50", section="transport"),
+               _f("congestion", "congestion control", "bool", default=False, section="transport",
                   help="Header/seed were removed upstream (migrated to finalmask); "
                        "this is the pure mKCP UDP transport.")]
 
-SNI_FIELD = _f("sni", "SNI / certificate name", placeholder="panel.example.com", required=True)
-ALPN_FIELD = _f("alpn", "ALPN", "multiselect", options=_ALPN, default=["h2", "http/1.1"])
+SNI_FIELD = _f("sni", "SNI / certificate name", placeholder="panel.example.com", required=True, section="tls")
+ALPN_FIELD = _f("alpn", "ALPN", "multiselect", options=_ALPN, default=["h2", "http/1.1"], section="tls")
 TLS_UPLOAD_FIELDS = [
-    _f("certificate", "certificate (PEM)", "file",
+    _f("certificate", "certificate (PEM)", "file", section="certificate",
        help="Paste a PEM certificate, or leave blank and the panel generates a "
             "self-signed one — upload a real pair for production domains."),
-    _f("certificate_key", "private key (PEM)", "file",
+    _f("certificate_key", "private key (PEM)", "file", section="certificate",
        help="Paste the matching PEM private key (never stored in the studio "
             "document — written 0600 into the core's cert dir)."),
 ]
 REALITY_FIELDS = [
-    _f("sni", "camouflage target (dest/SNI)", placeholder="www.microsoft.com", required=True,
+    _f("sni", "camouflage target (dest/SNI)", placeholder="www.microsoft.com", required=True, section="reality",
        help="The server masquerades as this TLS site; it must be TLSv1.3 + h2 capable."),
-    _f("fingerprint", "client fingerprint", "select", options=_FINGERPRINTS, default="chrome"),
-    _f("public_key", "Reality public key (blank = auto-generated with the inbound)"),
+    _f("fingerprint", "client fingerprint", "select", options=_FINGERPRINTS, default="chrome", section="reality"),
+    _f("public_key", "Reality public key (blank = auto-generated with the inbound)", section="reality"),
 ]
 FLOW_FIELD = _f("flow", "flow", "select",
-                options=["xtls-rprx-vision"], required=False,
+                options=["xtls-rprx-vision"], required=False, section="advanced",
                 help="recommended for VLESS + TCP + TLS/REALITY")
 
 
@@ -112,7 +112,7 @@ def _ss_field(*, allow_2022: bool) -> Field:
     if allow_2022:
         options = ["2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", *options]
     return _f("method", "cipher", "select", required=True, options=options,
-              default=options[0])
+              default=options[0], section="general")
 
 
 def _sec(id_: str, label: str, fields: list[Field]) -> Security:

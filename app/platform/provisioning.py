@@ -201,11 +201,17 @@ async def _catalog_map(runtime):
 
 
 def _resolve_tag_protocols(core_id: str, tags: list[str],
-                           catalog: dict[str, Any]) -> dict[str, list[str]]:
+                           catalog: dict[str, Any],
+                           *, repair: bool = False) -> dict[str, list[str]]:
     """Map selected inbound tags → {protocol: [tags]} using the live catalog.
 
     Raises GrantError naming the core when a tag does not exist — the admin
-    must never get a silently-empty account.
+    must never get a silently-empty account. With ``repair=True`` (item 6,
+    case B) unknown tags are instead skipped with a logged warning: a grant
+    that went STALE (its inbound was deleted) must not 500/422 an unrelated
+    User Edit/Save — it self-heals here AND at the source (the studio
+    cascade). A payload that was *never valid* still fails loudly at the
+    API boundary (repair=False for fresh create/modify validation).
     """
     group = catalog.get(core_id)
     if group is None:
@@ -214,6 +220,11 @@ def _resolve_tag_protocols(core_id: str, tags: list[str],
     out: dict[str, list[str]] = {}
     for tag in tags:
         if tag not in known:
+            if repair:
+                logger.warning("grant repair: dropping dangling inbound tag "
+                               "'%s' for core '%s' (valid: %s)",
+                               tag, core_id, sorted(known) or "— none configured")
+                continue
             raise GrantError(
                 f"core '{core_id}' has no inbound '{tag}' "
                 f"(valid: {sorted(known) or '— none configured'})")
@@ -222,12 +233,15 @@ def _resolve_tag_protocols(core_id: str, tags: list[str],
 
 
 async def apply_grants(runtime, user: Any, platform_id: int,
-                       grants: dict[str, list[str]]) -> None:
+                       grants: dict[str, list[str]], *,
+                       repair: bool = False) -> None:
     """Converge the per-core accounts to exactly ``grants`` (non-xray cores).
 
     ``grants`` maps core_id → selected inbound tags. cores absent from the
     mapping keep their current accounts (PATCH semantics); an explicit empty
-    list revokes that core's accounts.
+    list revokes that core's accounts. ``repair=True`` (storage-healing
+    paths only — never the strict fresh-payload validation) drops dangling
+    tags instead of raising, per item 6B.
     """
     catalog = await _catalog_map(runtime)
     active = _legacy_status(user.status) == "active"
@@ -239,7 +253,13 @@ async def apply_grants(runtime, user: Any, platform_id: int,
         if core_id not in catalog:
             raise GrantError(f"core '{core_id}' is not available (not installed/enabled)")
         existing = [a for a in current if a["core_id"] == core_id]
-        wanted = _resolve_tag_protocols(core_id, list(tags or []), catalog) if tags else {}
+        wanted = _resolve_tag_protocols(core_id, list(tags or []), catalog,
+                                        repair=repair) if tags else {}
+        if repair and tags and not wanted:
+            logger.warning("grant for core '%s' contained only dangling tags "
+                           "(%s) — leaving its accounts untouched; re-save "
+                           "with a valid selection to change them", core_id, tags)
+            continue
 
         # revoke what is no longer selected
         for acc in existing:
@@ -314,7 +334,9 @@ async def sync_user(runtime, user: Any,
     platform_id = await sync_platform_user(runtime, user)
     await sync_legacy_accounts(runtime, user, platform_id)
     if grants is not None:
-        await apply_grants(runtime, user, platform_id, grants)
+        # repair=True: Edit/Save re-sends the STORED selection — a grant that
+        # dangled since (inbound deleted) must self-heal, not 422 (item 6B).
+        await apply_grants(runtime, user, platform_id, grants, repair=True)
     await sync_grants_enabled(runtime, user, platform_id)
     return platform_id
 
@@ -352,3 +374,72 @@ async def grants_of(runtime, username: str) -> dict[str, list[str]]:
         out.setdefault(acc["core_id"], [])
         out[acc["core_id"]].extend(t for t in tags if t not in out[acc["core_id"]])
     return out
+
+
+async def reconcile_accounts_after_inbound_change(runtime, core_id: str) -> dict:
+    """Grant cascade when a core's inbound set CHANGED (studio apply /
+    wizard — item 6, case A): a grant materialized into an account whose
+    ``inbound_tags`` no longer exist must never strand the user.
+
+    * tags still valid → account settings pruned in place (store + driver);
+    * NOTHING left → the account is revoked (driver + store), honestly;
+    * callers get a small report; failures on one account never abort the
+      sweep for the others (logged, counted).
+    """
+    from collections import Counter
+
+    groups = await build_inbound_catalog(runtime)
+    group = next((g for g in groups if g.core_id == core_id), None)
+    known = {i.tag: i.protocol for i in group.inbounds} if group else {}
+    report = Counter()
+    try:
+        accounts = await asyncio.to_thread(runtime.users.accounts_of_core, core_id)
+    except AttributeError:
+        return {"skipped": "store cannot list core accounts"}
+    for acc in accounts:
+        settings = dict(acc.get("settings") or {})
+        current_tags = list(settings.get("inbound_tags") or [])
+        if not current_tags:
+            continue  # whole-core account — no per-inbound binding to prune
+        kept = [t for t in current_tags if t in known]
+        if kept == current_tags:
+            continue  # nothing dangling
+        try:
+            if kept:
+                proto = acc["protocol"]
+                all_proto = sorted(t for t, p in known.items() if p == proto)
+                settings["inbound_tags"] = kept
+                settings["excluded_inbounds"] = sorted(set(all_proto) - set(kept))
+                await asyncio.to_thread(
+                    runtime.users.upsert_core_account,
+                    user_id=acc["user_id"], core_id=core_id,
+                    account_id=acc["account_id"], protocol=proto,
+                    enabled=acc["enabled"], settings=settings)
+                await runtime.core_manager.get(core_id).update_account(UserAccount(
+                    user_id=acc["user_id"], username="",
+                    account_id=acc["account_id"], protocol=proto,
+                    enabled=acc["enabled"], settings=settings,
+                ))
+                report["pruned"] += 1
+                logger.info("inbound cascade: pruned dangling tags for %s on %s "
+                            "(%s → %s)", acc["account_id"], core_id,
+                            current_tags, kept)
+            else:
+                try:
+                    await runtime.core_manager.get(core_id).delete_account(acc["account_id"])
+                except Exception as exc:  # noqa: BLE001 — store row still heals
+                    logger.warning("inbound cascade: driver delete failed for %s on %s: %s",
+                                   acc["account_id"], core_id, exc)
+                await asyncio.to_thread(
+                    runtime.users.delete_account,
+                    user_id=acc["user_id"], core_id=core_id,
+                    account_id=acc["account_id"])
+                report["revoked"] += 1
+                logger.info("inbound cascade: revoked %s on %s — its last "
+                            "inbound %s is gone", acc["account_id"], core_id,
+                            current_tags)
+        except Exception as exc:  # noqa: BLE001 — one row must not block the sweep
+            report["errors"] += 1
+            logger.warning("inbound cascade failed for %s on %s: %s",
+                           acc["account_id"], core_id, exc)
+    return dict(report)

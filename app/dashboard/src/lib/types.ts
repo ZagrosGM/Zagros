@@ -247,9 +247,13 @@ export interface Device {
 }
 
 export interface CertificateInfo {
-  name: string; subject_cn: string; issuer_cn: string;
+  name: string; path: string; subject: string; issuer: string;
   not_before: string; not_after: string; days_left: number;
   expired: boolean; self_signed: boolean; has_key: boolean; serial: string;
+  /** stable delete identifier (data-dir-relative path) — item 18 */
+  id: string;
+  /** stored in the managed <data>/certs/<name>/ layout (vs scanned core cert) */
+  managed: boolean;
 }
 
 export interface PanelInfo {

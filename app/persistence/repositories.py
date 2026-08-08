@@ -256,10 +256,28 @@ class SQLUsageJournal:
                 return len(records)
         return await asyncio.to_thread(_sync)
 
+    async def totals_by_core(self) -> dict[str, tuple[int, int]]:
+        """All-time per-core usage totals from the journal (item 17).
 
-# --------------------------------------------------------------------- #
-# devices (DeviceStore port) & sessions (SessionStore port)
-# --------------------------------------------------------------------- #
+        The journal only ever receives recorder DELTAS (exactly-once), so a
+        plain GROUP-BY sum is the real per-core total — immune to core
+        restarts/reinstalls and free of the host-interface byte counts the
+        old Cores page mistakenly displayed (backend metrics' network_rx/tx
+        is the PROCESS/host NIC, not user traffic).
+        """
+        from sqlalchemy import func
+
+        def _sync() -> dict[str, tuple[int, int]]:
+            with self._sf() as s:
+                rows = s.execute(
+                    select(
+                        UsageRecordModel.core_id,
+                        func.coalesce(func.sum(UsageRecordModel.uplink_bytes), 0),
+                        func.coalesce(func.sum(UsageRecordModel.downlink_bytes), 0),
+                    ).group_by(UsageRecordModel.core_id)
+                ).all()
+                return {core: (int(up), int(down)) for core, up, down in rows}
+        return await asyncio.to_thread(_sync)
 
 def _to_info(row: DeviceModel) -> DeviceInfo:
     return DeviceInfo(
@@ -634,6 +652,30 @@ class UserRepository:
             rows = s.execute(
                 select(UserCoreAccountModel)
                 .where(UserCoreAccountModel.user_id == user_id)
+                .where(UserCoreAccountModel.revoked_at.is_(None))
+            ).scalars().all()
+            out: list[dict[str, Any]] = []
+            for row in rows:
+                settings: dict[str, Any] = {}
+                if decrypt and row.credentials_enc:
+                    if self._cipher is None:
+                        raise ValueError("a SecretsCipher is required to read credentials")
+                    aad = f"{row.user_id}:{row.core_id}:{row.account_id}"
+                    settings = self._cipher.decrypt_json(row.credentials_enc, aad=aad)
+                out.append({
+                    "user_id": row.user_id, "core_id": row.core_id,
+                    "account_id": row.account_id, "protocol": row.protocol,
+                    "enabled": row.enabled, "settings": settings,
+                })
+            return out
+
+    def accounts_of_core(self, core_id: str, *, decrypt: bool = True) -> list[dict[str, Any]]:
+        """Every LIVE account of one core across all users (grant-cascade
+        reconciler: prune/revoke accounts whose inbound tags vanished)."""
+        with self._sf() as s:
+            rows = s.execute(
+                select(UserCoreAccountModel)
+                .where(UserCoreAccountModel.core_id == core_id)
                 .where(UserCoreAccountModel.revoked_at.is_(None))
             ).scalars().all()
             out: list[dict[str, Any]] = []

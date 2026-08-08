@@ -10,6 +10,112 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.7.4] — 2026-08-08 — Field bug-fix batch + full regression audit
+
+A 20-item field-driven fix batch against `alpha.7.3`, every item reproduced
+from real field errors first, fixed at the root, and re-verified with real
+binaries where the sandbox allows (actual SoftEther 5.2.5188 source build,
+actual vendored sing-box 1.12.4 / 1.13.16 stats runs, real panel boot with a
+24-check browser + API pass).
+
+### Fixed — cores
+
+* **SoftEther install chain, end to end.** Upstream
+  `SoftEtherVPN/SoftEtherVPN` ships only Windows `.exe` binaries plus a source
+  tarball per release — there is no Linux binary asset (and no such apt
+  package as `softether-vpnserver`). The installer now discovers the official
+  `SoftEtherVPN-*.tar.xz` release asset (fallback: tag archive), installs the
+  full build dependency set (`pkg-config` + `libsodium` dev packages across
+  apt/dnf/yum/pacman/apk — the exact "Could NOT find PkgConfig" / "None of
+  the required 'libsodium' found" failures), copies `libcedar.so*` /
+  `libmayaqua.so*` beside the binaries, registers them with
+  `/etc/ld.so.conf.d/zagros-softether.conf` + `ldconfig` (resolved without
+  relying on sudo PATH), links **wrapper scripts** instead of symlinks
+  (symlinks broke `hamcore.se2` lookup), and drives vpncmd with 5.x-style
+  argv (separate tokens after `/CMD` — the 4.x single-string form produced
+  `"UserCreate": Command not found`). Verified against a real 240 s source
+  build of 5.2.5188: daemon up on 443/5555/992/1194, UserCreate /
+  PasswordSet / UserGet / UserList / suspend / delete all real.
+* **OpenVPN / WireGuard inside Docker.** Containers created before
+  `alpha.7.2` kept missing `NET_ADMIN` + `/dev/net/tun` because `zagros
+  update` never re-rendered the compose file. `update_apply` now re-renders
+  compose, sha256-diffs it and `up -d --force-recreate`s on drift; install
+  runs a host TUN preflight (`modprobe tun`/`wireguard`,
+  `/etc/modules-load.d/zagros-tun.conf`, actionable LXC/OpenVZ guidance);
+  `zagros doctor` checks the tun device, the wireguard module and the live
+  container's `CapAdd`/`Devices` with a `zagros update --force` fix hint.
+* **sing-box traffic stats.** sing-box ≥ 1.12 registers its gRPC stats
+  service as `v2ray.core.app.stats.command.StatsService`, not
+  `xray.app.stats.command.StatsService` (the field error, reproduced with
+  the real vendored 1.12.4 binary). The stats source now negotiates both
+  dialects, caches the winner, and names both on failure. Verified with real
+  traffic through a real socks inbound: exact byte counts on 1.12.4 and
+  1.13.16; a live panel boot reports `running | healthy`.
+* **SSH usage accounting is real now.** Every proxied payload byte is
+  re-emitted by the account's sshd, so a per-UID iptables owner-match chain
+  (`ZG-SSH-ACCT`) counts tunnel traffic exactly (reported as downlink,
+  uplink honestly 0). Capability is env-gated with an actionable diagnosis
+  and DEGRADED status when iptables is unavailable, instead of silently
+  returning zeros. Image gains `iptables` + `iproute2`.
+
+### Fixed — platform
+
+* **Deleted-inbound grants reconcile** (item 6): removing an inbound prunes
+  its dangling driver grants and revokes emptied accounts; orphan grants no
+  longer 500/422 Edit/Save — user sync runs in explicit repair mode that
+  skips untouched ghosts instead of mass-revoking.
+* **Certificates delete by a stable id.** `scan()` inventoried the whole
+  data tree (e.g. `cores/sing-box/certs/tuic.crt`) while `remove()` only
+  knew managed `certs/<name>/` entries — "certificate 'tuic' not found".
+  Certificates now carry a data-dir-relative `id` (+ `managed` flag) and
+  DELETE accepts name or id with escape/non-`.crt` refusal; the dashboard
+  deletes by `id`.
+* **Per-core traffic totals are real.** Cores page consumed
+  `metrics.network_rx/tx` (host NIC counters). The usage journal now
+  aggregates exactly-once deltas per core (`GROUP BY` sums; legacy xray
+  rollup included where applicable) via `GET /zagros/cores/traffic/totals`.
+  No double counting, and it deliberately excludes — not duplicates — the
+  per-user quota accounting.
+
+### Changed — studio / dashboard
+
+* **Wizard**: protocol-aware grouped sections (general / transport / TLS /
+  REALITY / certificate / advanced); no fake port tiles ("port not
+  configured" instead of a fabricated `:443`); certificate picker resolving
+  `certificate_ref` to a validated inline PEM pair (existence, PEM format,
+  key match, expiry — loud 404/422/CoreError); edit + clone with full
+  prefill (secrets never round-trip); `PUT
+  /studio/{core}/wizard/inbound/{tag}` replaces in place; import surfaces
+  unmapped values in warnings instead of dropping them silently.
+* **One user, one subscription**: canonical `GET /sub/{token}` (the legacy
+  `/zagros/sub/{token}` alias keeps working); issued links point at `/sub/`.
+* **Host settings are protocol-aware**: `GET /zagros/cores/{id}/hosts/schema`
+  returns a per-protocol field matrix, so WireGuard/OpenVPN/SSH no longer
+  offer ALPN / fingerprint / TLS-style fields they cannot express; blank
+  remarks get the default `🛸 Zagros ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]
+  » {SERVER_IP}` template with per-section variable resolution.
+* **Online presence is tri-state**: online / offline / **unknown** — when a
+  core's device read fails the user is shown as unknown (never a false
+  "offline"); diagnostics persist the last collect timestamp and failed
+  cores.
+* **Multi-core quota**: one shared per-user quota across all cores, folded
+  exactly-once from the usage journal (dedicated integration test).
+
+### Verified before tagging
+
+* Full python suite **609 passed / 7 skipped / 0 failed**; CLI suite
+  **244/0**; `tsc --noEmit` + vite build clean; alembic head boot.
+* **24-check real browser + API pass** against a real panel boot: canonical
+  sub + alias, cert delete-by-id (+404 on repeat), traffic totals, online
+  tri-state, vendored sing-box install + wizard create/edit + cert ref +
+  hosts schema, no-fake-port tiles, edit prefill — zero page errors.
+* Real-binary verification where the sandbox permits: SoftEther 5.2.5188
+  source build + runtime, sing-box 1.12.4 / 1.13.16 stats.
+* Not locally runnable in this sandbox (no Docker daemon / NET_ADMIN): the
+  Docker image build and in-container `wg-quick`/iptables paths — covered by
+  the CLI suite (244 assertions incl. compose re-render/force-recreate) and
+  the release pipeline.
+
 ## [1.0.0-alpha.7.3] — 2026-08-08 — CI hermeticity fix (functionally identical to alpha.7.2)
 
 Un-breaks the release pipeline: the alpha.7.2 tag run failed in the `Test`

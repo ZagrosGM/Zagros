@@ -68,8 +68,13 @@ _SERVICE_ENTRIES: dict[str, tuple[tuple[str, str, str | None], ...]] = {
 }
 
 
-async def _studio_inbounds(runtime, core_id: str) -> list[CatalogInbound]:
-    doc = await runtime.studio_store.get_document(core_id)
+def _doc_inbounds(doc: Any) -> list[CatalogInbound]:
+    """inbound entries out of a studio OR native-core config document.
+
+    Both shapes are accepted (alpha.7.5 item 17): the studio payload
+    (tag/protocol/port) AND native core renders (sing-box/xray carry
+    'type' + 'listen_port').
+    """
     if not doc:
         return []
     try:
@@ -81,12 +86,36 @@ async def _studio_inbounds(runtime, core_id: str) -> list[CatalogInbound]:
         if not isinstance(item, dict):
             continue
         tag = item.get("tag")
-        protocol = item.get("protocol")
+        protocol = item.get("protocol") or item.get("type")
         if not tag or not protocol:
             continue
-        out.append(CatalogInbound(tag=str(tag), protocol=str(protocol),
-                                  port=item.get("port")))
+        out.append(CatalogInbound(
+            tag=str(tag), protocol=str(protocol),
+            port=item.get("port", item.get("listen_port"))))
     return out
+
+
+async def _studio_inbounds(runtime, core_id: str) -> list[CatalogInbound]:
+    doc = await runtime.studio_store.get_document(core_id)
+    found = _doc_inbounds(doc)
+    if found:
+        return found
+    if core_id in _SERVICE_ENTRIES:
+        return []  # healthy static fallback below in catalog()
+    # Studio-first cores (sing-box & co, alpha.7.5 item 17): with NO
+    # persisted studio document the EFFECTIVE inbound set lives in the
+    # driver's live render (derived listeners exist as soon as accounts do,
+    # with zero studio state). A fresh core with no accounts still exports
+    # zero inbounds — by design a "clean start" — and simply stays out of
+    # host-facing surfaces until its first inbound/user.
+    try:
+        driver = runtime.core_manager.get(core_id)
+        export = getattr(driver, "export_config_document", None)
+        doc = export() if callable(export) else None
+    except Exception:  # noqa: BLE001 — a broken driver must not blank the page
+        logger.warning("export_config_document failed for core %s", core_id)
+        return []
+    return _doc_inbounds(doc)
 
 
 def _service_inbounds(core_id: str, settings: dict[str, Any]) -> list[CatalogInbound]:

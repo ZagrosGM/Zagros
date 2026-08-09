@@ -297,3 +297,12 @@ class FakeSEBackend:
         self.disconnected.append(session_name)
         self.sessions = [s for s in self.sessions if s.session_name != session_name]
     def ipsec_psk(self): return None
+    def ipsec_get(self):
+        from app.cores.drivers.softether.setool import IPsecServices
+        return getattr(self, "_ipsec", IPsecServices(
+            l2tp=False, l2tp_raw=False, etherip=False, psk="", default_hub="DEFAULT"))
+    def ipsec_services_set(self, *, l2tp, l2tp_raw, etherip, psk, default_hub):
+        from app.cores.drivers.softether.setool import IPsecServices
+        self._ipsec = IPsecServices(l2tp=l2tp, l2tp_raw=l2tp_raw,
+                                    etherip=etherip, psk=psk,
+                                    default_hub=default_hub)

@@ -440,7 +440,10 @@ class SingBoxDriver(BaseCoreDriver):
                  "congestion_control", "zero_rtt", "up_mbps", "down_mbps", "obfs",
                  "cipher", "ports", "ipsec_psk", "certificate", "certificate_key",
                  "mode", "username", "password", "auth", "padding_scheme",
-                 "masquerade"}
+                 "masquerade",
+                 # alpha.7.5 item 4 — http transport verb + arbitrary header
+                 # maps (ws/http); item 6 — certificate-by-path mode.
+                 "http_method", "certificate_path", "certificate_key_path"}
         unknown = sorted(set(raw) - known)
         if unknown:
             raise CoreError(
@@ -480,10 +483,16 @@ class SingBoxDriver(BaseCoreDriver):
             ib["transport"] = {"type": "httpupgrade", "path": raw.get("path") or "/",
                                **({"host": raw["host"]} if raw.get("host") else {})}
         elif net == "http" and not skip_transport:
+            from app.studio.headers import parse_http_headers
+
             _h = raw.get("host")
+            _headers = parse_http_headers(raw.get("headers"),
+                                          context=f"http inbound '{raw['tag']}'")
             ib["transport"] = {"type": "http",
                                **({"path": raw["path"]} if raw.get("path") else {}),
-                               **({"host": [_h] if isinstance(_h, str) else _h} if _h else {})}
+                               **({"method": str(raw["http_method"])} if raw.get("http_method") else {}),
+                               **({"host": [_h] if isinstance(_h, str) else _h} if _h else {}),
+                               **({"headers": _headers} if _headers else {})}
         elif net == "quic" and proto not in ("hysteria2", "tuic") and not skip_transport:
             # sing-box DOES have a generic quic transport, but it refuses to
             # boot it without TLS ("create server transport: quic: TLS
@@ -496,9 +505,12 @@ class SingBoxDriver(BaseCoreDriver):
         elif skip_transport:
             pass  # decorative transport choice (see above)
         elif net == "ws" or raw.get("path") is not None or raw.get("host"):
-            headers = dict(raw.get("headers") or {})
+            from app.studio.headers import parse_http_headers
+
+            headers = parse_http_headers(raw.get("headers"),
+                                         context=f"ws inbound '{raw['tag']}'")
             if raw.get("host"):
-                headers["Host"] = raw["host"]
+                headers["Host"] = str(raw["host"])
             ib["transport"] = {"type": "ws", "path": raw.get("path") or "/",
                                **({"headers": headers} if headers else {})}
         # security — explicit; reality is verified per-protocol below
@@ -552,9 +564,23 @@ class SingBoxDriver(BaseCoreDriver):
             }
             ib["_reality_public_key"] = public  # → side map (delivery), never rendered
         elif security == "tls" or proto in ("naive", "anytls", "hysteria2", "tuic"):
-            cert_path, key_path = self._studio_materialize_certificate(
-                str(raw["tag"]), raw.get("certificate"), raw.get("certificate_key"),
-            )
+            if raw.get("certificate_path") or raw.get("certificate_key_path"):
+                # alpha.7.5 item 6 Mode B(path): reference the operator's PEM
+                # files in place — validated like any pasted pair first.
+                from app.studio.certs import CertificateError, validate_pem_pair_paths
+
+                try:
+                    validate_pem_pair_paths(
+                        str(raw.get("certificate_path") or ""),
+                        str(raw.get("certificate_key_path") or ""),
+                        context=f"TLS inbound '{raw['tag']}'")
+                except CertificateError as exc:
+                    raise CoreError(str(exc)) from exc
+                cert_path, key_path = str(raw["certificate_path"]), str(raw["certificate_key_path"])
+            else:
+                cert_path, key_path = self._studio_materialize_certificate(
+                    str(raw["tag"]), raw.get("certificate"), raw.get("certificate_key"),
+                )
             ib["tls"] = {
                 "enabled": True,
                 "server_name": raw.get("sni") or "",

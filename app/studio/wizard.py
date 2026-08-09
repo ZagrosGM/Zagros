@@ -68,11 +68,46 @@ _FINGERPRINTS = ["chrome", "firefox", "safari", "ios", "android", "edge", "rando
 _ALPN = ["h2", "http/1.1", "h2,http/1.1", "h3"]
 
 WS_FIELDS = [_f("path", "WebSocket path", placeholder="/ws", default="/ws", section="transport"),
-             _f("host", "Host header", placeholder="cdn.example.com", section="transport")]
+             _f("host", "Host header", placeholder="cdn.example.com", section="transport"),
+             _f("headers", "extra headers (one 'Name: value' per line)", "textarea",
+                placeholder="X-Forwarded-For: 1.2.3.4\nSec-WebSocket-Protocol: chat",
+                section="headers",
+                help="merged into the ws handshake; the Host field above always "
+                     "wins over a pasted Host line")]
 HUP_FIELDS = [_f("path", "HTTPUpgrade path", placeholder="/up", default="/up", section="transport"),
               _f("host", "Host header", placeholder="cdn.example.com", section="transport")]
 GRPC_FIELDS = [_f("service_name", "gRPC service name", placeholder="grpc-service", required=True, section="transport"),
                _f("authority", "authority (optional)", section="transport")]
+GRPC_XRAY_EXTRA = [_f("multi_mode", "multiMode (separate up/down streams)", "bool",
+                      default=False, section="transport",
+                      help="xray grpcSettings.multiMode")]
+# alpha.7.5 item 4 — RAW/TCP HTTP camouflage (xray tcpSettings.header.type =
+# "http"): a real request/response pair Xray serves, NOT decoration. The
+# translator refuses these facts with header_type=none.
+XRAY_TCP_HTTP_FIELDS = [
+    _f("header_type", "RAW/TCP header", "select", options=["none", "http"],
+       default="none", section="transport",
+       help="'http' makes the listener camouflage as an HTTP server "
+            "(tcpSettings.header.type)"),
+    _f("http_method", "camouflage request method", placeholder="GET", default="GET",
+       section="headers", help="requires header_type = http"),
+    _f("request_headers", "request headers (one 'Name: value' per line)", "textarea",
+       placeholder="Accept: */*\nUser-Agent: curl/8.0", section="headers",
+       help="requires header_type = http; the Host field (if set) is added"),
+    _f("response_status", "response status code", "int", default=200, placeholder="200",
+       section="headers"),
+    _f("response_reason", "response reason phrase", placeholder="OK", default="OK",
+       section="headers"),
+    _f("response_headers", "response headers (one 'Name: value' per line)", "textarea",
+       placeholder="Server: nginx\nContent-Type: text/html", section="headers"),
+]
+# sing-box http transport verb + header map (its V2Ray-transport http struct
+# carries method/host/path/headers; method/headers were missing here)
+SINGBOX_HTTP_EXTRA = [
+    _f("http_method", "HTTP method", placeholder="GET", section="transport"),
+    _f("headers", "extra headers (one 'Name: value' per line)", "textarea",
+       placeholder="Accept: */*", section="headers"),
+]
 XHTTP_FIELDS = [_f("path", "XHTTP path", placeholder="/xh", default="/xh", section="transport"),
                 _f("host", "Host header", placeholder="cdn.example.com", section="transport"),
                 _f("mode", "mode", "select", options=["auto", "packet-up", "stream-up", "stream-one"],
@@ -94,6 +129,15 @@ TLS_UPLOAD_FIELDS = [
     _f("certificate_key", "private key (PEM)", "file", section="certificate",
        help="Paste the matching PEM private key (never stored in the studio "
             "document — written 0600 into the core's cert dir)."),
+    # alpha.7.5 item 6 Mode B(path): reference PEM files on the panel host —
+    # validated with the same rules as pasted content, never copied, never
+    # registered in the Certificates store.
+    _f("certificate_path", "certificate file path (on this server)", section="certificate",
+       placeholder="/etc/letsencrypt/live/example.com/fullchain.pem",
+       help="used with the key path below — takes precedence over pasted content"),
+    _f("certificate_key_path", "private key file path (on this server)", section="certificate",
+       placeholder="/etc/letsencrypt/live/example.com/privkey.pem",
+       help="must match the certificate file (validated before applying)"),
 ]
 REALITY_FIELDS = [
     _f("sni", "camouflage target (dest/SNI)", placeholder="www.microsoft.com", required=True, section="reality",
@@ -148,10 +192,10 @@ def _xray_transports(*, reality: bool, tls_only: bool = False,
     """Verified Xray matrix: REALITY only on RAW/XHTTP/gRPC."""
     out: list[Transport] = []
     for tid, label, fields in (
-        ("tcp", "TCP (raw)", None),
+        ("tcp", "TCP (raw)", XRAY_TCP_HTTP_FIELDS),
         ("ws", "WebSocket", None),
         ("httpupgrade", "HTTPUpgrade", None),
-        ("grpc", "gRPC", None),
+        ("grpc", "gRPC", GRPC_XRAY_EXTRA),
         ("xhttp", "XHTTP", None),
         ("mkcp", "mKCP (UDP)", MKCP_FIELDS),
     ):
@@ -174,17 +218,20 @@ def _xray_transports(*, reality: bool, tls_only: bool = False,
 def _singbox_proxy_transports(*, reality: bool, none_too: bool = True) -> list[Transport]:
     """Verified sing-box matrix (vless/vmess/trojan): quic only under TLS/REALITY."""
     out: list[Transport] = []
-    for tid, label in (
-        ("tcp", "TCP (raw)"),
-        ("ws", "WebSocket"),
-        ("httpupgrade", "HTTPUpgrade"),
-        ("grpc", "gRPC"),
-        ("http", "HTTP/2"),
+    for tid, label, extra in (
+        ("tcp", "TCP (raw)", None),
+        ("ws", "WebSocket", None),
+        ("httpupgrade", "HTTPUpgrade", None),
+        ("grpc", "gRPC", None),
+        ("http", "HTTP/2", SINGBOX_HTTP_EXTRA),
     ):
         if reality:
             secs = [_reality(), _tls()] + ([_none()] if none_too else [])
         else:
             secs = [_tls()] + ([_none()] if none_too else [])
+        if extra:
+            for s in secs:
+                s["fields"] = [*extra, *s["fields"]]
         out.append(_tr(tid, label, secs))
     # generic quic transport exists but REFUSES to boot without TLS
     secs_q = [_tls()] + ([_reality()] if reality else [])
@@ -439,7 +486,12 @@ def _ssh_blueprint() -> list[Protocol]:
 
 
 def _softether_blueprint() -> list[Protocol]:
-    """Hub-managed features: every entry maps to real vpncmd verbs on apply."""
+    """Hub-managed features — every entry maps to real vpncmd verbs on apply.
+
+    No OpenVPN-clone entry: vpncmd 5.02 has no verb for the clone server
+    (alpha.7.5 item 7 audit — offering it produced guaranteed failures).
+    OpenVPN is served by the standalone 'openvpn' core instead.
+    """
     return [
         _proto("l2tp", "L2TP/IPsec (hub)", 0, [
             _tr("udp", "UDP 500/4500/1701", [_none([
@@ -451,12 +503,6 @@ def _softether_blueprint() -> list[Protocol]:
         ]),
         _proto("pptp", "PPTP (hub)", 1723, [
             _tr("tcp", "TCP 1723 (hub listener)", [_none()]),
-        ]),
-        _proto("ovpn", "OpenVPN clone (hub)", 1194, [
-            _tr("udp", "OpenVPN-compatible ports", [_none([
-                _f("ports", "UDP ports (comma separated)", default="1194",
-                   placeholder="1194,1195"),
-            ])]),
         ]),
     ]
 

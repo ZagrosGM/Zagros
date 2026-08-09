@@ -54,10 +54,13 @@ LABEL org.opencontainers.image.title="Zagros" \
 # Runtime network tooling for the host-managing cores:
 #  * iptables — SSH per-UID usage accounting (owner-match chain, alpha.7.4)
 #  * iproute2 — WireGuard/OpenVPN interface plumbing + net diagnostics
-# Both are inert until such a core is enabled, and NET_ADMIN comes from the
-# compose spec (installer grants it).
+#  * certbot  — REAL ACME / Let's Encrypt issuance from the Certificates
+#    page (alpha.7.5 item 9); the panel detects it at runtime, and acme.sh /
+#    lego stay supported for operators who install them instead.
+# All are inert until such a feature is enabled, and NET_ADMIN comes from
+# the compose spec (installer grants it).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends iptables iproute2 \
+    && apt-get install -y --no-install-recommends iptables iproute2 certbot \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHON_LIB_PATH=/usr/local/lib/python${PYTHON_VERSION%.*}/site-packages

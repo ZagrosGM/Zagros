@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
@@ -26,6 +27,10 @@ from app.cores.exceptions import CoreError
 logger = logging.getLogger("zagros.cores.drivers.ssh")
 
 _UID_RULE_S = re.compile(r"--uid-owner (\d+)")
+
+#: the accounting chain is panel-owned; every writer lives in THIS process
+#: (usage ticks), so one lock gives exact-once converge semantics
+_ACCT_LOCK = threading.Lock()
 
 
 @runtime_checkable
@@ -73,6 +78,18 @@ class LocalSystemSSHBackend:
             )
         return proc.stdout
 
+    @staticmethod
+    def _rc(argv: list[str], *, timeout: float = 15.0) -> int:
+        """Exit-code-only run for kernel-checked idempotency guards (the
+        netlink table itself answers whether a rule exists — an exception
+        here maps to 'not satisfied' so the caller retries the real op)."""
+        try:
+            proc = subprocess.run(
+                argv, capture_output=True, text=True, timeout=timeout)
+        except (subprocess.SubprocessError, OSError):
+            return 127
+        return proc.returncode
+
     # ------------------------------------------------------------------ #
     # per-UID traffic accounting — iptables owner-match chain (alpha.7.4)
     # ------------------------------------------------------------------ #
@@ -115,22 +132,56 @@ class LocalSystemSSHBackend:
             self._run([ipt, "-I", "OUTPUT", "1", "-j", ACCT_CHAIN])
 
     def acct_sync_users(self, uids: set[int]) -> None:
-        """Converge per-UID accounting rules to exactly ``uids``."""
+        """Converge per-UID accounting rules to exactly ``uids`` — exactly
+        once each (alpha.7.5 item 13).
+
+        Field bug: racing usage ticks left DUPLICATED owner-match rules
+        (the kernel counts a packet against EVERY matching rule → the
+        user's traffic was double-counted), and symmetric racing drains
+        could over-delete to zero. The chain is panel-owned and the race
+        is between this process's threads, so the converge runs under a
+        module-level lock; the kernel-level `-C` existence checks and the
+        bounded duplicate drain stay as defense against out-of-band edits
+        and already-damaged state.
+        """
+        with _ACCT_LOCK:
+            self._acct_sync_users_locked(uids)
+
+    def _acct_sync_users_locked(self, uids: set[int]) -> None:
         ipt = self._iptables()
         self.acct_ensure()
+        rule_args = lambda uid: ["-m", "owner", "--uid-owner",  # noqa: E731
+                                 str(uid), "-j", "RETURN"]
+
+        def occurrences(uid: int) -> int:
+            count = 0
+            for line in self._run([ipt, "-S", ACCT_CHAIN]).splitlines():
+                m = _UID_RULE_S.search(line)
+                if m and int(m.group(1)) == uid:
+                    count += 1
+            return count
+
         current: set[int] = set()
         for line in self._run([ipt, "-S", ACCT_CHAIN]).splitlines():
             m = _UID_RULE_S.search(line)
             if m:
-                current.add(int(m.group("uid")))
-        for uid in sorted(uids - current):
-            self._run([ipt, "-A", ACCT_CHAIN, "-m", "owner",
-                       "--uid-owner", str(uid), "-j", "RETURN"])
+                current.add(int(m.group(1)))
+
+        for uid in sorted(uids):
+            if uid not in current and self._rc(
+                    [ipt, "-C", ACCT_CHAIN, *rule_args(uid)]) != 0:
+                self._run([ipt, "-A", ACCT_CHAIN, *rule_args(uid)])
+            for _ in range(8):  # drain duplicates (double-count source)
+                if occurrences(uid) <= 1:
+                    break
+                if self._rc([ipt, "-D", ACCT_CHAIN, *rule_args(uid)]) != 0:
+                    break
         # rule deletion counters-reset is fine for removed accounts — their
         # tracker baseline is forgotten alongside (driver does both)
         for uid in sorted(current - uids):
-            self._run([ipt, "-D", ACCT_CHAIN, "-m", "owner",
-                       "--uid-owner", str(uid), "-j", "RETURN"])
+            for _ in range(8):  # remove every stale instance, incl. dupes
+                if self._rc([ipt, "-D", ACCT_CHAIN, *rule_args(uid)]) != 0:
+                    break
 
     def acct_read(self) -> dict[int, int]:
         out = self._run([self._iptables(), "-L", ACCT_CHAIN, "-n", "-v", "-x"])

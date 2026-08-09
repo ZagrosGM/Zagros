@@ -10,7 +10,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { DataTable, type Column } from "../components/DataTable";
 import { toast } from "../components/feedback";
 import { ConfirmDialog, Dialog, RowMenu } from "../components/overlays";
-import { Badge, Button, Card, EmptyState, Field, Input, Progress, Select, StatusDot, Switch, Tooltip, cn } from "../components/ui";
+import { Badge, Button, Card, EmptyState, Field, Input, Progress, Select, Switch, Tooltip, cn } from "../components/ui";
 import CoreAccessPicker from "../components/CoreAccessPicker";
 import { api, ApiError } from "../lib/api";
 import { copyText } from "../lib/clipboard";
@@ -194,13 +194,22 @@ export default function Users() {
     {
       id: "user", header: t("users.title"), cell: (u) => (
         <div className="flex min-w-0 items-center gap-2.5">
-          <StatusDot tone={u.status === "active" ? "ok" : u.status === "disabled" ? "muted" : u.status === "limited" ? "warn" : "danger"} />
-          {/* item 14: online = session seen on ≥1 core; offline = no session & all cores answered; unknown = a core failed its read */}
+          {/* item 15: the account-status lamp is gone — one presence dot only:
+              online = session on ≥1 core (green), offline = no session and
+              every online-capable core answered (gray), unknown = a core
+              failed its read OR the deployment has no online API at all
+              (gray + honest title). Account status lives in its own column. */}
           <span
             role="img"
             aria-label={`presence ${onlineMap[u.username] ?? "unknown"}`}
-            title={onlineMap[u.username] === "online" ? "online (session on ≥1 core)" : onlineMap[u.username] === "offline" ? "offline (no session on any core)" : "presence unknown (a core failed its read)"}
-            className={`-ml-1 inline-block h-2 w-2 shrink-0 rounded-full ${onlineMap[u.username] === "online" ? "bg-ok" : onlineMap[u.username] === "offline" ? "bg-content-3/50" : "bg-warn"}`}
+            title={onlineMap[u.username] === "online"
+              ? "online (session on ≥1 core)"
+              : onlineMap[u.username] === "offline"
+                ? "offline (no session on any online-capable core)"
+                : (onlineQ.data?.failed_cores?.length
+                    ? `presence unknown (${onlineQ.data.failed_cores.join(", ")} failed its read)`
+                    : "presence unknown (no online-capable core on this deployment)")}
+            className={`inline-block h-2 w-2 shrink-0 rounded-full ${onlineMap[u.username] === "online" ? "bg-ok" : "bg-content-3/50"}`}
           />
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">

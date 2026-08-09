@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import tempfile
+import os
 import traceback
 import types as _types
 from pathlib import Path
@@ -371,7 +372,15 @@ def test_install_source_build_last_resort_uses_live_tag() -> None:
     tar_bytes = tar_buf.getvalue()
 
     class _Resp:
-        def read(self): return tar_bytes
+        """Streaming fake honouring the chunked-download contract:
+        read(size) returns successive ≤size slices, then b''."""
+        def __init__(self): self._pos = 0
+        def read(self, size=-1):
+            if self._pos >= len(tar_bytes): return b""
+            end = len(tar_bytes) if size is None or size < 0 \
+                else min(len(tar_bytes), self._pos + size)
+            out = tar_bytes[self._pos:end]; self._pos = end
+            return out
         def __enter__(self): return self
         def __exit__(self, *a): return False
 
@@ -383,24 +392,34 @@ def test_install_source_build_last_resort_uses_live_tag() -> None:
         calls.append(list(argv))
         if argv and argv[0] == "apt-get":
             raise CoreError("no candidate")
-        if argv[:2] == ["cmake", "--build"]:
-            build_dir = argv[2]
-            Path(build_dir).mkdir(parents=True, exist_ok=True)
-            for name in ("vpnserver", "vpncmd", "hamcore.se2"):
-                Path(build_dir, name).write_text("binary")
-            return "built"
         return "ok"
+
+    def fake_run_streamed(argv, timeout=0.0):
+        # the item-10 streamed build path: cmake --build <dir> --parallel N
+        # --target … — artifacts land directly in the build dir
+        calls.append(list(argv))
+        assert argv[:2] == ["cmake", "--build"], argv
+        assert "--parallel" in argv and "--target" in argv
+        build_dir = argv[2]
+        Path(build_dir).mkdir(parents=True, exist_ok=True)
+        for name in ("vpnserver", "vpncmd", "hamcore.se2"):
+            Path(build_dir, name).write_text("binary")
+        return "built"
 
     root = tempfile.mkdtemp(prefix="se-src-root-")
     with mock.patch.object(shutil, "which",
                            lambda n: "/usr/bin/apt-get" if n == "apt-get" else None), \
          mock.patch.object(backend, "_run", fake_run), \
+         mock.patch.object(backend, "_run_streamed", fake_run_streamed), \
          mock.patch.object(backend, "_ensure_build_deps", lambda: None), \
          mock.patch.object(gh, "install_from_github",
                            lambda **kw: (_ for _ in ()).throw(CoreError("no asset"))), \
          mock.patch.object(gh, "fetch_latest_release",
                            lambda repo, timeout=30.0: {"tag_name": "v9.9.9-test"}), \
          mock.patch.object(urllib.request, "urlopen", fake_urlopen), \
+         mock.patch.dict(os.environ,
+                         {"ZAGROS_SOFTETHER_SRC_CACHE":
+                          tempfile.mkdtemp(prefix="se-src-cache-")}), \
          mock.patch.object(backend, "_link_on_path", lambda r: None):
         backend._INSTALL_ROOT = root
         out = backend.install_packages()

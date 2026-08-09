@@ -172,6 +172,15 @@ class XrayDriver(BaseCoreDriver):
         "public_key", "flow", "method",
         "address", "target_port", "auth", "username", "password",
         "mtu", "tti", "congestion",
+        # alpha.7.5 item 4 — transport depth, all real xray mappings:
+        # ws arbitrary headers; gRPC multiMode; RAW/TCP HTTP camouflage
+        # (tcpSettings.header.type = "http" with full request/response).
+        "multi_mode",
+        "header_type", "http_method", "request_headers",
+        "response_status", "response_reason", "response_headers",
+        # alpha.7.5 item 6 — certificate-by-path wizard mode (validated
+        # against the same PEM rules as pasted content).
+        "certificate_path", "certificate_key_path",
     }
 
     async def apply_studio_document(self, document: dict[str, Any]) -> None:
@@ -334,9 +343,17 @@ class XrayDriver(BaseCoreDriver):
         path = raw.get("path")
         host = raw.get("host")
         if net == "ws":
+            from app.studio.headers import parse_http_headers
+
             settings: dict[str, Any] = {"path": path or "/"}
+            # alpha.7.5 item 4: arbitrary ws headers (the explicit Host field
+            # wins over a pasted Host line — one source of truth per fact)
+            headers = parse_http_headers(raw.get("headers"),
+                                         context=f"ws inbound '{tag}'")
             if host:
-                settings["headers"] = {"Host": str(host)}
+                headers["Host"] = str(host)
+            if headers:
+                settings["headers"] = headers
             stream["wsSettings"] = settings
         elif net == "httpupgrade":
             settings = {"path": path or "/"}
@@ -350,6 +367,8 @@ class XrayDriver(BaseCoreDriver):
             settings = {"serviceName": service}
             if raw.get("authority"):
                 settings["authority"] = str(raw["authority"])
+            if raw.get("multi_mode"):
+                settings["multiMode"] = True
             stream["grpcSettings"] = settings
         elif net == "xhttp":
             settings = {"path": path or "/"}
@@ -371,13 +390,89 @@ class XrayDriver(BaseCoreDriver):
             if raw.get("congestion") is not None:
                 settings["congestion"] = bool(raw["congestion"])
             stream["kcpSettings"] = settings
-        elif net != "tcp":
+        elif net == "tcp":
+            camouflage = self._studio_tcp_settings(tag, raw)
+            if camouflage:
+                stream["tcpSettings"] = camouflage
+        else:
             raise CoreError(
                 f"xray cannot serve transport '{net}' — supported: tcp, ws, "
                 "httpupgrade, grpc, xhttp, mkcp."
             )
         stream.update(self._studio_security(tag, raw))
         return stream
+
+    @staticmethod
+    def _studio_tcp_settings(tag: str, raw: dict[str, Any]) -> dict[str, Any]:
+        """RAW/TCP depth (alpha.7.5 item 4): Xray's real HTTP camouflage —
+        ``tcpSettings.header.type = "http"`` with full request/response
+        objects (method, paths, status line, arbitrary headers on both
+        sides). ``header_type`` other than none/http is refused loudly."""
+        from app.studio.headers import parse_http_headers
+
+        header_type = str(raw.get("header_type") or "none").lower()
+        if header_type in ("", "none"):
+            # even 'none' may carry request-only facts from a pasted link —
+            # any http fact with header_type none is a contradiction we name
+            leftover = [k for k in ("http_method", "request_headers",
+                                    "response_status", "response_reason",
+                                    "response_headers") if raw.get(k)]
+            if leftover:
+                raise CoreError(
+                    f"TCP inbound '{tag}': {leftover} require header_type=http "
+                    "(plain RAW carries no HTTP layer).")
+            return {}
+        if header_type != "http":
+            raise CoreError(
+                f"TCP inbound '{tag}': header_type '{header_type}' is not an "
+                "xray RAW header — supported: none, http (Xray removed the "
+                "old udp/mkcp headers upstream).")
+        if str(raw.get("security") or "").lower() == "reality":
+            raise CoreError(
+                f"TCP inbound '{tag}': REALITY already camouflages the stream — "
+                "an extra RAW http header breaks the handshake (Xray refuses "
+                "realitySettings + tcpSettings.header=http).")
+        method = str(raw.get("http_method") or "GET").upper()
+        if not method.isalpha():
+            raise CoreError(f"TCP inbound '{tag}': http method '{method}' is invalid.")
+        paths_raw = raw.get("path") or "/"
+        paths = ([p.strip() for p in str(paths_raw).split(",") if p.strip()]
+                 if isinstance(paths_raw, str) else list(paths_raw))
+        if not paths or any(not p.startswith("/") for p in paths):
+            raise CoreError(
+                f"TCP inbound '{tag}': http camouflage paths must start with '/' "
+                f"(comma separated), got {paths_raw!r}.")
+        req_headers = parse_http_headers(raw.get("request_headers"),
+                                         context=f"TCP/http inbound '{tag}' request")
+        if raw.get("host"):
+            req_headers.setdefault("Host", str(raw["host"]))
+        resp_headers = parse_http_headers(raw.get("response_headers"),
+                                          context=f"TCP/http inbound '{tag}' response")
+        try:
+            status = str(int(raw.get("response_status") or 200))
+        except (TypeError, ValueError) as exc:
+            raise CoreError(
+                f"TCP inbound '{tag}': response_status must be numeric.") from exc
+        reason = str(raw.get("response_reason") or "OK")
+        if "\r" in reason or "\n" in reason:
+            raise CoreError(f"TCP inbound '{tag}': response_reason cannot span lines.")
+        return {
+            "header": {
+                "type": "http",
+                "request": {
+                    "method": method,
+                    "path": paths,
+                    "version": "1.1",
+                    "headers": req_headers,
+                },
+                "response": {
+                    "version": "1.1",
+                    "status": status,
+                    "reason": reason,
+                    "headers": resp_headers,
+                },
+            }
+        }
 
     def _studio_security(self, tag: str, raw: dict[str, Any]) -> dict[str, Any]:
         security = str(raw.get("security") or "none").lower()
@@ -388,9 +483,25 @@ class XrayDriver(BaseCoreDriver):
             sni = str(raw.get("sni") or "").strip()
             if not sni:
                 raise CoreError(f"TLS inbound '{tag}' needs an SNI/certificate name.")
-            cert_pem = raw.get("certificate")
-            key_pem = raw.get("certificate_key")
-            cert_path, key_path = self._materialize_certificate(tag, sni, cert_pem, key_pem)
+            # alpha.7.5 item 6 Mode B(path): operator-supplied PEM FILES on
+            # the panel host — validated with the exact rules pasted content
+            # gets, then referenced in place (no copy, no registry entry).
+            cert_file = raw.get("certificate_path")
+            key_file = raw.get("certificate_key_path")
+            if cert_file or key_file:
+                from app.studio.certs import CertificateError, validate_pem_pair_paths
+
+                try:
+                    validate_pem_pair_paths(str(cert_file or ""), str(key_file or ""),
+                                            context=f"TLS inbound '{tag}'")
+                except CertificateError as exc:
+                    raise CoreError(str(exc)) from exc
+                cert_path, key_path = str(cert_file), str(key_file)
+            else:
+                cert_pem = raw.get("certificate")
+                key_pem = raw.get("certificate_key")
+                cert_path, key_path = self._materialize_certificate(
+                    tag, sni, cert_pem, key_pem)
             tls: dict[str, Any] = {
                 "serverName": sni,
                 "certificates": [{"certificateFile": cert_path, "keyFile": key_path}],
@@ -437,6 +548,17 @@ class XrayDriver(BaseCoreDriver):
             raise CoreError(
                 f"TLS inbound '{tag}': upload certificate AND private key together."
             )
+        if cert_pem:
+            # alpha.7.5 item 6: uploaded content now faces the SAME real
+            # validation sing-box had (parse + match + expiry) — xray used
+            # to write anything to disk and let the core die on it.
+            from app.studio.certs import CertificateError, validate_pem_pair
+
+            try:
+                validate_pem_pair(str(cert_pem), str(key_pem),
+                                  context=f"TLS inbound '{tag}'")
+            except CertificateError as exc:
+                raise CoreError(str(exc)) from exc
         import re as _re
 
         safe_tag = _re.sub(r"[^A-Za-z0-9_.-]+", "_", tag)

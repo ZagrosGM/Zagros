@@ -574,9 +574,13 @@ def test_ssh_dropin_keeps_port_22_always(tmp_path):
 # ===================================================================== #
 
 class _SEFakeBackend:
-    def __init__(self, reachable=True):
+    def __init__(self, reachable=True, ipsec=None):
+        from app.cores.drivers.softether.setool import IPsecServices
+
         self._reachable = reachable
         self.cmds: list[str] = []
+        self.ipsec_state = ipsec or IPsecServices(
+            l2tp=False, l2tp_raw=False, etherip=False, psk="", default_hub="")
 
     def reachable(self):
         return self._reachable
@@ -584,6 +588,28 @@ class _SEFakeBackend:
     def _cmd(self, command, csv=None):
         self.cmds.append(command)
         return ""
+
+    def ipsec_get(self):
+        self.cmds.append("IPsecGet")
+        if isinstance(self.ipsec_state, Exception):
+            raise self.ipsec_state
+        return self.ipsec_state
+
+    def ipsec_services_set(self, *, l2tp, l2tp_raw, etherip, psk, default_hub):
+        from app.cores.drivers.softether.setool import IPsecServices
+
+        # mirror of LocalSoftEtherBackend's local preflight: the full
+        # 5-argument command is only built from non-empty psk + hub, so a
+        # test asserting the arg string also asserts the validation
+        assert psk and default_hub, "preflight: empty psk/hub must never reach vpncmd"
+        yn = lambda b: "yes" if b else "no"  # noqa: E731
+        psk_arg = f'"{psk}"' if any(ch.isspace() for ch in psk) else psk
+        self.cmds.append(
+            f"IPsecEnable /L2TP:{yn(l2tp)} /L2TPRAW:{yn(l2tp_raw)} "
+            f"/ETHERIP:{yn(etherip)} /PSK:{psk_arg} /DEFAULTHUB:{default_hub}")
+        self.ipsec_state = IPsecServices(
+            l2tp=l2tp, l2tp_raw=l2tp_raw, etherip=etherip,
+            psk=psk, default_hub=default_hub)
 
 
 def test_softether_requires_reachability_first(tmp_path):
@@ -601,20 +627,27 @@ def test_softether_vpncmd_convergence(tmp_path):
     d = SoftEtherDriver(settings={"hub": "DEFAULT"}, backend=backend)
     asyncio.run(d.apply_studio_document({"inbounds": [
         {"protocol": "l2tp", "ipsec_psk": "my-psk"},
-        {"protocol": "ovpn", "ports": "995"}]}))
+        {"protocol": "pptp"}]}))
     flat = " | ".join(backend.cmds)
-    assert "IPsecEnable /L2TP:yes" in flat and "/PSK:my-psk" in flat
-    assert "/DEFAULTHUB:DEFAULT" in flat
-    assert "OpenVPNEnable yes /PORTS:995" in flat
-    # not-wanted features converge OFF (deleted listeners)
-    assert "ListenerDelete 443" in flat and "ListenerDelete 1723" in flat
-    # positive: sstp wanted → idempotent create
+    # alpha.7.5 item 7: the enable path converges from IPsecGet and ALWAYS
+    # issues the full 5-argument command (the alpha.7.4 form lacked /PSK:
+    # on disable, and vpncmd rejected it locally with rc=38)
+    assert "IPsecGet" in backend.cmds
+    assert ("IPsecEnable /L2TP:yes /L2TPRAW:no /ETHERIP:no "
+            "/PSK:my-psk /DEFAULTHUB:DEFAULT") in flat
+    # not-wanted sstp converges OFF (listener delete); wanted pptp created
+    assert "ListenerDelete 443" in flat and "ListenerCreate 1723" in flat
+    # no imagined verb is ever commanded (OpenVPNEnable does not exist in
+    # vpncmd 5.02 — the clone toggle is external by design)
+    assert "OpenVPNEnable" not in flat
+    # positive: sstp wanted → idempotent create; l2tp not wanted AND the
+    # server already reports all-off → idempotent no-op (no IPsecEnable)
     backend2 = _SEFakeBackend()
     d2 = SoftEtherDriver(settings={"hub": "DEFAULT"}, backend=backend2)
     asyncio.run(d2.apply_studio_document({"inbounds": [{"protocol": "sstp"}]}))
-    assert "ListenerCreate 443" in " | ".join(backend2.cmds)
-    assert "OpenVPNEnable no" in " | ".join(backend2.cmds) or \
-        "IPsecEnable /L2TP:no" in " | ".join(backend2.cmds)
+    flat2 = " | ".join(backend2.cmds)
+    assert "ListenerCreate 443" in flat2
+    assert "IPsecEnable" not in flat2
 
 
 def test_softether_l2tp_requires_psk(tmp_path):
@@ -632,3 +665,398 @@ def test_softether_empty_feature_set_rejected(tmp_path):
     d = SoftEtherDriver(settings={"hub": "DEFAULT"}, backend=_SEFakeBackend())
     with pytest.raises(CoreError, match="at least one feature"):
         asyncio.run(d.apply_studio_document({"inbounds": []}))
+
+
+def test_softether_disable_preserves_server_psk_and_hub(tmp_path):
+    """The item-7 regression (alpha.7.4 rc=38): disabling L2TP must still
+    send the FULL 5-argument command built from the server's CURRENT
+    PSK + hub (never a /PSK:-less string), and the settings store is not
+    clobbered by the disable."""
+    from app.cores.drivers.softether.driver import SoftEtherDriver
+    from app.cores.drivers.softether.setool import IPsecServices
+
+    state = IPsecServices(l2tp=True, l2tp_raw=False, etherip=True,
+                          psk="srv-psk", default_hub="MAIN")
+    backend = _SEFakeBackend(ipsec=state)
+    d = SoftEtherDriver(settings={"hub": "DEFAULT", "ipsec_psk": "stored"},
+                        backend=backend)
+    asyncio.run(d.apply_studio_document({"inbounds": [{"protocol": "pptp"}]}))
+    flat = " | ".join(backend.cmds)
+    assert ("IPsecEnable /L2TP:no /L2TPRAW:no /ETHERIP:no "
+            "/PSK:srv-psk /DEFAULTHUB:MAIN") in flat
+    assert d.settings["ipsec_psk"] == "stored"  # untouched by the disable
+    assert d.settings["feature_l2tp"] is False
+
+
+def test_softether_enable_psk_preference_order(tmp_path):
+    from app.cores.drivers.softether.driver import SoftEtherDriver
+    from app.cores.drivers.softether.setool import IPsecServices
+
+    state = IPsecServices(l2tp=False, l2tp_raw=False, etherip=False,
+                          psk="server-psk", default_hub="HUBX")
+    # settings PSK wins over the server's stored one; hub comes from IPsecGet
+    backend = _SEFakeBackend(ipsec=state)
+    d = SoftEtherDriver(settings={"hub": "DEFAULT", "ipsec_psk": "stored"},
+                        backend=backend)
+    asyncio.run(d.apply_studio_document({"inbounds": [{"protocol": "l2tp"}]}))
+    assert "/PSK:stored /DEFAULTHUB:HUBX" in " | ".join(backend.cmds)
+    # with no doc/stored PSK the server's own PSK is reused
+    backend2 = _SEFakeBackend(ipsec=state)
+    d2 = SoftEtherDriver(settings={"hub": "DEFAULT"}, backend=backend2)
+    asyncio.run(d2.apply_studio_document({"inbounds": [{"protocol": "l2tp"}]}))
+    assert "/PSK:server-psk /DEFAULTHUB:HUBX" in " | ".join(backend2.cmds)
+
+
+def test_softether_ovpn_feature_refused_honestly(tmp_path):
+    from app.cores.drivers.softether.driver import SoftEtherDriver
+
+    d = SoftEtherDriver(settings={"hub": "DEFAULT"}, backend=_SEFakeBackend())
+    with pytest.raises(CoreError, match="no verb"):
+        asyncio.run(d.apply_studio_document(
+            {"inbounds": [{"protocol": "ovpn", "ports": "995"}]}))
+    # a refused feature must not half-apply — nothing was commanded
+    assert all("IPsecEnable" not in c and "ListenerCreate" not in c
+               for c in d._backend.cmds)
+
+
+def test_softether_ipsec_backend_local_preflight(monkeypatch):
+    """LocalSoftEtherBackend.ipsec_services_set — the exact rc=38 guard:
+    an EMPTY psk must die locally (never reaching vpncmd), whitespace PSKs
+    get quoted for shlex.split, and parse_ipsec_get consumes real tables."""
+    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
+    from app.cores.drivers.softether.setool import parse_ipsec_get
+
+    backend = LocalSoftEtherBackend({"hub": "DEFAULT"})
+    sent: list[str] = []
+    monkeypatch.setattr(backend, "_cmd", lambda command, csv=False: sent.append(command) or "")
+
+    backend.ipsec_services_set(l2tp=False, l2tp_raw=False, etherip=False,
+                               psk="abc123", default_hub="DEFAULT")
+    assert sent == ["IPsecEnable /L2TP:no /L2TPRAW:no /ETHERIP:no "
+                    "/PSK:abc123 /DEFAULTHUB:DEFAULT"]
+    for bad in ("", "   ", None):
+        with pytest.raises(CoreError, match="pre-shared key"):
+            backend.ipsec_services_set(l2tp=False, l2tp_raw=False, etherip=False,
+                                       psk=bad, default_hub="DEFAULT")
+    assert len(sent) == 1  # nothing reached vpncmd for the refused calls
+    with pytest.raises(CoreError, match="default hub"):
+        backend.ipsec_services_set(l2tp=True, l2tp_raw=False, etherip=False,
+                                   psk="x", default_hub="")
+    with pytest.raises(CoreError, match="quote/newline"):
+        backend.ipsec_services_set(l2tp=True, l2tp_raw=False, etherip=False,
+                                   psk='a"b', default_hub="DEFAULT")
+    backend.ipsec_services_set(l2tp=True, l2tp_raw=False, etherip=False,
+                               psk="my pass phrase", default_hub="DEFAULT")
+    assert sent[-1] == ('IPsecEnable /L2TP:yes /L2TPRAW:no /ETHERIP:no '
+                        '/PSK:"my pass phrase" /DEFAULTHUB:DEFAULT')
+
+    table = (
+        "SoftEther VPN Command Line Management Utility (vpncmd command) Version 5.02\n"
+        "Connected to VPN Server \"localhost\".\n\n"
+        "Item                              |Value\n"
+        "----------------------------------+---------\n"
+        "L2TP over IPsec Server Function   |Yes\n"
+        "Raw L2TP Server Function          |No\n"
+        "EtherIP / L2TPv3 over IPsec Server Function |No\n"
+        "Pre-Shared Key                    |secret-psk\n"
+        "Default Virtual HUB               |DEFAULT\n\n"
+        "The command completed successfully.\n"
+    )
+    svc = parse_ipsec_get(table)
+    assert (svc.l2tp, svc.l2tp_raw, svc.etherip) == (True, False, False)
+    assert svc.psk == "secret-psk" and svc.default_hub == "DEFAULT"
+    assert svc.any_enabled
+    empty = parse_ipsec_get("")
+    assert not empty.any_enabled and empty.psk == "" and empty.default_hub == ""
+
+
+# --------------------------------------------------------------------- #
+# alpha.7.5 item 10 — controlled / cached / observable source build
+# --------------------------------------------------------------------- #
+
+def test_softether_build_jobs_bounded(monkeypatch):
+    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
+
+    backend = LocalSoftEtherBackend({})
+    monkeypatch.setattr("os.cpu_count", lambda: 64)
+    monkeypatch.delenv("ZAGROS_SOFTETHER_BUILD_JOBS", raising=False)
+    assert backend._build_jobs() == 4  # capped, never full-throttle
+    monkeypatch.setattr("os.cpu_count", lambda: 2)
+    assert backend._build_jobs() == 2
+    monkeypatch.setenv("ZAGROS_SOFTETHER_BUILD_JOBS", "8")
+    assert backend._build_jobs() == 8
+    monkeypatch.setenv("ZAGROS_SOFTETHER_BUILD_JOBS", "999")
+    assert backend._build_jobs() == 16  # hard ceiling on the override too
+    monkeypatch.setenv("ZAGROS_SOFTETHER_BUILD_JOBS", "junk")
+    assert backend._build_jobs() == 2  # invalid override → safe default
+
+
+def test_softether_run_streamed_progress_and_errors(monkeypatch, caplog):
+    import logging
+
+    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
+
+    backend = LocalSoftEtherBackend({})
+    out = backend._run_streamed(
+        ["/bin/sh", "-c", "printf '[ 10%%] Building C object x\\n[ 95%%] Linking\\nBuilt target vpnserver\\n'"],
+        timeout=30)
+    with caplog.at_level(logging.INFO, logger="zagros.cores.drivers.softether"):
+        backend._run_streamed(
+            ["/bin/sh", "-c", "printf '[ 10%%] Building C object x\\n'"],
+            timeout=30)
+    assert any("softether build: [ 10%] Building C object x" in r.message
+               for r in caplog.records)
+    assert "Built target vpnserver" in out
+    with pytest.raises(CoreError, match="rc=1"):
+        backend._run_streamed(
+            ["/bin/sh", "-c", "echo make: Error 2 >&2; exit 1"], timeout=30)
+    with pytest.raises(CoreError, match="timed out"):
+        backend._run_streamed(["/bin/sh", "-c", "sleep 3"], timeout=0.3)
+
+
+def test_softether_install_from_source_cached_and_targeted(tmp_path, monkeypatch):
+    """Item 10: the source build (a) is targeted (no client/bridge/vpntest),
+    (b) is bounded-parallel, (c) caches the source tree so a RETRY resumes
+    without re-downloading, (d) reports the tag honestly on success."""
+    import io
+    import tarfile
+
+    from app.cores import github_install
+    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
+
+    cache = tmp_path / "cache"
+    install_root = tmp_path / "installroot"
+    monkeypatch.setenv("ZAGROS_SOFTETHER_SRC_CACHE", str(cache))
+    monkeypatch.delenv("ZAGROS_SOFTETHER_BUILD_JOBS", raising=False)
+    monkeypatch.setattr("os.cpu_count", lambda: 32)
+
+    backend = LocalSoftEtherBackend({})
+    monkeypatch.setattr(backend, "_INSTALL_ROOT", str(install_root))
+    monkeypatch.setattr(backend, "_ensure_build_deps", lambda: None)
+    monkeypatch.setattr(backend, "_link_on_path", lambda root: None)
+    monkeypatch.setattr(
+        github_install, "fetch_latest_release",
+        lambda repo: {"tag_name": "5.02.5187", "assets": []})
+
+    # a minimal but valid "source tree" tarball
+    src_bytes = io.BytesIO()
+    with tarfile.open(fileobj=src_bytes, mode="w:gz") as tar:
+        data = b"cmake_minimum_required(VERSION 3.10)\n"
+        info = tarfile.TarInfo("SoftEtherVPN-5.02.5187/CMakeLists.txt")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    downloads: list[str] = []
+    monkeypatch.setattr(
+        backend, "_download",
+        lambda url, dest, timeout=900.0: (
+            downloads.append(url),
+            open(dest, "wb").write(src_bytes.getvalue()),
+        )[-1])
+
+    ran: list[list[str]] = []
+
+    def fake_run(argv, *, timeout=120.0):
+        ran.append(argv)
+        return ""
+
+    def fake_streamed(argv, *, timeout):
+        ran.append(argv)
+        build_dir = argv[2]
+        import os as _os
+        _os.makedirs(build_dir, exist_ok=True)  # the real configure step creates it
+        for name in ("vpnserver", "vpncmd", "hamcore.se2"):
+            open(_os.path.join(build_dir, name), "wb").write(b"bin")
+        return ""
+
+    monkeypatch.setattr(backend, "_run", fake_run)
+    monkeypatch.setattr(backend, "_run_streamed", fake_streamed)
+
+    first = backend._install_from_source()
+    assert "5.02.5187" in first
+    build_calls = [a for a in ran if a[:2] == ["cmake", "--build"]]
+    assert len(build_calls) == 1
+    argv = build_calls[0]
+    assert "--parallel" in argv and argv[argv.index("--parallel") + 1] == "4"
+    targets = argv[argv.index("--target") + 1:]
+    assert targets == ["cedar", "mayaqua", "hamcore-archive-build",
+                       "vpnserver", "vpncmd"]
+    # NOT built: the panel never installs the client/bridge/test binaries
+    assert all(t not in targets for t in ("vpnclient", "vpnbridge", "vpntest"))
+    assert (install_root / "vpnserver").exists()
+    assert (cache / "5.02.5187" / ".complete").exists()
+
+    # retry: NO re-download, configure+build resume from the cached tree
+    ran.clear()
+    second = backend._install_from_source()
+    assert downloads and len(downloads) == 1
+    assert "5.02.5187" in second
+    assert [a for a in ran if a[:2] == ["cmake", "--build"]]  # resumed build
+
+
+# ===================================================================== #
+# alpha.7.5 item 4 + 6 — headers depth & certificate path mode
+# ===================================================================== #
+
+def _xray(tmp_path):
+    from app.cores.drivers.xray.driver import XrayDriver
+
+    return XrayDriver(settings={"cert_dir": str(tmp_path / "certs")})
+
+
+def _xr_translate(driver, **entry):
+    base = {"tag": "t1", "listen": "0.0.0.0", "port": 1443}
+    base.update(entry)
+    return driver._studio_entry_to_native(base)
+
+
+# ---- xray: ws headers / grpc multiMode / RAW-TCP http camouflage ----
+
+def test_xray_ws_arbitrary_headers_merge_with_host(tmp_path):
+    d = _xray(tmp_path)
+    ib = _xr_translate(d, protocol="vless", transport="ws", security="none",
+                       path="/w", host="cdn.example.com",
+                       headers="Accept: */*\nX-Trace: 42\nHost: ignored.example.com")
+    ss = ib["streamSettings"]["wsSettings"]
+    assert ss["path"] == "/w"
+    # the explicit Host field wins over the pasted Host line; the rest lands
+    assert ss["headers"] == {"Accept": "*/*", "X-Trace": "42",
+                             "Host": "cdn.example.com"}
+
+
+def test_xray_ws_invalid_header_line_fails_loudly(tmp_path):
+    d = _xray(tmp_path)
+    with pytest.raises(CoreError, match="no 'Name: value'"):
+        _xr_translate(d, protocol="vless", transport="ws", security="none",
+                      headers="NotAHeader")
+
+
+def test_xray_grpc_multi_mode_maps_to_multiMode(tmp_path):
+    d = _xray(tmp_path)
+    ib = _xr_translate(d, protocol="vless", transport="grpc", security="none",
+                       service_name="svc", multi_mode=True)
+    grpc = ib["streamSettings"]["grpcSettings"]
+    assert grpc["serviceName"] == "svc" and grpc["multiMode"] is True
+    # absent → key omitted (no phantom defaults)
+    ib2 = _xr_translate(d, protocol="vless", transport="grpc", security="none",
+                        service_name="svc")
+    assert "multiMode" not in ib2["streamSettings"]["grpcSettings"]
+
+
+def test_xray_tcp_http_camouflage_full_object(tmp_path):
+    d = _xray(tmp_path)
+    ib = _xr_translate(
+        d, protocol="vless", transport="tcp", security="none",
+        header_type="http", http_method="post", path="/api,/v2",
+        host="static.example.com",
+        request_headers="Accept: */*\nAccept: text/html",  # last wins per name
+        response_status=404, response_reason="Not Found",
+        response_headers="Server: nginx")
+    hdr = ib["streamSettings"]["tcpSettings"]["header"]
+    assert hdr["type"] == "http"
+    assert hdr["request"]["method"] == "POST"
+    assert hdr["request"]["path"] == ["/api", "/v2"]
+    assert hdr["request"]["headers"]["Host"] == "static.example.com"
+    assert hdr["request"]["headers"]["Accept"] == "text/html"
+    assert hdr["response"] == {"version": "1.1", "status": "404",
+                               "reason": "Not Found",
+                               "headers": {"Server": "nginx"}}
+
+
+def test_xray_tcp_camouflage_guards(tmp_path):
+    d = _xray(tmp_path)
+    # http facts with header_type=none → named contradiction
+    with pytest.raises(CoreError, match="require header_type=http"):
+        _xr_translate(d, protocol="vless", transport="tcp", security="none",
+                      http_method="GET")
+    # unknown header type → loud
+    with pytest.raises(CoreError, match="not an xray RAW header"):
+        _xr_translate(d, protocol="vless", transport="tcp", security="none",
+                      header_type="udp")
+    # reality + http header → handshake breaker, refused upfront
+    with pytest.raises(CoreError, match="REALITY already camouflages"):
+        _xr_translate(d, protocol="vless", transport="tcp", security="reality",
+                      sni="www.microsoft.com", header_type="http")
+    # plain tcp stays clean — no tcpSettings at all
+    ib = _xr_translate(d, protocol="vless", transport="tcp", security="none")
+    assert "tcpSettings" not in ib["streamSettings"]
+
+
+# ---- xray: certificate path mode + upload validation unification ----
+
+def _pem_pair(tmp_path, name="a"):
+    from app.utils.crypto import generate_certificate
+
+    p = generate_certificate()
+    (tmp_path / f"{name}.crt").write_text(p["cert"])
+    (tmp_path / f"{name}.key").write_text(p["key"])
+    return p, str(tmp_path / f"{name}.crt"), str(tmp_path / f"{name}.key")
+
+
+def test_xray_tls_certificate_path_mode_references_files_in_place(tmp_path):
+    d = _xray(tmp_path)
+    _p, crt, key = _pem_pair(tmp_path)
+    ib = _xr_translate(d, protocol="vless", transport="tcp", security="tls",
+                       sni="example.com", certificate_path=crt,
+                       certificate_key_path=key)
+    tls = ib["streamSettings"]["tlsSettings"]
+    # referenced IN PLACE — never copied into the core cert dir
+    assert tls["certificates"][0] == {"certificateFile": crt, "keyFile": key}
+
+
+def test_xray_tls_rejects_bad_path_mismatched_and_garbage_pairs(tmp_path):
+    d = _xray(tmp_path)
+    _pa, ca, ka = _pem_pair(tmp_path, "a")
+    _pb, cb, kb = _pem_pair(tmp_path, "b")
+    with pytest.raises(CoreError, match="not found"):
+        _xr_translate(d, protocol="vless", transport="tcp", security="tls",
+                      sni="e.com", certificate_path=str(tmp_path / "nope.crt"),
+                      certificate_key_path=ka)
+    with pytest.raises(CoreError, match="do NOT match"):
+        _xr_translate(d, protocol="vless", transport="tcp", security="tls",
+                      sni="e.com", certificate_path=ca, certificate_key_path=kb)
+    # pasted garbage now fails validation too (unified rules — was: written
+    # to disk blind, died at core start)
+    with pytest.raises(CoreError, match="not a valid PEM"):
+        _xr_translate(d, protocol="vless", transport="tcp", security="tls",
+                      sni="e.com", certificate="garbage",
+                      certificate_key=_pa["key"])
+
+
+# ---- sing-box: ws/http headers + http method + cert path mode ----
+
+def test_singbox_ws_headers_text_parse_and_host_precedence(tmp_path):
+    d = _singbox(tmp_path)
+    ib = _sb_translate(d, protocol="vless", transport="ws", security="none",
+                       path="/w", host="cdn.example.com",
+                       headers="Accept: */*\nHost: overridden.example.com")
+    assert ib["transport"] == {
+        "type": "ws", "path": "/w",
+        "headers": {"Accept": "*/*", "Host": "cdn.example.com"}}
+
+
+def test_singbox_http_transport_method_and_headers(tmp_path):
+    d = _singbox(tmp_path)
+    ib = _sb_translate(d, protocol="vless", transport="http", security="none",
+                       path="/h", host="a.example.com", http_method="PUT",
+                       headers="X-Tenant: blue")
+    tr = ib["transport"]
+    assert tr["type"] == "http" and tr["path"] == "/h"
+    assert tr["method"] == "PUT"
+    assert tr["host"] == ["a.example.com"]
+    assert tr["headers"] == {"X-Tenant": "blue"}
+
+
+def test_singbox_tls_certificate_path_mode(tmp_path):
+    d = _singbox(tmp_path)
+    _p, crt, key = _pem_pair(tmp_path)
+    ib = _sb_translate(d, protocol="vless", transport="tcp", security="tls",
+                       sni="example.com", certificate_path=crt,
+                       certificate_key_path=key)
+    assert ib["tls"]["certificate_path"] == crt
+    assert ib["tls"]["key_path"] == key
+    # mismatched pair → precise CoreError, no files touched
+    _p2, _c2, k2 = _pem_pair(tmp_path, "b")
+    with pytest.raises(CoreError, match="do NOT match"):
+        _sb_translate(d, protocol="vless", transport="tcp", security="tls",
+                      sni="example.com", certificate_path=crt,
+                      certificate_key_path=k2)

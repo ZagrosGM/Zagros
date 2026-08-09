@@ -644,7 +644,11 @@ class HostSettingsEngine:
 #: default remark applied to every generated variant when an entry leaves
 #: the remark blank (item 15). Protocol/transport/server resolve per link or
 #: per section; username vars resolve per subscriber.
-DEFAULT_REMARK = "🛸 Zagros ({USERNAME}) [{PROTOCOL} - {TRANSPORT}] » {SERVER_IP}"
+#: Default remark template for EVERY core (alpha.7.5 item 16). The server
+#: address must NOT leak into the remark — the host entry's Address field
+#: carries it separately; a blank Address means "{SERVER_IP}" (the link's
+#: own server value, preserved on expansion).
+DEFAULT_REMARK = "🛸 Zagros ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]"
 
 _NON_LINK = {"wireguard", "openvpn", "ssh", "softether", "pptp", "sstp", "l2tp"}
 _TLS_LINK = {"vless", "trojan", "vmess", "hysteria2", "hy2", "tuic"}

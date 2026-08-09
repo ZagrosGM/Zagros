@@ -22,12 +22,28 @@ class WizardUnsupportedError(StudioError):
     honestly instead of guessing where inbounds live in its config."""
 
 
+class StudioConflictError(StudioError):
+    """Identity clash — the requested inbound tag already exists with
+    DIFFERENT settings (mapped to HTTP 409, so a create retry after a
+    timeout can never forklift a second, conflicting inbound in)."""
+
+
+class StudioNotFoundError(StudioError):
+    """The addressed inbound (stable identity = its tag) does not exist —
+    mapped to HTTP 404; deleting/editing a ghost is never a success."""
+
+
 class PreviewResult(BaseModel):
     core_id: str
     valid: bool
     errors: list[str] = Field(default_factory=list)
     diff: str = ""
     document: dict[str, Any] | None = None
+    # alpha.7.5 item 5: ``changed=False`` marks an IDEMPOTENT REPLAY — the
+    # desired state already exists exactly, so no mutation/materialize is
+    # required (a double-click or a retry-after-timeout stays harmless).
+    changed: bool = True
+    detail: str | None = None
 
 
 class StudioStore(Protocol):
@@ -81,11 +97,32 @@ class InboundSpec(BaseModel):
     settings: dict[str, Any] = Field(default_factory=dict)
 
 
+def _entry_fingerprint(entry: Any) -> str:
+    """Stable deep-compare token for an inbound entry (order-insensitive) —
+    the idempotency check for create retries (alpha.7.5 item 5)."""
+    return json.dumps(entry, sort_keys=True, ensure_ascii=False, default=str)
+
+
 class ConfigStudioService:
-    """Graphical-first config management; Advanced Mode = raw + diff."""
+    """Graphical-first config management; Advanced Mode = raw + diff.
+
+    Mutation lifecycle (alpha.7.5 item 5): create/update/delete STAGE a
+    validated candidate under a per-core lock (dup-identity + concurrency
+    rules enforced here); the ROUTE then materializes the candidate into
+    the core and only persists on success — a failed live apply never moves
+    the stored document to a state the core refused.
+    """
 
     def __init__(self, store: StudioStore) -> None:
         self._store = store
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def _lock_for(self, core_id: str) -> asyncio.Lock:
+        lock = self._locks.get(core_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[core_id] = lock
+        return lock
 
     async def get_document(self, core_id: str,
                            driver: BaseCoreDriver | None = None) -> dict[str, Any]:
@@ -140,6 +177,21 @@ class ConfigStudioService:
             return result
         await self._store.save_document(driver.metadata.id, result.document or {})
         return result
+
+    async def stage_apply(self, driver: BaseCoreDriver,
+                          operations: list[PatchOperation]) -> PreviewResult:
+        """Atomic lifecycle (alpha.7.5 item 5): a VALIDATED CANDIDATE under
+        the per-core mutation lock — nothing persisted yet. The caller
+        materializes ``result.document`` into the core and only then calls
+        :meth:`persist`."""
+        async with self._lock_for(driver.metadata.id):
+            return await self.preview(driver, operations)
+
+    async def persist(self, driver: BaseCoreDriver, document: dict[str, Any]) -> None:
+        """Store a candidate the core has already accepted (stage →
+        materialize → persist). Direct persistence of un-materialized
+        documents stays available via :meth:`apply` for headless flows."""
+        await self._store.save_document(driver.metadata.id, document)
 
     # ------------------------------------------------------------------ #
     # Inbound Wizard
@@ -202,41 +254,203 @@ class ConfigStudioService:
         + unified diff WITHOUT persisting or materializing anything."""
         return await self.preview(driver, await self._wizard_ops(driver, spec))
 
-    async def wizard_add_inbound(self, driver: BaseCoreDriver,
-                                 spec: InboundSpec) -> PreviewResult:
-        """Full wizard flow: build patch → validate → apply → return diff.
+    def _inbound_items(self, doc: dict[str, Any], path: str) -> list[Any]:
+        items = doc.get(path.strip("/"), []) if isinstance(doc, dict) else []
+        return items if isinstance(items, list) else []
 
-        Tolerant seeding: an empty document (core never started, store fresh)
-        gets the inbound-list parent created first instead of 422ing.
+    async def _wizard_create_candidate(self, driver: BaseCoreDriver,
+                                       spec: InboundSpec) -> PreviewResult:
+        """Lock-INTERNAL staging — call only while holding the core lock
+        (see :meth:`wizard_create`)."""
+        path = driver.metadata.studio_inbounds_path
+        if not path:
+            raise WizardUnsupportedError(
+                f"core '{driver.metadata.id}' does not expose an inbound list to "
+                "the studio (no studio_inbounds_path declared by its driver) — "
+                "edit its raw document in Advanced Mode instead."
+            )
+        doc = await self.get_document(driver.metadata.id, driver)
+        items = self._inbound_items(doc, path)
+        entry = self.wizard_patch(driver, spec)[0].value
+        max_inbounds = getattr(driver.metadata, "studio_max_inbounds", None)
+        existing = next((e for e in items
+                         if isinstance(e, dict) and e.get("tag") == spec.tag), None)
+        if existing is not None:
+            if _entry_fingerprint(existing) == _entry_fingerprint(entry):
+                return PreviewResult(
+                    core_id=driver.metadata.id, valid=True, changed=False,
+                    document=doc,
+                    detail=f"inbound '{spec.tag}' already exists exactly as "
+                           f"requested — idempotent replay, nothing changed")
+            raise StudioConflictError(
+                f"core '{driver.metadata.id}' already has an inbound tagged "
+                f"'{spec.tag}' with DIFFERENT settings — edit it, clone it "
+                f"under a new tag, or delete it first (refusing to append a "
+                f"conflicting twin)")
+        if max_inbounds == 1 and items:
+            # configure-the-listener: replacing the one listener IS the
+            # create on a single-socket engine (its own semantic, kept)
+            if _entry_fingerprint(items[0]) == _entry_fingerprint(entry):
+                return PreviewResult(
+                    core_id=driver.metadata.id, valid=True, changed=False,
+                    document=doc,
+                    detail=f"the {driver.metadata.id} listener already matches "
+                           f"this spec exactly — idempotent replay")
+        return await self.preview(driver, await self._wizard_ops(driver, spec))
 
-        Single-listener engines (``studio_max_inbounds == 1``: wireguard,
-        openvpn, ssh) physically bind ONE socket — the wizard
-        replaces that listener instead of appending a second entry the
-        engine could never serve (the old flow appended; the driver's
-        cardinality guard then died as an opaque 500).
-        """
-        return await self.apply(driver, await self._wizard_ops(driver, spec))
-
-    async def wizard_update_inbound(self, driver: BaseCoreDriver, tag: str,
-                                    spec: InboundSpec) -> PreviewResult:
-        """Item 11 — Edit an EXISTING inbound through the wizard: replace its
-        document entry with the wizard-built one (the SAME entry builder as
-        create, so shape stays identical); every earlier value must ride in
-        the spec — nothing is silently reset. A missing tag is a loud 404,
-        never a silent append."""
+    async def _wizard_update_candidate(self, driver: BaseCoreDriver, tag: str,
+                                       spec: InboundSpec) -> PreviewResult:
+        """Lock-INTERNAL staging for edits."""
         path = driver.metadata.studio_inbounds_path
         if not path:
             raise StudioError(f"core '{driver.metadata.id}' exposes no studio inbounds")
         doc = await self.get_document(driver.metadata.id, driver)
-        items = doc.get(path.strip("/"), []) if isinstance(doc, dict) else []
+        items = self._inbound_items(doc, path)
         idx = next(
             (i for i, e in enumerate(items)
              if isinstance(e, dict) and e.get("tag") == tag),
             None,
         )
         if idx is None:
-            raise StudioError(
-                f"core '{driver.metadata.id}' has no inbound tagged '{tag}'")
+            raise StudioNotFoundError(
+                f"core '{driver.metadata.id}' has no inbound tagged '{tag}' "
+                f"(valid: {sorted(str(e.get('tag')) for e in items if isinstance(e, dict) and e.get('tag')) or '— none configured'})")
         entry = self.wizard_patch(driver, spec)[0].value
-        return await self.apply(driver, [PatchOperation(
+        if spec.tag != tag:
+            # a rename must not fork a conflicting twin either
+            twin = next((e for e in items
+                         if isinstance(e, dict) and e.get("tag") == spec.tag), None)
+            if twin is not None:
+                raise StudioConflictError(
+                    f"renaming '{tag}' to '{spec.tag}' clashes with an existing "
+                    f"inbound — pick a unique tag")
+        if _entry_fingerprint(items[idx]) == _entry_fingerprint(entry):
+            return PreviewResult(
+                core_id=driver.metadata.id, valid=True, changed=False,
+                document=doc,
+                detail=f"inbound '{tag}' already matches — nothing to update")
+        return await self.preview(driver, [PatchOperation(
             op="replace", path=f"{path}/{idx}", value=entry)])
+
+    async def _wizard_delete_candidate(self, driver: BaseCoreDriver,
+                                       tag: str) -> PreviewResult:
+        """Lock-INTERNAL staging for deletes."""
+        path = driver.metadata.studio_inbounds_path
+        if not path:
+            raise StudioError(f"core '{driver.metadata.id}' exposes no studio inbounds")
+        doc = await self.get_document(driver.metadata.id, driver)
+        items = self._inbound_items(doc, path)
+        idxs = [i for i, e in enumerate(items)
+                if isinstance(e, dict) and e.get("tag") == tag]
+        if not idxs:
+            raise StudioNotFoundError(
+                f"core '{driver.metadata.id}' has no inbound tagged '{tag}' "
+                f"— nothing to delete")
+        if len(idxs) > 1:
+            raise StudioConflictError(
+                f"core '{driver.metadata.id}' has {len(idxs)} inbounds tagged "
+                f"'{tag}' — the identity is ambiguous; refusing to delete. "
+                f"Fix the duplicate tags in Advanced Mode first.")
+        return await self.preview(driver, [PatchOperation(
+            op="remove", path=f"{path}/{idxs[0]}")])
+
+    async def _wizard_execute(self, driver: BaseCoreDriver, stage,
+                              materialize=None) -> PreviewResult:
+        """THE atomic wizard transaction (alpha.7.5 item 5): the per-core
+        lock covers candidate-build → core-materialize → persist, so
+        concurrent lifecycle calls fully serialize; a failure inside
+        ``materialize`` propagates WITHOUT persisting (the 'request failed
+        but the inbound was created anyway' split is gone); an identical
+        replay short-circuits inside the lock."""
+        async with self._lock_for(driver.metadata.id):
+            result = await stage()
+            if not result.valid or not result.changed:
+                return result
+            if materialize is not None:
+                await materialize(result.document)
+            await self.persist(driver, result.document)
+            return result
+
+    async def wizard_create(self, driver: BaseCoreDriver, spec: InboundSpec,
+                            materialize=None) -> PreviewResult:
+        """Atomic CREATE (the routed flow): identity + idempotency rules of
+        the staging step, executed under the transaction lock."""
+        return await self._wizard_execute(
+            driver, lambda: self._wizard_create_candidate(driver, spec), materialize)
+
+    async def wizard_update(self, driver: BaseCoreDriver, tag: str,
+                            spec: InboundSpec, materialize=None) -> PreviewResult:
+        """Atomic EDIT-in-place (item 11 + item 5)."""
+        return await self._wizard_execute(
+            driver, lambda: self._wizard_update_candidate(driver, tag, spec),
+            materialize)
+
+    async def wizard_delete(self, driver: BaseCoreDriver, tag: str,
+                            materialize=None) -> PreviewResult:
+        """Atomic DELETE by stable identity — exactly one entry, ghost ≠
+        success, ambiguous twin-tags refused."""
+        return await self._wizard_execute(
+            driver, lambda: self._wizard_delete_candidate(driver, tag), materialize)
+
+    async def apply_operations(self, driver: BaseCoreDriver,
+                               operations: list[PatchOperation],
+                               materialize=None) -> PreviewResult:
+        """Atomic raw-patch apply (Advanced Mode routed flow): preview →
+        materialize → persist under the per-core lock; an engine refusal
+        stops before persistence, exactly like the wizard flows."""
+        return await self._wizard_execute(
+            driver, lambda: self.preview(driver, operations), materialize)
+
+    async def wizard_stage_create(self, driver: BaseCoreDriver,
+                                  spec: InboundSpec) -> PreviewResult:
+        """Stage a wizard CREATE (candidate only — no materialize/persist).
+
+        Rules (alpha.7.5 item 5 — the field-reported duplicate/500 storm):
+
+        * STABLE IDENTITY = the tag. An identical create replay (double
+          click / retry after a timed-out request that actually succeeded)
+          returns ``changed=False`` — success WITHOUT a duplicate;
+        * same tag with DIFFERENT settings raises :class:`StudioConflictError`
+          (HTTP 409) instead of silently appending a twin;
+        * single-listener engines (``studio_max_inbounds == 1``) keep their
+          configure-the-listener replace semantics — that IS the edit path
+          for them, under the same lock.
+
+        NOTE: for the committing flow use :meth:`wizard_create` — staging
+        alone does not guard the full transaction.
+        """
+        async with self._lock_for(driver.metadata.id):
+            return await self._wizard_create_candidate(driver, spec)
+
+    async def wizard_stage_update(self, driver: BaseCoreDriver, tag: str,
+                                  spec: InboundSpec) -> PreviewResult:
+        """Stage a wizard EDIT (candidate only): ghost tag →
+        :class:`StudioNotFoundError`, rename clash →
+        :class:`StudioConflictError`, identical replay → ``changed=False``."""
+        async with self._lock_for(driver.metadata.id):
+            return await self._wizard_update_candidate(driver, tag, spec)
+
+    async def wizard_stage_delete(self, driver: BaseCoreDriver,
+                                  tag: str) -> PreviewResult:
+        """Stage a wizard DELETE (candidate only — see :meth:`wizard_delete`)."""
+        async with self._lock_for(driver.metadata.id):
+            return await self._wizard_delete_candidate(driver, tag)
+
+    async def wizard_add_inbound(self, driver: BaseCoreDriver,
+                                 spec: InboundSpec) -> PreviewResult:
+        """Headless convenience (tests/CLI): atomic stage + persist in one
+        call — the ROUTED flow passes a ``materialize`` hook so a refused
+        live apply never moves the document.
+
+        Single-listener engines (``studio_max_inbounds == 1``: wireguard,
+        openvpn, ssh) physically bind ONE socket — the wizard
+        replaces that listener instead of appending a second entry the
+        engine could never serve.
+        """
+        return await self.wizard_create(driver, spec)
+
+    async def wizard_update_inbound(self, driver: BaseCoreDriver, tag: str,
+                                    spec: InboundSpec) -> PreviewResult:
+        """Item 11 — headless convenience: atomic edit + persist (the routed
+        flow materializes between the two, inside the same lock)."""
+        return await self.wizard_update(driver, tag, spec)

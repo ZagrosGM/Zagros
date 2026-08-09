@@ -34,19 +34,27 @@ logger = logging.getLogger(__name__)
 _REVIVE_GUARD_QUOTA = True  # documented constant: revival checks quota+expiry
 
 
-async def collect_devices_diag(runtime) -> tuple[dict[int, set[str]], list[str]]:
-    """collect_devices + which cores FAILED their online read this pass —
-    the 'unknown' state of the dashboard indicator (item 14): a user with no
-    fresh session is OFFLINE only when every online-capable core answered;
-    when some core's API was unreachable their state is honestly UNKNOWN."""
+async def collect_devices_diag(runtime) -> tuple[dict[int, set[str]], list[str], int]:
+    """collect_devices + pass diagnostics for the dashboard indicator:
+
+    RETURNS ``(devices, failed_cores, probed_core_count)``.
+
+    * ``failed_cores`` — cores that CLAIMED online tracking but whose read
+      failed this pass (their absence of evidence is honestly UNKNOWN);
+    * ``probed_core_count`` — online-capable cores that answered. When
+      ZERO, the panel simply has no online API on this deployment (every
+      enabled core lacks the capability) and presence must be reported as
+      UNKNOWN, never as a fake OFFLINE (alpha.7.5 item 15).
+    """
     from app.cores.types import Capability
 
     manager = runtime.core_manager
     owners = await asyncio.to_thread(runtime.users.account_owners)
     devices: dict[int, set[str]] = {}
     failed: list[str] = []
+    probed = 0
     if not owners:
-        return devices, failed
+        return devices, failed, probed
 
     for core_id in manager.list_cores():
         if not manager.is_enabled(core_id):
@@ -64,6 +72,7 @@ async def collect_devices_diag(runtime) -> tuple[dict[int, set[str]], list[str]]
                            core_id, exc)
             failed.append(core_id)
             continue
+        probed += 1
         for sess in sessions or []:
             owner = owners.get((sess.core_id, sess.account_id))
             if owner is None and core_id == "xray":
@@ -72,7 +81,7 @@ async def collect_devices_diag(runtime) -> tuple[dict[int, set[str]], list[str]]
                 continue  # revoked after the read — honest drop + log elsewhere
             key = str(sess.ip) if sess.ip else f"presence:{sess.core_id}:{sess.account_id}"
             devices.setdefault(owner, set()).add(key)
-    return devices, sorted(failed)
+    return devices, sorted(failed), probed
 
 
 async def collect_devices(runtime) -> dict[int, set[str]]:
@@ -81,7 +90,7 @@ async def collect_devices(runtime) -> dict[int, set[str]]:
     Device key = client IP when the core sees one, else one presence per
     online account (honest lower bound for IP-blind cores).
     """
-    devices, _failed = await collect_devices_diag(runtime)
+    devices, _failed, _probed = await collect_devices_diag(runtime)
     return devices
 
 
@@ -103,15 +112,17 @@ async def run_once(runtime) -> dict[str, int]:
     from app.db.models import User as LegacyUser
     from app.models.user import UserStatus
 
-    devices_by_user, failed_cores = await collect_devices_diag(runtime)
+    devices_by_user, failed_cores, probed_cores = await collect_devices_diag(runtime)
     stats = {"online": 0, "limited": 0, "revived": 0}
     now_ts = datetime.now(timezone.utc).timestamp()
-    # item 14: publish the raw material of the dashboard's online indicator —
-    # the freshest collect result + which cores were unreachable while taking it
+    # item 14/15: publish the raw material of the dashboard's online indicator
+    # — freshest collect result, unreachable cores, and how many online-
+    # capable cores answered (0 = no online API on this deployment at all)
     try:
         await runtime.kv.set_value("online.last_collect", {
             "ts": now_ts,
             "failed_cores": failed_cores,
+            "probed_cores": probed_cores,
             "online_user_ids": sorted(pid for pid, keys in devices_by_user.items() if keys),
         })
     except Exception as exc:  # noqa: BLE001 — indicator degrades, never blocks enforcement

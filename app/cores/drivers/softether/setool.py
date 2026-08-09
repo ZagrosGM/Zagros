@@ -45,6 +45,60 @@ class SESession:
     raw: dict[str, str]
 
 
+@dataclass(frozen=True, slots=True)
+class IPsecServices:
+    """Server IPsec service state per `IPsecGet` (alpha.7.5 item 7)."""
+
+    l2tp: bool                          # L2TP over IPsec server function
+    l2tp_raw: bool                      # Raw L2TP (without IPsec)
+    etherip: bool                       # EtherIP / L2TPv3 over IPsec
+    psk: str                            # current pre-shared key ("" when unset)
+    default_hub: str                    # default Virtual HUB ("" when unset)
+
+    @property
+    def any_enabled(self) -> bool:
+        return self.l2tp or self.l2tp_raw or self.etherip
+
+
+_BOOL_TRUE = {"yes", "enable", "enabled", "true", "on"}
+_EMPTY_PRINTS = {"", "none", "(none)", "(empty)", "-", "--"}
+
+
+def parse_ipsec_get(text: str) -> IPsecServices:
+    """Parse the `IPsecGet` console table.
+
+    Rows print as ``Label | Value`` with localized labels, so rows are
+    matched by stable keyword, not by exact string. Booleans accept
+    yes/no/enable/disable/true/false (localized SEC_YES/SEC_NO variants
+    still start with the ASCII word in every shipped hamcore).
+    """
+    flags: dict[str, str] = {}
+    for raw in (text or "").splitlines():
+        if "|" not in raw:
+            continue
+        label, _, value = raw.rpartition("|")
+        flags[label.strip().lower()] = value.strip()
+
+    def _find(*needles: str) -> str:
+        for key, value in flags.items():
+            if any(n in key for n in needles):
+                return value
+        return ""
+
+    def _bool(value: str) -> bool:
+        return value.strip().lower().split(" ")[0].rstrip(".") in _BOOL_TRUE
+
+    psk = _find("pre-shared key", "psk")
+    hub = _find("default virtual hub", "default hub", "defaulthub")
+    return IPsecServices(
+        l2tp=_bool(_find("l2tp over ipsec")),
+        l2tp_raw=_bool(_find("raw l2tp")),
+        etherip=_bool(_find("etherip")),
+        psk="" if psk.strip().lower() in _EMPTY_PRINTS else psk,
+        default_hub="" if hub.strip().lower() in _EMPTY_PRINTS else hub,
+    )
+
+
 _SIZE_LABEL = re.compile(r"^([\d,]+)\s+bytes$", re.IGNORECASE)
 
 

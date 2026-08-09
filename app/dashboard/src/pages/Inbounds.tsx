@@ -2,8 +2,8 @@
 // structured spec through the studio service (preview → apply); no JSON is
 // ever shown to the operator.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, ChevronLeft, Copy, Eye, FileUp, Link2, Loader2, Pencil, Plus, Trash2, Waypoints, Wand2, XCircle } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { CheckCircle2, ChevronLeft, Copy, Eye, Loader2, Pencil, Plus, Trash2, Waypoints, Wand2, XCircle } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "../components/feedback";
 import { ConfirmDialog, Dialog } from "../components/overlays";
 import { Badge, Button, Card, CardHeader, EmptyState, Field, Input, Select, Skeleton, Textarea } from "../components/ui";
@@ -19,9 +19,10 @@ interface WizardField {
   key: string; label: string; type: "string" | "int" | "bool" | "select" | "multiselect" | "password" | "textarea" | "file";
   required?: boolean; default?: string | number | boolean | string[];
   options?: string[]; placeholder?: string; help?: string;
-  /** schema-driven UX grouping (alpha.7.4 item 8): which panel the field
-   *  belongs to — the stepper renders groups, not a flat wall */
-  section?: "general" | "transport" | "tls" | "reality" | "certificate" | "advanced";
+  /** schema-driven UX grouping (alpha.7.4 item 8 + alpha.7.5 item 4): which
+   *  panel the field belongs to — the stepper renders groups, not a flat
+   *  wall. "headers" joins for the transport verb/header depth. */
+  section?: "general" | "transport" | "headers" | "tls" | "reality" | "certificate" | "advanced";
 }
 interface WizardSecurity { id: string; label: string; fields: WizardField[] }
 interface WizardTransport { id: string; label: string; securities: WizardSecurity[] }
@@ -65,17 +66,17 @@ export default function Inbounds() {
     } catch { return []; }
   }, [raw.data]);
 
+  // alpha.7.5 item 5: delete by STABLE IDENTITY (the tag) via the dedicated
+  // endpoint — the old flow computed an INDEX off a possibly-stale snapshot
+  // and removed a positional patch, which could delete the WRONG inbound
+  // (or several, after concurrent edits shifted the list).
   const removeInbound = useMutation({
-    mutationFn: async (tag: string) => {
-      const idx = inbounds.findIndex((i) => i.tag === tag);
-      const path = `/inbounds/${idx}`;
-      const ops = [{ op: "remove", path }];
-      const preview = await api.post<{ valid: boolean; errors: string[] }>(`/zagros/studio/${effectiveCore}/preview`, { operations: ops });
-      if (!preview.valid) throw new ApiError(422, preview.errors.join("; "));
-      return api.post(`/zagros/studio/${effectiveCore}/apply`, { operations: ops });
-    },
-    onSuccess: () => {
-      toast.ok(t("common.deleted")); setDeleteFor(null);
+    mutationFn: (tag: string) =>
+      api.delete<{ ok: boolean; deleted: string }>(
+        `/zagros/studio/${effectiveCore}/wizard/inbound/${encodeURIComponent(tag)}`),
+    onSuccess: (res) => {
+      toast.ok(res?.ok === false ? t("common.error") : t("common.deleted"));
+      setDeleteFor(null);
       qc.invalidateQueries({ queryKey: ["zagros", "studio", "raw", effectiveCore] });
       qc.invalidateQueries({ queryKey: ["inbounds"] });
     },
@@ -181,13 +182,6 @@ export default function Inbounds() {
   );
 }
 
-interface WizardImportResult {
-  tag: string; protocol: string; listen: string | null; port: number;
-  transport: string; security: string;
-  settings: Record<string, string | number | boolean | string[]>;
-  unmapped: { key: string; value: string; reason: string }[];
-  source_name?: string;
-}
 interface WizardPreviewResult { valid: boolean; errors: string[]; diff?: string | null }
 
 function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose, onDone }: {
@@ -209,17 +203,23 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
   const [security, setSecurity] = useState<WizardSecurity | null>(null);
   const [tag, setTag] = useState("");
   const [listen, setListen] = useState("0.0.0.0");
-  const [port, setPort] = useState(443);
+  // alpha.7.5 item 3: the port starts EMPTY and fills from a host-aware
+  // random five-digit suggestion (never a famous 443) — fully clearable and
+  // overridable; "" is a valid in-progress state, validation catches intent.
+  const [port, setPort] = useState<number | "">("");
+  const portTouchedRef = useRef(false);
+  // deterministic generation contract: ONE suggestion per wizard-open and
+  // protocol — switching protocols re-suggests (untouched), re-opening the
+  // wizard draws fresh, and a displayed suggestion never shuffles mid-edit.
+  const [dialogSeed] = useState(() => Date.now());
   const [fields, setFields] = useState<Record<string, string | string[]>>({});
   const [touched, setTouched] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  // item 6 Import: prefill the stepper from an existing client share link
-  const [importOpen, setImportOpen] = useState(false);
-  const [importText, setImportText] = useState("");
-  const [importBusy, setImportBusy] = useState(false);
-  const [importError, setImportError] = useState("");
-  const [importNote, setImportNote] = useState<string[]>([]);
+  // alpha.7.5 item 6: TLS certificate source — stored (managed registry),
+  // pasted PEM content, server-side file paths, or runtime self-signed
+  // (auto; runtime-only, NEVER registered as a managed certificate).
+  const [certMode, setCertMode] = useState<"ref" | "paste" | "path" | "auto">("auto");
 
   const schema = useQuery({
     queryKey: ["zagros", "wizard-schema", coreId],
@@ -233,6 +233,27 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
     staleTime: 60000,
   });
   const [certRef, setCertRef] = useState("");
+
+  // alpha.7.5 item 3: host-aware random port suggestion — re-keyed per
+  // protocol (fresh suggestion per selection) and per dialog lifetime
+  // (dialogSeed: the deterministic-per-open contract). Edit mode never
+  // touches the inbound's real port.
+  const suggestPort = useQuery({
+    queryKey: ["zagros", "suggest-port", coreId, proto?.id ?? "auto", dialogSeed],
+    queryFn: () => api.get<{ port: number }>(`/zagros/cores/${coreId}/suggest-port`),
+    enabled: mode !== "edit" && !!coreId,
+    staleTime: Infinity, gcTime: 0, retry: false,
+  });
+  useEffect(() => {
+    if (mode === "edit" || portTouchedRef.current) return;
+    if (suggestPort.data?.port) {
+      setPort(suggestPort.data.port);
+    } else if (suggestPort.isError) {
+      // the suggestion service is unreachable — degrade to a client-side
+      // random five-digit port (no host knowledge, never a static 443)
+      setPort(10000 + Math.floor(Math.random() * 50000));
+    }
+  }, [suggestPort.data, suggestPort.isError, mode]);
 
   // sensible defaults once the blueprint lands / whenever an ancestor changes
   const effProto = proto ?? schema.data?.protocols[0] ?? null;
@@ -253,8 +274,17 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
     setProto(p); setTransport(tr); setSecurity(sec);
     setTag(mode === "clone" ? `${initial.tag}-copy` : String(initial.tag));
     if (typeof initial.listen === "string" && initial.listen) setListen(initial.listen);
-    const portNum = Number(initial.port);
-    if (portNum > 0) setPort(portNum);
+    // Edit keeps the inbound's real port verbatim. Clone deliberately gets a
+    // FRESH suggested port — cloning the port too would bind two listeners
+    // to one socket; everything else is carried over, so re-typing the old
+    // port is one keystroke if that is really intended.
+    if (mode === "edit") {
+      const portNum = Number(initial.port);
+      if (portNum > 0) { setPort(portNum); portTouchedRef.current = true; }
+    }
+    // certificate path mode restores cleanly (paths are not secrets); pasted
+    // PEM content still never round-trips.
+    if (initial.certificate_path && initial.certificate_key_path) setCertMode("path");
     const known = new Set(sec.fields.map((f) => f.key));
     const restored: Record<string, string | string[]> = {};
     for (const [k, v] of Object.entries(initial)) {
@@ -268,9 +298,18 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
   }, [initial, schema.data]);
 
   const pickProto = (p: WizardProtocol) => {
-    setProto(p); setTransport(null); setSecurity(null); setFields({}); setTouched(new Set()); setCertRef(""); setPort(p.default_port || 443);
+    setProto(p); setTransport(null); setSecurity(null); setFields({}); setTouched(new Set());
+    setCertRef(""); setCertMode("auto");
+    // the port: an untouched wizard gets a fresh suggestion for the new
+    // protocol (the suggest query is keyed on the protocol id); a port the
+    // USER typed survives — explicit input always wins (alpha.7.5 item 3).
   };
-  const pickTransport = (tr: WizardTransport) => { setTransport(tr); setSecurity(null); setCertRef(""); };
+  const pickTransport = (tr: WizardTransport) => { setTransport(tr); setSecurity(null); setCertRef(""); setCertMode("auto"); };
+
+  // certificate material keys — included in the spec ONLY for the active
+  // cert mode, so a stale field from another mode can never leak into the
+  // payload (alpha.7.5 item 6: exactly one certificate contract per spec).
+  const CERT_KEYS = new Set(["certificate", "certificate_key", "certificate_path", "certificate_key_path"]);
 
   const spec = useMemo(() => {
     if (!effProto || !effTransport || !effSecurity) return null;
@@ -281,19 +320,22 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
     for (const f of effSecurity.fields) {
       const v = fields[f.key];
       if (v === undefined || v === "") continue;
-      // a selected managed certificate wins over pasted content (item 10)
-      if (certRef && (f.key === "certificate" || f.key === "certificate_key")) continue;
+      if (CERT_KEYS.has(f.key)) {
+        if (certMode === "paste" && (f.key === "certificate" || f.key === "certificate_key")) { /* keep */ }
+        else if (certMode === "path" && f.key.endsWith("_path")) { /* keep */ }
+        else continue; // ref/auto resolve server-side or are not material
+      }
       settings[f.key] = f.type === "int" ? Number(v) : f.type === "bool" ? v === "true" : v;
     }
-    if (certRef) settings.certificate_ref = certRef;
+    if (certMode === "ref" && certRef) settings.certificate_ref = certRef;
     return {
-      tag: tag.trim() || `${effProto.id}-${port}`,
+      tag: tag.trim() || `${effProto.id}-${port || "auto"}`,
       protocol: effProto.id,
       listen: listen || null,
       port: Number(port),
       settings,
     };
-  }, [effProto, effTransport, effSecurity, tag, listen, port, fields, certRef]);
+  }, [effProto, effTransport, effSecurity, tag, listen, port, fields, certRef, certMode]);
 
   // item 6 Validation: schema-driven, per-field, BEFORE the server round
   // (required fields, int parse, port range, tag uniqueness); honesty rule —
@@ -319,61 +361,52 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
   // item 6 Preview: server-side dry-run of the EXACT create patch (shared
   // backend path with apply) — schema verdict + unified diff, nothing saved.
   const specKey = JSON.stringify(spec);
+  // certificate-mode completeness gates (item 6): a chosen source must be
+  // FULLY specified — an empty "stored" pick or a half path/paste pair must
+  // never silently degrade into an unintended self-signed default.
+  const tlsCertInvalid = effSecurity?.id === "tls" && (
+    (certMode === "ref" && !certRef) ||
+    (certMode === "path" && (!String(fields.certificate_path ?? "").trim() ||
+                             !String(fields.certificate_key_path ?? "").trim())) ||
+    (certMode === "paste" && (!String(fields.certificate ?? "").trim() !==
+                              !String(fields.certificate_key ?? "").trim()))
+  );
+
   const preview = useQuery({
-    queryKey: ["zagros", "wizard-preview", coreId, specKey],
+    queryKey: ["zagros", "wizard-preview", coreId, specKey, certMode, certRef],
     queryFn: () => api.post<WizardPreviewResult>(`/zagros/studio/${coreId}/wizard/preview`, spec),
-    enabled: !!spec && step === 3 && missingRequired.length === 0,
+    enabled: !!spec && step === 3 && missingRequired.length === 0 && !tlsCertInvalid,
     retry: false,
   });
 
+  // alpha.7.5 item 5: hard double-submit guard — a synchronous in-flight
+  // ref (state lags one render; two fast clicks would both pass a
+  // `if (busy)` check). Combined with the server-side idempotent create,
+  // a double click CANNOT fork a duplicate inbound anymore.
+  const inFlight = useRef(false);
+
   const submit = async () => {
-    if (!spec) return;
+    if (!spec || inFlight.current) return;
+    inFlight.current = true;
     setBusy(true); setError("");
     try {
       const res = mode === "edit" && initial
-        ? await api.put<{ materialized?: boolean; notice?: string }>(
+        ? await api.put<{ materialized?: boolean | null; notice?: string; changed?: boolean }>(
             `/zagros/studio/${coreId}/wizard/inbound/${encodeURIComponent(String(initial.tag))}`, spec)
-        : await api.post<{ materialized?: boolean; notice?: string }>(`/zagros/studio/${coreId}/wizard/inbound`, spec);
+        : await api.post<{ materialized?: boolean | null; notice?: string; changed?: boolean }>(`/zagros/studio/${coreId}/wizard/inbound`, spec);
       toast.ok(
         mode === "edit"
           ? `inbound "${spec.tag}" updated on ${coreId}${res.materialized === false ? " (applies on next start)" : ""}`
-          : res.materialized === false
-            ? `inbound "${spec.tag}" saved on ${coreId} (applies on next start)`
-            : `inbound "${spec.tag}" created on ${coreId}`);
+          : res.changed === false
+            ? `inbound "${spec.tag}" already exists as requested — nothing changed`
+            : res.materialized === false
+              ? `inbound "${spec.tag}" saved on ${coreId} (applies on next start)`
+              : `inbound "${spec.tag}" created on ${coreId}`);
       onDone();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : t("common.error"));
       setBusy(false);
-    }
-  };
-
-  const doImport = async () => {
-    const link = importText.trim();
-    if (!link || !schema.data) return;
-    setImportBusy(true); setImportError(""); setImportNote([]);
-    try {
-      const res = await api.post<WizardImportResult>(`/zagros/cores/${coreId}/wizard/import`, { link });
-      const p = schema.data.protocols.find((x) => x.id === res.protocol);
-      const tr = p?.transports.find((x) => x.id === res.transport);
-      const sec = tr?.securities.find((x) => x.id === res.security);
-      if (!p || !tr || !sec) throw new Error("imported cell missing from the fetched blueprint — refetch the schema");
-      setProto(p); setTransport(tr); setSecurity(sec);
-      const mapped: Record<string, string | string[]> = {};
-      for (const [k, v] of Object.entries(res.settings)) {
-        mapped[k] = Array.isArray(v) ? v.map(String) : typeof v === "boolean" ? String(v) : String(v);
-      }
-      setFields(mapped); setTouched(new Set());
-      setTag(res.tag); setPort(res.port);
-      if (res.listen) setListen(res.listen);
-      if (res.unmapped.length) {
-        setImportNote(res.unmapped.map((u) => `${u.key} = ${u.value} — ${u.reason}`));
-      }
-      setImportOpen(false); setImportText("");
-      setStep(3); // review before create — never auto-apply an import
-    } catch (e) {
-      setImportError(e instanceof ApiError ? e.message : e instanceof Error ? e.message : t("common.error"));
-    } finally {
-      setImportBusy(false);
+      inFlight.current = false;
     }
   };
 
@@ -387,7 +420,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
     step === 0 ? !effProto
     : step === 1 ? !effTransport
     : step === 2 ? !effSecurity
-    : !spec || !port || port < 1 || port > 65535 || tagClash || formInvalid;
+    : !spec || !port || port < 1 || port > 65535 || tagClash || formInvalid || !!tlsCertInvalid;
 
   const renderChoice = (
     <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
@@ -398,9 +431,10 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
           <button key={o.id} onClick={() => (step === 0 ? pickProto(o as WizardProtocol) : step === 1 ? pickTransport(o as WizardTransport) : setSecurity(o as WizardSecurity))}
             className={`rounded-xl border p-3 text-start transition-colors ${active ? "border-brand bg-brand-soft" : "border-border hover:border-border-strong"}`}>
             <p className="text-[13px] font-semibold">{o.label}</p>
-            {/* item 7: never show a FAKE port — before creation there IS no
-                port; the number only appears once typed (or imported) */}
-            {step === 0 && <p className="mt-1 text-[10.5px] text-content-3">port not configured</p>}
+            {/* alpha.7.5 items 2+7: NO port line on initial protocol cards —
+                neither a fabricated number nor a misleading placeholder. The
+                real port is the suggested editable value in the review
+                step, nothing before it. */}
           </button>
         );
       })}
@@ -421,9 +455,9 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
       subtitle={`step ${step + 1} of 4 — ${stepNames[step]}${advanced ? "" : " · simple"}`}
       headerActions={
         <div className="flex items-center gap-1.5">
-          <Button variant="ghost" size="sm" onClick={() => { setImportOpen((v) => !v); setImportError(""); }}
-            title="prefill the wizard from an existing client share link">
-            <Link2 size={13} /> import</Button>
+          {/* alpha.7.5 item 1: the «import from URL» path is gone — the
+              wizard is authored from the blueprint alone (the endpoint and
+              its module were removed server-side too). */}
           <div className="flex overflow-hidden rounded-lg border border-border" role="group" aria-label="wizard mode">
             {(["simple", "advanced"] as const).map((m) => (
               <button key={m} onClick={() => setAdvanced(m === "advanced")}
@@ -447,34 +481,6 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
                 <Wand2 size={14} /> {mode === "edit" ? "save changes" : "create inbound"}</Button>}
         </>
       }>
-      {importOpen && (
-        <div className="mb-3 space-y-2 rounded-xl border border-border p-3">
-          <p className="flex items-center gap-1.5 text-[12px] font-medium text-content-2">
-            <FileUp size={13} className="text-brand" /> import from a share link
-            <span className="text-content-3">— vless / vmess / trojan / ss / hysteria2 / tuic</span>
-          </p>
-          <Textarea rows={2} dir="ltr" className="font-mono text-[11px]"
-            placeholder="vless://…?type=ws&security=tls#name"
-            value={importText} onChange={(e) => setImportText(e.target.value)} />
-          <div className="flex items-center gap-2">
-            <Button size="sm" onClick={doImport} loading={importBusy} disabled={!importText.trim()}>
-              <Link2 size={13} /> parse &amp; prefill</Button>
-            <span className="text-[11px] text-content-3">
-              the link's credentials belong to a user account — only listener facts are imported;
-              anything unmappable is reported, never guessed.
-            </span>
-          </div>
-          {importError && <p role="alert" className="rounded-lg border border-danger/30 bg-danger-soft px-2.5 py-1.5 text-[11px] text-danger">{importError}</p>}
-        </div>
-      )}
-      {importNote.length > 0 && (
-        <div className="mb-3 rounded-xl border border-border-strong bg-surface-2 px-3 py-2">
-          <p className="mb-1 text-[11px] font-semibold text-content-2">unmapped / warnings (imported facts only — nothing guessed, nothing dropped silently):</p>
-          <ul className="list-inside list-disc font-mono text-[10.5px] text-content-3" dir="ltr">
-            {importNote.map((n) => <li key={n}>{n}</li>)}
-          </ul>
-        </div>
-      )}
       {schema.isLoading && <div className="space-y-2"><Skeleton className="h-10" /><Skeleton className="h-24" /></div>}
       {schema.isError && (
         <div role="alert" className="flex items-center justify-between gap-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">
@@ -515,21 +521,43 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
               </Field>
             )}
             <Field label="port" required
-              hint={!port || port < 1 || port > 65535 ? "1–65535" : undefined}>
-              <Input type="number" min={1} max={65535} value={port}
-                onChange={(e) => setPort(Number(e.target.value))} dir="ltr"
+              hint={
+                !port || port < 1 || port > 65535
+                  ? "1–65535"
+                  : mode !== "edit" && !portTouchedRef.current
+                    ? "random suggestion (host-collision-checked) — clear or type your own"
+                    : undefined
+              }>
+              <Input type="number" min={1} max={65535}
+                value={port === "" ? "" : port}
+                placeholder={suggestPort.isFetching ? "suggesting…" : "e.g. 38472"}
+                onChange={(e) => {
+                  portTouchedRef.current = true;
+                  setPort(e.target.value === "" ? "" : Number(e.target.value));
+                }} dir="ltr"
                 invalid={!port || port < 1 || port > 65535} />
             </Field>
           </div>
-          {/* items 8+10: schema-driven GROUPS instead of a flat field wall —
-             General / Transport / TLS / REALITY / Certificate / Advanced.
-             A protocol renders only the groups its cell actually carries. */}
-          {effSecurity && (["general", "transport", "tls", "reality", "certificate", "advanced"] as const).map((sec) => {
-            const groupFields = effSecurity.fields.filter((f) => (f.section ?? "advanced") === sec && fieldVisible(f));
-            if (!groupFields.length) return null;
+          {/* items 8+10 + alpha.7.5 item 4: schema-driven GROUPS instead of a
+             flat field wall — General / Transport / Headers / TLS / REALITY /
+             Certificate / Advanced. A protocol renders only the groups its
+             cell actually carries; certificate fields follow the chosen
+             certificate source mode (item 6). */}
+          {effSecurity && (["general", "transport", "headers", "tls", "reality", "certificate", "advanced"] as const).map((sec) => {
+            const groupFields = effSecurity.fields.filter((f) => {
+              if ((f.section ?? "advanced") !== sec || !fieldVisible(f)) return false;
+              if (CERT_KEYS.has(f.key)) {
+                if (certMode === "paste") return !f.key.endsWith("_path");
+                if (certMode === "path") return f.key.endsWith("_path");
+                return false; // ref/auto carry no inline certificate fields
+              }
+              return true;
+            });
+            if (!groupFields.length && sec !== "certificate") return null;
             const titles: Record<string, string> = {
-              general: "General", transport: "Transport", tls: "TLS / Security",
-              reality: "REALITY", certificate: "Certificate", advanced: "Advanced",
+              general: "General", transport: "Transport / Network", headers: "Headers",
+              tls: "TLS / Security", reality: "REALITY", certificate: "Certificate",
+              advanced: "Advanced",
             };
             return (
             <div key={sec} className="grid gap-4 rounded-xl border border-border p-3.5 sm:grid-cols-3">
@@ -538,23 +566,34 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
                 {!advanced && sec !== "general" && <span className="ms-1.5 normal-case tracking-normal">(showing only what needs a decision — switch to advanced for the rest)</span>}
               </p>
               {sec === "certificate" && (
-                <Field label="certificate source"
-                  hint="choose a stored certificate — or leave empty and paste (or auto-generate) below">
-                  <Select value={certRef}
-                    onChange={(e) => { setCertRef(e.target.value); if (e.target.value) setFields((cur) => { const n = { ...cur }; delete n.certificate; delete n.certificate_key; return n; }); }}>
-                    <option value="">— paste content / auto-generate —</option>
+                <Field label="certificate source" required
+                  hint="exactly ONE source is applied — stored pairs and paths are validated (PEM + match + expiry) server-side">
+                  <Select value={certMode}
+                    onChange={(e) => setCertMode(e.target.value as "ref" | "paste" | "path" | "auto")}>
+                    <option value="auto">auto-generate (self-signed, runtime-only — not added to Certificates)</option>
+                    <option value="ref">stored certificate (from the Certificates registry)</option>
+                    <option value="paste">paste PEM content</option>
+                    <option value="path">file paths on this server</option>
+                  </Select>
+                </Field>
+              )}
+              {sec === "certificate" && certMode === "ref" && (
+                <Field label="stored certificate" required
+                  hint={!certRef ? "pick a managed certificate (or switch the source mode)" : undefined}>
+                  <Select value={certRef} onChange={(e) => setCertRef(e.target.value)}>
+                    <option value="">— choose a managed certificate —</option>
                     {(certsQ.data?.certificates ?? []).filter((c) => c.managed).map((c) => (
                       <option key={c.name} value={c.name}>{c.name}{c.expired ? " (EXPIRED)" : ""}</option>
                     ))}
                   </Select>
                 </Field>
               )}
-              {sec === "certificate" && certRef && (
+              {sec === "certificate" && certMode === "ref" && certRef && (
                 <p className="sm:col-span-3 rounded-lg border border-brand/30 bg-brand-soft/30 px-2.5 py-1.5 text-[11px] text-brand">
                   using stored certificate «{certRef}» — validated server-side (PEM pair + match + expiry) before applying.
                 </p>
               )}
-              {groupFields.filter((f) => !(certRef && (f.key === "certificate" || f.key === "certificate_key"))).map((f) => {
+              {groupFields.map((f) => {
                 const err = fieldErrors[f.key];
                 const showErr = !!err && (touched.has(f.key) || !!err && f.required && fields[f.key] !== undefined);
                 const mark = () => setTouched((cur) => new Set(cur).add(f.key));

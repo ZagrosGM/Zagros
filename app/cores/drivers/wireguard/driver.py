@@ -105,6 +105,11 @@ class WireGuardDriver(BaseCoreDriver):
                 "peer_allowed_ips": {"type": "array", "items": {"type": "string"},
                                      "default": ["0.0.0.0/0", "::/0"]},
                 "peer_keepalive": {"type": "integer", "default": 25},
+                "enable_nat": {"type": "boolean", "default": True,
+                               "description": "PostUp/PostDown forwarding+"
+                                              "MASQUERADE hooks (needed for "
+                                              "full-tunnel clients); False = "
+                                              "bare point-to-point link"},
             },
         },
         default_settings={
@@ -176,6 +181,10 @@ class WireGuardDriver(BaseCoreDriver):
             address=server_address(s["subnet"]),
             listen_port=int(s["port"]),
             peers=self._desired_peers(),
+            # item 12: forwarding + NAT hooks ship by default (full-tunnel
+            # client configs are the product default); operators running a
+            # bare point-to-point link disable them via enable_nat=false
+            forward_nat=bool(s.get("enable_nat", True)),
         )
 
     async def _publish(self) -> None:

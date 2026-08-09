@@ -607,10 +607,18 @@ class SSHTunnelDriver(BaseCoreDriver):
                 self.metadata.id,
                 f"usage_accounting (ssh): {self._acct_error}")
         uid_map: dict[int, str] = {}
+        unresolved = 0
         for account in self._accounts.values():
             uid = await asyncio.to_thread(self._uid_of_account, account)
             if uid is not None:
                 uid_map[uid] = account.account_id
+            else:
+                unresolved += 1
+        if unresolved:
+            logger.warning(
+                "ssh accounting: %d account(s) have no resolvable UID "
+                "(host account deleted out-of-band?) — their usage cannot "
+                "be attributed this tick", unresolved)
         await asyncio.to_thread(self._backend.acct_sync_users, set(uid_map))
         counters = await asyncio.to_thread(self._backend.acct_read)
         records: list[UsageRecord] = []

@@ -235,7 +235,11 @@ def test_server_config_has_management_auth_hook_and_tls() -> None:
     conf = backend.config or ""
     assert "management-client-auth" in conf
     assert "username-as-common-name" in conf
-    assert "client-cert-not-required" in conf
+    # alpha.7.5 item 11: OpenVPN 2.6 refuses to start with the REMOVED
+    # directive 'client-cert-not-required' — the modern replacement (valid
+    # since 2.4; the fake backend reports 2.5.9) is rendered instead
+    assert "verify-client-cert none" in conf
+    assert "client-cert-not-required" not in conf
     assert "client-disconnect /wd/listeners/openvpn/client-disconnect.sh" in conf
     assert "management 127.0.0.1 17506" in conf  # base 17505 + portal offset
     # shared PKI via absolute paths (per-listener cwd since alpha.7.2)
@@ -552,6 +556,40 @@ def test_removed_listener_config_materializes_offline() -> None:
         assert "port 1294" in backend.configs["solo"]
 
     asyncio.run(main())
+
+
+def test_client_cert_directive_version_gating() -> None:
+    """item 11: version-detected gate, modern default, operator override."""
+    driver, backend = _driver()
+    assert driver._client_cert_directive() == "verify-client-cert none"  # 2.5.9
+    backend.version = lambda: "2.6.12"
+    assert driver._client_cert_directive() == "verify-client-cert none"
+    backend.version = lambda: "2.3.18"
+    assert driver._client_cert_directive() == "client-cert-not-required"
+    backend.version = lambda: "not-an-openvpn"
+    # unparsable/unknown probe → modern default (distros ship ≥2.5 today)
+    assert driver._client_cert_directive() == "verify-client-cert none"
+    backend.version = lambda: None
+    assert driver._client_cert_directive() == "verify-client-cert none"
+    # operator override beats the binary probe
+    backend.version = lambda: "2.6.12"
+    overridden = OpenVPNDriver(settings={"openvpn_version": "2.3.99"},
+                               backend=backend)
+    assert overridden._client_cert_directive() == "client-cert-not-required"
+
+
+def test_legacy_binary_renders_legacy_directive() -> None:
+    driver, backend = _driver()
+    backend.version = lambda: "2.3.18"
+
+    async def main():
+        await driver.create_account(_account())
+        await driver.start()
+
+    asyncio.run(main())
+    conf = backend.config or ""
+    assert "client-cert-not-required" in conf
+    assert "verify-client-cert none" not in conf
 
 
 def _run_all() -> None:

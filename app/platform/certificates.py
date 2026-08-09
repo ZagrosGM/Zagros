@@ -100,8 +100,18 @@ def _info_from(path: Path, cert: x509.Certificate, name: str | None = None) -> C
     )
 
 
-def scan(data_dir: str, *, max_depth: int = 5) -> list[CertificateInfo]:
-    """Inventory certificates under *data_dir* (depth-limited, read-only)."""
+def scan(data_dir: str, *, max_depth: int = 5,
+         managed_only: bool = True) -> list[CertificateInfo]:
+    """Inventory certificates under *data_dir* (depth-limited, read-only).
+
+    ``managed_only=True`` (alpha.7.5 item 8 — the registry belongs to the
+    OPERATOR): only the managed store ``<data>/certs/<name>/`` is listed.
+    Core RUNTIME certs (self-signed material an inbound generated under
+    ``cores/<core>/certs/``) are engine plumbing, NOT user-managed
+    resources, and must never appear as if the user created them. Pass
+    ``managed_only=False`` for diagnostics that intentionally want the
+    whole tree (the delete-by-id path still reaches those files elsewhere).
+    """
     root = Path(data_dir)
     if not root.is_dir():
         return []
@@ -117,11 +127,13 @@ def scan(data_dir: str, *, max_depth: int = 5) -> list[CertificateInfo]:
             except ValueError:  # pragma: no cover - rglob stays under root
                 continue
             seen.add(path)
+            managed = path.parent.parent == certs_root  # certs/<name>/<file>
+            if managed_only and not managed:
+                continue  # runtime/generated material — not a registry entry
             try:
                 info = _info_from(path, _parse_cert(path))
             except ValueError:
                 continue  # PEM-shaped files that aren't certs (keys, bundles)
-            managed = path.parent.parent == certs_root  # certs/<name>/<file>
             info.managed = managed
             if managed:
                 info.name = path.parent.name

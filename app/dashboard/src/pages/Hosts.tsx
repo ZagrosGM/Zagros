@@ -263,13 +263,14 @@ export default function Hosts() {
 
                       <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
                         <Field label={t("hosts.remark")}
-                          hint="blank → 🛸 Zagros ({USERNAME}) [{PROTOCOL} - {TRANSPORT}] » {SERVER_IP}">
+                          hint="blank → 🛸 Zagros ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]">
                           <Input value={row.remark} placeholder="🛸 Zagros ({USERNAME})"
                             onChange={(e) => update(tag, idx, { remark: e.target.value })} />
                         </Field>
-                        <Field label={t("hosts.address")} required>
+                        <Field label={t("hosts.address")} required
+                          hint="blank → {SERVER_IP} (the link's own server address is kept)">
                           <Input value={row.address} dir="ltr"
-                            placeholder="cdn.example.com, edge-*.example.com"
+                            placeholder="{SERVER_IP}, cdn.example.com, edge-*.example.com"
                             onChange={(e) => update(tag, idx, { address: e.target.value })} />
                         </Field>
                         <Field label={t("hosts.port")}>

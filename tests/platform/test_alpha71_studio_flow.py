@@ -191,13 +191,10 @@ def test_materialize_studio_maps_core_error_to_422():
         async def apply_studio_document(self, doc):
             raise CoreError("only ONE listener is supported")
 
-    runtime = types.SimpleNamespace(
-        studio_store=types.SimpleNamespace(
-            get_document=lambda cid: asyncio.sleep(0, result={"inbounds": []}),
-        ),
-    )
+    runtime = types.SimpleNamespace()
     with pytest.raises(HTTPException) as ei:
-        asyncio.run(_materialize_studio(runtime, "wireguard", _RejectDriver()))
+        asyncio.run(_materialize_studio(runtime, "wireguard", _RejectDriver(),
+                                        {"inbounds": [{"tag": "x"}]}))
     assert ei.value.status_code == 422
     assert "wireguard:" in str(ei.value.detail)
     assert "ONE listener" in str(ei.value.detail)
@@ -206,12 +203,8 @@ def test_materialize_studio_maps_core_error_to_422():
 def test_materialize_studio_no_hook_returns_notice():
     from app.platform.routers import _materialize_studio
 
-    runtime = types.SimpleNamespace(
-        studio_store=types.SimpleNamespace(
-            get_document=lambda cid: asyncio.sleep(0, result={"inbounds": []}),
-        ),
-    )
-    notice = asyncio.run(_materialize_studio(runtime, "legacy", object()))
+    notice = asyncio.run(_materialize_studio(types.SimpleNamespace(), "legacy",
+                                             object(), {"inbounds": []}))
     assert notice is not None and "next start" in notice
 
 

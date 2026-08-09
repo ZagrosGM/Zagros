@@ -178,6 +178,59 @@ def test_strip_config_matches_wgquick_semantics() -> None:
     assert "AllowedIPs = 10.66.66.2/32" in stripped
 
 
+def test_render_interface_forwarding_nat_hooks() -> None:
+    """alpha.7.5 item 12: full-path rendering — forwarding + MASQUERADE.
+
+    The server interface must carry the wg-quick PostUp/PostDown hook block
+    when the driver default (enable_nat=True) holds, must skip it for a
+    bare-link operator choice, and `wg syncconf` payloads must NEVER carry
+    the hooks (strip semantics keep live updates non-disruptive)."""
+    from app.cores.drivers.wireguard.wgtool import DesiredPeer
+
+    peer = DesiredPeer(comment="1.alice", public_key=KEY_ALICE,
+                       allowed_ips=("10.66.66.2/32",), preshared_key=None)
+    with_hooks = render_interface(
+        private_key="PRIV", address="10.66.66.1/24", listen_port=51820,
+        peers=[peer], forward_nat=True)
+    assert "PostUp = sysctl -w net.ipv4.ip_forward=1" in with_hooks
+    assert "PostUp = iptables -C FORWARD -i %i -j ACCEPT" in with_hooks
+    assert "iptables -t nat -C POSTROUTING" in with_hooks
+    assert "MASQUERADE" in with_hooks
+    # runtime default-route discovery — no hardcoded interface name
+    assert "ip route show default" in with_hooks and "eth0" not in with_hooks
+    assert "PostDown = iptables -D FORWARD -i %i -j ACCEPT" in with_hooks
+    without = render_interface(
+        private_key="PRIV", address="10.66.66.1/24", listen_port=51820,
+        peers=[peer], forward_nat=False)
+    assert "PostUp" not in without and "MASQUERADE" not in without
+    stripped = strip_config(with_hooks)
+    assert "PostUp" not in stripped and "sysctl" not in stripped
+    # syncconf payload keeps exactly the interface/peer crypto keys
+    assert "PrivateKey = PRIV" in stripped and "ListenPort = 51820" in stripped
+
+
+def test_driver_render_carries_hooks_by_default(monkeypatch) -> None:
+    async def run() -> None:
+        driver, backend = _driver()
+        await driver.start()
+        conf = backend.up_calls[0]
+        assert "sysctl -w net.ipv4.ip_forward=1" in conf
+        assert "MASQUERADE" in conf
+
+    asyncio.run(run())
+
+
+def test_driver_render_nat_disabled_omits_hooks() -> None:
+    async def run() -> None:
+        driver, backend = _driver()
+        driver.settings["enable_nat"] = False
+        await driver.start()
+        conf = backend.up_calls[0]
+        assert "MASQUERADE" not in conf and "PostUp" not in conf
+
+    asyncio.run(run())
+
+
 def test_ip_allocation_lowest_free_and_exhaustion() -> None:
     assert server_address("10.66.66.0/24") == "10.66.66.1/24"
     first = allocate_address("10.66.66.0/24", set())

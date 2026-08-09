@@ -276,10 +276,16 @@ def test_softether_delivery_all_transports_with_psk_and_notes() -> None:
     l2tp = _fields(profile, 0)
     assert l2tp["ipsec_psk"].value == "test-psk" and l2tp["ipsec_psk"].secret
     assert "ipsec_psk" not in _fields(profile, 1)
-    # feature flags are OFF on a fresh hub → honest NOTE per transport
+    # feature flags are OFF on a fresh hub → honest NOTE per transport; the
+    # OpenVPN-clone section carries the EXTERNAL-MANAGEMENT note instead
+    # (vpncmd 5.02 has no toggle verb — alpha.7.5 item 7)
     for section in profile.sections:
         notes = [a.note for a in section.artifacts if a.kind is ArtifactKind.NOTE]
-        assert any("feature is currently OFF" in (n or "") for n in notes)
+        if section.protocol == "ovpn":
+            assert any("Server Manager" in (n or "") and "no" in (n or "")
+                       for n in notes)
+        else:
+            assert any("feature is currently OFF" in (n or "") for n in notes)
 
 
 def test_softether_delivery_missing_facts_are_notes_not_errors() -> None:

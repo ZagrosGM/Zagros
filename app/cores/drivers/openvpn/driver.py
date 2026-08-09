@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import secrets
 from datetime import datetime, timezone
 from collections.abc import AsyncIterator
@@ -73,6 +74,11 @@ class OpenVPNDriver(BaseCoreDriver):
             "type": "object",
             "properties": {
                 "executable_path": {"type": "string"},
+                "openvpn_version": {
+                    "type": "string",
+                    "description": "installed OpenVPN version override (e.g. "
+                                   "'2.3.18') — gates version-dependent "
+                                   "directives; blank = probe the binary"},
                 "work_dir": {"type": "string"},
                 "listen": {"type": "string", "default": "0.0.0.0"},
                 "port": {"type": "integer", "default": 1194},
@@ -589,7 +595,7 @@ class OpenVPNDriver(BaseCoreDriver):
         else:
             lines += [
                 "management-client-auth",
-                "client-cert-not-required",
+                self._client_cert_directive(),
                 "username-as-common-name",
             ]
         lines += [
@@ -605,6 +611,35 @@ class OpenVPNDriver(BaseCoreDriver):
             lines += [ln.rstrip() for ln in extra.splitlines() if ln.strip()]
         lines.append("")
         return "\n".join(lines)
+
+    def _client_cert_directive(self) -> str:
+        """Version-gated client-cert directive (alpha.7.5 item 11).
+
+        OpenVPN 2.6 REMOVED ``--client-cert-not-required`` — the daemon
+        aborts with 'REMOVED OPTION: --client-cert-not-required, use
+        ``--verify-client-cert none`` instead'. ``--verify-client-cert``
+        itself exists since 2.4, therefore: a binary DETECTED as ≥2.4 (or
+        an unparsed/unknown one — every supported distro ships ≥2.5 today)
+        always gets the modern directive, a detected pre-2.4 binary keeps
+        the legacy flag, and ``settings.openvpn_version`` overrides the
+        probe for exotic hosts.
+        """
+        raw = str(self.settings.get("openvpn_version") or "").strip()
+        if not raw:
+            probe = getattr(self._backend, "version", None)
+            if callable(probe):
+                try:
+                    raw = str(probe() or "").strip()
+                except Exception:  # noqa: BLE001 — a failed probe means
+                    raw = ""       # "unknown", and unknown = modern directive
+        version: tuple[int, int] | None = None
+        if raw:
+            match = re.match(r"(\d+)\.(\d+)", raw)
+            if match:
+                version = (int(match.group(1)), int(match.group(2)))
+        if version is not None and version < (2, 4):
+            return "client-cert-not-required"
+        return "verify-client-cert none"
 
     def _static_auth_script_path(self) -> str:
         import os

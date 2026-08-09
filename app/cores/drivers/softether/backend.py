@@ -13,11 +13,14 @@ import os
 import shlex
 import shutil
 import subprocess
+import time
 from typing import Protocol, runtime_checkable
 
 from app.cores.drivers.softether.setool import (
+    IPsecServices,
     SESession,
     UserStatistics,
+    parse_ipsec_get,
     parse_session_list,
     parse_user_get,
     parse_user_list,
@@ -43,6 +46,9 @@ class SoftEtherBackend(Protocol):
     def session_list(self) -> list[SESession]: ...
     def session_disconnect(self, session_name: str) -> None: ...
     def ipsec_psk(self) -> str | None: ...
+    def ipsec_get(self) -> IPsecServices: ...
+    def ipsec_services_set(self, *, l2tp: bool, l2tp_raw: bool, etherip: bool,
+                           psk: str, default_hub: str) -> None: ...
 
 
 class LocalSoftEtherBackend:
@@ -94,6 +100,52 @@ class LocalSoftEtherBackend:
         if error_line:
             raise CoreError(f"vpncmd '{command}' failed: {error_line}")
         return proc.stdout or ""
+
+    # ------------------------------------------------------------------ #
+    # IPsec server functions (L2TP/IPsec, raw L2TP, EtherIP)
+    #
+    # alpha.7.4 bug (field report "vpncmd 'IPsecEnable /L2TP:no ...
+    # /DEFAULTHUB:DEFAULT' failed (rc=38)"): upstream PsIPsecEnable
+    # declares ALL FIVE arguments — including /PSK: — with CmdEvalNotEmpty,
+    # so a missing/empty PSK fails vpncmd's LOCAL validation and the tool
+    # exits ERR_INVALID_PARAMETER (38) BEFORE any RPC runs — even when the
+    # intent is to disable every service. The argument string is also
+    # passed through shlex.split here (5.x one-shot tokenizes natively),
+    # so embedded whitespace needs real quoting. Every IPsecEnable issued
+    # by this backend therefore carries the full 5-argument form with a
+    # non-empty PSK + hub, validated locally first so a bad value never
+    # half-commands the server. (alpha.7.5 item 7)
+    # ------------------------------------------------------------------ #
+
+    def ipsec_get(self) -> IPsecServices:
+        """Current server IPsec state (authoritative — used to converge
+        without clobbering the stored PSK or the default hub)."""
+        return parse_ipsec_get(self._cmd("IPsecGet"))
+
+    def ipsec_services_set(self, *, l2tp: bool, l2tp_raw: bool, etherip: bool,
+                           psk: str, default_hub: str) -> None:
+        """Full-form `IPsecEnable` — mirrors vpncmd's own local validation."""
+        psk = (psk or "").strip()
+        hub = (default_hub or "").strip()
+        if not psk:
+            raise CoreError(
+                "IPsecEnable needs a non-empty pre-shared key — vpncmd "
+                "validates /PSK: locally (ERR_INVALID_PARAMETER, rc=38) even "
+                "when every service is being disabled."
+            )
+        if not hub:
+            raise CoreError("IPsecEnable needs a non-empty default hub name.")
+        if any(ch in psk for ch in ('"', "\n", "\r")) or '"' in hub:
+            raise CoreError(
+                "IPsec PSK/hub contains characters that cannot be encoded "
+                "as a vpncmd argument (quote/newline) — refused locally."
+            )
+        yn = lambda b: "yes" if b else "no"  # noqa: E731
+        psk_arg = f'"{psk}"' if any(ch.isspace() for ch in psk) else psk
+        self._cmd(
+            f"IPsecEnable /L2TP:{yn(l2tp)} /L2TPRAW:{yn(l2tp_raw)} "
+            f"/ETHERIP:{yn(etherip)} /PSK:{psk_arg} /DEFAULTHUB:{hub}"
+        )
 
     # ------------------------------------------------------------------ #
     # setup — real SELF_INSTALL (3-stage chain, alpha.7.2)
@@ -245,14 +297,172 @@ class LocalSoftEtherBackend:
             "(need: c/c++ compiler, cmake, openssl+zlib+readline+ncurses dev)."
         )
 
+    # alpha.7.5 item 10 — the source build must be CONTROLLED, CACHED and
+    # OBSERVABLE (field report: install pinned the host at 100% CPU with
+    # zero visible progress and re-downloaded/re-compiled everything on
+    # every retry):
+    #: parallelism ceiling (env ZAGROS_SOFTETHER_BUILD_JOBS overrides) —
+    #: a full-throttle --parallel <all cores> starves the panel and live
+    #: VPN traffic on small VPS hosts
+    _BUILD_JOBS_CAP = 4
+    #: only what the panel actually installs — building the default target
+    #: set also compiles+links vpnclient/vpnbridge/vpntest (≈40% waste)
+    _BUILD_TARGETS = ("cedar", "mayaqua", "hamcore-archive-build",
+                      "vpnserver", "vpncmd")
+
+    def _build_jobs(self) -> int:
+        override = os.environ.get("ZAGROS_SOFTETHER_BUILD_JOBS", "").strip()
+        if override:
+            try:
+                return max(1, min(int(override), 16))
+            except ValueError:
+                logger.warning("invalid ZAGROS_SOFTETHER_BUILD_JOBS=%r — default",
+                               override)
+        return max(1, min(os.cpu_count() or 2, self._BUILD_JOBS_CAP))
+
+    def _src_cache_root(self) -> str | None:
+        """Stable source-tree cache root (a retry RESUMES the previous
+        download/build instead of restarting it). None = no usable cache
+        location → caller falls back to a throwaway temp dir (never a fake
+        cache that silently keeps failing state)."""
+        override = os.environ.get("ZAGROS_SOFTETHER_SRC_CACHE", "").strip()
+        candidates = [override] if override else [
+            "/var/lib/zagros/cache/softether", "/tmp/zagros-softether-cache"]
+        for root in candidates:
+            try:
+                os.makedirs(root, mode=0o755, exist_ok=True)
+                probe = os.path.join(root, ".probe")
+                with open(probe, "w", encoding="utf-8") as fh:
+                    fh.write("ok")
+                os.remove(probe)
+                return root
+            except OSError:
+                continue
+        return None
+
+    def _download(self, url: str, dest: str, *, timeout: float = 900.0) -> int:
+        """Chunked download with real logged progress (item 10 — the panel
+        previously sat silent through a >100 MB fetch)."""
+        import urllib.request
+
+        request = urllib.request.Request(
+            url, headers={"User-Agent": "zagros-panel/install"})
+        written = 0
+        next_mark = 8 * 1024 * 1024
+        deadline = time.monotonic() + timeout
+        # download into a temp sibling and RENAME on success — a failed or
+        # interrupted fetch must never leave a partial file at the final
+        # path, or the "retry performs a fresh download" promise breaks
+        # (the cache layer would try to extract the truncated file).
+        part = dest + ".part"
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response, \
+                    open(part, "wb") as fh:
+                while True:
+                    if time.monotonic() > deadline:
+                        raise CoreError(
+                            f"download timed out after {int(timeout)} s ({url}) — "
+                            "retry to resume (the partial build tree is cached)")
+                    chunk = response.read(1 << 20)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    written += len(chunk)
+                    if written >= next_mark:
+                        logger.info("softether source download: %.1f MB…",
+                                    written / 1048576)
+                        next_mark = written + 8 * 1024 * 1024
+            os.replace(part, dest)
+        finally:
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+        logger.info("softether source download complete: %.1f MB",
+                    written / 1048576)
+        return written
+
+    def _run_streamed(self, argv: list[str], *, timeout: float) -> str:
+        """Long-stage runner with REAL streamed progress: cmake/make emit
+        `[ NN%] Building …` / `Built target …` lines — every such line is
+        logged as it happens (the panel previously captured output blindly
+        for up to an hour). The last lines are kept for the error tail.
+        select()-driven so a totally SILENT hang also hits the timeout —
+        a blocking readline() would wait forever on an output-less child."""
+        import select
+
+        nice = shutil.which("nice")
+        cmd = ([nice, "-n", "10"] if nice else []) + argv
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        except FileNotFoundError as exc:
+            raise CoreError(f"cannot run '{argv[0]}': not found") from exc
+        tail: list[str] = []
+        buf = b""
+        deadline = time.monotonic() + timeout
+
+        def _emit(line: bytes) -> None:
+            clean = line.decode("utf-8", "replace").rstrip()
+            tail.append(clean)
+            del tail[:-30]
+            if "%]" in clean or clean.startswith("Built target"):
+                logger.info("softether build: %s", clean)
+
+        assert proc.stdout is not None
+        fd = proc.stdout.fileno()
+        try:
+            while True:
+                ready, _, _ = select.select([fd], [], [], 0.25)
+                if ready:
+                    chunk = os.read(fd, 65536)
+                    if chunk:
+                        buf += chunk
+                        while b"\n" in buf:
+                            line, buf = buf.split(b"\n", 1)
+                            _emit(line)
+                        continue
+                    break  # EOF — child closed its output
+                if proc.poll() is not None:
+                    # exited but stream may still hold buffered bytes
+                    chunk = os.read(fd, 65536)
+                    if chunk:
+                        buf += chunk
+                        continue
+                    break
+                if time.monotonic() > deadline:
+                    proc.kill()
+                    raise CoreError(
+                        f"'{argv[0]}' timed out after {int(timeout)} s — the "
+                        "cached build tree survives, retry resumes it")
+            if buf.strip():
+                _emit(buf)
+            rc = proc.wait(timeout=10)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        if rc != 0:
+            detail = " | ".join(tail[-6:]) or "no output"
+            raise CoreError(f"'{' '.join(argv)}' failed (rc={rc}): {detail}")
+        return "\n".join(tail)
+
     def _install_from_source(self) -> str:
         """Last-resort: compile the latest STABLE tag from source. The tag
-        is resolved live from GitHub (no version is ever hardcoded), the
-        tree is built with cmake, and only ``vpnserver`` / ``vpncmd`` /
-        ``hamcore.se2`` are installed (same layout as the binary stage)."""
+        is resolved live from GitHub (no version is ever hardcoded).
+
+        alpha.7.5 item 10 controls:
+          * build deps are ensured exactly once BEFORE any compile;
+          * the source tree + cmake build dir live in a STABLE cache
+            (env ZAGROS_SOFTETHER_SRC_CACHE / /var/lib/zagros/cache/
+            softether) so a retry resumes instead of re-downloading and
+            re-compiling;
+          * the build is bounded (<=4 jobs, niced) and TARGETED (only
+            cedar/mayaqua/hamcore/vpnserver/vpncmd — not client/bridge/
+            vpntest);
+          * download + compile stream REAL progress into the panel log.
+        """
         import tarfile
         import tempfile
-        import urllib.request
 
         from app.cores.github_install import fetch_latest_release
 
@@ -276,27 +486,62 @@ class LocalSoftEtherBackend:
         else:
             url = ("https://github.com/SoftEtherVPN/SoftEtherVPN/"
                    f"archive/refs/tags/{tag}.tar.gz")
-        work = tempfile.mkdtemp(prefix="zagros-softether-src-")
-        tarball = os.path.join(work, "src.tar.gz")
+
+        cache_root = self._src_cache_root()
+        if cache_root:
+            work = os.path.join(cache_root, tag)
+            persistent = True
+        else:
+            work = tempfile.mkdtemp(prefix="zagros-softether-src-")
+            persistent = False
+        os.makedirs(work, exist_ok=True)
+        tarball = os.path.join(work, "src.pkg")
+        extract_done = os.path.join(work, ".extracted")
+        build_dir = os.path.join(work, "build")
         try:
-            request = urllib.request.Request(
-                url, headers={"User-Agent": "zagros-panel/install"})
-            with urllib.request.urlopen(request, timeout=120) as response:
-                data = response.read()
-            with open(tarball, "wb") as fh:
-                fh.write(data)
-            with tarfile.open(tarball, "r:*") as tar:  # gz AND xz (official asset)
-                tar.extractall(work, filter="data")
+            if os.path.exists(tarball) and os.path.exists(extract_done):
+                logger.info("softether source cache hit (%s) — skipping "
+                            "download/extract", work)
+            else:
+                if not os.path.exists(tarball):
+                    self._download(url, tarball)
+                try:
+                    with tarfile.open(tarball, "r:*") as tar:  # gz AND xz
+                        tar.extractall(work, filter="data")
+                except (tarfile.TarError, EOFError, OSError) as exc:
+                    # corrupt/partial cache — drop it so the NEXT retry
+                    # re-downloads cleanly instead of looping on junk
+                    for junk in (tarball, extract_done):
+                        try:
+                            os.remove(junk)
+                        except OSError:
+                            pass
+                    raise CoreError(
+                        f"source tarball unusable ({exc}) — cache cleared, "
+                        "retry performs a fresh download") from exc
+                with open(extract_done, "w", encoding="utf-8") as fh:
+                    fh.write(tag)
             roots = [d for d in os.listdir(work)
-                     if os.path.isdir(os.path.join(work, d)) and d != "__pycache__"]
+                     if os.path.isdir(os.path.join(work, d))
+                     and d not in ("__pycache__", "build")]
             if len(roots) != 1:
+                # cache from another layout/tag — clear and restart cleanly
+                if persistent:
+                    shutil.rmtree(work, ignore_errors=True)
+                    raise CoreError(
+                        "source cache layout mismatch — cleared; retry for a "
+                        "fresh download")
                 raise CoreError(f"unexpected source tarball layout: {roots!r}")
             src_dir = os.path.join(work, roots[0])
-            build_dir = os.path.join(work, "build")
             self._run(["cmake", "-S", src_dir, "-B", build_dir,
                        "-DCMAKE_BUILD_TYPE=Release"], timeout=900)
-            self._run(["cmake", "--build", build_dir, "--parallel",
-                       str(os.cpu_count() or 2)], timeout=3600)
+            jobs = self._build_jobs()
+            logger.info("softether build starting: %d job(s), targets %s "
+                        "(bounded + niced — the panel and live tunnels stay "
+                        "responsive)", jobs, ", ".join(self._BUILD_TARGETS))
+            self._run_streamed(
+                ["cmake", "--build", build_dir, "--parallel", str(jobs),
+                 "--target", *self._BUILD_TARGETS], timeout=3600)
             root = self._INSTALL_ROOT
             os.makedirs(root, exist_ok=True)
             for name in ("vpnserver", "vpncmd", "hamcore.se2"):
@@ -349,8 +594,20 @@ class LocalSoftEtherBackend:
                         "libcedar/libmayaqua at start."
                     ) from exc
             self._link_on_path(root)
+            if persistent:
+                # success marker: a later retry skips download+extract and
+                # `cmake --build` short-circuits on up-to-date targets
+                try:
+                    with open(os.path.join(work, ".complete"), "w",
+                              encoding="utf-8") as fh:
+                        fh.write(tag)
+                except OSError:
+                    pass
+                logger.info("softether source tree cached at %s (retry "
+                            "resumes instantly)", work)
         finally:
-            shutil.rmtree(work, ignore_errors=True)
+            if not persistent:
+                shutil.rmtree(work, ignore_errors=True)
         return f"built SoftEther {tag} from source (cmake)"
 
     def _run(self, argv: list[str], *, timeout: float = 120.0) -> str:

@@ -824,10 +824,75 @@ def _data_dir(runtime) -> str:
 
 @zagros_admin_router.get("/certificates")
 async def certificates_list(runtime=Depends(get_runtime)):
+    from app.platform import acme
+
     return {"certificates": [c.model_dump(mode="json")
-                             for c in certificates.scan(_data_dir(runtime))],
-            "acme": {"available": False,
-                     "status": "roadmap — Let's Encrypt / ACME automation is not implemented yet"}}
+                             for c in certificates.scan(_data_dir(runtime),
+                                                        managed_only=True)],
+            "acme": acme.acme_available()}
+
+
+class AcmeIssueBody(BaseModel):
+    domain: str
+    email: str | None = None
+    provider: str | None = None  # certbot | acme.sh | lego (auto = first found)
+    force: bool = False
+
+
+@zagros_admin_router.get("/certificates/acme")
+async def certificates_acme_status(runtime=Depends(get_runtime)):
+    """ACME reality: which clients exist on this host + every ACME-managed
+    entry with expiry/renewal facts (alpha.7.5 item 9)."""
+    from app.platform import acme
+
+    return acme.acme_status(_data_dir(runtime))
+
+
+@zagros_admin_router.post("/certificates/acme/issue")
+async def certificates_acme_issue(body: AcmeIssueBody, runtime=Depends(get_runtime)):
+    """REAL issuance via the host ACME client (HTTP-01 standalone). A failed
+    run returns the client's own error tail — never a fake success."""
+    from app.platform import acme
+
+    try:
+        return await asyncio.to_thread(
+            acme.issue, _data_dir(runtime), body.domain,
+            email=body.email, provider_id=body.provider, force=body.force)
+    except acme.ACMEError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+class AcmeRenewBody(BaseModel):
+    force: bool = False
+
+
+@zagros_admin_router.post("/certificates/acme/{domain}/renew")
+async def certificates_acme_renew(domain: str, body: AcmeRenewBody | None = None,
+                                  runtime=Depends(get_runtime)):
+    from app.platform import acme
+
+    try:
+        return await asyncio.to_thread(
+            acme.renew, _data_dir(runtime), domain,
+            force=bool(body and body.force))
+    except acme.ACMEError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@zagros_admin_router.delete("/certificates/acme/{domain}")
+async def certificates_acme_remove(domain: str, runtime=Depends(get_runtime)):
+    """Delete an ACME entry — managed-store removal authoritative, provider
+    cleanup best-effort and reported."""
+    from app.platform import acme
+
+    try:
+        return await asyncio.to_thread(acme.remove_acme, _data_dir(runtime), domain)
+    except acme.ACMEError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
 
 
 class CertImportBody(BaseModel):
@@ -877,6 +942,18 @@ async def certificates_remove(ident: str, runtime=Depends(get_runtime)):
     path — the ONLY handle that reaches core-materialized certs, item 18)
     or a plain managed name for the legacy caller contract."""
     ident = ident.strip().lstrip("/")
+    # ACME-managed material must go through the ACME endpoint, which also
+    # performs provider-side cleanup and reports it — a bare store delete
+    # would orphan the provider account copy and leave a sidecar pointing
+    # at files that no longer exist (alpha.7.5 item 9).
+    managed_name = ident[len("certs/"):] if ident.startswith("certs/") else ident
+    if "/" not in managed_name and managed_name:
+        from app.platform import acme
+        if acme.has_sidecar(_data_dir(runtime), managed_name):
+            raise HTTPException(
+                409, f"'{managed_name}' is ACME-managed — delete it via the "
+                     f"ACME endpoint (DELETE /api/zagros/certificates/acme/"
+                     f"{managed_name}) so provider cleanup runs and is reported")
     try:
         certificates.remove(_data_dir(runtime), ident)
     except FileNotFoundError as exc:
@@ -892,15 +969,17 @@ async def certificates_remove(ident: str, runtime=Depends(get_runtime)):
 
 @zagros_admin_router.get("/users/online")
 async def users_online_states(runtime=Depends(get_runtime)):
-    """Per-user MULTI-CORE online states for the dashboard indicator dot.
+    """Per-user MULTI-CORE online states for the dashboard presence dot.
 
     * ``online`` — the freshest device-limit collect saw ≥1 session/presence
       for the user on ANY core (or the legacy xray flow touched online_at
       within the window);
-    * ``offline`` — no session anywhere AND every online-capable core
-      answered its read;
-    * ``unknown`` — ≥1 core failed its read in the last pass, so absence of
-      evidence is NOT evidence of absence (item 14 requirement).
+    * ``offline`` — no session anywhere AND ≥1 online-capable core actually
+      answered its read and NO probe failed;
+    * ``unknown`` — ≥1 core failed its read in the last pass, OR NO
+      online-capable core answered at all. A core without an online API
+      must never fabricate 'offline': absence of evidence is not evidence
+      of absence (alpha.7.5 item 15).
     """
     window = 90.0
     try:
@@ -909,6 +988,10 @@ async def users_online_states(runtime=Depends(get_runtime)):
         snapshot = {}
     online_ids = set(snapshot.get("online_user_ids") or [])
     failed = list(snapshot.get("failed_cores") or [])
+    # snapshots predating the diagnostic field carry no count: treat a
+    # missing count as "nothing answered" (honest, never a fake offline)
+    probed = snapshot.get("probed_cores")
+    probed = int(probed) if probed is not None else 0
 
     def _fresh_usernames() -> set[str]:
         now = datetime.now(timezone.utc)
@@ -942,12 +1025,15 @@ async def users_online_states(runtime=Depends(get_runtime)):
     for pid, username in pid_map.items():
         if pid in online_ids or username in fresh:
             states[username] = "online"
-        elif failed:
+        elif failed or probed == 0:
+            # failed read → state unknowable; no answering online API on
+            # this deployment → equally unknowable (item 15)
             states[username] = "unknown"
         else:
             states[username] = "offline"
     return {"states": states, "collect_ts": snapshot.get("ts"),
-            "failed_cores": failed, "window_seconds": int(window)}
+            "failed_cores": failed, "probed_cores": probed,
+            "window_seconds": int(window)}
 
 
 # --------------------------------------------------------------------- #

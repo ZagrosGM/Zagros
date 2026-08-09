@@ -12,6 +12,7 @@ when the platform runtime is available):
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -26,7 +27,14 @@ from app.cores.exceptions import CoreError
 from app.portal.models import PortalSettings
 from app.portal.render import render_page_html
 from app.studio.jsonpatch import PatchOperation
-from app.studio.service import InboundSpec, StudioError
+from app.studio.service import (
+    InboundSpec,
+    StudioConflictError,
+    StudioError,
+    StudioNotFoundError,
+)
+
+logger = logging.getLogger(__name__)
 
 zagros_router = APIRouter(tags=["Zagros"])
 
@@ -434,6 +442,19 @@ async def core_wizard_schema(core_id: str):
         raise HTTPException(404, f"no inbound-wizard blueprint for core '{core_id}'") from None
 
 
+@zagros_admin_router.get("/cores/{core_id}/suggest-port")
+async def core_suggest_port(core_id: str, runtime=Depends(get_runtime)):
+    """alpha.7.5 item 3 — a fresh RANDOM five-digit listen-port suggestion
+    for the wizard: never a famous default, never one the host or a managed
+    core already binds (best-effort collision avoidance)."""
+    _driver_or_404(runtime, core_id)
+    from app.studio.ports import host_listening_ports, studio_used_ports, suggest_port
+
+    excluded = await studio_used_ports(runtime)
+    excluded |= host_listening_ports()
+    return {"port": suggest_port(excluded)}
+
+
 class StudioPatchBody(BaseModel):
     operations: list[PatchOperation]
 
@@ -445,15 +466,19 @@ async def studio_preview(core_id: str, body: StudioPatchBody,
     return await runtime.studio.preview(driver, body.operations)
 
 
-async def _materialize_studio(runtime, core_id: str, driver) -> str | None:
-    """Push the freshly-applied studio document INTO the core (every driver
-    implements apply_studio_document since alpha.7.1).
+async def _materialize_studio(runtime, core_id: str, driver, doc) -> str | None:
+    """Push the CANDIDATE studio document INTO the core (every driver
+    implements apply_studio_document since alpha.7.1) — BEFORE it is
+    persisted (alpha.7.5 item 5: stage → materialize → persist, so a core
+    that refuses the document fails the request WITHOUT moving the stored
+    document to a state the engine rejected; the field-reported split where
+    the API answered an opaque 5xx while the inbound HAD been persisted is
+    gone for good).
 
     A driver that refuses the document (CoreError — cardinality violation,
     untranslatable wizard field, failed restart) speaks to the OPERATOR, so
     it maps to 422 with the driver's own message instead of leaking out as
     an opaque 500 (the field-reported TUIC/OpenVPN/… wizard crash)."""
-    doc = await runtime.studio_store.get_document(core_id)
     hook = getattr(driver, "apply_studio_document", None)
     if hook is None or doc is None:
         return ("document saved; this engine applies it on next start "
@@ -462,9 +487,14 @@ async def _materialize_studio(runtime, core_id: str, driver) -> str | None:
         await hook(doc)
     except CoreError as exc:
         raise HTTPException(422, f"{core_id}: {exc}") from exc
-    # Item 6: an applied document may have REMOVED inbounds — cascade the
-    # change into materialized grants (prune dangling tags / revoke empty
-    # accounts) so a later User Edit can never die on a ghost tag.
+    return None
+
+
+async def _cascade_grants(runtime, core_id: str) -> None:
+    """Item 6: an applied document may have REMOVED inbounds — cascade the
+    change into materialized grants (prune dangling tags / revoke empty
+    accounts) so a later User Edit can never die on a ghost tag. Runs AFTER
+    the document persisted (the catalog reads the store)."""
     try:
         from app.platform.provisioning import (
             reconcile_accounts_after_inbound_change,
@@ -475,18 +505,64 @@ async def _materialize_studio(runtime, core_id: str, driver) -> str | None:
             logger.info("studio apply on %s — grant cascade: %s", core_id, report)
     except Exception as exc:  # noqa: BLE001 — never mask a successful apply
         logger.warning("post-apply grant cascade failed on %s: %s", core_id, exc)
-    return None
+
+
+def _studio_error(exc: StudioError) -> HTTPException:
+    """Map staged-mutation identity errors to honest HTTP statuses
+    (alpha.7.5 item 5): ghost tag → 404, identity clash → 409, anything
+    else is a client-correctable 422 — an opaque 500 is NEVER right for
+    lifecycle conflicts."""
+    if isinstance(exc, StudioNotFoundError):
+        return HTTPException(404, str(exc))
+    if isinstance(exc, StudioConflictError):
+        return HTTPException(409, str(exc))
+    return HTTPException(422, str(exc))
+
+
+async def _commit_staged(runtime, core_id: str, driver, result) -> dict:
+    """DEPRECATED compatibility shim — the transaction (stage → materialize
+    → persist under the core lock) now lives INSIDE the service
+    (``wizard_create/update/delete``). Kept for one release for tests that
+    emulate the routed flow; new callers use the service transactions."""
+    if not result.changed:
+        return {**result.model_dump(), "materialized": None,
+                "notice": result.detail or "already in the requested state"}
+    warning = await _materialize_studio(runtime, core_id, driver, result.document)
+    await runtime.studio.persist(driver, result.document or {})
+    await _cascade_grants(runtime, core_id)
+    return {**result.model_dump(), "materialized": warning is None, "notice": warning}
+
+
+def _materialize_hook(runtime, core_id: str, driver):
+    """The callback the service transactions invoke INSIDE the lock — maps
+    engine refusals to 422 before anything persists."""
+    async def _run(doc):
+        return await _materialize_studio(runtime, core_id, driver, doc)
+
+    return _run
+
+
+async def _respond_committed(runtime, core_id: str, result, *, warning=None) -> dict:
+    """Tail of a committed studio transaction: grant cascade + response
+    shaping (idempotent replays skip the cascade — nothing changed)."""
+    if not result.changed:
+        return {**result.model_dump(), "materialized": None,
+                "notice": result.detail or "already in the requested state"}
+    await _cascade_grants(runtime, core_id)
+    return {**result.model_dump(),
+            "materialized": warning is None,
+            "notice": warning}
 
 
 @zagros_admin_router.post("/studio/{core_id}/apply")
 async def studio_apply(core_id: str, body: StudioPatchBody,
                        runtime=Depends(get_runtime)):
     driver = _driver_or_404(runtime, core_id)
-    result = await runtime.studio.apply(driver, body.operations)
+    result = await runtime.studio.apply_operations(
+        driver, body.operations, _materialize_hook(runtime, core_id, driver))
     if not result.valid:
         raise HTTPException(422, {"errors": result.errors})
-    warning = await _materialize_studio(runtime, core_id, driver)
-    return {**result.model_dump(), "materialized": warning is None, "notice": warning}
+    return await _respond_committed(runtime, core_id, result)
 
 
 def _certs_data_dir(runtime) -> str:
@@ -537,36 +613,66 @@ def _resolve_certificate_ref(runtime, spec: InboundSpec) -> None:
 @zagros_admin_router.post("/studio/{core_id}/wizard/inbound")
 async def studio_wizard_inbound(core_id: str, spec: InboundSpec,
                                 runtime=Depends(get_runtime)):
+    """Create — atomic + idempotent (alpha.7.5 item 5): staged under the
+    per-core lock, materialized BEFORE persisted; an identical replay is a
+    success without a duplicate; a conflicting tag is a 409."""
     driver = _driver_or_404(runtime, core_id)
     _resolve_certificate_ref(runtime, spec)
     try:
-        result = await runtime.studio.wizard_add_inbound(driver, spec)
+        result = await runtime.studio.wizard_create(
+            driver, spec, _materialize_hook(runtime, core_id, driver))
     except StudioError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise _studio_error(exc) from exc
     if not result.valid:
         raise HTTPException(422, {"errors": result.errors})
-    warning = await _materialize_studio(runtime, core_id, driver)
-    return {**result.model_dump(), "materialized": warning is None, "notice": warning}
+    return await _respond_committed(runtime, core_id, result)
 
 
 @zagros_admin_router.put("/studio/{core_id}/wizard/inbound/{tag}")
 async def studio_wizard_update_inbound(core_id: str, tag: str, spec: InboundSpec,
                                        runtime=Depends(get_runtime)):
-    """Item 11 — Edit an existing inbound through the same wizard flow."""
+    """Item 11 — Edit an existing inbound through the same wizard flow
+    (staged → materialized → persisted, atomically)."""
     driver = _driver_or_404(runtime, core_id)
     _resolve_certificate_ref(runtime, spec)
     try:
-        result = await runtime.studio.wizard_update_inbound(driver, tag, spec)
+        result = await runtime.studio.wizard_update(
+            driver, tag, spec, _materialize_hook(runtime, core_id, driver))
     except StudioError as exc:
-        raise HTTPException(422, str(exc)) from exc
+        raise _studio_error(exc) from exc
     if not result.valid:
         raise HTTPException(422, {"errors": result.errors})
-    warning = await _materialize_studio(runtime, core_id, driver)
-    return {**result.model_dump(), "materialized": warning is None, "notice": warning}
+    return await _respond_committed(runtime, core_id, result)
 
 
-class WizardImportBody(BaseModel):
-    link: str
+@zagros_admin_router.delete("/studio/{core_id}/wizard/inbound/{tag}")
+async def studio_wizard_delete_inbound(core_id: str, tag: str,
+                                       runtime=Depends(get_runtime)):
+    """Delete ONE inbound by its stable identity — the tag (alpha.7.5 item
+    5; replaces the index-based frontend patch that could remove the WRONG
+    listener off a stale snapshot). Ghost tag → 404; duplicate tags (broken
+    document) → 409; success removes exactly one entry, cascades grants."""
+    driver = _driver_or_404(runtime, core_id)
+    try:
+        result = await runtime.studio.wizard_delete(
+            driver, tag, _materialize_hook(runtime, core_id, driver))
+    except StudioError as exc:
+        raise _studio_error(exc) from exc
+    if not result.valid:
+        raise HTTPException(422, {"errors": result.errors})
+    if not result.changed:
+        return {"ok": True, "deleted": None, "materialized": None,
+                "notice": result.detail or "already absent"}
+    return {"ok": True, "deleted": tag,
+            "materialized": result.document is not None,
+            "notice": await _delete_cascade_notice(runtime, core_id)}
+
+
+async def _delete_cascade_notice(runtime, core_id: str) -> str | None:
+    """Delete tail: grants bound to the removed inbound are pruned/revoked
+    (item 6). Failures surface in logs only — the delete itself succeeded."""
+    await _cascade_grants(runtime, core_id)
+    return None
 
 
 @zagros_admin_router.post("/studio/{core_id}/wizard/preview")
@@ -582,21 +688,6 @@ async def studio_wizard_preview(core_id: str, spec: InboundSpec,
     except StudioError as exc:
         raise HTTPException(422, str(exc)) from exc
     return result
-
-
-@zagros_admin_router.post("/cores/{core_id}/wizard/import")
-async def core_wizard_import(core_id: str, body: WizardImportBody):
-    """Item 6 Import: parse a client share link into a blueprint-matched
-    wizard prefill spec (never guessed; unmapped values are reported)."""
-    from app.studio.wizard import wizard_supported
-    from app.studio.wizard_import import WizardImportError, import_link_spec
-
-    if not wizard_supported(core_id):
-        raise HTTPException(404, f"no inbound-wizard blueprint for core '{core_id}'")
-    try:
-        return import_link_spec(core_id, body.link)
-    except WizardImportError as exc:
-        raise HTTPException(422, str(exc)) from exc
 
 
 def _driver_or_404(runtime, core_id: str):

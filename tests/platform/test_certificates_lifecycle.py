@@ -31,17 +31,34 @@ def test_scanned_core_cert_is_addressable_and_deletable(tmp_path):
     managed = certificates.self_signed(data, "panel-x", "panel.example.com", days=90)
     assert managed.managed and managed.id == "certs/panel-x/fullchain.pem"
 
-    inv = {c.name: c for c in certificates.scan(data)}
+    # alpha.7.5 item 8: the REGISTRY lists managed certs ONLY — runtime
+    # material a core generated must never appear as if the user created it
+    registry = {c.name: c for c in certificates.scan(data)}
+    assert "tuic" not in registry
+    assert list(registry) == ["panel-x"]
+
+    # the item-18 whole-tree inventory stays available for diagnostics, and
+    # delete-by-id still reaches those files (no 404-by-name regression)
+    inv = {c.name: c for c in certificates.scan(data, managed_only=False)}
     assert "tuic" in inv and not inv["tuic"].managed
     assert inv["tuic"].id == "cores/sing-box/certs/tuic.crt"
-
-    # THE item-18 regression: deleting a scanned cert used to 404-by-name
     certificates.remove(data, inv["tuic"].id)
     assert not (core_dir / "tuic.crt").exists()
     assert not (core_dir / "tuic.key").exists(), "the key sibling must go too"
     # managed layout keeps its legacy by-name contract
     certificates.remove(data, "panel-x")
     assert not (tmp_path / "certs" / "panel-x").exists()
+
+
+def test_runtime_only_tree_yields_an_empty_registry_not_a_runtime_listing(tmp_path):
+    """item 8, exact field complaint: creating TLS inbounds generated a cert
+    that showed up in Certificates — with NOTHING user-managed, the page
+    must be empty, not full of engine plumbing."""
+    data = str(tmp_path)
+    _core_materialized_cert(tmp_path, tag="sstp")
+    assert certificates.scan(data) == []
+    whole = {c.name for c in certificates.scan(data, managed_only=False)}
+    assert "sstp" in whole
 
 
 def test_remove_refuses_escapes_and_ghosts(tmp_path):

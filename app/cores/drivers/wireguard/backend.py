@@ -156,6 +156,8 @@ class LocalWireGuardBackend:
             raise CoreError(
                 f"wireguard-tools not found ('{argv[0]}') — install the core first."
             ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise CoreError(f"wireguard command timed out: {' '.join(argv)}") from exc
         if proc.returncode != 0:
             raise CoreError(
                 f"{' '.join(argv)!r} failed (rc={proc.returncode}): {proc.stderr.strip()}"
@@ -257,6 +259,61 @@ class LocalWireGuardBackend:
     # ------------------------------------------------------------------ #
     # lifecycle
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _in_container() -> bool:
+        return (os.path.exists("/.dockerenv")
+                or os.path.exists("/run/.containerenv")
+                or bool(os.environ.get("container")))
+
+    @staticmethod
+    def _forwarding_enabled() -> bool:
+        try:
+            with open("/proc/sys/net/ipv4/ip_forward", encoding="ascii") as fh:
+                return fh.read().strip() == "1"
+        except OSError as exc:
+            raise CoreError(
+                f"cannot read net.ipv4.ip_forward ({exc}); WireGuard NAT readiness "
+                "cannot be verified"
+            ) from exc
+
+    def _ensure_forwarding(self) -> None:
+        """Enable forwarding on a direct host, or fail *before* interface
+        creation in a container that cannot mutate the host network sysctl."""
+        if self._forwarding_enabled():
+            return
+        guidance = (
+            "enable it on the Docker HOST: sudo sysctl -w net.ipv4.ip_forward=1; "
+            "persist 'net.ipv4.ip_forward = 1' in "
+            "/etc/sysctl.d/99-zagros-forwarding.conf, then restart WireGuard"
+        )
+        if self._in_container():
+            raise CoreError(
+                "WireGuard full-tunnel NAT requires net.ipv4.ip_forward=1, but "
+                "this container sees it disabled. /proc/sys is intentionally "
+                f"not mutated from a host-network container; {guidance}. "
+                "NET_ADMIN and /dev/net/tun are also required."
+            )
+        sysctl = shutil.which("sysctl")
+        if sysctl is None:
+            raise CoreError(f"WireGuard NAT requires IPv4 forwarding; {guidance}")
+        try:
+            self._run([sysctl, "-w", "net.ipv4.ip_forward=1"])
+        except CoreError as exc:
+            raise CoreError(
+                f"cannot enable net.ipv4.ip_forward before WireGuard startup "
+                f"({exc}); {guidance}"
+            ) from exc
+        if not self._forwarding_enabled():
+            raise CoreError(f"sysctl returned success but forwarding is still off; {guidance}")
+
+    def _cleanup_failed_up(self) -> None:
+        """Best-effort wg-quick rollback after any partial PostUp failure."""
+        try:
+            subprocess.run([self.quick, "down", self.config_path],
+                           capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
     def _run_up(self) -> None:
         """wg-quick up with STRUCTURED failure diagnosis (alpha.7.2): a bare
         'Operation not permitted' tells the operator nothing — run the
@@ -265,7 +322,14 @@ class LocalWireGuardBackend:
         try:
             self._run([self.quick, "up", self.config_path], timeout=60)
         except CoreError as exc:
+            self._cleanup_failed_up()
             text = str(exc).lower()
+            if "read-only file system" in text and "/proc/sys" in text:
+                raise CoreError(
+                    f"{exc} — a container cannot change host network sysctls "
+                    "during PostUp. Enable net.ipv4.ip_forward=1 on the host; "
+                    "the generated Zagros config no longer contains a sysctl hook."
+                ) from exc
             if not any(pattern in text for pattern in (
                     "operation not permitted", "not permitted", "eperm",
                     "permission denied", "access denied")):
@@ -284,6 +348,11 @@ class LocalWireGuardBackend:
 
     def up(self, config_text: str) -> None:
         self._ensure_host_tools()
+        # NAT configs are recognizable by their firewall hook. Forwarding is
+        # settled before writing/creating the interface, so a read-only proc
+        # can never strand a half-created interface.
+        if "MASQUERADE" in config_text:
+            self._ensure_forwarding()
         self._atomic_write(self.config_path, config_text)
         if self.is_running():
             self.sync(config_text)
@@ -303,8 +372,14 @@ class LocalWireGuardBackend:
     def down(self) -> None:
         try:
             self._run([self.quick, "down", self.config_path], timeout=60)
-        except CoreError:
-            pass  # already down / config absent — desired state reached
+        except CoreError as exc:
+            # "already down" is success only when the interface is actually
+            # absent. Never hide a teardown/firewall failure with a live link.
+            if self.is_running():
+                raise CoreError(
+                    f"WireGuard cleanup failed and interface '{self.interface}' "
+                    f"is still present: {exc}"
+                ) from exc
 
     def is_running(self) -> bool:
         if not self.is_installed():

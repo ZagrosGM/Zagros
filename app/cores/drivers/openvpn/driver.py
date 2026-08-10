@@ -46,6 +46,26 @@ _DISCONNECT_HOOK = """#!/bin/sh
 printf '%s\\n' "{{\\"cn\\":\\"$common_name\\",\\"bytes_received\\":$bytes_received,\\"bytes_sent\\":$bytes_sent,\\"duration\\":$time_duration,\\"ts\\":$(date +%s)}}" >> "{log_path}"
 """
 
+_NETWORK_HOOK = """#!/bin/sh
+# Zagros-owned OpenVPN forwarding/NAT rules. Every rule is scoped to this
+# listener's tunnel subnet, so stopping one inbound cannot steal another
+# VPN core's firewall state.
+IF=$(ip route show default 2>/dev/null | awk '/^default/ {{print $5; exit}}')
+[ -n "$IF" ] || exit 1
+case "${{script_type:-}}" in
+  up)
+    iptables -C FORWARD -i "$dev" -s {subnet} -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$dev" -s {subnet} -j ACCEPT
+    iptables -C FORWARD -o "$dev" -d {subnet} -j ACCEPT 2>/dev/null || iptables -A FORWARD -o "$dev" -d {subnet} -j ACCEPT
+    iptables -t nat -C POSTROUTING -s {subnet} -o "$IF" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s {subnet} -o "$IF" -j MASQUERADE
+    ;;
+  down)
+    iptables -D FORWARD -i "$dev" -s {subnet} -j ACCEPT 2>/dev/null || true
+    iptables -D FORWARD -o "$dev" -d {subnet} -j ACCEPT 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -s {subnet} -o "$IF" -j MASQUERADE 2>/dev/null || true
+    ;;
+esac
+"""
+
 
 class OpenVPNDriver(BaseCoreDriver):
     """Driver for OpenVPN community server (management-interface managed)."""
@@ -483,6 +503,25 @@ class OpenVPNDriver(BaseCoreDriver):
                 raise CoreError(
                     "uploaded certificate does NOT match the uploaded private key."
                 )
+            from cryptography.x509.oid import ExtendedKeyUsageOID, ExtensionOID
+            try:
+                ku = cert_obj.extensions.get_extension_for_oid(ExtensionOID.KEY_USAGE).value
+                eku = cert_obj.extensions.get_extension_for_oid(ExtensionOID.EXTENDED_KEY_USAGE).value
+            except x509.ExtensionNotFound as exc:
+                raise CoreError(
+                    "uploaded OpenVPN server certificate needs keyUsage and "
+                    "extendedKeyUsage=serverAuth (required by remote-cert-tls server)."
+                ) from exc
+            if not ku.digital_signature or ExtendedKeyUsageOID.SERVER_AUTH not in eku:
+                raise CoreError(
+                    "uploaded OpenVPN server certificate is not authorized for serverAuth."
+                )
+            if ca_pem:
+                try:
+                    ca_obj = x509.load_pem_x509_certificate(str(ca_pem).encode())
+                    cert_obj.verify_directly_issued_by(ca_obj)
+                except ValueError as exc:
+                    raise CoreError("uploaded server certificate is not signed by the uploaded CA.") from exc
             for name, text in (("server.crt", str(cert_pem)), ("server.key", str(key_pem))):
                 self._write_if_changed(os.path.join(work_dir, name), text,
                                        0o600 if name.endswith(".key") else 0o644)
@@ -539,6 +578,7 @@ class OpenVPNDriver(BaseCoreDriver):
                     log_path=log_path,
                 ),
                 "hook_script": self._render_hook(log_path),
+                "network_hook_script": self._render_network_hook(listener),
             })
         return specs
 
@@ -563,6 +603,7 @@ class OpenVPNDriver(BaseCoreDriver):
         fallback = str(listener.get("cipher_fallback") or "AES-128-GCM")
         import os
         lines = [
+            f"local {listener.get('listen') or '0.0.0.0'}",
             f"port {listener['port']}",
             f"proto {listener['proto']}",
             "dev tun",
@@ -579,6 +620,10 @@ class OpenVPNDriver(BaseCoreDriver):
             "tls-version-min 1.2",
             f"management 127.0.0.1 {int(mgmt_port)}",
         ]
+        if listener["redirect_gateway"]:
+            network_hook = os.path.join(os.path.dirname(str(log_path)), "network-hook.sh")
+            lines += ["script-security 2", f"up {network_hook}",
+                      f"down {network_hook}", "down-pre"]
         if str(listener.get("auth_digest") or ""):
             lines.append(f"auth {listener['auth_digest']}")
         compression = str(listener.get("compression") or "")
@@ -591,6 +636,8 @@ class OpenVPNDriver(BaseCoreDriver):
             # for status/usage but NOT for auth
             lines += [
                 f"auth-user-pass-verify {self._static_auth_script_path()} via-env",
+                self._client_cert_directive(),
+                "username-as-common-name",
             ]
         else:
             lines += [
@@ -686,6 +733,14 @@ want_pass="${creds#*:}"
 
     def _render_hook(self, log_path: str) -> str:
         return _DISCONNECT_HOOK.format(log_path=log_path)
+
+    @staticmethod
+    def _render_network_hook(listener: dict[str, Any]) -> str:
+        import ipaddress
+
+        subnet = ipaddress.ip_network(
+            f"{listener['subnet']}/{listener['netmask']}", strict=False)
+        return _NETWORK_HOOK.format(subnet=str(subnet))
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -936,7 +991,13 @@ want_pass="${creds#*:}"
             "nobind",
             "persist-key", "persist-tun",
             "remote-cert-tls server",
+            # Server auth is CA/certificate based, while CLIENT auth is the
+            # panel's username/password management channel
+            # (`verify-client-cert none`). OpenVPN Connect needs this explicit
+            # import hint or it rejects a valid cert-less client profile.
+            "setenv CLIENT_CERT 0",
             "auth-user-pass",
+            "auth-nocache",
             f"data-ciphers {listener.get('cipher') or 'AES-256-GCM'}:"
             f"{listener.get('cipher_fallback') or 'AES-128-GCM'}",
             f"data-ciphers-fallback {listener.get('cipher_fallback') or 'AES-128-GCM'}",

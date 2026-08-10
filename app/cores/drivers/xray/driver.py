@@ -240,6 +240,14 @@ class XrayDriver(BaseCoreDriver):
             raise CoreError(f"studio inbound '{tag}' needs a numeric port.") from exc
         transport = str(raw.get("transport") or "tcp").lower()
         security = str(raw.get("security") or "none").lower()
+        certificate_keys = ("certificate", "certificate_key",
+                            "certificate_path", "certificate_key_path")
+        if security != "tls" and any(raw.get(key) for key in certificate_keys):
+            raise CoreError(
+                f"studio inbound '{tag}': certificate material is only valid "
+                "when security=tls; clear the certificate fields for "
+                f"security={security}."
+            )
         if transport not in self._STUDIO_TRANSPORTS:
             raise CoreError(
                 f"studio inbound '{tag}': transport '{transport}' is removed/not "

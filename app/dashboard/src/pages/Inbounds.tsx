@@ -8,6 +8,7 @@ import { toast } from "../components/feedback";
 import { ConfirmDialog, Dialog } from "../components/overlays";
 import { Badge, Button, Card, CardHeader, EmptyState, Field, Input, Select, Skeleton, Textarea } from "../components/ui";
 import { api, ApiError } from "../lib/api";
+import { copyText } from "../lib/clipboard";
 import { useT } from "../lib/i18n";
 import type { CoreView } from "../lib/types";
 
@@ -297,6 +298,11 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initial, schema.data]);
 
+  // certificate material keys — included in the spec ONLY for the active
+  // cert mode, so a stale field from another mode can never leak into the
+  // payload (alpha.7.5 item 6: exactly one certificate contract per spec).
+  const CERT_KEYS = new Set(["certificate", "certificate_key", "certificate_path", "certificate_key_path"]);
+
   const pickProto = (p: WizardProtocol) => {
     setProto(p); setTransport(null); setSecurity(null); setFields({}); setTouched(new Set());
     setCertRef(""); setCertMode("auto");
@@ -305,11 +311,17 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
     // USER typed survives — explicit input always wins (alpha.7.5 item 3).
   };
   const pickTransport = (tr: WizardTransport) => { setTransport(tr); setSecurity(null); setCertRef(""); setCertMode("auto"); };
-
-  // certificate material keys — included in the spec ONLY for the active
-  // cert mode, so a stale field from another mode can never leak into the
-  // payload (alpha.7.5 item 6: exactly one certificate contract per spec).
-  const CERT_KEYS = new Set(["certificate", "certificate_key", "certificate_path", "certificate_key_path"]);
+  const pickSecurity = (next: WizardSecurity) => {
+    setSecurity(next);
+    setCertRef("");
+    setCertMode("auto");
+    // TLS → None/REALITY must remove stale certificate material from local
+    // state as well as from the payload. Switching back to TLS starts with a
+    // clean certificate decision instead of resurrecting an old private key.
+    setFields((current) => Object.fromEntries(
+      Object.entries(current).filter(([key]) => !CERT_KEYS.has(key)),
+    ));
+  };
 
   const spec = useMemo(() => {
     if (!effProto || !effTransport || !effSecurity) return null;
@@ -318,14 +330,22 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
       security: effSecurity.id,
     };
     for (const f of effSecurity.fields) {
-      const v = fields[f.key];
+      // The displayed schema default is part of the submitted spec. The old
+      // code rendered defaults in the input but skipped them in the payload;
+      // generated required values (notably SoftEther's L2TP PSK) therefore
+      // looked filled while the backend received an empty field.
+      const v = fields[f.key] === undefined ? f.default : fields[f.key];
       if (v === undefined || v === "") continue;
       if (CERT_KEYS.has(f.key)) {
         if (certMode === "paste" && (f.key === "certificate" || f.key === "certificate_key")) { /* keep */ }
         else if (certMode === "path" && f.key.endsWith("_path")) { /* keep */ }
         else continue; // ref/auto resolve server-side or are not material
       }
-      settings[f.key] = f.type === "int" ? Number(v) : f.type === "bool" ? v === "true" : v;
+      settings[f.key] = f.type === "int"
+        ? Number(v)
+        : f.type === "bool"
+          ? (typeof v === "boolean" ? v : v === "true")
+          : v;
     }
     if (certMode === "ref" && certRef) settings.certificate_ref = certRef;
     return {
@@ -428,7 +448,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
         const active =
           step === 0 ? effProto?.id === o.id : step === 1 ? effTransport?.id === o.id : effSecurity?.id === o.id;
         return (
-          <button key={o.id} onClick={() => (step === 0 ? pickProto(o as WizardProtocol) : step === 1 ? pickTransport(o as WizardTransport) : setSecurity(o as WizardSecurity))}
+          <button key={o.id} onClick={() => (step === 0 ? pickProto(o as WizardProtocol) : step === 1 ? pickTransport(o as WizardTransport) : pickSecurity(o as WizardSecurity))}
             className={`rounded-xl border p-3 text-start transition-colors ${active ? "border-brand bg-brand-soft" : "border-border hover:border-border-strong"}`}>
             <p className="text-[13px] font-semibold">{o.label}</p>
             {/* alpha.7.5 items 2+7: NO port line on initial protocol cards —
@@ -553,6 +573,9 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
               }
               return true;
             });
+            // Certificate is a TLS capability, not a universal wizard panel.
+            // None/REALITY cells neither render nor accept certificate state.
+            if (sec === "certificate" && effSecurity.id !== "tls") return null;
             if (!groupFields.length && sec !== "certificate") return null;
             const titles: Record<string, string> = {
               general: "General", transport: "Transport / Network", headers: "Headers",
@@ -560,7 +583,8 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
               advanced: "Advanced",
             };
             return (
-            <div key={sec} className="grid gap-4 rounded-xl border border-border p-3.5 sm:grid-cols-3">
+            <div key={sec} data-wizard-section={sec}
+              className="grid gap-4 rounded-xl border border-border p-3.5 sm:grid-cols-3">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-content-3 sm:col-span-3">
                 {titles[sec]}
                 {!advanced && sec !== "general" && <span className="ms-1.5 normal-case tracking-normal">(showing only what needs a decision — switch to advanced for the rest)</span>}
@@ -647,6 +671,23 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
                           </button>
                         );
                       })}
+                    </div>
+                  ) : f.key === "ipsec_psk" ? (
+                    <div className="flex min-w-0 items-center gap-2" data-generated-secret="ipsec_psk">
+                      <Input type="text" autoComplete="off"
+                        placeholder={f.placeholder}
+                        value={(fields[f.key] as string) ?? String(f.default ?? "")}
+                        onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })}
+                        onBlur={mark} dir="ltr" invalid={showErr} />
+                      <Button type="button" variant="secondary" size="icon"
+                        aria-label="copy IPsec pre-shared key"
+                        title="copy IPsec pre-shared key"
+                        onClick={async () => {
+                          const value = String(fields[f.key] ?? f.default ?? "");
+                          (await copyText(value)) ? toast.ok("pre-shared key copied") : toast.error(t("common.error"));
+                        }}>
+                        <Copy size={13} />
+                      </Button>
                     </div>
                   ) : (
                     <Input type={f.type === "int" ? "number" : f.type === "password" ? "password" : "text"}

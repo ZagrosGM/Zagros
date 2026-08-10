@@ -7,6 +7,11 @@ import { defineConfig } from "vite";
 // the plumbing in app/dashboard/__init__.py.
 export default defineConfig({
   plugins: [react()],
+  preview: {
+    // Agent/dev previews are served behind an ephemeral reverse-proxy host.
+    // Production assets remain FastAPI-served; this affects `vite preview` only.
+    allowedHosts: true,
+  },
   build: {
     chunkSizeWarningLimit: 900,
     rollupOptions: {

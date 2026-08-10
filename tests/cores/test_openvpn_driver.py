@@ -82,6 +82,7 @@ class FakeBackend:
         self.disconnects: list[DisconnectRecord] = []
         self.configs: dict[str, str] = {}
         self.hooks: dict[str, str] = {}
+        self.network_hooks: dict[str, str] = {}
         self.mgmt_ports: dict[str, int] = {}
         self.pki = {"ca_crt": TEST_CA_CRT,
                     "tls_crypt": "-----BEGIN OpenVPN Static key V1-----\nFAKE-TA\n-----END OpenVPN Static key V1-----"}
@@ -107,6 +108,7 @@ class FakeBackend:
     def configure(self, specs):
         self.configs = {str(s["tag"]): str(s["server_conf"]) for s in specs}
         self.hooks = {str(s["tag"]): str(s["hook_script"]) for s in specs}
+        self.network_hooks = {str(s["tag"]): str(s["network_hook_script"]) for s in specs}
         self.mgmt_ports = {str(s["tag"]): int(s["mgmt_port"]) for s in specs}
     @property
     def config(self):    # single-listener convenience view
@@ -246,6 +248,11 @@ def test_server_config_has_management_auth_hook_and_tls() -> None:
     assert "tls-crypt /var/lib/zagros/cores/openvpn/ta.key" in conf
     assert "ca /var/lib/zagros/cores/openvpn/ca.crt" in conf
     assert 'push "dhcp-option DNS 1.1.1.1"' in conf
+    assert "script-security 2" in conf
+    assert "up /wd/listeners/openvpn/network-hook.sh" in conf
+    network = backend.network_hooks["openvpn"]
+    assert "-s 10.8.0.0/24" in network and "MASQUERADE" in network
+    assert "script_type" in network and "down)" in network
 
 
 def test_live_user_management_with_kill_semantics() -> None:
@@ -354,8 +361,15 @@ def test_client_profile_sealed_and_complete() -> None:
     assert cfg.engine == "openvpn" and cfg.payload["format"] == "ovpn"
     assert "remote 127.0.0.1 1194" in profile
     assert "auth-user-pass" in profile
+    # Username/password-only client auth is explicit for OpenVPN Connect;
+    # server identity still uses the real CA/server certificate chain.
+    assert "setenv CLIENT_CERT 0" in profile
+    assert "<cert>" not in profile and "<key>" not in profile
     assert "<ca>" in profile and "BEGIN CERTIFICATE" in profile
     assert "<tls-crypt>" in profile and "FAKE-TA" in profile
+    server = driver.render_server_conf(driver._listeners()[0], "/tmp/disconnect", 17505, "/tmp/status")
+    assert "verify-client-cert none" in server
+    assert "management-client-auth" in server
     blob = repr(cfg) + repr(cfg.public_view())
     assert "BEGIN CERTIFICATE" not in blob and "remote 127.0.0.1" not in blob
 

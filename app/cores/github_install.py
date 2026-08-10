@@ -74,8 +74,14 @@ def fetch_latest_release(repo: str, *, timeout: float = 30.0) -> dict:
 _RELEASE_LIST_API = "https://api.github.com/repos/{repo}/releases?per_page={limit}"
 
 
-def fetch_recent_releases(repo: str, *, limit: int = 10, timeout: float = 20.0) -> list[dict]:
-    """Last N release tags of a repo (newest first, non-draft)."""
+def fetch_release_list(repo: str, *, limit: int = 10,
+                       timeout: float = 20.0) -> list[dict]:
+    """Full non-draft GitHub release objects, API order, bounded to 30.
+
+    Some upstreams publish several historical assets on one day, making
+    ``releases/latest`` point at an older semantic version. Callers that need
+    an architecture asset can select it from this honest full list.
+    """
     limit = max(1, min(limit, 30))
     try:
         with _open(_RELEASE_LIST_API.format(repo=repo, limit=limit),
@@ -83,6 +89,14 @@ def fetch_recent_releases(repo: str, *, limit: int = 10, timeout: float = 20.0) 
             releases = json.loads(resp.read().decode())
     except (urllib.error.URLError, TimeoutError, ValueError) as exc:
         raise CoreError(f"cannot list releases of {repo}: {exc}") from exc
+    if not isinstance(releases, list):
+        raise CoreError(f"cannot list releases of {repo}: GitHub returned a non-list payload")
+    return [release for release in releases if not release.get("draft")]
+
+
+def fetch_recent_releases(repo: str, *, limit: int = 10, timeout: float = 20.0) -> list[dict]:
+    """Last N release tags of a repo (newest first, non-draft)."""
+    releases = fetch_release_list(repo, limit=limit, timeout=timeout)
     out = []
     for rel in releases:
         if rel.get("draft"):

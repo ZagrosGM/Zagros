@@ -99,35 +99,33 @@ class DesiredPeer:
     preshared_key: str | None = None
 
 
-# Standard forwarding/NAT hook block (alpha.7.5 item 12 — the full-path
-# audit found NONE: clients handshook fine but traffic died past the
-# server). Rendered through wg-quick's own PostUp/PostDown mechanism:
-#   * ip_forward ensured ON (never reset back — it may serve other VPNs);
-#     the /proc fallback needs no procps binary;
+# Standard forwarding/NAT hook block. IPv4 forwarding is deliberately NOT a
+# PostUp sysctl: Docker host-network containers mount /proc/sys read-only, so
+# changing it after interface creation fails and leaves a half-started tunnel.
+# LocalWireGuardBackend preflights forwarding before wg-quick; the installer
+# enables and persists it on the host. PostUp/PostDown own firewall state only:
 #   * FORWARD accepts for the tunnel interface, `-C || -A` = idempotent
 #     even across an unclean flap (no duplicated rules ever);
-#   * MASQUERADE against the DEFAULT-ROUTE interface discovered at RUNTIME
-#     inside the hook (no fake 'eth0' constant);
+#   * MASQUERADE is scoped to this tunnel's source subnet and the default-route
+#     interface discovered at runtime (no fake eth0; no cross-core rule theft);
 #   * PostDown removes exactly the rules PostUp added (`|| true` keeps a
 #     partially-applied prior state from breaking teardown).
 # `wg syncconf` never sees these lines (strip drops every Post* key), so
 # live peer updates stay non-disruptive.
 _FORWARD_NAT_HOOKS: tuple[str, ...] = (
-    "PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || "
-    "echo 1 > /proc/sys/net/ipv4/ip_forward",
     "PostUp = iptables -C FORWARD -i %i -j ACCEPT 2>/dev/null || "
     "iptables -A FORWARD -i %i -j ACCEPT",
     "PostUp = iptables -C FORWARD -o %i -j ACCEPT 2>/dev/null || "
     "iptables -A FORWARD -o %i -j ACCEPT",
     'PostUp = IF=$(ip route show default 2>/dev/null | '
     "awk '/^default/ {print $5; exit}'); if [ -n \"$IF\" ]; then "
-    'iptables -t nat -C POSTROUTING -o "$IF" -j MASQUERADE 2>/dev/null || '
-    'iptables -t nat -A POSTROUTING -o "$IF" -j MASQUERADE; fi',
+    'iptables -t nat -C POSTROUTING -s {source} -o "$IF" -j MASQUERADE 2>/dev/null || '
+    'iptables -t nat -A POSTROUTING -s {source} -o "$IF" -j MASQUERADE; fi',
     "PostDown = iptables -D FORWARD -i %i -j ACCEPT 2>/dev/null || true",
     "PostDown = iptables -D FORWARD -o %i -j ACCEPT 2>/dev/null || true",
     'PostDown = IF=$(ip route show default 2>/dev/null | '
     "awk '/^default/ {print $5; exit}'); if [ -n \"$IF\" ]; then "
-    'iptables -t nat -D POSTROUTING -o "$IF" -j MASQUERADE 2>/dev/null || true; fi',
+    'iptables -t nat -D POSTROUTING -s {source} -o "$IF" -j MASQUERADE 2>/dev/null || true; fi',
 )
 
 
@@ -156,7 +154,8 @@ def render_interface(
     if table_off:
         lines.append("Table = off")
     if forward_nat:
-        lines += _FORWARD_NAT_HOOKS
+        source = str(ipaddress.ip_interface(address).network)
+        lines += [hook.replace("{source}", source) for hook in _FORWARD_NAT_HOOKS]
     for peer in peers:
         lines += [
             "",

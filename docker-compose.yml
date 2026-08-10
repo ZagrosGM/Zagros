@@ -14,7 +14,10 @@ services:
     # the tunnel device + NET_ADMIN their Start dies at interface creation.
     # The installer template grants both; the sample mirrors it. On the HOST
     # you still need the module loaded: `modprobe tun` (LXC/OpenVZ: enable
-    # TUN/TAP in the provider panel).
+    # TUN/TAP in the provider panel) and forwarding enabled persistently:
+    #   sysctl -w net.ipv4.ip_forward=1
+    # Do not add a compose `sysctls:` entry here: network_mode=host shares the
+    # host network namespace and Docker cannot mutate that host sysctl safely.
     cap_add:
       - NET_ADMIN
     devices:

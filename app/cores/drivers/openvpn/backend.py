@@ -80,7 +80,7 @@ class _Listener:
     channel, own accounting hook/log (multi-inbound, alpha.7.2)."""
 
     __slots__ = ("tag", "directory", "config_path", "disconnect_log",
-                 "hook_path", "mgmt_port", "proc", "mgmt")
+                 "hook_path", "network_hook_path", "mgmt_port", "proc", "mgmt")
 
     def __init__(self, tag: str, directory: str, mgmt_port: int, executable: str):
         self.tag = tag
@@ -88,6 +88,7 @@ class _Listener:
         self.config_path = os.path.join(directory, "server.conf")
         self.disconnect_log = os.path.join(directory, "disconnect-log.jsonl")
         self.hook_path = os.path.join(directory, "client-disconnect.sh")
+        self.network_hook_path = os.path.join(directory, "network-hook.sh")
         self.mgmt_port = mgmt_port
         self.proc = ManagedProcess(
             [executable, "--config", self.config_path],
@@ -153,12 +154,49 @@ class LocalOpenVPNBackend:
             self._write_atomic(listener.config_path, str(spec["server_conf"]))
             self._write_atomic(listener.hook_path, str(spec["hook_script"]),
                                mode=0o755)
+            self._write_atomic(listener.network_hook_path,
+                               str(spec.get("network_hook_script") or "#!/bin/sh\nexit 0\n"),
+                               mode=0o755)
         # preserve the tag order of the spec list
         self._order = [str(s["tag"]) for s in specs]
 
     # ------------------------------------------------------------------ #
     # process
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _in_container() -> bool:
+        return (os.path.exists("/.dockerenv")
+                or os.path.exists("/run/.containerenv")
+                or bool(os.environ.get("container")))
+
+    def _needs_forwarding(self) -> bool:
+        for listener in self._listeners.values():
+            try:
+                with open(listener.config_path, encoding="utf-8") as fh:
+                    if "redirect-gateway" in fh.read():
+                        return True
+            except OSError:
+                continue
+        return False
+
+    def _ensure_forwarding(self) -> None:
+        if not self._needs_forwarding():
+            return
+        try:
+            with open("/proc/sys/net/ipv4/ip_forward", encoding="ascii") as fh:
+                if fh.read().strip() == "1":
+                    return
+        except OSError as exc:
+            raise CoreError(f"cannot verify net.ipv4.ip_forward: {exc}") from exc
+        guidance = ("enable net.ipv4.ip_forward=1 on the Docker HOST and persist "
+                    "it in /etc/sysctl.d/99-zagros-forwarding.conf")
+        if self._in_container():
+            raise CoreError(f"OpenVPN full-tunnel routing requires IPv4 forwarding; {guidance}")
+        sysctl = shutil.which("sysctl")
+        if sysctl is None:
+            raise CoreError(f"OpenVPN full-tunnel routing requires IPv4 forwarding; {guidance}")
+        self._run([sysctl, "-w", "net.ipv4.ip_forward=1"])
+
     def preflight_start(self) -> None:
         """Root-cause readiness before any launch attempt. The field failure
         was a bare 'cannot reach openvpn management interface: Connection
@@ -178,6 +216,16 @@ class LocalOpenVPNBackend:
                     f"package install step — read the package-manager output "
                     f"in the core logs."
                 )
+        missing_network_tools = [tool for tool in ("ip", "iptables")
+                                 if shutil.which(tool) is None]
+        if missing_network_tools and self._needs_forwarding():
+            raise CoreError(
+                "OpenVPN full-tunnel NAT needs host tools: "
+                + ", ".join(missing_network_tools)
+                + " (install iproute2 and iptables)."
+            )
+        self._ensure_forwarding()
+
         from app.cores.netdiag import diagnose_tun, format_guidance, tun_device_state
 
         checks = diagnose_tun("OpenVPN")
@@ -276,27 +324,110 @@ class LocalOpenVPNBackend:
             raise CoreError(f"command failed {' '.join(argv[:2])}: {proc.stderr.strip()}")
         return proc.stdout
 
+    @staticmethod
+    def _server_pki_valid(cert_path: str, key_path: str, ca_path: str) -> bool:
+        """The profile uses remote-cert-tls server, so a matching key alone
+        is insufficient: KU digitalSignature and EKU serverAuth are required."""
+        try:
+            from cryptography import x509
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.x509.oid import ExtendedKeyUsageOID, ExtensionOID
+
+            cert = x509.load_pem_x509_certificate(open(cert_path, "rb").read())
+            ca = x509.load_pem_x509_certificate(open(ca_path, "rb").read())
+            cert.verify_directly_issued_by(ca)
+            key = serialization.load_pem_private_key(open(key_path, "rb").read(), password=None)
+            cert_pub = cert.public_key().public_bytes(
+                serialization.Encoding.DER,
+                serialization.PublicFormat.SubjectPublicKeyInfo)
+            key_pub = key.public_key().public_bytes(
+                serialization.Encoding.DER,
+                serialization.PublicFormat.SubjectPublicKeyInfo)
+            ku = cert.extensions.get_extension_for_oid(ExtensionOID.KEY_USAGE).value
+            eku = cert.extensions.get_extension_for_oid(ExtensionOID.EXTENDED_KEY_USAGE).value
+            return cert_pub == key_pub and ku.digital_signature \
+                and ExtendedKeyUsageOID.SERVER_AUTH in eku
+        except (OSError, ValueError, x509.ExtensionNotFound):
+            return False
+
     def ensure_pki(self) -> dict[str, str]:
         paths = {name: os.path.join(self.work_dir, name) for name in
                  ("ca.key", "ca.crt", "server.key", "server.csr", "server.crt", "ta.key")}
         if shutil.which("openssl") is None:
             raise CoreError("openssl not found on this host (install it first).")
-        if not os.path.exists(paths["ca.crt"]):
+        if not (os.path.exists(paths["ca.crt"]) and os.path.exists(paths["ca.key"])):
+            ca_key, ca_crt = paths["ca.key"] + ".part", paths["ca.crt"] + ".part"
+            for part in (ca_key, ca_crt):
+                try: os.remove(part)
+                except OSError: pass
             self._run(["openssl", "req", "-x509", "-newkey", "rsa:2048",
-                       "-keyout", paths["ca.key"], "-out", paths["ca.crt"],
+                       "-keyout", ca_key, "-out", ca_crt,
                        "-days", "3650", "-nodes", "-subj", "/CN=zagros-ovpn-ca"])
-        if not os.path.exists(paths["server.crt"]):
+            os.chmod(ca_key, 0o600)
+            os.replace(ca_key, paths["ca.key"])
+            os.replace(ca_crt, paths["ca.crt"])
+
+        server_exists = all(os.path.exists(paths[name])
+                            for name in ("server.crt", "server.key"))
+        server_valid = server_exists and self._server_pki_valid(
+            paths["server.crt"], paths["server.key"], paths["ca.crt"])
+        if server_exists and not server_valid:
+            # Automatically migrate only Zagros' own historical certificate
+            # (pre-fix certificates lacked KU/EKU). Never overwrite an
+            # operator certificate silently.
+            try:
+                from cryptography import x509
+                from cryptography.x509.oid import NameOID
+                cert = x509.load_pem_x509_certificate(open(paths["server.crt"], "rb").read())
+                cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+            except Exception:  # noqa: BLE001
+                cn = ""
+            if cn != "zagros-ovpn-server":
+                raise CoreError(
+                    "OpenVPN server certificate is not usable with "
+                    "remote-cert-tls server (needs matching key, keyUsage "
+                    "digitalSignature and extendedKeyUsage serverAuth)."
+                )
+
+        if not server_valid:
+            key_part = paths["server.key"] + ".part"
+            csr_part = paths["server.csr"] + ".part"
+            cert_part = paths["server.crt"] + ".part"
+            ext_path = os.path.join(self.work_dir, "server-ext.cnf.part")
+            for part in (key_part, csr_part, cert_part, ext_path):
+                try: os.remove(part)
+                except OSError: pass
+            with open(ext_path, "w", encoding="utf-8") as fh:
+                fh.write("[server_cert]\n"
+                         "basicConstraints=critical,CA:FALSE\n"
+                         "keyUsage=critical,digitalSignature,keyEncipherment\n"
+                         "extendedKeyUsage=serverAuth\n"
+                         "subjectAltName=DNS:zagros-ovpn-server\n")
             self._run(["openssl", "req", "-newkey", "rsa:2048",
-                       "-keyout", paths["server.key"], "-out", paths["server.csr"],
+                       "-keyout", key_part, "-out", csr_part,
                        "-nodes", "-subj", "/CN=zagros-ovpn-server"])
-            self._run(["openssl", "x509", "-req", "-in", paths["server.csr"],
+            self._run(["openssl", "x509", "-req", "-in", csr_part,
                        "-CA", paths["ca.crt"], "-CAkey", paths["ca.key"],
-                       "-CAcreateserial", "-out", paths["server.crt"], "-days", "3650"])
+                       "-CAcreateserial", "-out", cert_part, "-days", "3650",
+                       "-extfile", ext_path, "-extensions", "server_cert"])
+            self._run(["openssl", "verify", "-CAfile", paths["ca.crt"], cert_part])
+            os.chmod(key_part, 0o600)
+            os.replace(key_part, paths["server.key"])
+            os.replace(csr_part, paths["server.csr"])
+            os.replace(cert_part, paths["server.crt"])
+            try: os.remove(ext_path)
+            except OSError: pass
+            if not self._server_pki_valid(paths["server.crt"], paths["server.key"], paths["ca.crt"]):
+                raise CoreError("generated OpenVPN server certificate failed KU/EKU validation")
+
         if not os.path.exists(paths["ta.key"]):
-            self._run([self.executable, "--genkey", "--secret", paths["ta.key"]])
+            part = paths["ta.key"] + ".part"
+            self._run([self.executable, "--genkey", "--secret", part])
+            os.chmod(part, 0o600)
+            os.replace(part, paths["ta.key"])
         for private in ("ca.key", "server.key", "ta.key"):
             try:
-                os.chmod(paths[private], 0o600)  # private key material: owner-only
+                os.chmod(paths[private], 0o600)
             except OSError:
                 pass
         with open(paths["ca.crt"], encoding="utf-8") as fh:
@@ -319,11 +450,11 @@ class LocalOpenVPNBackend:
 
     def install_packages(self) -> str:
         for manager, argv in (
-            ("apt-get", ["apt-get", "install", "-y", "openvpn", "openssl"]),
-            ("dnf", ["dnf", "install", "-y", "openvpn", "openssl"]),
-            ("yum", ["yum", "install", "-y", "openvpn", "openssl"]),
-            ("pacman", ["pacman", "-S", "--noconfirm", "openvpn", "openssl"]),
-            ("apk", ["apk", "add", "openvpn", "openssl"]),
+            ("apt-get", ["apt-get", "install", "-y", "openvpn", "openssl", "iproute2", "iptables"]),
+            ("dnf", ["dnf", "install", "-y", "openvpn", "openssl", "iproute", "iptables"]),
+            ("yum", ["yum", "install", "-y", "openvpn", "openssl", "iproute", "iptables"]),
+            ("pacman", ["pacman", "-S", "--noconfirm", "openvpn", "openssl", "iproute2", "iptables"]),
+            ("apk", ["apk", "add", "openvpn", "openssl", "iproute2", "iptables"]),
         ):
             if shutil.which(manager):
                 if manager == "apt-get":

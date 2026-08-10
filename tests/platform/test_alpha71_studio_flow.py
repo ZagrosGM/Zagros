@@ -372,6 +372,27 @@ def test_xray_grpc_requires_service_name(tmp_path):
              "transport": "grpc"}]}))
 
 
+def test_xray_grpc_service_name_survives_final_config(tmp_path):
+    d = _xray_driver(tmp_path)
+    doc = _apply_doc(d, [{
+        "tag": "g", "protocol": "vless", "port": 2053,
+        "transport": "grpc", "security": "none",
+        "service_name": "my-service",
+    }])
+    assert doc["inbounds"][0]["streamSettings"]["grpcSettings"]["serviceName"] == "my-service"
+
+
+def test_certificate_material_rejected_without_tls(tmp_path):
+    pair = __import__("app.utils.crypto", fromlist=["generate_certificate"]).generate_certificate()
+    d = _xray_driver(tmp_path)
+    with pytest.raises(CoreError, match="only valid when security=tls"):
+        _apply_doc(d, [{
+            "tag": "plain", "protocol": "vless", "port": 2080,
+            "transport": "ws", "security": "none",
+            "certificate": pair["cert"], "certificate_key": pair["key"],
+        }])
+
+
 # --------------------------------------------------------------------- #
 # xray backend bridge: validate → persist → reload live catalog → restart
 # --------------------------------------------------------------------- #

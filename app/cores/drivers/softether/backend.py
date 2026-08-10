@@ -64,17 +64,33 @@ class LocalSoftEtherBackend:
     # ------------------------------------------------------------------ #
     # command plumbing
     # ------------------------------------------------------------------ #
-    def _cmd(self, command: str, *, csv: bool = False) -> str:
+    @staticmethod
+    def _safe_command(command: str) -> str:
+        """Redact vpncmd argument secrets before errors/logs. The actual argv
+        still receives the value; PSKs and user/admin passwords never do."""
+        import re
+
+        return re.sub(r"(?i)(/(?:PSK|PASSWORD):)(?:\"[^\"]*\"|\S+)",
+                      r"\1<redacted>", command)
+
+    def _cmd(self, command: str, *, csv: bool = False,
+             hub: bool = True) -> str:
+        """Run a hub-scoped or entire-server vpncmd command.
+
+        IPsec/SSTP/OpenVPN/listener switches require server-admin context and
+        must omit /HUB; user/session operations intentionally keep it.
+        """
+        safe = self._safe_command(command)
         if shutil.which(self.vpncmd) is None:
             raise CoreError(
                 "vpncmd not found — press Install for this core (or run its "
                 "install_packages()): apt 'softether-vpnserver' on supported "
                 "distros, otherwise the official GitHub release is fetched."
             )
-        argv = [
-            self.vpncmd, self.server, "/SERVER", f"/HUB:{self.hub}",
-            f"/PASSWORD:{self.password}",
-        ]
+        argv = [self.vpncmd, self.server, "/SERVER"]
+        if hub:
+            argv.append(f"/HUB:{self.hub}")
+        argv.append(f"/PASSWORD:{self.password}")
         if csv:
             argv.append("/CSV")
         # vpncmd 5.x /CMD one-shot tokenizes argv NATIVELY: pass every token
@@ -88,17 +104,18 @@ class LocalSoftEtherBackend:
                 argv, capture_output=True, text=True, timeout=self.timeout
             )
         except subprocess.TimeoutExpired as exc:
-            raise CoreError(f"vpncmd timed out on '{command}'.") from exc
+            raise CoreError(f"vpncmd timed out on '{safe}'.") from exc
         out = (proc.stdout or "") + (proc.stderr or "")
+        safe_out = self._safe_command(out)
         if proc.returncode != 0:
-            raise CoreError(f"vpncmd '{command}' failed (rc={proc.returncode}): {out.strip()[:400]}")
+            raise CoreError(f"vpncmd '{safe}' failed (rc={proc.returncode}): {safe_out.strip()[-1200:]}")
         error_line = next(
             (line.strip() for line in out.splitlines()
              if line.strip().startswith("Error") or "error occurred" in line.lower()),
             None,
         )
         if error_line:
-            raise CoreError(f"vpncmd '{command}' failed: {error_line}")
+            raise CoreError(f"vpncmd '{safe}' failed: {error_line}")
         return proc.stdout or ""
 
     # ------------------------------------------------------------------ #
@@ -120,7 +137,7 @@ class LocalSoftEtherBackend:
     def ipsec_get(self) -> IPsecServices:
         """Current server IPsec state (authoritative — used to converge
         without clobbering the stored PSK or the default hub)."""
-        return parse_ipsec_get(self._cmd("IPsecGet"))
+        return parse_ipsec_get(self._cmd("IPsecGet", hub=False))
 
     def ipsec_services_set(self, *, l2tp: bool, l2tp_raw: bool, etherip: bool,
                            psk: str, default_hub: str) -> None:
@@ -144,7 +161,8 @@ class LocalSoftEtherBackend:
         psk_arg = f'"{psk}"' if any(ch.isspace() for ch in psk) else psk
         self._cmd(
             f"IPsecEnable /L2TP:{yn(l2tp)} /L2TPRAW:{yn(l2tp_raw)} "
-            f"/ETHERIP:{yn(etherip)} /PSK:{psk_arg} /DEFAULTHUB:{hub}"
+            f"/ETHERIP:{yn(etherip)} /PSK:{psk_arg} /DEFAULTHUB:{hub}",
+            hub=False,
         )
 
     # ------------------------------------------------------------------ #
@@ -188,45 +206,65 @@ class LocalSoftEtherBackend:
     _INSTALL_ROOT = "/usr/local/softether"
 
     def install_packages(self) -> str:
-        """Install SoftEther VPN Server for real; returns a human description.
+        """Install SoftEther once, under an inter-process build lock.
 
-        Strategy chain (first success wins, EVERY attempt reported):
-        1. The host's package manager — apt/dnf/yum/pacman/apk are ALL
-           probed; success is verified by locating the vpnserver binary,
-           not by the package tool's exit code.
-        2. Official GitHub release binary (SoftEtherVPN/SoftEtherVPN): the
-           latest STABLE release is resolved live (zero hardcoded version).
-        3. Full source build from that same latest stable tag — toolchain
-           installed via the package manager, cmake build, artifacts laid
-           out under /usr/local/softether and symlinked onto PATH.
-        Raises CoreError with the per-stage detail when everything failed.
+        Fast path is the official architecture-specific **stable** bundle.
+        It contains precompiled vpnserver/vpncmd object archives, so the host
+        only performs the two final links instead of compiling the entire 5.x
+        developer tree. Distro packages and the controlled source build are
+        fallbacks. Every completed stage is verified by a real executable.
         """
-        errors: list[str] = []
-        for manager, argv, refresh in self._PKG_MANAGERS:
-            if shutil.which(manager) is None:
-                continue
+        cache = self._src_cache_root() or "/tmp/zagros-softether-cache"
+        os.makedirs(cache, exist_ok=True)
+        lock_path = os.path.join(cache, ".install.lock")
+        # flock is process-wide and is released by the kernel on interruption;
+        # a second API worker waits rather than downloading/building again.
+        import fcntl
+
+        with open(lock_path, "a+", encoding="utf-8") as lock:
+            self._set_progress("waiting_lock", "waiting for another installer, if any")
+            logger.info("softether install: waiting for build lock %s", lock_path)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            self._set_progress("resolving", "checking existing binary and official stable release")
+            logger.info("softether install: build lock acquired")
+            existing = self.server_binary()
+            if existing:
+                self._set_progress("complete", "already installed; no work needed")
+                return f"SoftEther already installed ({existing}); no build needed"
+
+            errors: list[str] = []
             try:
-                if refresh:
-                    self._run(refresh, timeout=600)
-                self._run(argv, timeout=900)
-                if self.server_binary():
-                    return f"installed softether-vpnserver via {manager}"
-                errors.append(
-                    f"{manager}: install completed but vpnserver not found on PATH")
-            except CoreError as exc:
-                errors.append(f"{manager}: {exc}")
-        try:
-            return self._install_from_github()
-        except Exception as exc:  # noqa: BLE001 — report every attempt
-            errors.append(f"github-release: {exc}")
-        try:
-            return self._install_from_source()
-        except Exception as exc:  # noqa: BLE001 — report every attempt
-            errors.append(f"source-build: {exc}")
-        raise CoreError(
-            "could not self-install SoftEther VPN Server — attempts: "
-            + " | ".join(errors or ["no strategy applicable on this host"])
-        )
+                result = self._install_from_github()
+                self._set_progress("complete", "official stable bundle installed")
+                return result
+            except Exception as exc:  # noqa: BLE001 — report every attempt
+                errors.append(f"stable-bundle: {exc}")
+            for manager, argv, refresh in self._PKG_MANAGERS:
+                if shutil.which(manager) is None:
+                    continue
+                try:
+                    if refresh:
+                        self._run(refresh, timeout=600)
+                    self._run(argv, timeout=900)
+                    if self.server_binary():
+                        self._set_progress("complete", f"installed through {manager}")
+                        return f"installed softether-vpnserver via {manager}"
+                    errors.append(
+                        f"{manager}: install completed but vpnserver not found on PATH")
+                except CoreError as exc:
+                    errors.append(f"{manager}: {exc}")
+            try:
+                self._set_progress("source_fallback", "stable/package unavailable; controlled source build")
+                result = self._install_from_source()
+                self._set_progress("complete", "controlled source build installed")
+                return result
+            except Exception as exc:  # noqa: BLE001 — report every attempt
+                errors.append(f"source-build: {exc}")
+            self._set_progress("failed", "all installation strategies failed; see error detail")
+            raise CoreError(
+                "could not self-install SoftEther VPN Server — attempts: "
+                + " | ".join(errors or ["no strategy applicable on this host"])
+            )
 
     def _link_on_path(self, root: str) -> None:
         # WRAPPER scripts, not symlinks (field failure alpha.7.4): SoftEther
@@ -238,48 +276,170 @@ class LocalSoftEtherBackend:
             real = os.path.join(root, name)
             link = os.path.join("/usr/local/bin", name)
             try:
-                if os.path.lexists(link):
-                    os.remove(link)
-                with open(link, "w", encoding="utf-8") as fh:
+                part = link + ".part"
+                with open(part, "w", encoding="utf-8") as fh:
                     fh.write(f"#!/bin/sh\nexec \"{real}\" \"$@\"\n")
-                os.chmod(link, 0o755)
+                os.chmod(part, 0o755)
+                os.replace(part, link)
             except OSError as exc:
                 logger.warning("softether PATH wrapper %s failed: %s", link, exc)
 
+    def _ensure_bundle_deps(self) -> None:
+        """Stable Linux bundles carry precompiled .a files; only the final
+        linker toolchain is needed (no cmake, libsodium, or full source deps)."""
+        if all(shutil.which(tool) for tool in ("make", "gcc", "ranlib")):
+            return
+        packages = {
+            "apt-get": (["apt-get", "update"],
+                        ["apt-get", "install", "-y", "build-essential", "binutils"]),
+            "dnf": (None, ["dnf", "install", "-y", "gcc", "make", "binutils"]),
+            "yum": (None, ["yum", "install", "-y", "gcc", "make", "binutils"]),
+            "pacman": (None, ["pacman", "-S", "--noconfirm", "gcc", "make", "binutils"]),
+            "apk": (None, ["apk", "add", "gcc", "musl-dev", "make", "binutils"]),
+        }
+        for manager, (refresh, install) in packages.items():
+            if not shutil.which(manager):
+                continue
+            if refresh:
+                self._run(refresh, timeout=600)
+            self._run(install, timeout=1200)
+            if all(shutil.which(tool) for tool in ("make", "gcc", "ranlib")):
+                return
+            break
+        raise CoreError("stable bundle needs make, gcc and ranlib for its two final links")
+
     def _install_from_github(self) -> str:
-        from app.cores.github_install import host_arch, host_os, install_from_github
+        """Install the newest official RTM stable Linux bundle.
+
+        Unlike the 5.x developer repository (source-only on Linux),
+        ``SoftEtherVPN_Stable`` publishes architecture bundles containing
+        precompiled object archives. Download/extract/build/install all use
+        cache markers and sibling ``.part``/staging paths; the live install
+        root is replaced only after every required artifact exists.
+        """
+        import re
+        import tarfile
+        import tempfile
+
+        from app.cores.github_install import fetch_release_list, host_arch, host_os
 
         system, arch = host_os(), host_arch()
         if system != "linux" or arch not in ("amd64", "arm64"):
-            raise CoreError(f"no official SoftEther build for {system}/{arch}")
-        arch_bits = ("x64-64bit",) if arch == "amd64" else ("arm64-64bit",)
-        root = self._INSTALL_ROOT
-        os.makedirs(root, exist_ok=True)
+            raise CoreError(f"no supported stable bundle for {system}/{arch}")
+        arch_name = "x64-64bit" if arch == "amd64" else "arm64-64bit"
+        self._set_progress("resolving", "selecting newest official RTM stable bundle")
+        releases = fetch_release_list("SoftEtherVPN/SoftEtherVPN_Stable", limit=10)
+        candidates = [r for r in releases
+                      if not r.get("prerelease")
+                      and re.match(r"^v\d+\.\d+-\d+-rtm$", str(r.get("tag_name") or ""), re.I)]
+        if not candidates:
+            raise CoreError("SoftEther stable repository published no RTM release")
+
+        def version_key(release: dict) -> tuple[int, int, int]:
+            nums = re.findall(r"\d+", str(release.get("tag_name") or ""))
+            return tuple((list(map(int, nums)) + [0, 0, 0])[:3])  # type: ignore[return-value]
+
+        release = max(candidates, key=version_key)
+        tag = str(release["tag_name"])
+        asset = next((a for a in release.get("assets", [])
+                      if str(a.get("name", "")).startswith("softether-vpnserver-")
+                      and "-linux-" in str(a.get("name", "")).lower()
+                      and arch_name in str(a.get("name", ""))
+                      and str(a.get("name", "")).endswith(".tar.gz")), None)
+        if not asset or not asset.get("browser_download_url"):
+            raise CoreError(f"{tag} has no Linux {arch_name} vpnserver bundle")
+
+        cache_root = self._src_cache_root()
+        if cache_root:
+            work = os.path.join(cache_root, "stable", tag, arch_name)
+            persistent = True
+        else:
+            work = tempfile.mkdtemp(prefix="zagros-softether-stable-")
+            persistent = False
+        os.makedirs(work, exist_ok=True)
+        package = os.path.join(work, "bundle.tar.gz")
+        extracted = os.path.join(work, "extracted")
+        complete = os.path.join(work, ".complete")
         try:
-            tag = install_from_github(
-                repo="SoftEtherVPN/SoftEtherVPN",
-                target_executable=os.path.join(root, "vpnserver"),
-                # BOTH upstream naming generations, never one hardcoded
-                # filename: current 5.x lines ship no Linux binary at all
-                # (Windows .exe bundles + the official source tarball only),
-                # older 4.x lines shipped linux tarballs.
-                asset_match=lambda n: (
-                    n.startswith("softether-vpnserver-")
-                    and n.endswith(".tar.gz")
-                    and "linux" in n.lower()
-                    and any(bit in n for bit in arch_bits)
-                ),
-                member_match=lambda m: m.rsplit("/", 1)[-1] == "vpnserver",
-                extra_members={
-                    "vpncmd": os.path.join(root, "vpncmd"),
-                    "hamcore.se2": os.path.join(root, "hamcore.se2"),
-                },
-            )
-        except CoreError as exc:
-            raise CoreError(f"{exc} → source-build stage follows") from exc
-        os.chmod(os.path.join(root, "vpncmd"), 0o755)
-        self._link_on_path(root)
-        return f"installed SoftEther {tag} from GitHub releases"
+            if not os.path.exists(package):
+                self._set_progress("downloading", str(asset["name"]))
+                logger.info("softether stable bundle: downloading %s", asset["name"])
+                self._download(str(asset["browser_download_url"]), package)
+            else:
+                self._set_progress("cache_hit", "official bundle download already cached")
+            if not os.path.isdir(extracted):
+                self._set_progress("extracting", "validating and atomically extracting bundle")
+                part = f"{extracted}.part.{os.getpid()}"
+                shutil.rmtree(part, ignore_errors=True)
+                os.makedirs(part)
+                try:
+                    with tarfile.open(package, "r:gz") as tar:
+                        tar.extractall(part, filter="data")
+                    source_part = os.path.join(part, "vpnserver")
+                    if not all(os.path.exists(os.path.join(source_part, item))
+                               for item in ("Makefile", "code/vpnserver.a", "code/vpncmd.a",
+                                            "hamcore.se2")):
+                        raise CoreError("stable bundle is missing its signed release layout")
+                    os.replace(part, extracted)
+                except Exception:
+                    shutil.rmtree(part, ignore_errors=True)
+                    # A bad final package must not poison every retry.
+                    try:
+                        os.remove(package)
+                    except OSError:
+                        pass
+                    raise
+            source = os.path.join(extracted, "vpnserver")
+            if os.path.exists(complete) and all(
+                    os.path.isfile(os.path.join(source, n))
+                    for n in ("vpnserver", "vpncmd", "hamcore.se2")):
+                logger.info("softether stable bundle cache hit: %s", work)
+            if not all(os.path.isfile(os.path.join(source, n))
+                       for n in ("vpnserver", "vpncmd")):
+                self._set_progress("linking", "two final links from precompiled objects (1 job)")
+                self._ensure_bundle_deps()
+                logger.info("softether stable bundle: final-link stage (1 job; precompiled objects)")
+                self._run_streamed(
+                    ["make", "-C", source, "main", "-j", "1"], timeout=600)
+            required = ("vpnserver", "vpncmd", "hamcore.se2")
+            if not all(os.path.isfile(os.path.join(source, n)) for n in required):
+                raise CoreError("stable bundle final-link did not produce vpnserver/vpncmd")
+
+            self._set_progress("installing", "atomically publishing verified binaries")
+            root = self._INSTALL_ROOT
+            stage = f"{root}.part.{os.getpid()}"
+            backup = f"{root}.previous.{os.getpid()}"
+            shutil.rmtree(stage, ignore_errors=True)
+            os.makedirs(stage, mode=0o755)
+            for name in required:
+                shutil.copy2(os.path.join(source, name), os.path.join(stage, name))
+            os.chmod(os.path.join(stage, "vpnserver"), 0o755)
+            os.chmod(os.path.join(stage, "vpncmd"), 0o755)
+            # Preserve server identity/config when repairing an existing root.
+            for name in ("vpn_server.config", "lang.config"):
+                old = os.path.join(root, name)
+                if os.path.isfile(old):
+                    shutil.copy2(old, os.path.join(stage, name))
+            if os.path.lexists(backup):
+                shutil.rmtree(backup, ignore_errors=True)
+            if os.path.isdir(root):
+                os.replace(root, backup)
+            try:
+                os.replace(stage, root)
+            except Exception:
+                if os.path.isdir(backup) and not os.path.exists(root):
+                    os.replace(backup, root)
+                raise
+            shutil.rmtree(backup, ignore_errors=True)
+            self._link_on_path(root)
+            with open(complete + ".part", "w", encoding="utf-8") as fh:
+                fh.write(tag)
+            os.replace(complete + ".part", complete)
+            logger.info("softether stable bundle installed atomically: %s", tag)
+            return f"installed SoftEther {tag} stable bundle (precompiled objects; 1-job final link)"
+        finally:
+            if not persistent:
+                shutil.rmtree(work, ignore_errors=True)
 
     def _ensure_build_deps(self) -> None:
         for manager, (refresh, argv) in self._BUILD_DEPS.items():
@@ -331,7 +491,10 @@ class LocalSoftEtherBackend:
         for root in candidates:
             try:
                 os.makedirs(root, mode=0o755, exist_ok=True)
-                probe = os.path.join(root, ".probe")
+                import threading
+
+                probe = os.path.join(
+                    root, f".probe.{os.getpid()}.{threading.get_ident()}")
                 with open(probe, "w", encoding="utf-8") as fh:
                     fh.write("ok")
                 os.remove(probe)
@@ -339,6 +502,38 @@ class LocalSoftEtherBackend:
             except OSError:
                 continue
         return None
+
+    def _progress_file(self) -> str:
+        root = self._src_cache_root() or "/tmp/zagros-softether-cache"
+        os.makedirs(root, exist_ok=True)
+        return os.path.join(root, "install-progress.json")
+
+    def _set_progress(self, stage: str, detail: str = "") -> None:
+        """Persist a secret-free installation stage for UI polling."""
+        import json
+
+        path = self._progress_file()
+        part = path + ".part"
+        payload = {"stage": stage, "detail": detail, "updated_at": int(time.time())}
+        try:
+            with open(part, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            os.replace(part, path)
+        except OSError:
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+
+    def install_progress(self) -> dict[str, object]:
+        import json
+
+        try:
+            with open(self._progress_file(), encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {"stage": "unknown"}
+        except (OSError, ValueError):
+            return {"stage": "idle", "detail": ""}
 
     def _download(self, url: str, dest: str, *, timeout: float = 900.0) -> int:
         """Chunked download with real logged progress (item 10 — the panel
@@ -543,27 +738,44 @@ class LocalSoftEtherBackend:
                 ["cmake", "--build", build_dir, "--parallel", str(jobs),
                  "--target", *self._BUILD_TARGETS], timeout=3600)
             root = self._INSTALL_ROOT
-            os.makedirs(root, exist_ok=True)
+            # Build/copy into a sibling stage. A compile failure or SIGTERM
+            # leaves the current install untouched; only a complete artifact
+            # set is renamed into service.
+            stage = f"{root}.part.{os.getpid()}"
+            backup = f"{root}.previous.{os.getpid()}"
+            shutil.rmtree(stage, ignore_errors=True)
+            os.makedirs(stage, exist_ok=True)
             for name in ("vpnserver", "vpncmd", "hamcore.se2"):
                 built = os.path.join(build_dir, name)
                 if not os.path.exists(built):
+                    shutil.rmtree(stage, ignore_errors=True)
                     raise CoreError(f"cmake build did not produce '{name}'")
-                shutil.copy2(built, os.path.join(root, name))
-            os.chmod(os.path.join(root, "vpnserver"), 0o755)
-            os.chmod(os.path.join(root, "vpncmd"), 0o755)
+                shutil.copy2(built, os.path.join(stage, name))
+            os.chmod(os.path.join(stage, "vpnserver"), 0o755)
+            os.chmod(os.path.join(stage, "vpncmd"), 0o755)
             # cmake builds cedar/mayaqua as SHARED libs and bakes the temp
-            # build dir into RUNPATH (field failure alpha.7.4: daemon died
-            # with "libcedar.so: cannot open shared object file" once the
-            # temp tree was cleaned). Ship the libs next to the binaries
-            # and register the path with the dynamic loader.
+            # build dir into RUNPATH. Ship the libs next to the binaries.
             libs = sorted(
                 name for name in os.listdir(build_dir)
                 if name.startswith(("libcedar.so", "libmayaqua.so"))
                 and os.path.isfile(os.path.join(build_dir, name))
             )
             for name in libs:
-                shutil.copy2(os.path.join(build_dir, name),
-                             os.path.join(root, name))
+                shutil.copy2(os.path.join(build_dir, name), os.path.join(stage, name))
+            for name in ("vpn_server.config", "lang.config"):
+                old = os.path.join(root, name)
+                if os.path.isfile(old):
+                    shutil.copy2(old, os.path.join(stage, name))
+            shutil.rmtree(backup, ignore_errors=True)
+            if os.path.isdir(root):
+                os.replace(root, backup)
+            try:
+                os.replace(stage, root)
+            except Exception:
+                if os.path.isdir(backup) and not os.path.exists(root):
+                    os.replace(backup, root)
+                raise
+            shutil.rmtree(backup, ignore_errors=True)
             if libs:
                 conf = "/etc/ld.so.conf.d/zagros-softether.conf"
                 try:

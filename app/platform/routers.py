@@ -549,6 +549,13 @@ async def _respond_committed(runtime, core_id: str, result, *, warning=None) -> 
         return {**result.model_dump(), "materialized": None,
                 "notice": result.detail or "already in the requested state"}
     await _cascade_grants(runtime, core_id)
+    if core_id != "xray" and result.document is not None:
+        from app.portal.hostengine import reconcile_default_hosts
+
+        inbounds = result.document.get("inbounds") or []
+        tags = [str(item.get("tag")) for item in inbounds
+                if isinstance(item, dict) and item.get("tag")]
+        await reconcile_default_hosts(runtime.core_hosts, core_id, tags)
     return {**result.model_dump(),
             "materialized": warning is None,
             "notice": warning}
@@ -663,9 +670,32 @@ async def studio_wizard_delete_inbound(core_id: str, tag: str,
     if not result.changed:
         return {"ok": True, "deleted": None, "materialized": None,
                 "notice": result.detail or "already absent"}
+    notice = await _delete_cascade_notice(runtime, core_id)
+    if core_id != "xray" and result.document is not None:
+        from app.portal.hostengine import reconcile_default_hosts
+
+        tags = [str(item.get("tag")) for item in (result.document.get("inbounds") or [])
+                if isinstance(item, dict) and item.get("tag")]
+        await reconcile_default_hosts(runtime.core_hosts, core_id, tags)
+    elif core_id == "xray":
+        # Grant cascade ran first; now the legacy inbound/host row can be
+        # removed cleanly. ProxyHost has delete-orphan cascade from inbound.
+        import asyncio as _asyncio
+
+        def _remove_legacy_host() -> None:
+            from app.db import GetDB
+            from app.db.models import ProxyInbound
+
+            with GetDB() as db:
+                row = db.query(ProxyInbound).filter(ProxyInbound.tag == tag).first()
+                if row is not None:
+                    db.delete(row)
+                    db.commit()
+
+        await _asyncio.to_thread(_remove_legacy_host)
     return {"ok": True, "deleted": tag,
             "materialized": result.document is not None,
-            "notice": await _delete_cascade_notice(runtime, core_id)}
+            "notice": notice}
 
 
 async def _delete_cascade_notice(runtime, core_id: str) -> str | None:

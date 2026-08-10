@@ -460,7 +460,15 @@ class SingBoxDriver(BaseCoreDriver):
         # a transport sing-box cannot serve fails loudly instead of silently
         # degrading the listener to plain TCP
         net = str(raw.get("transport") or "").lower()
-        security = str(raw.get("security") or "").lower()
+        security = str(raw.get("security") or "none").lower()
+        certificate_keys = ("certificate", "certificate_key",
+                            "certificate_path", "certificate_key_path")
+        if security != "tls" and any(raw.get(key) for key in certificate_keys):
+            raise CoreError(
+                f"studio inbound '{raw.get('tag')}': certificate material is "
+                f"invalid for security={security}; certificates belong only "
+                "to TLS listeners."
+            )
         if proto == "shadowsocks" and net not in ("", "tcp"):
             raise CoreError(
                 "sing-box shadowsocks inbounds have no transport field at all "

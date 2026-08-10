@@ -60,10 +60,12 @@ _SERVICE_ENTRIES: dict[str, tuple[tuple[str, str, str | None], ...]] = {
     "wireguard": (("wireguard", "wireguard", "port"),),
     "ssh": (("ssh", "ssh", "port"),),
     "softether": (
+        ("softether", "softether", "native_port"),
         ("l2tp", "l2tp", None),
+        ("l2tp-raw", "l2tp_raw", None),
+        ("etherip", "etherip", None),
         ("sstp", "sstp", None),
-        ("pptp", "pptp", None),
-        ("softether", "ovpn", None),
+        ("softether-openvpn", "ovpn", None),
     ),
 }
 
@@ -121,6 +123,10 @@ async def _studio_inbounds(runtime, core_id: str) -> list[CatalogInbound]:
 def _service_inbounds(core_id: str, settings: dict[str, Any]) -> list[CatalogInbound]:
     out: list[CatalogInbound] = []
     for tag, protocol, port_key in _SERVICE_ENTRIES.get(core_id, ()):
+        if core_id == "softether" and not settings.get(f"feature_{protocol}"):
+            # Capability catalog = what the hub is configured to serve, not a
+            # static list of everything SoftEther could theoretically do.
+            continue
         port = None
         if port_key is not None:
             try:

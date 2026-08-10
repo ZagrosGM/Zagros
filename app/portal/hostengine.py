@@ -649,8 +649,30 @@ class HostSettingsEngine:
 #: carries it separately; a blank Address means "{SERVER_IP}" (the link's
 #: own server value, preserved on expansion).
 DEFAULT_REMARK = "🛸 Zagros ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]"
+DEFAULT_ADDRESS = "{SERVER_IP}"
 
-_NON_LINK = {"wireguard", "openvpn", "ssh", "softether", "pptp", "sstp", "l2tp"}
+
+async def reconcile_default_hosts(store, core_id: str,
+                                  inbound_tags: list[str] | set[str]) -> dict[str, list[HostEntry]]:
+    """Keep Host Settings in the same lifecycle as its core inbounds.
+
+    New inbound → one independent default HostEntry. Deleted inbound → only
+    that tag's host rows are removed. Existing customized rows are untouched.
+    """
+    wanted = {str(tag) for tag in inbound_tags if str(tag)}
+    grouped = await store.list_grouped(core_id)
+    updates: dict[str, list[HostEntry]] = {}
+    for tag in wanted - set(grouped):
+        updates[tag] = [HostEntry(remark=DEFAULT_REMARK, address=DEFAULT_ADDRESS)]
+    for tag in set(grouped) - wanted:
+        updates[tag] = []
+    if updates:
+        await store.replace_tags(core_id, updates)
+        grouped = await store.list_grouped(core_id)
+    return grouped
+
+
+_NON_LINK = {"wireguard", "openvpn", "ssh", "softether", "sstp", "l2tp", "l2tp_raw", "etherip"}
 _TLS_LINK = {"vless", "trojan", "vmess", "hysteria2", "hy2", "tuic"}
 
 

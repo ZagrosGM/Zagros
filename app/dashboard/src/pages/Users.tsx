@@ -137,11 +137,6 @@ export default function Users() {
     mutationFn: (username: string) => api.post(`/user/${username}/reset`),
     onSuccess: () => { toast.ok("usage reset"); invalidate(); },
   });
-  const revokeSub = useMutation({
-    mutationFn: (username: string) => api.post(`/user/${username}/revoke_sub`),
-    onSuccess: () => { toast.ok("subscription revoked"); invalidate(); },
-  });
-
   const users = useMemo(() => data?.users ?? [], [data]);
   const owners = useMemo(() => [...new Set(users.map((u) => u.admin).filter(Boolean))] as string[], [users]);
   const catalogQ = useQuery({
@@ -201,6 +196,7 @@ export default function Users() {
               (gray + honest title). Account status lives in its own column. */}
           <span
             role="img"
+            data-presence={onlineMap[u.username] ?? "unknown"}
             aria-label={`presence ${onlineMap[u.username] ?? "unknown"}`}
             title={onlineMap[u.username] === "online"
               ? "online (session on ≥1 core)"
@@ -209,7 +205,14 @@ export default function Users() {
                 : (onlineQ.data?.failed_cores?.length
                     ? `presence unknown (${onlineQ.data.failed_cores.join(", ")} failed its read)`
                     : "presence unknown (no online-capable core on this deployment)")}
-            className={`inline-block h-2 w-2 shrink-0 rounded-full ${onlineMap[u.username] === "online" ? "bg-ok" : "bg-content-3/50"}`}
+            className={cn(
+              "inline-block h-2.5 w-2.5 shrink-0 rounded-full border",
+              onlineMap[u.username] === "online"
+                ? "border-ok bg-ok"
+                : onlineMap[u.username] === "offline"
+                  ? "border-content-3/60 bg-content-3/35"
+                  : "border-content-3/70 bg-transparent",
+            )}
           />
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
@@ -286,7 +289,6 @@ export default function Users() {
           <MenuItem icon={<ExternalLink size={14} />} label={t("common.edit")} onClick={() => { setMenu(null); setDialog({ mode: "edit", user: mu }); }} />
           <MenuItem icon={<Copy size={14} />} label={t("users.copySub")} onClick={() => { setMenu(null); copySub(mu); }} />
           <MenuItem icon={<RefreshCcw size={14} />} label={t("users.resetUsage")} onClick={() => { setMenu(null); resetUsage.mutate(mu.username); }} />
-          <MenuItem icon={<Link2 size={14} />} label={t("users.revokeSub")} onClick={() => { setMenu(null); revokeSub.mutate(mu.username); }} />
           <div className="my-1 border-t border-border" />
           <MenuItem icon={<Trash2 size={14} />} label={t("common.delete")} danger
             onClick={() => { setMenu(null); setConfirmDelete(mu); }} />
@@ -400,49 +402,6 @@ function MenuItem({ icon, label, onClick, danger }: { icon: React.ReactNode; lab
 
 // ---------------------------------------------------------------- dialog ---
 
-function PortalLinkSection({ username }: { username: string }) {
-  const t = useT();
-  const [link, setLink] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const info = useQuery({
-    queryKey: ["zagros", "panel-info"],
-    queryFn: () => api.get<{ panel_base_url?: string | null; domain?: string | null }>("/zagros/panel/info"),
-  });
-  const issue = async () => {
-    setBusy(true);
-    try {
-      const r = await api.post<{ path: string }>(`/zagros/users/by-username/${encodeURIComponent(username)}/subscription-token`, {});
-      const base = (info.data?.panel_base_url || (info.data?.domain ? `https://${info.data.domain}` : "")) || window.location.origin;
-      setLink(`${base}${r.path}`);
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : t("common.error"));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <div className="sm:col-span-2 rounded-xl border border-brand/30 bg-brand-soft/20 p-3">
-      <p className="mb-1.5 text-[11px] font-medium text-brand">
-        {t("users.subPortalHint")}
-      </p>
-      <div className="flex items-center gap-2">
-        {link ? (
-          <>
-            <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-content-2" dir="ltr">{link}</code>
-            <Button variant="secondary" size="sm" onClick={async () => (await copyText(link)) ? toast.ok(t("common.copied")) : toast.error(t("common.error"))}>
-              <Copy size={13} /> {t("common.copy")}
-            </Button>
-          </>
-        ) : (
-          <Button variant="secondary" size="sm" onClick={issue} loading={busy}>
-            <Link2 size={13} /> issue portal link
-          </Button>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
   mode: "create" | "edit"; user?: User;
   catalog: InboundCatalogGroup[]; templates: UserTemplate[];
@@ -474,6 +433,8 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
   const [genBusy, setGenBusy] = useState(false);
 
   const chosen = Object.keys(form.inbounds);
+  const hasCoreAccess = Object.values(form.coreAccess).some((tags) => tags.length > 0);
+  const hasAnyAccess = chosen.length > 0 || hasCoreAccess;
   const subUrl = absolutizeSub(user?.subscription_url ?? user?.sub_url);
 
   // α7.2 (item 11): on CREATE everything is pre-selected once the catalog
@@ -522,16 +483,24 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
   // the template's inbound sets flow into the form in one click.
   const applyTemplate = (id: number | null) => {
     const tp = templates.find((x) => x.id === id);
-    if (!tp) return setForm({ ...form, templateId: id });
-    setForm({
-      ...form,
-      templateId: id,
-      dataLimitGB: tp.data_limit ? String(tp.data_limit / 1024 ** 3) : "",
-      expireDate: tp.expire_duration
-        ? new Date(Date.now() + tp.expire_duration * 1000).toISOString().slice(0, 10)
-        : "",
-      inbounds: structuredClone(tp.inbounds ?? {}),
-      coreAccess: { ...form.coreAccess, ...structuredClone(tp.core_access ?? {}) },
+    if (!tp) return setForm((current) => ({ ...current, templateId: id }));
+    setForm((current) => {
+      const generated = `${tp.username_prefix ?? ""}${randomUsername(8)}${tp.username_suffix ?? ""}`;
+      return {
+        ...current,
+        templateId: id,
+        // A template is a complete creation source. Honour its username
+        // policy when the admin has not already entered an explicit name.
+        username: current.username.trim() || generated,
+        dataLimitGB: tp.data_limit ? String(tp.data_limit / 1024 ** 3) : "",
+        expireDate: tp.expire_duration
+          ? new Date(Date.now() + tp.expire_duration * 1000).toISOString().slice(0, 10)
+          : "",
+        inbounds: structuredClone(tp.inbounds ?? {}),
+        // Do not merge with the manual "select all" prefill: that silently
+        // granted cores the selected template never contained.
+        coreAccess: structuredClone(tp.core_access ?? {}),
+      };
     });
   };
 
@@ -591,7 +560,11 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
         <>
           <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
           <Button onClick={save} loading={busy}
-            disabled={(mode === "create" && !form.username.trim()) || chosen.length === 0}>
+            disabled={
+              (mode === "create" && (!form.username.trim() ||
+                (form.mode === "template" && form.templateId == null))) ||
+              !hasAnyAccess
+            }>
             {t("common.save")}
           </Button>
         </>
@@ -681,9 +654,9 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
 
         <div className="sm:col-span-2">
           <Field label={t("users.protocols")}
-            hint={chosen.length === 0
-              ? "select at least one protocol on the xray row — accounts on other cores share this user's quota, expiry and status"
-              : `${chosen.length} protocol${chosen.length > 1 ? "s" : ""} on xray · every selected core gets a real account`}>
+            hint={!hasAnyAccess
+              ? "select at least one inbound on any core"
+              : `${chosen.length} xray protocol${chosen.length === 1 ? "" : "s"} · ${Object.values(form.coreAccess).filter((tags) => tags.length).length} additional core${Object.values(form.coreAccess).filter((tags) => tags.length).length === 1 ? "" : "s"}`}>
             <CoreAccessPicker
               groups={catalog}
               value={form.coreAccess}
@@ -715,7 +688,6 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
           </div>
         )}
 
-        {mode === "edit" && user && <PortalLinkSection username={user.username} />}
       </div>
       {error && <p role="alert" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
     </Dialog>

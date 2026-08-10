@@ -343,11 +343,10 @@ class UserResponse(User):
             url_prefix = (XRAY_SUBSCRIPTION_URL_PREFIX).replace('*', salt)
             token = create_subscription_token(self.username)
             # alpha.7.2 (item 14): the legacy /<XRAY_SUBSCRIPTION_PATH>/
-            # endpoint is GONE — subscription_url now lands on the ONE
-            # multi-core portal (/zagros/sub/), which validates legacy
-            # username tokens under the legacy revocation rules, so links
-            # issued anywhere (telegram bot, admin flows) keep working.
-            self.subscription_url = f"{url_prefix}/zagros/sub/{token}"
+            # Canonical public subscription route. /zagros/sub/<token> remains
+            # a server-side legacy alias only; no newly generated/copied/QR URL
+            # may carry the old dashboard namespace.
+            self.subscription_url = f"{url_prefix}/sub/{token}"
         return self
 
     @field_validator("proxies", mode="before")

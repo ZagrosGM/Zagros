@@ -296,56 +296,39 @@ def _se_backend():
     return LocalSoftEtherBackend({})
 
 
-def test_install_pkg_manager_first_success_short_circuits() -> None:
-    import shutil
+def test_second_install_short_circuits_without_download_or_build(tmp_path) -> None:
     from unittest import mock
 
     backend = _se_backend()
     calls: list[list[str]] = []
-    with mock.patch.object(shutil, "which",
-                           lambda n: "/usr/bin/apt-get" if n == "apt-get" else None), \
+    with mock.patch.dict(os.environ, {"ZAGROS_SOFTETHER_SRC_CACHE": str(tmp_path / "cache")}), \
          mock.patch.object(backend, "_run",
                            lambda argv, timeout=120.0: (calls.append(list(argv)), "ok")[1]), \
+         mock.patch.object(backend, "_install_from_github",
+                           lambda: (_ for _ in ()).throw(AssertionError("must not download"))), \
          mock.patch.object(backend, "server_binary",
-                           lambda: "/usr/lib/softether/vpnserver"):
+                           lambda: "/usr/local/softether/vpnserver"):
         out = backend.install_packages()
-    assert "apt-get" in out
-    assert calls[0] == ["apt-get", "update"]            # refresh first
-    assert calls[1] == ["apt-get", "install", "-y", "softether-vpnserver"]
-    # first success wins — no GitHub, no source stage
+    assert "already installed" in out
+    assert calls == []
 
 
-def test_install_tries_every_manager_then_github(monkeypatch=None) -> None:
+def test_official_stable_bundle_precedes_package_and_source(tmp_path) -> None:
     import shutil
     from unittest import mock
 
-    import app.cores.github_install as gh
-
     backend = _se_backend()
     calls: list[list[str]] = []
-
-    def which(name):
-        return {"apt-get": "/usr/bin/apt-get", "dnf": "/usr/bin/dnf"}.get(name)
-
-    def failing(argv, timeout=120.0):
-        calls.append(list(argv))
-        if argv[0] == "apt-get" and argv[1] == "update":
-            return "ok"
-        raise CoreError("no candidate")
-
-    root = tempfile.mkdtemp(prefix="se-gh-")
-    for name in ("vpnserver", "vpncmd", "hamcore.se2"):
-        Path(root, name).write_text("x")
-    with mock.patch.object(shutil, "which", which), \
-         mock.patch.object(backend, "_run", failing), \
-         mock.patch.object(gh, "install_from_github",
-                           lambda **kw: "v5.02.5187"), \
-         mock.patch.object(backend, "_link_on_path", lambda r: None):
-        backend._INSTALL_ROOT = root
+    with mock.patch.dict(os.environ, {"ZAGROS_SOFTETHER_SRC_CACHE": str(tmp_path / "cache")}), \
+         mock.patch.object(shutil, "which", lambda name: "/usr/bin/apt-get"), \
+         mock.patch.object(backend, "server_binary", lambda: None), \
+         mock.patch.object(backend, "_run",
+                           lambda argv, timeout=120.0: (calls.append(list(argv)), "ok")[1]), \
+         mock.patch.object(backend, "_install_from_github",
+                           lambda: "installed SoftEther v4.44 stable bundle"):
         out = backend.install_packages()
-    assert out == "installed SoftEther v5.02.5187 from GitHub releases"
-    attempted = {c[0] for c in calls}
-    assert {"apt-get", "dnf"} <= attempted  # NOT apt-only anymore
+    assert "v4.44 stable bundle" in out
+    assert calls == [], "the fast official bundle must win before apt/source work"
 
 
 def test_install_source_build_last_resort_uses_live_tag() -> None:
@@ -412,8 +395,8 @@ def test_install_source_build_last_resort_uses_live_tag() -> None:
          mock.patch.object(backend, "_run", fake_run), \
          mock.patch.object(backend, "_run_streamed", fake_run_streamed), \
          mock.patch.object(backend, "_ensure_build_deps", lambda: None), \
-         mock.patch.object(gh, "install_from_github",
-                           lambda **kw: (_ for _ in ()).throw(CoreError("no asset"))), \
+         mock.patch.object(backend, "_install_from_github",
+                           lambda: (_ for _ in ()).throw(CoreError("no stable asset"))), \
          mock.patch.object(gh, "fetch_latest_release",
                            lambda repo, timeout=30.0: {"tag_name": "v9.9.9-test"}), \
          mock.patch.object(urllib.request, "urlopen", fake_urlopen), \
@@ -424,7 +407,7 @@ def test_install_source_build_last_resort_uses_live_tag() -> None:
         backend._INSTALL_ROOT = root
         out = backend.install_packages()
     # zero hardcoding: the URL carries the LIVE-resolved tag
-    assert urls and "v9.9.9-test" in urls[0]
+    assert any("v9.9.9-test" in url for url in urls)
     assert out == "built SoftEther v9.9.9-test from source (cmake)"
     assert any(c[:2] == ["cmake", "-S"] for c in calls)
     assert any(c[:2] == ["cmake", "--build"] for c in calls)
@@ -441,8 +424,9 @@ def test_install_reports_every_failed_stage(tmp_path) -> None:
 
     backend = _se_backend()
     with mock.patch.object(shutil, "which", lambda n: None), \
-         mock.patch.object(gh, "install_from_github",
-                           lambda **kw: (_ for _ in ()).throw(CoreError("gh down"))), \
+         mock.patch.object(backend, "server_binary", lambda: None), \
+         mock.patch.object(backend, "_install_from_github",
+                           lambda: (_ for _ in ()).throw(CoreError("gh down"))), \
          mock.patch.object(gh, "fetch_latest_release",
                            lambda repo, timeout=30.0: {"tag_name": "v1"}), \
          mock.patch.object(backend, "_ensure_build_deps",
@@ -459,8 +443,17 @@ def test_install_reports_every_failed_stage(tmp_path) -> None:
             raise AssertionError("install must fail when every stage fails")
         except CoreError as exc:
             msg = str(exc)
-            assert "github-release:" in msg and "source-build:" in msg
+            assert "stable-bundle:" in msg and "source-build:" in msg
             assert "gh down" in msg and "no toolchain" in msg
+
+
+def test_vpncmd_errors_redact_psk_and_password() -> None:
+    backend = _se_backend()
+    secret = "NeverLog9"
+    rendered = backend._safe_command(
+        f"IPsecEnable /PSK:{secret} /PASSWORD:{secret} /L2TP:yes")
+    assert secret not in rendered
+    assert rendered.count("<redacted>") == 2
 
 
 def test_build_deps_per_manager_and_absence_error() -> None:

@@ -309,6 +309,8 @@ def test_issue_portal_token_by_username_and_404():
     r = _client.post("/api/user", headers=_auth(token), json={
         "username": name, "proxies": {"shadowsocks": {}}})
     assert r.status_code == 200, r.text
+    generated = r.json()["subscription_url"]
+    assert "/sub/" in generated and "/zagros/sub/" not in generated
     r = _client.post(f"/api/zagros/users/by-username/{name}/subscription-token",
                      headers=_auth(token))
     assert r.status_code == 200, r.text

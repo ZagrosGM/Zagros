@@ -439,17 +439,46 @@ def test_openvpn_pki_upload_validated_and_matching_pair_written(tmp_path):
     with pytest.raises(CoreError, match="together"):
         asyncio.run(d.apply_studio_document({"inbounds": [
             {"protocol": "ovpn", "certificate": pair_a["cert"]}]}))
-    # matching pair → written once, idempotent
+    # A real OpenVPN server pair needs KU digitalSignature + EKU serverAuth
+    # and must be signed by the supplied CA (remote-cert-tls server enforces it).
+    from datetime import datetime, timedelta, timezone
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_name = _x509.Name([_x509.NameAttribute(NameOID.COMMON_NAME, "test-ca")])
+    ca_cert = (_x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name)
+               .public_key(ca_key.public_key()).serial_number(_x509.random_serial_number())
+               .not_valid_before(datetime.now(timezone.utc) - timedelta(minutes=1))
+               .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
+               .add_extension(_x509.BasicConstraints(ca=True, path_length=None), critical=True)
+               .sign(ca_key, hashes.SHA256()))
+    server_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    server_name = _x509.Name([_x509.NameAttribute(NameOID.COMMON_NAME, "server")])
+    server_cert = (_x509.CertificateBuilder().subject_name(server_name).issuer_name(ca_name)
+                   .public_key(server_key.public_key()).serial_number(_x509.random_serial_number())
+                   .not_valid_before(datetime.now(timezone.utc) - timedelta(minutes=1))
+                   .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
+                   .add_extension(_x509.KeyUsage(digital_signature=True, content_commitment=False,
+                        key_encipherment=True, data_encipherment=False, key_agreement=False,
+                        key_cert_sign=False, crl_sign=False, encipher_only=None, decipher_only=None), critical=True)
+                   .add_extension(_x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+                   .sign(ca_key, hashes.SHA256()))
+    ca_pem = ca_cert.public_bytes(serialization.Encoding.PEM).decode()
+    cert_pem = server_cert.public_bytes(serialization.Encoding.PEM).decode()
+    key_pem = server_key.private_bytes(serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption()).decode()
     asyncio.run(d.apply_studio_document({"inbounds": [
-        {"protocol": "ovpn", "ca_certificate": pair_a["cert"],
-         "certificate": pair_a["cert"], "certificate_key": pair_a["key"]}]}))
-    keys = list(wd.glob("*.key"))
-    assert keys and "PRIVATE KEY" in keys[0].read_text()
-    first_mtime = keys[0].stat().st_mtime_ns
+        {"protocol": "ovpn", "ca_certificate": ca_pem,
+         "certificate": cert_pem, "certificate_key": key_pem}]}))
+    server_key_path = wd / "server.key"
+    assert server_key_path.exists() and "PRIVATE KEY" in server_key_path.read_text()
+    first_mtime = server_key_path.stat().st_mtime_ns
     asyncio.run(d.apply_studio_document({"inbounds": [
-        {"protocol": "ovpn",
-         "certificate": pair_a["cert"], "certificate_key": pair_a["key"]}]}))
-    assert keys[0].stat().st_mtime_ns == first_mtime
+        {"protocol": "ovpn", "ca_certificate": ca_pem,
+         "certificate": cert_pem, "certificate_key": key_pem}]}))
+    assert server_key_path.stat().st_mtime_ns == first_mtime
 
 
 def test_openvpn_render_reflects_auth_mode_and_push_options(tmp_path):
@@ -463,6 +492,7 @@ def test_openvpn_render_reflects_auth_mode_and_push_options(tmp_path):
                      compression="lz4-v2", topology="net30")
     conf = _render(d)
     assert "auth-user-pass-verify" in conf
+    assert "verify-client-cert none" in conf
     assert "topology net30" in conf
     assert "lz4-v2" in conf
     assert "management 127.0.0.1 17506" in conf
@@ -585,7 +615,8 @@ class _SEFakeBackend:
     def reachable(self):
         return self._reachable
 
-    def _cmd(self, command, csv=None):
+    def _cmd(self, command, csv=None, hub=True):
+        assert hub is False, "feature switches require entire-server admin context"
         self.cmds.append(command)
         return ""
 
@@ -627,27 +658,23 @@ def test_softether_vpncmd_convergence(tmp_path):
     d = SoftEtherDriver(settings={"hub": "DEFAULT"}, backend=backend)
     asyncio.run(d.apply_studio_document({"inbounds": [
         {"protocol": "l2tp", "ipsec_psk": "my-psk"},
-        {"protocol": "pptp"}]}))
+        {"protocol": "sstp"}]}))
     flat = " | ".join(backend.cmds)
-    # alpha.7.5 item 7: the enable path converges from IPsecGet and ALWAYS
-    # issues the full 5-argument command (the alpha.7.4 form lacked /PSK:
-    # on disable, and vpncmd rejected it locally with rc=38)
     assert "IPsecGet" in backend.cmds
     assert ("IPsecEnable /L2TP:yes /L2TPRAW:no /ETHERIP:no "
             "/PSK:my-psk /DEFAULTHUB:DEFAULT") in flat
-    # not-wanted sstp converges OFF (listener delete); wanted pptp created
-    assert "ListenerDelete 443" in flat and "ListenerCreate 1723" in flat
-    # no imagined verb is ever commanded (OpenVPNEnable does not exist in
-    # vpncmd 5.02 — the clone toggle is external by design)
-    assert "OpenVPNEnable" not in flat
-    # positive: sstp wanted → idempotent create; l2tp not wanted AND the
-    # server already reports all-off → idempotent no-op (no IPsecEnable)
+    # SSTP is a real protocol switch plus a TCP listener. It is never
+    # represented as PPTP and never asks for the L2TP PSK.
+    assert "SstpEnable yes" in flat and "ListenerCreate 443" in flat
+    assert "PPTP" not in flat and "ListenerCreate 1723" not in flat
+
     backend2 = _SEFakeBackend()
     d2 = SoftEtherDriver(settings={"hub": "DEFAULT"}, backend=backend2)
     asyncio.run(d2.apply_studio_document({"inbounds": [{"protocol": "sstp"}]}))
     flat2 = " | ".join(backend2.cmds)
-    assert "ListenerCreate 443" in flat2
+    assert "SstpEnable yes" in flat2 and "ListenerCreate 443" in flat2
     assert "IPsecEnable" not in flat2
+    assert "pre-shared key" not in flat2.lower()
 
 
 def test_softether_l2tp_requires_psk(tmp_path):
@@ -680,7 +707,7 @@ def test_softether_disable_preserves_server_psk_and_hub(tmp_path):
     backend = _SEFakeBackend(ipsec=state)
     d = SoftEtherDriver(settings={"hub": "DEFAULT", "ipsec_psk": "stored"},
                         backend=backend)
-    asyncio.run(d.apply_studio_document({"inbounds": [{"protocol": "pptp"}]}))
+    asyncio.run(d.apply_studio_document({"inbounds": [{"protocol": "sstp"}]}))
     flat = " | ".join(backend.cmds)
     assert ("IPsecEnable /L2TP:no /L2TPRAW:no /ETHERIP:no "
             "/PSK:srv-psk /DEFAULTHUB:MAIN") in flat
@@ -707,16 +734,18 @@ def test_softether_enable_psk_preference_order(tmp_path):
     assert "/PSK:server-psk /DEFAULTHUB:HUBX" in " | ".join(backend2.cmds)
 
 
-def test_softether_ovpn_feature_refused_honestly(tmp_path):
+def test_softether_stable_openvpn_switch_and_pptp_honesty(tmp_path):
     from app.cores.drivers.softether.driver import SoftEtherDriver
 
     d = SoftEtherDriver(settings={"hub": "DEFAULT"}, backend=_SEFakeBackend())
-    with pytest.raises(CoreError, match="no verb"):
+    asyncio.run(d.apply_studio_document(
+        {"inbounds": [{"protocol": "ovpn", "port": 995}]}))
+    assert "OpenVpnEnable yes /PORTS:995" in d._backend.cmds
+    assert d.settings["feature_ovpn"] is True
+
+    with pytest.raises(CoreError, match="does not implement PPTP"):
         asyncio.run(d.apply_studio_document(
-            {"inbounds": [{"protocol": "ovpn", "ports": "995"}]}))
-    # a refused feature must not half-apply — nothing was commanded
-    assert all("IPsecEnable" not in c and "ListenerCreate" not in c
-               for c in d._backend.cmds)
+            {"inbounds": [{"protocol": "pptp"}]}))
 
 
 def test_softether_ipsec_backend_local_preflight(monkeypatch):
@@ -728,7 +757,13 @@ def test_softether_ipsec_backend_local_preflight(monkeypatch):
 
     backend = LocalSoftEtherBackend({"hub": "DEFAULT"})
     sent: list[str] = []
-    monkeypatch.setattr(backend, "_cmd", lambda command, csv=False: sent.append(command) or "")
+    monkeypatch.setattr(
+        backend, "_cmd",
+        lambda command, csv=False, hub=True: (
+            (_ for _ in ()).throw(AssertionError("IPsec must be server-scoped"))
+            if hub else sent.append(command) or ""
+        ),
+    )
 
     backend.ipsec_services_set(l2tp=False, l2tp_raw=False, etherip=False,
                                psk="abc123", default_hub="DEFAULT")

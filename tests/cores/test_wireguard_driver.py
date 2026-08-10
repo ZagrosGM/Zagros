@@ -23,6 +23,8 @@ import time
 import traceback
 import types as _types
 from pathlib import Path
+
+import pytest
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -192,9 +194,11 @@ def test_render_interface_forwarding_nat_hooks() -> None:
     with_hooks = render_interface(
         private_key="PRIV", address="10.66.66.1/24", listen_port=51820,
         peers=[peer], forward_nat=True)
-    assert "PostUp = sysctl -w net.ipv4.ip_forward=1" in with_hooks
+    # Forwarding is a pre-start environment check, never a PostUp sysctl:
+    # host-network Docker mounts /proc/sys read-only.
+    assert "sysctl" not in with_hooks and "/proc/sys" not in with_hooks
     assert "PostUp = iptables -C FORWARD -i %i -j ACCEPT" in with_hooks
-    assert "iptables -t nat -C POSTROUTING" in with_hooks
+    assert "iptables -t nat -C POSTROUTING -s 10.66.66.0/24" in with_hooks
     assert "MASQUERADE" in with_hooks
     # runtime default-route discovery — no hardcoded interface name
     assert "ip route show default" in with_hooks and "eth0" not in with_hooks
@@ -214,7 +218,7 @@ def test_driver_render_carries_hooks_by_default(monkeypatch) -> None:
         driver, backend = _driver()
         await driver.start()
         conf = backend.up_calls[0]
-        assert "sysctl -w net.ipv4.ip_forward=1" in conf
+        assert "sysctl" not in conf and "/proc/sys" not in conf
         assert "MASQUERADE" in conf
 
     asyncio.run(run())
@@ -587,6 +591,28 @@ def test_account_provisioning_on_stopped_core():
         await driver.start()
         assert account.settings["public_key"] in backend.up_calls[0]
     asyncio.run(run())
+
+
+def test_local_backend_forwarding_preflight_is_environment_aware(tmp_path, monkeypatch):
+    """Docker/read-only proc fails before interface creation; direct-host mode
+    uses sysctl and verifies the resulting kernel value."""
+    from app.cores.drivers.wireguard.backend import LocalWireGuardBackend
+
+    backend = LocalWireGuardBackend({"work_dir": str(tmp_path)})
+    monkeypatch.setattr(backend, "_forwarding_enabled", lambda: False)
+    monkeypatch.setattr(backend, "_in_container", lambda: True)
+    with pytest.raises(CoreError, match="Docker HOST"):
+        backend._ensure_forwarding()
+    assert not (tmp_path / "mzwg0.conf").exists()
+
+    states = iter([False, True])
+    commands: list[list[str]] = []
+    monkeypatch.setattr(backend, "_in_container", lambda: False)
+    monkeypatch.setattr(backend, "_forwarding_enabled", lambda: next(states))
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/sbin/sysctl" if name == "sysctl" else None)
+    monkeypatch.setattr(backend, "_run", lambda argv, **kw: commands.append(argv) or "")
+    backend._ensure_forwarding()
+    assert commands == [["/usr/sbin/sysctl", "-w", "net.ipv4.ip_forward=1"]]
 
 
 # ---------------------------------------------------------------------- #

@@ -108,12 +108,22 @@ def test_disabled_core_yields_no_entries(runtime):
     assert all(g.core_id != "wireguard" for g in groups)
 
 
-def test_softether_offers_all_compat_protocols():
+def test_softether_catalog_is_enabled_capability_aware():
     from app.platform.inbounds import _service_inbounds
 
-    entries = _service_inbounds("softether", {})
+    assert _service_inbounds("softether", {}) == []
+    settings = {
+        "feature_softether": True, "native_port": 5555,
+        "feature_l2tp": True, "feature_l2tp_raw": True,
+        "feature_etherip": True, "feature_sstp": True,
+        "feature_ovpn": True,
+    }
+    entries = _service_inbounds("softether", settings)
     assert [(e.tag, e.protocol) for e in entries] == [
-        ("l2tp", "l2tp"), ("sstp", "sstp"), ("pptp", "pptp"), ("softether", "ovpn")]
+        ("softether", "softether"), ("l2tp", "l2tp"),
+        ("l2tp-raw", "l2tp_raw"), ("etherip", "etherip"),
+        ("sstp", "sstp"), ("softether-openvpn", "ovpn")]
+    assert all(e.protocol != "pptp" for e in entries)
 
 
 def test_legacy_xray_group_merges_running_config(runtime, monkeypatch):

@@ -29,12 +29,24 @@ export function DataTable<T>({
     count: rows.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => estimate,
+    getItemKey: (index) => rowKey(rows[index], index),
+    // Rows may contain wrapped badges, notes, or long identities. A fixed
+    // estimate is only the first paint; measureElement keeps every following
+    // absolute row below the row's REAL rendered height.
+    measureElement: (element) => element?.getBoundingClientRect().height,
     overscan: 12,
     enabled: virtual,
   });
+  // Fixed columns must not consume a flex row until the remaining column has
+  // negative width. Give the table a real intrinsic minimum and let the outer
+  // container scroll horizontally on phones instead of overlapping cells.
+  const minTableWidth = columns.reduce((total, column) => {
+    const fixed = column.width?.match(/^(\d+(?:\.\d+)?)px$/);
+    return total + (fixed ? Number(fixed[1]) : 180);
+  }, 0);
 
   const header = (
-    <div role="row" className="sticky top-0 z-10 flex border-b border-border bg-surface-1/95 backdrop-blur">
+    <div role="row" style={{ minWidth: minTableWidth }} className="sticky top-0 z-10 flex border-b border-border bg-surface-1/95 backdrop-blur">
       {columns.map((c) => (
         <div key={c.id} role="columnheader" style={c.width ? { width: c.width, flex: "none" } : undefined}
           className={cn("flex-1 px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-content-3", c.className)}>
@@ -76,6 +88,8 @@ export function DataTable<T>({
             return (
               <div
                 key={virtual ? (vi as { key: React.Key }).key : rowKey(row, index)}
+                ref={virtual ? virtualizer.measureElement : undefined}
+                data-index={virtual ? index : undefined}
                 role="row"
                 onClick={onRowClick ? () => onRowClick(row, index) : undefined}
                 className={cn(
@@ -84,12 +98,13 @@ export function DataTable<T>({
                 )}
                 style={virtual ? {
                   position: "absolute", top: 0, left: 0, width: "100%",
+                  minWidth: minTableWidth,
                   transform: `translateY(${(vi as { start: number }).start}px)`,
-                } : undefined}
+                } : { minWidth: minTableWidth }}
               >
                 {columns.map((c) => (
                   <div key={c.id} role="cell" style={c.width ? { width: c.width, flex: "none" } : undefined}
-                    className={cn("flex-1 truncate px-4 py-3 text-[13px]", c.className)}>
+                    className={cn("min-w-0 flex-1 overflow-hidden px-4 py-3 text-[13px]", c.className)}>
                     {c.cell(row, index)}
                   </div>
                 ))}

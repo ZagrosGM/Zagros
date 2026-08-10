@@ -163,6 +163,28 @@ def test_build_page_expands_sections():
 # SQL store round-trip (exercises the real CoreHostModel mapping)
 # --------------------------------------------------------------------- #
 
+def test_default_host_lifecycle_is_per_inbound_and_cleans_deleted_tags():
+    async def run():
+        from app.portal.hostengine import DEFAULT_ADDRESS, DEFAULT_REMARK, reconcile_default_hosts
+
+        store = InMemoryCoreHostStore()
+        grouped = await reconcile_default_hosts(store, "wireguard", ["wg-a"])
+        assert grouped["wg-a"][0].remark == DEFAULT_REMARK
+        assert grouped["wg-a"][0].address == DEFAULT_ADDRESS
+        # A second inbound gets an independent object/row.
+        grouped = await reconcile_default_hosts(store, "wireguard", ["wg-a", "wg-b"])
+        assert set(grouped) == {"wg-a", "wg-b"}
+        await store.replace_tags("wireguard", {
+            "wg-a": [HostEntry(remark="custom", address="a.example")],
+        })
+        grouped = await reconcile_default_hosts(store, "wireguard", ["wg-a", "wg-b"])
+        assert grouped["wg-a"][0].remark == "custom"  # no blind overwrite
+        grouped = await reconcile_default_hosts(store, "wireguard", ["wg-b"])
+        assert set(grouped) == {"wg-b"}  # deleted inbound's hosts cleaned
+
+    asyncio.run(run())
+
+
 def test_sql_core_host_store_roundtrip(tmp_path):
     async def run():
         from app.persistence import create_schema, create_session_factory

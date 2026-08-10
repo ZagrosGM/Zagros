@@ -151,6 +151,8 @@ def test_openvpn_delivery_security_facts_and_real_ca_fingerprint() -> None:
         file_art = section.artifacts[0]
         assert "BEGIN CERTIFICATE" in file_art.content
         assert "remote-cert-tls server" in file_art.content
+        assert "setenv CLIENT_CERT 0" in file_art.content
+        assert "<cert>" not in file_art.content and "<key>" not in file_art.content
 
 
 # ---------------------------------------------------------------------- #
@@ -258,9 +260,10 @@ def test_softether_delivery_all_transports_with_psk_and_notes() -> None:
 
     profile = asyncio.run(main())
     assert [s.inbound_tag for s in profile.sections] == [
-        "l2tp", "sstp", "pptp", "softether"]
+        "softether", "l2tp", "l2tp-raw", "etherip", "sstp",
+        "softether-openvpn"]
     assert [s.protocol for s in profile.sections] == [
-        "l2tp", "sstp", "pptp", "ovpn"]
+        "softether", "l2tp", "l2tp_raw", "etherip", "sstp", "ovpn"]
     for index, section in enumerate(profile.sections):
         fields = _fields(profile, index)
         assert fields["host"].value == "vpn.example.com"
@@ -268,24 +271,21 @@ def test_softether_delivery_all_transports_with_psk_and_notes() -> None:
         assert fields["password"].secret and fields["password"].value == "pw-alice"
         assert fields["hub"].value == "DEFAULT"
     # per-transport ports grounded in the hub document
-    assert _fields(profile, 0)["port"].value == "UDP 500 · 4500 · 1701"
-    assert _fields(profile, 1)["port"].value == "443/tcp"
-    assert _fields(profile, 2)["port"].value == "1723/tcp"
-    assert _fields(profile, 3)["port"].value == "1194/tcp"
+    by_tag = {section.inbound_tag: _fields(profile, index)
+              for index, section in enumerate(profile.sections)}
+    assert by_tag["softether"]["port"].value == "5555/tcp"
+    assert by_tag["l2tp"]["port"].value == "UDP 500 · 4500 · 1701"
+    assert by_tag["l2tp-raw"]["port"].value == "1701/udp"
+    assert by_tag["sstp"]["port"].value == "443/tcp"
+    assert by_tag["softether-openvpn"]["port"].value == "1194/udp"
     # PSK rides the L2TP section only, secret
-    l2tp = _fields(profile, 0)
+    l2tp = by_tag["l2tp"]
     assert l2tp["ipsec_psk"].value == "test-psk" and l2tp["ipsec_psk"].secret
-    assert "ipsec_psk" not in _fields(profile, 1)
-    # feature flags are OFF on a fresh hub → honest NOTE per transport; the
-    # OpenVPN-clone section carries the EXTERNAL-MANAGEMENT note instead
-    # (vpncmd 5.02 has no toggle verb — alpha.7.5 item 7)
+    assert "ipsec_psk" not in by_tag["sstp"]
+    # feature flags are OFF on a fresh hub → honest NOTE per transport.
     for section in profile.sections:
         notes = [a.note for a in section.artifacts if a.kind is ArtifactKind.NOTE]
-        if section.protocol == "ovpn":
-            assert any("Server Manager" in (n or "") and "no" in (n or "")
-                       for n in notes)
-        else:
-            assert any("feature is currently OFF" in (n or "") for n in notes)
+        assert any("feature is currently OFF" in (n or "") for n in notes)
 
 
 def test_softether_delivery_missing_facts_are_notes_not_errors() -> None:
@@ -304,16 +304,20 @@ def test_softether_delivery_missing_facts_are_notes_not_errors() -> None:
 
     profile, account = asyncio.run(main())
     assert account.settings["password"]                  # item-10 mint
-    l2tp_notes = [a.note for a in profile.sections[0].artifacts
+    l2tp = next(section for section in profile.sections if section.inbound_tag == "l2tp")
+    l2tp_notes = [a.note for a in l2tp.artifacts
                   if a.kind is ArtifactKind.NOTE]
     assert any("pre-shared key" in n for n in l2tp_notes)
     assert any("server address is not configured" in n for n in l2tp_notes)
     assert _fields(profile, 0)["password"].value == account.settings["password"]
     # non-L2TP sections never mention the PSK
-    sstp_notes = [a.note for a in profile.sections[1].artifacts
+    sstp = next(section for section in profile.sections if section.inbound_tag == "sstp")
+    sstp_notes = [a.note for a in sstp.artifacts
                   if a.kind is ArtifactKind.NOTE]
     assert not any("pre-shared key" in (n or "") for n in sstp_notes)
-    assert _fields(profile, 3)["port"].value == "55443/tcp"
+    ovpn_index = next(i for i, section in enumerate(profile.sections)
+                      if section.inbound_tag == "softether-openvpn")
+    assert _fields(profile, ovpn_index)["port"].value == "55443/udp"
 
 
 def test_softether_delivery_grants_and_empty_state() -> None:
@@ -335,7 +339,7 @@ def test_softether_delivery_grants_and_empty_state() -> None:
         sans = await driver.describe_delivery(excluded)
         assert "sstp" not in [s.inbound_tag for s in sans.sections]
 
-        nothing = _acct(3, "carol", "pptp",
+        nothing = _acct(3, "carol", "softether",
                         {"password": "x",
                          "inbound_tags": ["sstp"],
                          "excluded_inbounds": ["sstp"]})

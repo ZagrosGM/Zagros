@@ -13,7 +13,7 @@ import type { PanelInfo, PortalSettings } from "../lib/types";
 // backend keeps accepting the alpha.7 shorthand "app_login" for stray
 // integrations, but the dashboard speaks the canonical ids itself
 const AUTH_MODES = [
-  { id: "subscription_link", label: "Subscription link", hint: "users open a tokenized /zagros/sub/<token> link from any client" },
+  { id: "subscription_link", label: "Subscription link", hint: "users open the canonical tokenized /sub/<token> link from any client" },
   { id: "application_login", label: "Application login", hint: "the Zagros app signs in with issued credentials (app-credentials per user)" },
 ];
 

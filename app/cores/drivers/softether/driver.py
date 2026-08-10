@@ -58,13 +58,11 @@ class SoftEtherDriver(BaseCoreDriver):
         id="softether",
         name="SoftEther VPN",
         description=(
-            "SoftEther hub users via vpncmd: live user/session management, "
-            "native per-user traffic counters, expiry-based suspend, "
-            "session kick, L2TP/IPsec + SSTP/PPTP listener toggles and "
-            "OpenVPN-clone client configs (clone toggle itself is external "
-            "to vpncmd 5.02)."
+            "SoftEther stable server: native SoftEther, L2TP/IPsec, raw L2TP, "
+            "EtherIP, SSTP and OpenVPN compatibility with live vpncmd user, "
+            "session and traffic management. PPTP is not implemented upstream."
         ),
-        protocols=["l2tp", "sstp", "pptp", "ovpn"],
+        protocols=["softether", "l2tp", "l2tp_raw", "etherip", "sstp", "ovpn"],
         capabilities={
             Capability.USER_MANAGEMENT,
             Capability.SUSPEND_RESUME,
@@ -83,7 +81,9 @@ class SoftEtherDriver(BaseCoreDriver):
                 "server": {"type": "string", "default": "localhost"},
                 "hub": {"type": "string", "default": "DEFAULT"},
                 "admin_password": {"type": "string"},
-                "ipsec_psk": {"type": "string"},
+                "ipsec_psk": {"type": "string", "minLength": 1, "maxLength": 128},
+                "native_port": {"type": "integer", "default": 5555},
+                "ovpn_ports": {"type": "string", "default": "1194"},
                 "advertise_host": {"type": "string"},
             },
         },
@@ -93,6 +93,14 @@ class SoftEtherDriver(BaseCoreDriver):
             "hub": "DEFAULT",
             "admin_password": "",
             "ipsec_psk": "",
+            "native_port": 5555,
+            "ovpn_ports": "1194",
+            "feature_softether": False,
+            "feature_l2tp": False,
+            "feature_l2tp_raw": False,
+            "feature_etherip": False,
+            "feature_sstp": False,
+            "feature_ovpn": False,
             "advertise_host": "127.0.0.1",
         },
         homepage="https://www.softether.org/",
@@ -117,32 +125,37 @@ class SoftEtherDriver(BaseCoreDriver):
         self._suspended_expire_restore: dict[str, str | None] = {}
 
     # ------------------------------------------------------------------ #
-    # Config Studio bridge — every entry maps to REAL vpncmd verbs.
-    # The OpenVPN clone is intentionally absent: vpncmd 5.02 has no verb
-    # for it (alpha.7.5 item 7 audit) — claiming it produced guaranteed
-    # failures (ERR_BAD_COMMAND_OR_PARAM) after the IPsec rc=38 fix.
+    # Config Studio bridge — every offered entry maps to a REAL stable-line
+    # vpncmd capability. PPTP is not a SoftEther protocol. EtherIP remains
+    # Advanced-only because a usable setup additionally needs per-router
+    # EtherIpClientAdd mappings (a bare enable switch would be misleading).
     # ------------------------------------------------------------------ #
-    _STUDIO_FEATURES = {"l2tp", "sstp", "pptp"}
+    _STUDIO_FEATURES = {"softether", "l2tp", "l2tp_raw", "etherip", "sstp", "ovpn"}
 
     def export_config_document(self) -> dict[str, Any]:
-        """Studio seed: hub feature flags as inbound entries (settings-shaped;
-        ipsec_psk is write-only like every secret in the studio surface)."""
+        """Current enabled feature set. An unconfigured hub exports an EMPTY
+        list — never an invented blank L2TP inbound. That phantom entry was
+        why creating SSTP/native incorrectly failed L2TP PSK validation."""
         s = self.settings
         inbounds: list[dict[str, Any]] = []
+        if s.get("feature_softether"):
+            inbounds.append({"tag": "softether", "protocol": "softether",
+                             "port": int(s.get("native_port") or 5555), "transport": "tcp"})
         if s.get("feature_l2tp"):
             inbounds.append({
-                "tag": "l2tp", "protocol": "l2tp", "port": 0,
+                "tag": "l2tp", "protocol": "l2tp", "port": 1701,
                 "ipsec_psk": "", "has_ipsec_psk": bool(s.get("ipsec_psk")),
             })
+        if s.get("feature_l2tp_raw"):
+            inbounds.append({"tag": "l2tp-raw", "protocol": "l2tp_raw", "port": 1701})
+        if s.get("feature_etherip"):
+            inbounds.append({"tag": "etherip", "protocol": "etherip", "port": 0})
         if s.get("feature_sstp"):
             inbounds.append({"tag": "sstp", "protocol": "sstp", "port": 443})
-        if s.get("feature_pptp"):
-            inbounds.append({"tag": "pptp", "protocol": "pptp", "port": 1723})
-        if not inbounds:
-            inbounds.append({
-                "tag": "l2tp", "protocol": "l2tp", "port": 0,
-                "ipsec_psk": "", "has_ipsec_psk": bool(s.get("ipsec_psk")),
-            })
+        if s.get("feature_ovpn"):
+            inbounds.append({"tag": "softether-openvpn", "protocol": "ovpn",
+                             "port": int(str(s.get("ovpn_ports") or "1194").split(",")[0]),
+                             "transport": "udp"})
         return {"inbounds": inbounds}
 
     async def apply_studio_document(self, document: dict[str, Any]) -> None:
@@ -163,13 +176,10 @@ class SoftEtherDriver(BaseCoreDriver):
         wanted: dict[str, dict[str, Any]] = {}
         for ib in inbounds:
             proto = str(ib.get("protocol") or "")
-            if proto == "ovpn":
+            if proto == "pptp":
                 raise CoreError(
-                    "SoftEther's OpenVPN clone server cannot be managed "
-                    "through vpncmd 5.02 — upstream ships no verb for it "
-                    "(only the GUI Server Manager / RPC SetOpenVpnSstpConfig "
-                    "can toggle the clone). Use the standalone 'openvpn' "
-                    "core for OpenVPN instead."
+                    "SoftEther does not implement PPTP. Use L2TP/IPsec, SSTP, "
+                    "OpenVPN compatibility, or the native SoftEther protocol."
                 )
             if proto not in self._STUDIO_FEATURES:
                 raise CoreError(
@@ -184,67 +194,89 @@ class SoftEtherDriver(BaseCoreDriver):
                 "first; feature changes need a live vpncmd."
             )
 
-        # L2TP/IPsec — converge from the server's CURRENT IPsec state
-        # (alpha.7.5 item 7): vpncmd's IPsecEnable refuses a missing/empty
-        # /PSK: locally (rc=38) on BOTH enable and disable; reading IPsecGet
-        # first lets every command carry the full 5-argument form WITHOUT
-        # clobbering the stored PSK or default hub.
+        # IPsec family is one atomic vpncmd setting. Only L2TP/IPsec consumes
+        # a user-facing PSK in the simple wizard. Raw L2TP has no IPsec layer;
+        # EtherIP is Advanced-only and reuses the server's existing IPsec key.
         try:
             current = await asyncio.to_thread(self._backend.ipsec_get)
-        except CoreError:
-            current = None  # unreachable/rights-limited → converge anyway
-        if "l2tp" in wanted:
-            psk = (str(wanted["l2tp"].get("ipsec_psk") or "").strip()
-                   or str(s.get("ipsec_psk") or "").strip()
-                   or (current.psk if current else ""))
-            if not psk:
-                raise CoreError("L2TP/IPsec needs a pre-shared key (ipsec_psk).")
-            hub_name = (current.default_hub if current else "") or hub
+        except (CoreError, AttributeError):
+            current = None
+        l2tp = "l2tp" in wanted
+        l2tp_raw = "l2tp_raw" in wanted
+        etherip = "etherip" in wanted
+        supplied_psk = str(wanted.get("l2tp", {}).get("ipsec_psk") or "").strip()
+        stored_psk = str(s.get("ipsec_psk") or "").strip()
+        current_psk = current.psk if current else ""
+        # Enabling L2TP honours the wizard/stored admin choice. Disabling the
+        # IPsec family carries the server's CURRENT PSK to avoid clobbering a
+        # value changed out-of-band.
+        psk = (supplied_psk or stored_psk or current_psk) if l2tp \
+            else (current_psk or stored_psk)
+        if l2tp and not psk:
+            raise CoreError("L2TP/IPsec needs a non-empty pre-shared key (ipsec_psk).")
+        # IPsecEnable's CLI parser requires /PSK even when only raw L2TP is
+        # enabled or all services are disabled. This value is inert unless an
+        # IPsec-backed feature is on; it is never presented as a PPTP/SSTP PSK.
+        command_psk = psk or "zagrosoff"  # 9 chars: stable vpncmd's PSK maximum
+        target_changed = current is None or (
+            current.l2tp != l2tp or current.l2tp_raw != l2tp_raw
+            or current.etherip != etherip
+        )
+        if target_changed:
             await asyncio.to_thread(
                 self._backend.ipsec_services_set,
-                l2tp=True, l2tp_raw=False, etherip=False,
-                psk=psk, default_hub=hub_name)
+                l2tp=l2tp, l2tp_raw=l2tp_raw, etherip=etherip,
+                psk=command_psk,
+                default_hub=(current.default_hub if current else "") or hub,
+            )
+        if l2tp and psk:
             s["ipsec_psk"] = psk
-            s["feature_l2tp"] = True
-        elif current is None or current.any_enabled:
-            # disable: /PSK: is inert while every service is off but vpncmd
-            # still demands it non-empty — keep the server's own value (or
-            # the stored one) so nothing meaningful is clobbered.
-            psk = ((current.psk if current else "")
-                   or str(s.get("ipsec_psk") or "").strip() or "none")
-            hub_name = (current.default_hub if current else "") or hub
-            await asyncio.to_thread(
-                self._backend.ipsec_services_set,
-                l2tp=False, l2tp_raw=False, etherip=False,
-                psk=psk, default_hub=hub_name)
-            s["feature_l2tp"] = False
+        s["feature_l2tp"] = l2tp
+        s["feature_l2tp_raw"] = l2tp_raw
+        s["feature_etherip"] = etherip
+
+        async def command(command: str, *, ignore_exists: bool = False) -> None:
+            try:
+                await asyncio.to_thread(self._backend._cmd, command, hub=False)  # noqa: SLF001
+            except CoreError as exc:
+                text = str(exc).lower()
+                if ignore_exists and any(marker in text for marker in
+                                         ("exist", "already", "not found", "not exist")):
+                    return
+                raise
+
+        # Native SoftEther is a TCP listener, independently managed.
+        if "softether" in wanted:
+            native_port = int(wanted["softether"].get("port") or 5555)
+            await command(f"ListenerCreate {native_port}", ignore_exists=True)
+            old_native = int(s.get("native_port") or native_port)
+            if s.get("feature_softether") and old_native != native_port:
+                await command(f"ListenerDelete {old_native}", ignore_exists=True)
+            s["native_port"] = native_port
+            s["feature_softether"] = True
         else:
-            # already fully OFF server-side AND not wanted — idempotent no-op
-            s["feature_l2tp"] = False
+            if s.get("feature_softether"):
+                await command(f"ListenerDelete {int(s.get('native_port') or 5555)}",
+                              ignore_exists=True)
+            s["feature_softether"] = False
 
-        # SSTP / PPTP — plain TCP listeners on the hub; converge
-        # idempotently (create-or-ignore-exists, delete-or-ignore-absent)
-        for proto, port in (("sstp", 443), ("pptp", 1723)):
-            if proto in wanted:
-                try:
-                    await asyncio.to_thread(self._backend._cmd, f"ListenerCreate {port}")  # noqa: SLF001
-                except CoreError as exc:
-                    if "exist" not in str(exc).lower():
-                        raise
-                s[f"feature_{proto}"] = True
-            else:
-                try:
-                    await asyncio.to_thread(self._backend._cmd, f"ListenerDelete {port}")  # noqa: SLF001
-                except CoreError as exc:
-                    if "exist" not in str(exc).lower():
-                        raise
-                s[f"feature_{proto}"] = False
+        # SSTP/OpenVPN are real stable-line protocol switches. ListenerCreate
+        # alone does NOT turn a port into PPTP/SSTP (the prior implementation
+        # did exactly that); PPTP is absent because SoftEther does not support it.
+        sstp = "sstp" in wanted
+        if sstp != bool(s.get("feature_sstp")):
+            await command(f"SstpEnable {'yes' if sstp else 'no'}")
+        if sstp:
+            await command("ListenerCreate 443", ignore_exists=True)
+        s["feature_sstp"] = sstp
 
-        # OpenVPN clone server: intentionally NOT managed — vpncmd 5.02 has
-        # no verb for it (unknown command exits ERR_BAD_COMMAND_OR_PARAM);
-        # fake-managing it was the same class of field failure as the
-        # IPsecEnable rc=38 bug. Entries with protocol "ovpn" are refused
-        # above with an explicit explanation (alpha.7.5 item 7 audit).
+        ovpn = "ovpn" in wanted
+        ovpn_port = int(wanted.get("ovpn", {}).get("port") or 1194)
+        if ovpn != bool(s.get("feature_ovpn")) or (
+                ovpn and str(s.get("ovpn_ports") or "1194") != str(ovpn_port)):
+            await command(f"OpenVpnEnable {'yes' if ovpn else 'no'} /PORTS:{ovpn_port}")
+        s["feature_ovpn"] = ovpn
+        s["ovpn_ports"] = str(ovpn_port)
 
     # ------------------------------------------------------------------ #
     # lifecycle — the server is external/systemd-owned; we verify reachability
@@ -464,16 +496,19 @@ class SoftEtherDriver(BaseCoreDriver):
     #: per-transport presentation facts — ports mirror EXACTLY what
     #: apply_studio_document converges on the hub (no invented settings).
     _TRANSPORTS = {
+        "softether": {"catalog_tag": "softether", "title": "Native SoftEther VPN",
+                       "port": None, "feature": "feature_softether", "needs_psk": False},
         "l2tp": {"catalog_tag": "l2tp", "title": "VPN (L2TP/IPsec)",
                  "port": "UDP 500 · 4500 · 1701", "feature": "feature_l2tp",
                  "needs_psk": True},
+        "l2tp_raw": {"catalog_tag": "l2tp-raw", "title": "VPN (raw L2TP; unencrypted)",
+                      "port": "1701/udp", "feature": "feature_l2tp_raw", "needs_psk": False},
+        "etherip": {"catalog_tag": "etherip", "title": "EtherIP / L2TPv3 over IPsec",
+                    "port": "UDP 500 · 4500", "feature": "feature_etherip", "needs_psk": False},
         "sstp": {"catalog_tag": "sstp", "title": "VPN (SSTP)",
                  "port": "443/tcp", "feature": "feature_sstp", "needs_psk": False},
-        "pptp": {"catalog_tag": "pptp", "title": "VPN (PPTP)",
-                 "port": "1723/tcp", "feature": "feature_pptp", "needs_psk": False},
-        "ovpn": {"catalog_tag": "softether", "title": "VPN (OpenVPN clone)",
-                 "port": None,  # from settings.ovpn_ports
-                 "feature": "feature_ovpn", "needs_psk": False},
+        "ovpn": {"catalog_tag": "softether-openvpn", "title": "VPN (OpenVPN compatibility)",
+                 "port": None, "feature": "feature_ovpn", "needs_psk": False},
     }
 
     def _granted_transports(self, account: UserAccount) -> list[str]:
@@ -519,8 +554,12 @@ class SoftEtherDriver(BaseCoreDriver):
 
         for proto in self._granted_transports(account):
             facts = self._TRANSPORTS[proto]
-            port = (facts["port"]
-                    or f"{str(s.get('ovpn_ports') or '1194').split(',')[0].strip()}/tcp")
+            if facts["port"]:
+                port = facts["port"]
+            elif proto == "ovpn":
+                port = f"{str(s.get('ovpn_ports') or '1194').split(',')[0].strip()}/udp"
+            else:
+                port = f"{int(s.get('native_port') or 5555)}/tcp"
             fields = [
                 DeliveryField(key="host", label="Server",
                               value=str(server) if server else "—"),
@@ -547,15 +586,10 @@ class SoftEtherDriver(BaseCoreDriver):
                 notes.append("The server address is not configured yet "
                              "(settings.advertise_host) — clients cannot dial "
                              "until the admin sets it.")
-            if proto == "ovpn":
-                # honest origin: the clone toggle lives outside the panel
-                # (vpncmd 5.02 has no verb) — the panel reports facts only
-                notes.append("The OpenVPN clone listener is managed OUTSIDE "
-                             "the panel (SoftEther Server Manager → 'OpenVPN / "
-                             "MS-SSTP Setting') — vpncmd 5.02 exposes no "
-                             "toggle verb; these facts describe how to dial "
-                             "once the operator has enabled it there.")
-            elif not s.get(facts["feature"]):
+            if proto == "etherip":
+                notes.append("EtherIP also needs an EtherIpClientAdd router identity "
+                             "mapping; enabling the server bit alone is not a usable tunnel.")
+            if not s.get(facts["feature"]):
                 notes.append(f"The '{proto}' feature is currently OFF on the hub "
                              "— enable it in the SoftEther studio document.")
             artifacts: list[DeliveryArtifact] = [

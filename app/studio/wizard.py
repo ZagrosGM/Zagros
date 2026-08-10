@@ -47,6 +47,8 @@ Secrets are write-only (apply keeps the stored value when left blank).
 """
 from __future__ import annotations
 
+import secrets
+
 from typing import Any
 
 Field = dict[str, Any]
@@ -486,23 +488,41 @@ def _ssh_blueprint() -> list[Protocol]:
 
 
 def _softether_blueprint() -> list[Protocol]:
-    """Hub-managed features — every entry maps to real vpncmd verbs on apply.
+    """Capabilities of the supported SoftEther **stable** server line.
 
-    No OpenVPN-clone entry: vpncmd 5.02 has no verb for the clone server
-    (alpha.7.5 item 7 audit — offering it produced guaranteed failures).
-    OpenVPN is served by the standalone 'openvpn' core instead.
+    Each offered cell maps to a real vpncmd operation. PPTP is deliberately
+    absent (SoftEther has never implemented it). EtherIP is also absent from
+    the simple wizard because enabling the server bit alone is insufficient:
+    every router needs an EtherIpClientAdd identity mapping. It remains an
+    Advanced/runtime capability, not a fake one-click inbound.
     """
+    # SoftEther recommends at most nine characters for broad built-in L2TP
+    # client compatibility. Choice is CSPRNG-backed; ~53 bits from this
+    # unambiguous 64-symbol alphabet, visible/copyable/editable in the UI.
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_"
+    psk = "".join(secrets.choice(alphabet) for _ in range(9))
     return [
-        _proto("l2tp", "L2TP/IPsec (hub)", 0, [
+        _proto("softether", "Native SoftEther VPN", 5555, [
+            _tr("tcp", "SoftEther VPN over HTTPS/TCP", [_none()]),
+        ]),
+        _proto("l2tp", "L2TP/IPsec", 1701, [
             _tr("udp", "UDP 500/4500/1701", [_none([
-                _f("ipsec_psk", "IPsec pre-shared key", required=True),
+                _f("ipsec_psk", "IPsec pre-shared key", required=True,
+                   default=psk, section="general",
+                   help="secure random 9-character default; visible, copyable and editable"),
             ])]),
         ]),
-        _proto("sstp", "SSTP (hub)", 443, [
-            _tr("tcp", "TCP 443 (hub listener)", [_tls()]),
+        _proto("l2tp_raw", "L2TP RAW (no IPsec)", 1701, [
+            _tr("udp", "UDP 1701 (unencrypted)", [_none()]),
         ]),
-        _proto("pptp", "PPTP (hub)", 1723, [
-            _tr("tcp", "TCP 1723 (hub listener)", [_none()]),
+        _proto("sstp", "Microsoft SSTP compatibility", 443, [
+            # SoftEther owns its server certificate. Generic Xray-style PEM
+            # upload fields would be a lie here; certificate management is a
+            # separate SoftEther server-certificate operation.
+            _tr("tcp", "HTTPS/TCP 443", [_none()]),
+        ]),
+        _proto("ovpn", "OpenVPN compatibility", 1194, [
+            _tr("udp", "UDP", [_none()]),
         ]),
     ]
 

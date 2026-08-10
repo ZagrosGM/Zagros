@@ -219,5 +219,24 @@ def test_new_sections_are_grouped_for_the_ui():
     assert "headers" in header_sections
 
 
+def test_softether_wizard_is_capability_aware_and_psk_is_secure_default():
+    first = blueprint_for("softether")
+    second = blueprint_for("softether")
+    ids = {p["id"] for p in first["protocols"]}
+    assert {"softether", "l2tp", "l2tp_raw", "sstp", "ovpn"} <= ids
+    assert "pptp" not in ids  # not implemented upstream
+    l2tp = next(p for p in first["protocols"] if p["id"] == "l2tp")
+    psk = next(f for t in l2tp["transports"] for s in t["securities"]
+               for f in s["fields"] if f["key"] == "ipsec_psk")
+    psk2 = next(f for p in second["protocols"] if p["id"] == "l2tp"
+                for t in p["transports"] for s in t["securities"]
+                for f in s["fields"] if f["key"] == "ipsec_psk")
+    assert psk["required"] is True and len(psk["default"]) == 9
+    assert psk["default"] != psk2["default"]
+    for proto in ("softether", "l2tp_raw", "sstp", "ovpn"):
+        assert "ipsec_psk" not in _field_keys(
+            next(p for p in first["protocols"] if p["id"] == proto)["transports"][0])
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

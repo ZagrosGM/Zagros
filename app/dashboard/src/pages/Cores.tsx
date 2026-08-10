@@ -4,7 +4,7 @@
 // upgrade/reinstall/uninstall, live CPU/RAM/uptime, logs drawer.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Cpu, Download, FileText, HardDriveDownload, Play, PowerOff,
+  Cpu, Download, FileText, HardDriveDownload, Loader2, Play, PowerOff,
   RefreshCcw, RotateCw, Square, Trash2, UploadCloud,
 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -299,6 +299,13 @@ function InstallDialog({ entry, onClose, onDone }: { entry: CoreRegistryEntry; o
     queryFn: () => api.get<{ releases: CoreRelease[] }>(`/zagros/cores/${entry.id}/versions`),
     retry: false, staleTime: 600000,
   });
+  const progress = useQuery({
+    queryKey: ["zagros", "core-install-progress", entry.id],
+    queryFn: () => api.get<{ stage: string; detail?: string }>(`/zagros/cores/${entry.id}/install-progress`),
+    enabled: busy,
+    refetchInterval: busy ? 750 : false,
+    retry: false,
+  });
 
   const install = async () => {
     setBusy(true); setError("");
@@ -413,6 +420,16 @@ function InstallDialog({ entry, onClose, onDone }: { entry: CoreRegistryEntry; o
           <Switch checked={startNow} onChange={setStartNow} label={t("cores.install.startAfter")} />
           {t("cores.install.startAfter")}
         </label>
+        {busy && (
+          <div role="status" aria-live="polite" data-install-stage={progress.data?.stage ?? "starting"}
+            className="rounded-xl border border-brand/30 bg-brand-soft/30 px-3 py-2.5 text-xs text-content-2">
+            <p className="flex items-center gap-2 font-medium text-brand">
+              <Loader2 size={13} className="animate-spin" />
+              {progress.data?.stage?.replace(/_/g, " ") ?? "starting installation"}
+            </p>
+            {progress.data?.detail && <p className="mt-1 text-[11px] text-content-3">{progress.data.detail}</p>}
+          </div>
+        )}
         {error && <p role="alert" className="rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
       </div>
     </Dialog>

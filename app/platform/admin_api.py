@@ -273,6 +273,21 @@ async def _manager_call(runtime, core_id: str, method: str, *args, **kwargs):
         raise _err(exc) from exc
 
 
+@zagros_admin_router.get("/cores/{core_id}/install-progress")
+async def cores_install_progress(core_id: str, runtime=Depends(get_runtime)):
+    """Observable long-install stage (currently SoftEther's stable/source
+    pipeline). Returns idle for drivers without a progress provider."""
+    try:
+        driver = runtime.core_manager.get(core_id)
+    except CoreNotFoundError:
+        return {"stage": "idle", "detail": "installation has not started"}
+    backend = getattr(driver, "_backend", None)
+    provider = getattr(backend, "install_progress", None)
+    if not callable(provider):
+        return {"stage": "working", "detail": "driver installation in progress"}
+    return await asyncio.to_thread(provider)
+
+
 @zagros_admin_router.post("/cores/{core_id}/install")
 async def cores_install(core_id: str, body: CoreInstallBody, runtime=Depends(get_runtime)):
     from app.cores.registry import available_drivers
@@ -282,6 +297,18 @@ async def cores_install(core_id: str, body: CoreInstallBody, runtime=Depends(get
     try:
         state = await runtime.core_manager.install_core(
             core_id, body.settings, enabled=body.enabled)
+        if core_id != "xray":
+            # Service cores already have their initial listener at install
+            # time. Give each real inbound its own default Host entry once;
+            # later studio create/delete calls keep the same lifecycle.
+            from app.platform.inbounds import catalog as _catalog
+            from app.portal.hostengine import reconcile_default_hosts
+
+            group = next((g for g in await _catalog(runtime)
+                          if g.core_id == core_id), None)
+            if group is not None:
+                await reconcile_default_hosts(
+                    runtime.core_hosts, core_id, [item.tag for item in group.inbounds])
     except Exception as exc:
         raise _err(exc) from exc
     return {"ok": True, "core": core_id, "state": state.value, "enabled": body.enabled}
@@ -1277,9 +1304,22 @@ def _xray_hosts_get() -> dict[str, list[dict[str, Any]]]:
             for items in _xray_mod.config.inbounds_by_protocol.values()
             for inb in items if isinstance(inb, dict) and inb.get("tag")]
     out: dict[str, list[dict[str, Any]]] = {}
+    old_default = "🚀 Marz ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]"
+    new_default = "🛸 Zagros ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]"
     with GetDB() as db:
+        migrated = False
         for tag in dict.fromkeys(tags):
-            out[tag] = [_xray_host_wire(h) for h in crud.get_hosts(db, tag)]
+            rows = crud.get_hosts(db, tag)
+            for row in rows:
+                # Upgrade only the byte-exact former product default. Any
+                # customized remark, including one mentioning Marz, is owned
+                # by the admin and remains untouched.
+                if row.remark == old_default and row.address == "{SERVER_IP}":
+                    row.remark = new_default
+                    migrated = True
+            out[tag] = [_xray_host_wire(h) for h in rows]
+        if migrated:
+            db.commit()
     return out
 
 

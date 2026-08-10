@@ -10,6 +10,96 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.7.6] — 2026-08-10 — Runtime networking, SoftEther installer, OpenVPN PKI, and dashboard fixes
+
+Root-cause bug-fix cycle following `alpha.7.5`. This release replaces the
+expensive SoftEther developer source-build path, fixes host/container
+forwarding semantics for TUN cores, makes OpenVPN portal profiles connect in
+real clients, and closes the reported subscription, Host Settings, wizard,
+and Users UI regressions.
+
+### Fixed — core runtime
+
+* **SoftEther installation no longer compiles the complete 5.x developer
+  tree on the normal Linux path.** Zagros now selects the newest official RTM
+  release from `SoftEtherVPN_Stable`, downloads the architecture bundle and
+  performs only its two final links from precompiled objects with one job.
+  The installer has an inter-process `flock`, persistent cache, atomic
+  `.part`/rename download and extraction, atomic live-root replacement,
+  failure rollback, interrupted-build recovery, secret-free progress polling,
+  and a bounded/niced source fallback. Real verification: fresh install in
+  about 3.9 seconds, cached reinstall in about 0.35 seconds, and the bundled
+  `vpncmd Check` passed every operation-environment check.
+* **SoftEther protocol capability model corrected.** Server-level vpncmd
+  commands now run in entire-server context rather than virtual-hub admin
+  context. Native SoftEther, L2TP/IPsec, raw L2TP, SSTP and OpenVPN
+  compatibility map to real commands; PPTP is explicitly refused because
+  SoftEther does not implement it. A phantom default L2TP entry no longer
+  makes SSTP/native creation demand a PSK. L2TP receives a CSPRNG-generated,
+  visible/copyable/editable nine-character PSK; PSK/password values are
+  redacted from every vpncmd error.
+* **WireGuard forwarding and cleanup fixed.** `ip_forward` is verified before
+  interface creation instead of being changed by a `PostUp` command after the
+  interface is already half-up. Direct-host mode can apply the sysctl; the
+  installer persists it on the Docker host because host-network containers
+  cannot safely mutate host `/proc/sys`. FORWARD/MASQUERADE rules are scoped
+  to the tunnel subnet, and start/stop/restart/failure paths clean interface
+  and firewall state exactly.
+* **OpenVPN portal profiles now import and connect without a client
+  certificate.** The server intentionally uses username/password management
+  authentication with `verify-client-cert none`; profiles now declare
+  `setenv CLIENT_CERT 0` and `auth-nocache` while retaining the real CA,
+  server trust and `tls-crypt` material. Generated server certificates carry
+  matching keys, CA signatures, keyUsage `digitalSignature` and EKU
+  `serverAuth`; historical Zagros certificates missing those extensions are
+  migrated, and invalid operator chains are rejected. Per-listener,
+  subnet-scoped forwarding/NAT hooks and exact teardown were added.
+
+### Fixed — studio, subscriptions, and dashboard
+
+* Xray gRPC `service_name` survives Wizard → API → persistence → renderer as
+  the exact Xray `grpcSettings.serviceName`; the same field is pinned for
+  sing-box. Both generated configs pass their real binary validators.
+* Certificate controls render only for TLS. TLS → None clears local
+  certificate state, and Xray/sing-box reject certificate material on a
+  non-TLS listener server-side.
+* Virtualized Users rows now measure their real dynamic height and have an
+  intrinsic table width, eliminating badge/note/long-username overlap on
+  desktop and mobile. Online, offline and unknown presence indicators always
+  retain distinct DOM elements and tooltips.
+* Template user creation accepts real non-Xray `core_access`, applies template
+  username prefix/suffix and access exactly instead of merging manual
+  preselection, and sends a complete creation payload. Manual creation remains
+  independent.
+* The obsolete Edit User “Multi-core subscription / Issue portal link” flow
+  and its UI actions were removed.
+* Newly generated, copied, QR and Telegram subscription URLs use canonical
+  `/sub/<token>`. `/zagros/sub/<token>` remains a legacy server alias only.
+* Host defaults are now `🛸 Zagros ({USERNAME}) [{PROTOCOL} - {TRANSPORT}]`
+  with `{SERVER_IP}` as Address for Xray and every applicable core. Inbound
+  create/delete owns the associated Host lifecycle, second inbounds receive
+  independent rows, exact old Marz defaults migrate safely, and each protocol
+  exposes only fields it can apply (for example WireGuard has no TLS/ALPN/
+  fingerprint controls).
+
+### Verified before tagging
+
+* Full Python suite: **699 passed / 7 environment-gated skipped / 0 failed**.
+* CLI suite: **244 passed / 0 failed**.
+* TypeScript `tsc --noEmit` and production Vite build: **PASS**.
+* Real Chromium regression gate: **23 passed / 0 failed** (multiple users,
+  mobile/desktop layout, manual/template users, all presence states, old UI
+  absence, canonical `/sub/`, Host fields, TLS state, gRPC service name and
+  SoftEther PSK/SSTP behavior).
+* Real runtime: SoftEther stable daemon + SSTP/L2TP; WireGuard interface,
+  peer, NAT, restart and failed-start cleanup; OpenVPN 2.6 profile import,
+  CA/EKU verification, username/password auth, tunnel traffic, accounting,
+  NAT and cleanup. Xray 26.3.27 and current sing-box accepted the generated
+  gRPC configurations.
+* Environment limitation: this sandbox had no Docker daemon, so the final
+  host-network compose smoke remains a VPS deployment check; compose
+  permissions/sysctl rendering is covered by the full CLI gate.
+
 ## [1.0.0-alpha.7.4] — 2026-08-08 — Field bug-fix batch + full regression audit
 
 A 20-item field-driven fix batch against `alpha.7.3`, every item reproduced

@@ -98,7 +98,9 @@ class WireGuardDriver(BaseCoreDriver):
                 "port": {"type": "integer", "default": 51820},
                 "subnet": {"type": "string", "default": _DEFAULT_SUBNET},
                 "dns_servers": {"type": "array", "items": {"type": "string"}},
-                "advertise_host": {"type": "string"},
+                "advertise_host": {"type": "string",
+                                   "description": "public endpoint; blank uses the subscription request host"},
+                "allow_loopback_advertise": {"type": "boolean", "default": False},
                 "mtu": {"type": "integer"},
                 "use_preshared_keys": {"type": "boolean", "default": True},
                 "online_threshold_seconds": {"type": "integer", "default": 180},
@@ -119,7 +121,8 @@ class WireGuardDriver(BaseCoreDriver):
             "port": 51820,
             "subnet": _DEFAULT_SUBNET,
             "dns_servers": ["1.1.1.1"],
-            "advertise_host": "127.0.0.1",
+            "advertise_host": "",
+            "allow_loopback_advertise": False,
             "mtu": None,
             "use_preshared_keys": True,
             "online_threshold_seconds": 180,
@@ -508,7 +511,8 @@ class WireGuardDriver(BaseCoreDriver):
     # ------------------------------------------------------------------ #
     # client config (sealed delivery only) + QR                          #
     # ------------------------------------------------------------------ #
-    def render_client_profile(self, account: UserAccount) -> str:
+    def render_client_profile(self, account: UserAccount,
+                              context: "DeliveryContext | None" = None) -> str:
         self._ensure_supported(account.protocol)
         s = account.settings
         if self._server_public is None:
@@ -517,11 +521,22 @@ class WireGuardDriver(BaseCoreDriver):
             if not s.get(key):
                 raise CoreError(f"wireguard account '{account.account_id}' is missing '{key}'.")
         cfg = self.settings
+        from app.cores.delivery import resolve_delivery_host
+
+        endpoint_host = resolve_delivery_host(
+            cfg.get("advertise_host"), context,
+            allow_loopback=bool(cfg.get("allow_loopback_advertise", False)),
+        )
+        if not endpoint_host:
+            raise CoreError(
+                "no public WireGuard endpoint is configured — set endpoint/"
+                "advertise_host or fetch the subscription through its public host"
+            )
         return render_client(
             private_key=s["private_key"],
             address=s["address"],
             server_public_key=self._server_public,
-            endpoint_host=cfg["advertise_host"],
+            endpoint_host=endpoint_host,
             endpoint_port=int(cfg["port"]),
             preshared_key=s.get("preshared_key") or None,
             dns=list(cfg["dns_servers"]),
@@ -548,8 +563,13 @@ class WireGuardDriver(BaseCoreDriver):
             DeliverySection,
         )
 
-        profile_text = self.render_client_profile(account)
+        profile_text = self.render_client_profile(account, context)
         cfg = self.settings
+        from app.cores.delivery import resolve_delivery_host
+        endpoint_host = resolve_delivery_host(
+            cfg.get("advertise_host"), context,
+            allow_loopback=bool(cfg.get("allow_loopback_advertise", False)),
+        )
         fields = [
             DeliveryField(key="address", label="Address", value=str(account.settings["address"])),
             DeliveryField(
@@ -558,7 +578,7 @@ class WireGuardDriver(BaseCoreDriver):
             ),
             DeliveryField(
                 key="endpoint", label="Endpoint",
-                value=f"{cfg['advertise_host']}:{int(cfg['port'])}",
+                value=f"{endpoint_host}:{int(cfg['port'])}",
             ),
             DeliveryField(
                 key="dns", label="DNS",

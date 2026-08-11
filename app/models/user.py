@@ -116,8 +116,15 @@ class User(BaseModel):
 
     @field_validator("proxies", mode="before")
     def validate_proxies(cls, v, values, **kwargs):
-        if not v:
-            raise ValueError("Each user needs at least one proxy")
+        """Normalize legacy Xray proxies without deciding user validity.
+
+        A Zagros user may be intentionally non-Xray (WireGuard/OpenVPN/SSH/
+        SoftEther/sing-box only). Creation validity therefore belongs to
+        ``UserCreate`` where both proxies and ``core_access`` are visible;
+        enforcing non-empty proxies here made template-only users fail 422
+        before the API could provision their real core grants.
+        """
+        v = v or {}
         return {
             proxy_type: ProxySettings.from_dict(
                 proxy_type, v.get(proxy_type, {}))
@@ -159,6 +166,21 @@ class UserCreate(User):
     # EVERY inbound excluded (empty subscription!). UserModify is left
     # untouched on purpose: there the omission must mean "no change".
     inbounds: Dict[ProxyTypes, List[str]] = Field(default={}, validate_default=True)
+
+    @model_validator(mode="after")
+    def validate_has_real_access(self):
+        """A new user needs Xray proxies OR at least one real core grant.
+
+        ``UserModify`` must stay partial, so this creation-only invariant
+        cannot live on the shared base model.
+        """
+        has_core_access = any(bool(tags) for tags in (self.core_access or {}).values())
+        if not self.proxies and not has_core_access:
+            raise ValueError(
+                "Each user needs at least one Xray proxy or one core_access inbound"
+            )
+        return self
+
     model_config = ConfigDict(json_schema_extra={
         "example": {
             "username": "user1234",

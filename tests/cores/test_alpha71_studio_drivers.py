@@ -176,7 +176,24 @@ def test_singbox_tuic_account_uuid_and_shape(tmp_path):
     norm = d._normalize_account(account)
     assert norm.settings["uuid"] == "legacy-uuid-1"
     entry = SingBoxDriver._user_entry(norm)
-    assert entry == {"uuid": "legacy-uuid-1", "password": "pw"}   # NO name
+    assert entry == {"name": "1.t", "uuid": "legacy-uuid-1", "password": "pw"}
+    # The name is not decoration: vendored sing-box's StatsService keys TUIC
+    # counters by it, exactly like Hysteria2/VLESS users.
+
+
+def test_singbox_explicit_hy2_tuic_listen_before_first_grant(tmp_path):
+    driver = _singbox(tmp_path)
+    driver._studio_doc = {"inbounds": [
+        {"tag": "hy-empty", "protocol": "hysteria2", "port": 38443,
+         "transport": "quic", "security": "tls"},
+        {"tag": "tu-empty", "protocol": "tuic", "port": 38444,
+         "transport": "quic", "security": "tls"},
+    ]}
+    rendered = driver.render_config()["inbounds"]
+    assert [(item["type"], item["listen_port"], item["users"])
+            for item in rendered] == [
+                ("hysteria2", 38443, []), ("tuic", 38444, []),
+            ]
 
 
 def test_singbox_create_account_provisions_credentials_when_missing(tmp_path):
@@ -626,6 +643,9 @@ class _SEFakeBackend:
             raise self.ipsec_state
         return self.ipsec_state
 
+    def secure_nat_ensure(self):
+        self.cmds.append("SecureNatEnable+DhcpEnable+DhcpGet")
+
     def ipsec_services_set(self, *, l2tp, l2tp_raw, etherip, psk, default_hub):
         from app.cores.drivers.softether.setool import IPsecServices
 
@@ -661,6 +681,7 @@ def test_softether_vpncmd_convergence(tmp_path):
         {"protocol": "sstp"}]}))
     flat = " | ".join(backend.cmds)
     assert "IPsecGet" in backend.cmds
+    assert "SecureNatEnable+DhcpEnable+DhcpGet" in backend.cmds
     assert ("IPsecEnable /L2TP:yes /L2TPRAW:no /ETHERIP:no "
             "/PSK:my-psk /DEFAULTHUB:DEFAULT") in flat
     # SSTP is a real protocol switch plus a TCP listener. It is never
@@ -675,6 +696,21 @@ def test_softether_vpncmd_convergence(tmp_path):
     assert "SstpEnable yes" in flat2 and "ListenerCreate 443" in flat2
     assert "IPsecEnable" not in flat2
     assert "pre-shared key" not in flat2.lower()
+
+
+def test_softether_l2tp_raw_preserves_wizard_tag(tmp_path):
+    from app.cores.drivers.softether.driver import SoftEtherDriver
+
+    backend = _SEFakeBackend()
+    driver = SoftEtherDriver(settings={"hub": "DEFAULT"}, backend=backend)
+    asyncio.run(driver.apply_studio_document({"inbounds": [{
+        "tag": "raw-custom-1701", "protocol": "l2tp_raw", "port": 1701,
+    }]}))
+    assert driver.settings["feature_l2tp_raw"] is True
+    assert driver.settings["feature_tags"]["l2tp_raw"] == "raw-custom-1701"
+    assert driver.export_config_document()["inbounds"][0]["tag"] == "raw-custom-1701"
+    assert "/L2TP:no /L2TPRAW:yes /ETHERIP:no" in " | ".join(backend.cmds)
+    assert "SecureNatEnable+DhcpEnable+DhcpGet" in backend.cmds
 
 
 def test_softether_l2tp_requires_psk(tmp_path):
@@ -721,13 +757,16 @@ def test_softether_enable_psk_preference_order(tmp_path):
 
     state = IPsecServices(l2tp=False, l2tp_raw=False, etherip=False,
                           psk="server-psk", default_hub="HUBX")
-    # settings PSK wins over the server's stored one; hub comes from IPsecGet
+    # Without fresh wizard input, IPsecGet is authoritative over a stale
+    # persisted value (the field bug showed "vpn" while the server used a
+    # different key); hub also comes from IPsecGet.
     backend = _SEFakeBackend(ipsec=state)
     d = SoftEtherDriver(settings={"hub": "DEFAULT", "ipsec_psk": "stored"},
                         backend=backend)
     asyncio.run(d.apply_studio_document({"inbounds": [{"protocol": "l2tp"}]}))
-    assert "/PSK:stored /DEFAULTHUB:HUBX" in " | ".join(backend.cmds)
-    # with no doc/stored PSK the server's own PSK is reused
+    assert "/PSK:server-psk /DEFAULTHUB:HUBX" in " | ".join(backend.cmds)
+    assert d.settings["ipsec_psk"] == "server-psk"
+    # with no stored PSK the server's own PSK is reused
     backend2 = _SEFakeBackend(ipsec=state)
     d2 = SoftEtherDriver(settings={"hub": "DEFAULT"}, backend=backend2)
     asyncio.run(d2.apply_studio_document({"inbounds": [{"protocol": "l2tp"}]}))

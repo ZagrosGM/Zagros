@@ -165,6 +165,7 @@ def test_wireguard_delivery_peer_and_key_details() -> None:
 
     driver = WireGuardDriver(
         {"work_dir": tempfile.mkdtemp(prefix="it15wg-"),
+         "advertise_host": "203.0.113.10",
          "use_preshared_keys": True},
         backend=FakeWireGuardBackend())
 
@@ -198,6 +199,7 @@ def test_wireguard_delivery_without_psk_omits_the_field_honestly() -> None:
 
     driver = WireGuardDriver(
         {"work_dir": tempfile.mkdtemp(prefix="it15wg2-"),
+         "advertise_host": "203.0.113.10",
          "use_preshared_keys": False},  # default is True — disable explicitly
         backend=FakeWireGuardBackend())
 
@@ -318,6 +320,27 @@ def test_softether_delivery_missing_facts_are_notes_not_errors() -> None:
     ovpn_index = next(i for i, section in enumerate(profile.sections)
                       if section.inbound_tag == "softether-openvpn")
     assert _fields(profile, ovpn_index)["port"].value == "55443/udp"
+
+
+def test_softether_l2tp_raw_custom_tag_is_delivered() -> None:
+    from app.cores.drivers.softether import SoftEtherDriver
+    from tests.cores.fakes import FakeSEBackend
+
+    driver = SoftEtherDriver({
+        "feature_l2tp_raw": True,
+        "feature_tags": {"l2tp_raw": "raw-wizard-38472"},
+        "advertise_host": "vpn.example.com",
+    }, backend=FakeSEBackend())
+    account = _acct(1, "raw-user", "l2tp_raw", {
+        "password": "pw", "inbound_tags": ["raw-wizard-38472"],
+    })
+    profile = asyncio.run(driver.describe_delivery(account))
+    assert len(profile.sections) == 1
+    section = profile.sections[0]
+    assert section.protocol == "l2tp_raw"
+    assert section.inbound_tag == "raw-wizard-38472"
+    assert section.artifacts[0].kind is ArtifactKind.FIELDS
+    assert "No transports granted" not in str(profile)
 
 
 def test_softether_delivery_grants_and_empty_state() -> None:

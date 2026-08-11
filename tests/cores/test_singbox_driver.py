@@ -82,6 +82,21 @@ def _inbound(config: dict, tag: str) -> dict:
 
 # --------------------------------------------------------------------------- #
 
+def test_listener_readiness_classifies_native_quic_as_udp() -> None:
+    from app.cores.drivers.singbox.backend import LocalSingBoxBackend
+
+    expected = LocalSingBoxBackend._expected_listeners({"inbounds": [
+        {"type": "hysteria2", "listen_port": 4430},
+        {"type": "tuic", "listen_port": 5443},
+        {"type": "vless", "listen_port": 8443},
+        {"type": "shadowsocks", "listen_port": 8388},
+    ]})
+    assert expected == {
+        ("udp", 4430), ("udp", 5443), ("tcp", 8443),
+        ("tcp", 8388), ("udp", 8388),
+    }
+
+
 def test_render_contains_all_protocol_inbounds_and_users() -> None:
     async def main():
         driver, backend, _s = _driver()

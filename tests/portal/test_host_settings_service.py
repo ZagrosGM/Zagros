@@ -15,6 +15,7 @@ from __future__ import annotations
 # clean runner with "async def functions are not natively supported".
 import asyncio
 import datetime as dt
+import tempfile
 
 from app.cores.delivery import (
     ArtifactKind,
@@ -162,6 +163,96 @@ def test_build_page_expands_sections():
 # --------------------------------------------------------------------- #
 # SQL store round-trip (exercises the real CoreHostModel mapping)
 # --------------------------------------------------------------------- #
+
+def test_portal_context_prefers_configured_subscription_host():
+    async def run():
+        from app.portal.models import PortalSettings
+
+        class ContextDriver(_FakeDriver):
+            async def describe_delivery(self, account, context=None):
+                assert context is not None
+                self._link = f"hy2://pw@{context.public_host}:443#context"
+                return await super().describe_delivery(account, context)
+
+        settings = InMemorySettingsStore()
+        await settings.save_portal_settings(PortalSettings(
+            subscription_url_prefix="https://vpn.public.example/sub-root"))
+        host_store = InMemoryCoreHostStore()
+        await host_store.replace_tags("hysteria2", {
+            "hy2-in": [HostEntry(address="{SERVER_IP}")],
+        })
+        service = PortalService(
+            _Provider([(ContextDriver(HY2_LINK), _Account())]), settings,
+            host_store=host_store)
+        links, _ = await service.build_links(7, public_host="request.invalid")
+        assert len(links) == 1 and "@vpn.public.example:443" in links[0]
+        assert "127.0.0.1" not in links[0]
+        assert "request.invalid" not in links[0]
+
+    asyncio.run(run())
+
+
+def test_server_ip_default_uses_public_context_for_singbox_and_wireguard():
+    async def run():
+        from app.cores.delivery import DeliveryContext
+        from app.cores.drivers.singbox import SingBoxDriver
+        from app.cores.drivers.wireguard import WireGuardDriver
+        from app.cores.types import UserAccount
+        from app.portal.hostengine import DEFAULT_ADDRESS, DEFAULT_REMARK, HostSettingsEngine
+        from tests.cores.fakes import (
+            FakeSingBoxBackend, FakeV2RayStats, FakeWireGuardBackend,
+        )
+
+        public = "198.51.100.44"
+        context = DeliveryContext(public_host=public)
+        host_engine = HostSettingsEngine()
+
+        sing = SingBoxDriver({
+            "work_dir": tempfile.mkdtemp(prefix="host-sb-"),
+            # Simulate an upgraded install carrying the historical default.
+            "advertise_host": "127.0.0.1",
+        }, backend=FakeSingBoxBackend(), stats=FakeV2RayStats())
+        await sing.apply_studio_document({"inbounds": [{
+            "tag": "vless-public", "protocol": "vless", "port": 28443,
+            "transport": "ws", "security": "none", "path": "/ws",
+        }]})
+        sing_account = UserAccount(
+            user_id=1, username="alice", account_id="1.alice.vless",
+            protocol="vless", settings={"inbound_tags": ["vless-public"]},
+        )
+        await sing.create_account(sing_account)
+        sing_profile = await sing.describe_delivery(sing_account, context)
+        sing_profile = host_engine.expand(sing_profile, {
+            "vless-public": [HostEntry(remark=DEFAULT_REMARK,
+                                        address=DEFAULT_ADDRESS)],
+        }, {"USERNAME": "alice"})
+        sing_links = [a.content for s in sing_profile.sections for a in s.artifacts
+                      if a.kind is ArtifactKind.LINK]
+        assert sing_links and all(public in link for link in sing_links)
+        assert all("127.0.0.1" not in link for link in sing_links)
+
+        wg = WireGuardDriver({
+            "work_dir": tempfile.mkdtemp(prefix="host-wg-"),
+            "advertise_host": "127.0.0.1",
+        }, backend=FakeWireGuardBackend())
+        await wg.start()
+        wg_account = UserAccount(
+            user_id=2, username="bob", account_id="2.bob.wireguard",
+            protocol="wireguard", settings={"inbound_tags": ["wireguard"]},
+        )
+        await wg.create_account(wg_account)
+        wg_profile = await wg.describe_delivery(wg_account, context)
+        wg_profile = host_engine.expand(wg_profile, {
+            "wireguard": [HostEntry(remark=DEFAULT_REMARK,
+                                     address=DEFAULT_ADDRESS)],
+        }, {"USERNAME": "bob"})
+        files = [a.content for s in wg_profile.sections for a in s.artifacts
+                 if a.kind is ArtifactKind.FILE]
+        assert files and all(f"Endpoint = {public}:" in value for value in files)
+        assert all("127.0.0.1" not in value for value in files)
+
+    asyncio.run(run())
+
 
 def test_default_host_lifecycle_is_per_inbound_and_cleans_deleted_tags():
     async def run():

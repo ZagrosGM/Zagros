@@ -58,7 +58,7 @@ NOW = int(time.time())
 DUMP_SAMPLE = (
     "mzwg0\tServerPriv\t{srv}\t51820\toff\n"
     "mzwg0\t{alice}\t{psk}\t198.51.100.7:60123\t10.66.66.2/32\t{hs}\t1048576\t2097152\t0\n"
-    "mzwg0\t{bob}\t(none)\t(none)\t10.66.66.3/32\t0\t0\t0\t0\n"
+    "mzwg0\t{bob}\t(none)\t(none)\t10.66.66.3/32\t0\t0\t0\toff\n"
 ).format(srv=KEY_SERVER, alice=KEY_ALICE, psk=PSK_ALICE, bob=KEY_BOB, hs=NOW - 42)
 
 DUMP_ALICE_GREW = DUMP_SAMPLE.replace("\t1048576\t2097152\t", "\t1572864\t2097152\t")
@@ -134,7 +134,11 @@ def _account(user: int, name: str, enabled: bool = True, settings: dict | None =
 
 def _driver(tmp: str | None = None, dump: str = DUMP_SAMPLE) -> tuple[WireGuardDriver, FakeWireGuardBackend]:
     backend = FakeWireGuardBackend(dump)
-    settings: dict[str, Any] = {"work_dir": tmp or tempfile.mkdtemp(prefix="mzwg-test-")}
+    settings: dict[str, Any] = {
+        "work_dir": tmp or tempfile.mkdtemp(prefix="mzwg-test-"),
+        "advertise_host": "127.0.0.1",
+        "allow_loopback_advertise": True,
+    }
     return WireGuardDriver(settings, backend=backend), backend
 
 
@@ -159,6 +163,7 @@ def test_parse_wg_dump_real_shape() -> None:
     assert bob.preshared_key is None
     assert bob.endpoint is None
     assert bob.latest_handshake == 0
+    assert bob.persistent_keepalive == 0  # real `wg dump` spells disabled as off
 
 
 def test_strip_config_matches_wgquick_semantics() -> None:

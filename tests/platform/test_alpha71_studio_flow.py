@@ -131,9 +131,13 @@ class _HydrationRuntime:
     touches core_manager + studio_store."""
 
     def __init__(self, cores, docs):
+        async def _apply(core_id, document):
+            await cores[core_id].apply_studio_document(document)
+
         self.core_manager = types.SimpleNamespace(
             list_cores=lambda: list(cores),
             get=lambda cid: cores[cid],
+            apply_studio_document=_apply,
         )
         self.studio_store = types.SimpleNamespace(
             get_document=None,
@@ -191,7 +195,14 @@ def test_materialize_studio_maps_core_error_to_422():
         async def apply_studio_document(self, doc):
             raise CoreError("only ONE listener is supported")
 
-    runtime = types.SimpleNamespace()
+    reject = _RejectDriver()
+
+    async def _apply(_core_id, document):
+        await reject.apply_studio_document(document)
+
+    runtime = types.SimpleNamespace(core_manager=types.SimpleNamespace(
+        apply_studio_document=_apply,
+    ))
     with pytest.raises(HTTPException) as ei:
         asyncio.run(_materialize_studio(runtime, "wireguard", _RejectDriver(),
                                         {"inbounds": [{"tag": "x"}]}))

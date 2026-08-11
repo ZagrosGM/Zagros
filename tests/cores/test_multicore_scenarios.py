@@ -97,10 +97,12 @@ def _status3(rows: list[tuple[str, str, int, int]]) -> str:
 async def _cluster(tmp: str):
     """Four-core cluster: xray + sing-box + openvpn + wireguard via one manager."""
     xray = XrayDriver(backend=FakeXrayBackend())
-    sing = SingBoxDriver(backend=FakeSingBoxBackend(), stats=FakeV2RayStats())
+    sing = SingBoxDriver(settings={"advertise_host": "203.0.113.10"},
+                         backend=FakeSingBoxBackend(), stats=FakeV2RayStats())
     ovpn = OpenVPNDriver(settings={"work_dir": f"{tmp}/ovpn"},
                          backend=FakeOpenVPNBackend())
-    wg = WireGuardDriver(settings={"work_dir": f"{tmp}/wg"},
+    wg = WireGuardDriver(settings={"work_dir": f"{tmp}/wg",
+                                   "advertise_host": "203.0.113.10"},
                          backend=FakeWireGuardBackend())
 
     mgr = CoreManager(InMemoryCoreStore())

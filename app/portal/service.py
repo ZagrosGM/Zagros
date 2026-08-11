@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.cores.base import BaseCoreDriver
-from app.cores.delivery import ArtifactKind, DeliveryArtifact, DeliverySection
+from app.cores.delivery import (
+    ArtifactKind,
+    DeliveryArtifact,
+    DeliveryContext,
+    DeliverySection,
+)
 from app.cores.types import UserAccount
 from app.portal.hostengine import HostSettingsEngine, delivery_variables
 from app.portal.models import (
@@ -47,6 +52,21 @@ class PortalService:
         self._host_store = host_store
         self._host_engine = HostSettingsEngine()
 
+    @staticmethod
+    def _delivery_context(settings, request_host: str | None) -> DeliveryContext:
+        from urllib.parse import urlsplit
+
+        configured = str(settings.subscription_url_prefix or "").strip()
+        host = ""
+        if configured:
+            parsed = urlsplit(configured if "://" in configured
+                              else f"//{configured}")
+            host = parsed.hostname or ""
+        if not host:
+            host = str(request_host or "").strip()
+        return DeliveryContext(brand=settings.brand,
+                               public_host=host or None)
+
     async def _expand_hosts(self, core_id: str, profile, variables):
         """Widen one delivery profile through the admin's Host Settings
         (item 13).  The built-in xray core is SKIPPED — its links are
@@ -60,7 +80,8 @@ class PortalService:
             return profile
         return self._host_engine.expand(profile, entries, variables)
 
-    async def build_page(self, user_id: int, *, lang: str | None = None) -> PortalPage | None:
+    async def build_page(self, user_id: int, *, lang: str | None = None,
+                         public_host: str | None = None) -> PortalPage | None:
         ctx = await self._provider.get_subscription_context(user_id)
         if ctx is None:
             return None
@@ -86,9 +107,10 @@ class PortalService:
         sections: list[DeliverySection] = []
         notes: list[str] = []
         variables = delivery_variables(ctx.user)
+        delivery_context = self._delivery_context(settings, public_host)
         for driver, account in ctx.accounts:
             try:
-                profile = await driver.describe_delivery(account)
+                profile = await driver.describe_delivery(account, delivery_context)
                 profile = await self._expand_hosts(driver.metadata.id, profile, variables)
             except Exception as exc:  # noqa: BLE001 — honesty: show, don't crash the page
                 logger.warning("delivery description failed for core %s: %s",
@@ -125,14 +147,15 @@ class PortalService:
             notes=notes,
         )
 
-    async def build_links(self, user_id: int) -> tuple[list[str], list[str]] | None:
+    async def build_links(self, user_id: int, *,
+                          public_host: str | None = None) -> tuple[list[str], list[str]] | None:
         """Every share-link the user's cores can produce — the multi-core
         subscription payload for non-browser clients (v2rayNG, Streisand,
         sing-box for Android...).
 
         Returns ``(links, notes)`` — every LINK artifact across ALL
         (driver, account) pairs. FILE/FIELDS artifacts (ovpn/wireguard
-        configs, l2tp/sstp/pptp credentials) have no standard URL form; they
+        configs and L2TP/SSTP credentials) have no standard URL form; they
         stay on the HTML portal instead of being fabricated into pseudo
         links, and the drivers' honest notes are returned so the caller can
         state why (never silently dropped).
@@ -149,11 +172,12 @@ class PortalService:
         links: list[str] = []
         notes: list[str] = []
         variables = delivery_variables(ctx.user)
+        delivery_context = self._delivery_context(settings, public_host)
         for driver, account in ctx.accounts:
             if not account.enabled:
                 continue
             try:
-                profile = await driver.describe_delivery(account)
+                profile = await driver.describe_delivery(account, delivery_context)
                 profile = await self._expand_hosts(driver.metadata.id, profile, variables)
             except Exception as exc:  # noqa: BLE001 — honest, never crash the list
                 notes.append(f"{account.protocol}: temporarily unavailable ({exc.__class__.__name__})")

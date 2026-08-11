@@ -97,6 +97,47 @@ class DeliveryContext(BaseModel):
     """Ambient information the presentation layer hands to drivers."""
 
     brand: str = "Zagros"
+    # Public host used when a core still carries its historical loopback/
+    # wildcard default. It comes from the configured subscription URL prefix
+    # or, failing that, the actual public subscription request Host.
+    public_host: str | None = None
+
+
+def resolve_delivery_host(configured: object, context: DeliveryContext | None,
+                          fallback: object = "", *,
+                          allow_loopback: bool = False) -> str:
+    """Resolve a client-dialable host without leaking core loopback defaults.
+
+    Explicit non-loopback core settings win. Historical ``127.0.0.1`` /
+    ``localhost`` values are placeholders unless the admin enables the
+    core's ``allow_loopback_advertise`` escape hatch. Then use the portal's
+    configured/request public host, followed by a non-wildcard listener.
+    """
+    import ipaddress
+
+    def usable(value: object, *, loopback_ok: bool = False) -> str:
+        host = str(value or "").strip().strip("[]")
+        if not host or host in ("0.0.0.0", "::", "*"):
+            return ""
+        if host.lower() == "localhost":
+            return host if loopback_ok else ""
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return host
+        if address.is_unspecified:
+            return ""
+        if address.is_loopback and not loopback_ok:
+            return ""
+        return host
+
+    direct = usable(configured, loopback_ok=allow_loopback)
+    if direct:
+        return direct
+    ambient = usable(context.public_host if context else "")
+    if ambient:
+        return ambient
+    return usable(fallback, loopback_ok=allow_loopback)
 
 
 class ShareLinkError(ValueError):

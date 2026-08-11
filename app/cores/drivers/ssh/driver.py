@@ -11,14 +11,12 @@ Real capabilities used:
   * **Chain ingress**: cores with a native ssh outbound (Xray ≥ 1.8.x has
     one) can tunnel INTO this server with a dedicated chain account.
 
-  * USAGE_ACCOUNTING (claimed since alpha.7.4) — REAL kernel accounting via
-    an iptables owner-match chain (ZG-SSH-ACCT): the sshd session child runs
-    as the account's UID and re-emits every proxied payload byte in BOTH
-    directions, so a per-UID OUTPUT counter equals the tunnel's total
-    payload — deterministically, without fabricated numbers (full design
-    note in sshtool). Needs: iptables in the image + NET_ADMIN on the
-    container (the installer compose grants it); both missing → get_usage
-    raises with an actionable diagnosis instead of silent zeros.
+  * USAGE_ACCOUNTING — decrypted SFTP/SCP stream accounting reports real
+    upload+download bytes through an OpenSSH ForceCommand proxy and a
+    SO_PASSCRED-authenticated local collector. Dynamic forwarding uplink is
+    additionally counted by the per-UID iptables owner chain when the kernel
+    supports xt_owner. Each source degrades independently and never fabricates
+    zeros as successful accounting.
 
 Honestly NOT claimed (documented, no simulation):
   * SERVICE_CONTROL — sshd belongs to systemd; the driver manages accounts,
@@ -62,7 +60,8 @@ class SSHTunnelDriver(BaseCoreDriver):
         description=(
             "OpenSSH port-forwarding/SOCKS tunnelling with real unix accounts. "
             "Instant lock/unlock suspend, ps-based online detection, native "
-            "ssh-outbound chain ingress (xray). Usage is honestly unaccounted."
+            "ssh-outbound chain ingress (xray), and bidirectional SFTP/SCP "
+            "traffic accounting."
         ),
         protocols=["ssh"],
         capabilities={
@@ -79,6 +78,7 @@ class SSHTunnelDriver(BaseCoreDriver):
             "type": "object",
             "properties": {
                 "shell": {"type": "string", "default": "/bin/bash"},
+                "work_dir": {"type": "string", "default": "/var/lib/zagros/cores/ssh"},
                 "create_home": {"type": "boolean", "default": False},
                 "port": {"type": "integer", "default": 2022},
                 "listeners": {"type": "array",
@@ -104,6 +104,7 @@ class SSHTunnelDriver(BaseCoreDriver):
         },
         default_settings={
             "shell": "/bin/bash",
+            "work_dir": "/var/lib/zagros/cores/ssh",
             "create_home": False,
             "port": 2022,
             "listeners": [],
@@ -140,6 +141,8 @@ class SSHTunnelDriver(BaseCoreDriver):
         self._chain_users: dict[str, tuple[str, str]] = {}
         self._usage = DeltaTracker()
         self._acct_error: str | None = None
+        self._tunnel_acct_error: str | None = None
+        self._sftp_acct_error: str | None = None
 
     # ------------------------------------------------------------------ #
     # listeners (xray-style multi-inbound over the ONE sshd listener set)   #
@@ -205,25 +208,45 @@ class SSHTunnelDriver(BaseCoreDriver):
         # verify the daemon actually answers.
         how = await asyncio.to_thread(self._backend.ensure_service)
         logger.info("ssh core ready — sshd brought up via %s", how)
-        # accounting chain bring-up (best-effort): the diagnosis (if any)
-        # rides in _acct_error; get_usage raises it verbatim downstream.
+        # SFTP/scp stream accounting is capability-independent and records
+        # both directions after OpenSSH decrypts them. Forwarding uplink uses
+        # owner-match when the host kernel supports it; one source may degrade
+        # without disabling the other.
+        start_sftp = getattr(self._backend, "sftp_acct_start", None)
+        self._sftp_acct_error = None
+        if callable(start_sftp) and self.settings.get("sftp", True):
+            try:
+                await asyncio.to_thread(start_sftp)
+            except Exception as exc:  # noqa: BLE001
+                self._sftp_acct_error = f"SFTP accounting collector failed: {exc}"
+        elif self.settings.get("sftp", True):
+            self._sftp_acct_error = "backend has no SFTP accounting collector"
+
         unavailable = await asyncio.to_thread(
             getattr(self._backend, "acct_available",
-                    lambda: "backend has no accounting support"))
-        self._acct_error = unavailable
+                    lambda: "backend has no forwarding accounting support"))
+        self._tunnel_acct_error = unavailable
         if unavailable is None:
             try:
                 await asyncio.to_thread(self._backend.acct_ensure)
-                self._acct_error = None
             except Exception as exc:  # noqa: BLE001 — honest degrade
-                self._acct_error = f"ssh accounting chain setup failed: {exc}"
-        if self._acct_error:
-            logger.warning("ssh per-user accounting disabled: %s", self._acct_error)
+                self._tunnel_acct_error = f"SSH forwarding accounting setup failed: {exc}"
+
+        errors = [e for e in (self._tunnel_acct_error,
+                              self._sftp_acct_error) if e]
+        # Full capability is unavailable only when every accounting source is
+        # gone. A partial source remains useful and status says exactly which.
+        self._acct_error = " | ".join(errors) if len(errors) == 2 else None
+        for error in errors:
+            logger.warning("ssh accounting source degraded: %s", error)
 
     async def stop(self) -> None:
-        # intentional no-op: stopping the host's ssh service is out of scope
-        # for a panel core (and dangerous); accounts remain provisioned.
-        pass
+        # sshd itself stays system-owned (stopping it could lock out the
+        # operator), but the panel-owned accounting receiver must release its
+        # socket/thread when this core is stopped or reloaded.
+        stop_sftp = getattr(self._backend, "sftp_acct_stop", None)
+        if callable(stop_sftp):
+            await asyncio.to_thread(stop_sftp)
 
     async def status(self) -> CoreStatus:
         running = await asyncio.to_thread(self._backend.sshd_running)
@@ -234,13 +257,15 @@ class SSHTunnelDriver(BaseCoreDriver):
 
             metrics = CoreMetrics(active_accounts=len(self._accounts),
                                   active_sessions=len(sessions))
+        accounting_message = " | ".join(e for e in (
+            self._tunnel_acct_error, self._sftp_acct_error) if e)
         return CoreStatus(
             core_id=self.metadata.id,
             state=CoreState.RUNNING if running else CoreState.STOPPED,
-            health=(HealthStatus.DEGRADED if (running and self._acct_error)
+            health=(HealthStatus.DEGRADED if (running and accounting_message)
                     else HealthStatus.HEALTHY if running else HealthStatus.UNHEALTHY),
             metrics=metrics,
-            message=(self._acct_error if running
+            message=(accounting_message or None if running
                      else "sshd is not running (system service)."),
         )
 
@@ -619,16 +644,28 @@ class SSHTunnelDriver(BaseCoreDriver):
                 "ssh accounting: %d account(s) have no resolvable UID "
                 "(host account deleted out-of-band?) — their usage cannot "
                 "be attributed this tick", unresolved)
-        await asyncio.to_thread(self._backend.acct_sync_users, set(uid_map))
-        counters = await asyncio.to_thread(self._backend.acct_read)
+        tunnel_counters: dict[int, int] = {}
+        if not self._tunnel_acct_error:
+            await asyncio.to_thread(self._backend.acct_sync_users, set(uid_map))
+            tunnel_counters = await asyncio.to_thread(self._backend.acct_read)
+
+        sftp_counters: dict[int, tuple[int, int]] = {}
+        read_sftp = getattr(self._backend, "sftp_acct_read", None)
+        if not self._sftp_acct_error and callable(read_sftp):
+            sftp_counters = await asyncio.to_thread(read_sftp)
+
         records: list[UsageRecord] = []
         for uid, account_id in uid_map.items():
             if account_ids is not None and account_id not in account_ids:
                 continue
-            # cumulative kernel bytes emitted by the account's sshd for BOTH
-            # tunnel directions (design note in sshtool) — reported as
-            # downlink, uplink stays 0; DeltaTracker gives per-tick deltas.
-            up, down = self._usage.observe(account_id, 0, counters.get(uid, 0))
+            sftp_up, sftp_down = sftp_counters.get(uid, (0, 0))
+            # owner-match OUTPUT sees user-created forwarding sockets, i.e.
+            # payload sent toward the tunnel destination (uplink). The
+            # decrypted SFTP proxy supplies exact upload+download counters.
+            cumulative_up = tunnel_counters.get(uid, 0) + sftp_up
+            cumulative_down = sftp_down
+            up, down = self._usage.observe(
+                account_id, cumulative_up, cumulative_down)
             records.append(UsageRecord(
                 core_id=self.metadata.id, account_id=account_id,
                 uplink_bytes=up, downlink_bytes=down,

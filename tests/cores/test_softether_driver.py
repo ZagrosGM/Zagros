@@ -20,6 +20,8 @@ import traceback
 import types as _types
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 if "app" not in sys.modules:
@@ -98,6 +100,7 @@ class FakeSEBackend:
         self.disconnected.append(session_name)
         self.sessions = [s for s in self.sessions if s.session_name != session_name]
     def ipsec_psk(self): return None
+    def secure_nat_ensure(self): self.secure_nat = True
 
 
 def _driver(settings: dict | None = None, backend: FakeSEBackend | None = None
@@ -255,6 +258,23 @@ def test_l2tp_payload_rules_and_unreachable_server() -> None:
             pass
 
     asyncio.run(run())
+
+
+def test_l2tp_raw_client_config_never_requires_or_leaks_ipsec_psk() -> None:
+    driver, _ = _driver(settings={
+        "ipsec_psk": "", "advertise_host": "vpn.example.com",
+        "feature_l2tp_raw": True,
+        "feature_tags": {"l2tp_raw": "raw-custom"},
+    })
+    account = UserAccount(
+        user_id=5, username="raw", account_id="5.raw",
+        protocol="l2tp_raw", settings={"password": "pw"},
+    )
+    config = asyncio.run(driver.build_client_config(account))
+    assert config.payload["format"] == "l2tp-raw"
+    assert config.payload["port"] == 1701
+    assert "ipsec_psk" not in config.payload
+    assert "no IPsec encryption" in config.payload["warning"]
 
 
 def test_honest_capability_surface_locked() -> None:
@@ -445,6 +465,35 @@ def test_install_reports_every_failed_stage(tmp_path) -> None:
             msg = str(exc)
             assert "stable-bundle:" in msg and "source-build:" in msg
             assert "gh down" in msg and "no toolchain" in msg
+
+
+def test_secure_nat_ensure_is_idempotent_and_requires_complete_pool(monkeypatch) -> None:
+    backend = _se_backend()
+    calls: list[tuple[str, bool]] = []
+    pool = """
+Virtual DHCP Server Function | Enabled
+Start IP Address | 192.168.30.10
+End IP Address | 192.168.30.200
+Subnet Mask | 255.255.255.0
+Default Gateway | 192.168.30.1
+DNS Server 1 | 1.1.1.1
+"""
+
+    def command(value, *, csv=False, hub=True):
+        calls.append((value, hub))
+        if value in ("SecureNatEnable", "DhcpEnable"):
+            raise CoreError(f"{value}: already enabled")
+        return pool
+
+    monkeypatch.setattr(backend, "_cmd", command)
+    backend.secure_nat_ensure()
+    assert calls == [("SecureNatEnable", True), ("DhcpEnable", True),
+                     ("DhcpGet", True)]
+
+    monkeypatch.setattr(backend, "_cmd",
+                        lambda value, **kw: "Start IP Address | 192.168.30.10")
+    with pytest.raises(CoreError, match="complete lease pool"):
+        backend.secure_nat_ensure()
 
 
 def test_vpncmd_errors_redact_psk_and_password() -> None:

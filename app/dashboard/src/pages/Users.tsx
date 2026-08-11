@@ -48,6 +48,23 @@ const emptyForm: UserForm = {
   mode: "manual", templateId: null, inbounds: {}, coreAccess: {}, telegramId: "",
 };
 
+// Mirror the backend's creation constraint closely enough to stop a known
+// 422 before submit. Template affixes are normalized into the documented
+// portable subset and bounded so the generated name always fits 32 chars.
+const USERNAME_RE = /^(?=\w{3,32}\b)[A-Za-z0-9_@.-]+(?:_[A-Za-z0-9_@.-]+)*$/;
+const usernameValid = (value: string) => USERNAME_RE.test(value);
+const templateUsername = (template: UserTemplate): string => {
+  let prefix = String(template.username_prefix ?? "").toLowerCase()
+    .replace(/[^a-z0-9_]/g, "_").slice(0, 20);
+  let suffix = String(template.username_suffix ?? "").toLowerCase()
+    .replace(/[^a-z0-9_]/g, "_").slice(0, 20);
+  // Reserve eight characters of entropy. Trim suffix first, then prefix;
+  // both remain recognizable while no backend truncation/422 is possible.
+  if (prefix.length > 24) prefix = prefix.slice(0, 24);
+  suffix = suffix.slice(0, Math.max(0, 24 - prefix.length));
+  return `${prefix}${randomUsername(8)}${suffix}`.slice(0, 32);
+};
+
 /** The legacy API sends subscription_url as a RELATIVE /sub/... path (never
  * as the `sub_url` the older UI code read — that mismatch silently broke the
  * copy action). Make it absolute against the serving origin. */
@@ -485,7 +502,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
     const tp = templates.find((x) => x.id === id);
     if (!tp) return setForm((current) => ({ ...current, templateId: id }));
     setForm((current) => {
-      const generated = `${tp.username_prefix ?? ""}${randomUsername(8)}${tp.username_suffix ?? ""}`;
+      const generated = templateUsername(tp);
       return {
         ...current,
         templateId: id,
@@ -561,7 +578,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
           <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
           <Button onClick={save} loading={busy}
             disabled={
-              (mode === "create" && (!form.username.trim() ||
+              (mode === "create" && (!usernameValid(form.username.trim()) ||
                 (form.mode === "template" && form.templateId == null))) ||
               !hasAnyAccess
             }>
@@ -572,11 +589,16 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
     >
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="username" required
-          hint={mode === "create" ? "letters + digits — or generate a random one" : undefined}>
+          hint={mode === "create"
+            ? (form.username && !usernameValid(form.username)
+                ? "3–32 chars; use letters, digits, _, -, @ or ."
+                : "letters + digits — or generate a random one")
+            : undefined}>
           <div className={mode === "create"
             ? "grid grid-cols-[minmax(0,1fr)_4rem_auto] items-center gap-2"
             : ""}>
             <Input id="username" value={form.username} disabled={mode === "edit"} autoComplete="off"
+              invalid={mode === "create" && !!form.username && !usernameValid(form.username)}
               /* grid tracks, not flex: the <input>'s intrinsic width made the
                  flex row overflow INTO the status select (clicks on generate
                  landed on the select — caught by the browser gate) */

@@ -84,6 +84,8 @@ class SoftEtherDriver(BaseCoreDriver):
                 "ipsec_psk": {"type": "string", "minLength": 1, "maxLength": 128},
                 "native_port": {"type": "integer", "default": 5555},
                 "ovpn_ports": {"type": "string", "default": "1194"},
+                "secure_nat": {"type": "boolean", "default": True,
+                               "description": "enable the hub's Virtual NAT + DHCP so remote-access clients receive an IP; disable only when an external DHCP/local bridge is configured"},
                 "advertise_host": {"type": "string"},
             },
         },
@@ -95,6 +97,8 @@ class SoftEtherDriver(BaseCoreDriver):
             "ipsec_psk": "",
             "native_port": 5555,
             "ovpn_ports": "1194",
+            "secure_nat": True,
+            "feature_tags": {},
             "feature_softether": False,
             "feature_l2tp": False,
             "feature_l2tp_raw": False,
@@ -107,7 +111,7 @@ class SoftEtherDriver(BaseCoreDriver):
         provides=set(),
         requires=set(),
     # hub features are listener-shaped but MANY-valued: each studio
-    # inbound entry = one hub capability (l2tp/sstp/pptp) driven by a
+    # inbound entry = one hub capability (l2tp/raw/sstp/ovpn/native) driven by a
     # real vpncmd verb on apply. The OpenVPN clone is delivered as
     # client-config facts only — vpncmd 5.02 has no toggle verb for it.
         studio_inbounds_path="/inbounds",
@@ -132,6 +136,15 @@ class SoftEtherDriver(BaseCoreDriver):
     # ------------------------------------------------------------------ #
     _STUDIO_FEATURES = {"softether", "l2tp", "l2tp_raw", "etherip", "sstp", "ovpn"}
 
+    def _feature_tag(self, protocol: str) -> str:
+        defaults = {
+            "softether": "softether", "l2tp": "l2tp",
+            "l2tp_raw": "l2tp-raw", "etherip": "etherip",
+            "sstp": "sstp", "ovpn": "softether-openvpn",
+        }
+        tags = self.settings.get("feature_tags") or {}
+        return str(tags.get(protocol) or defaults[protocol])
+
     def export_config_document(self) -> dict[str, Any]:
         """Current enabled feature set. An unconfigured hub exports an EMPTY
         list — never an invented blank L2TP inbound. That phantom entry was
@@ -139,21 +152,21 @@ class SoftEtherDriver(BaseCoreDriver):
         s = self.settings
         inbounds: list[dict[str, Any]] = []
         if s.get("feature_softether"):
-            inbounds.append({"tag": "softether", "protocol": "softether",
+            inbounds.append({"tag": self._feature_tag("softether"), "protocol": "softether",
                              "port": int(s.get("native_port") or 5555), "transport": "tcp"})
         if s.get("feature_l2tp"):
             inbounds.append({
-                "tag": "l2tp", "protocol": "l2tp", "port": 1701,
+                "tag": self._feature_tag("l2tp"), "protocol": "l2tp", "port": 1701,
                 "ipsec_psk": "", "has_ipsec_psk": bool(s.get("ipsec_psk")),
             })
         if s.get("feature_l2tp_raw"):
-            inbounds.append({"tag": "l2tp-raw", "protocol": "l2tp_raw", "port": 1701})
+            inbounds.append({"tag": self._feature_tag("l2tp_raw"), "protocol": "l2tp_raw", "port": 1701})
         if s.get("feature_etherip"):
-            inbounds.append({"tag": "etherip", "protocol": "etherip", "port": 0})
+            inbounds.append({"tag": self._feature_tag("etherip"), "protocol": "etherip", "port": 0})
         if s.get("feature_sstp"):
-            inbounds.append({"tag": "sstp", "protocol": "sstp", "port": 443})
+            inbounds.append({"tag": self._feature_tag("sstp"), "protocol": "sstp", "port": 443})
         if s.get("feature_ovpn"):
-            inbounds.append({"tag": "softether-openvpn", "protocol": "ovpn",
+            inbounds.append({"tag": self._feature_tag("ovpn"), "protocol": "ovpn",
                              "port": int(str(s.get("ovpn_ports") or "1194").split(",")[0]),
                              "transport": "udp"})
         return {"inbounds": inbounds}
@@ -186,13 +199,35 @@ class SoftEtherDriver(BaseCoreDriver):
                     f"SoftEther has no hub feature '{proto}' "
                     f"({sorted(self._STUDIO_FEATURES)})."
                 )
-            wanted[proto] = ib
+            if proto in wanted:
+                raise CoreError(
+                    f"SoftEther '{proto}' is a server-wide hub feature, not "
+                    "a multi-listener protocol; keep exactly one inbound for it."
+                )
+            tag = str(ib.get("tag") or "").strip() or self._feature_tag(proto)
+            wanted[proto] = {**ib, "tag": tag}
 
         if not await asyncio.to_thread(self._backend.reachable):
             raise CoreError(
                 "SoftEther hub is not reachable right now — Start the core "
                 "first; feature changes need a live vpncmd."
             )
+
+        # A remote-access hub without DHCP produces PPP's "Could not
+        # determine local IP address" after successful CHAP. SecureNAT is the
+        # self-contained VPS mode (Virtual NAT + Virtual DHCP). Operators with
+        # an explicit local bridge/external DHCP can opt out in core settings.
+        remote_access = bool(set(wanted) & {
+            "softether", "l2tp", "l2tp_raw", "sstp", "ovpn"
+        })
+        if remote_access and bool(s.get("secure_nat", True)):
+            ensure_nat = getattr(self._backend, "secure_nat_ensure", None)
+            if not callable(ensure_nat):
+                raise CoreError(
+                    "SoftEther backend cannot ensure hub DHCP/SecureNAT; "
+                    "upgrade the driver or configure external DHCP explicitly."
+                )
+            await asyncio.to_thread(ensure_nat)
 
         # IPsec family is one atomic vpncmd setting. Only L2TP/IPsec consumes
         # a user-facing PSK in the simple wizard. Raw L2TP has no IPsec layer;
@@ -210,7 +245,10 @@ class SoftEtherDriver(BaseCoreDriver):
         # Enabling L2TP honours the wizard/stored admin choice. Disabling the
         # IPsec family carries the server's CURRENT PSK to avoid clobbering a
         # value changed out-of-band.
-        psk = (supplied_psk or stored_psk or current_psk) if l2tp \
+        # Explicit wizard input wins. Otherwise the live server is
+        # authoritative: using a stale persisted default (commonly "vpn")
+        # made every subscription show a PSK different from IPsecGet.
+        psk = (supplied_psk or current_psk or stored_psk) if l2tp \
             else (current_psk or stored_psk)
         if l2tp and not psk:
             raise CoreError("L2TP/IPsec needs a non-empty pre-shared key (ipsec_psk).")
@@ -277,6 +315,12 @@ class SoftEtherDriver(BaseCoreDriver):
             await command(f"OpenVpnEnable {'yes' if ovpn else 'no'} /PORTS:{ovpn_port}")
         s["feature_ovpn"] = ovpn
         s["ovpn_ports"] = str(ovpn_port)
+
+        # Stable grant identity: catalog/user entitlements carry the actual
+        # wizard tag, not a hardcoded alias such as "l2tp-raw".
+        s["feature_tags"] = {
+            proto: str(entry["tag"]) for proto, entry in wanted.items()
+        }
 
     # ------------------------------------------------------------------ #
     # lifecycle — the server is external/systemd-owned; we verify reachability
@@ -511,20 +555,31 @@ class SoftEtherDriver(BaseCoreDriver):
                  "port": None, "feature": "feature_ovpn", "needs_psk": False},
     }
 
-    def _granted_transports(self, account: UserAccount) -> list[str]:
-        """Grant-aware transport view (same convention as sing-box/ssh):
-        inbound_tags whitelists, excluded_inbounds blacklists; catalog
-        tags are l2tp/sstp/pptp/softether; default = every transport."""
-        wanted = set(account.settings.get("inbound_tags") or [])
-        excluded = set(account.settings.get("excluded_inbounds") or [])
-        out = []
+    def _granted_transports(self, account: UserAccount) -> list[tuple[str, str]]:
+        """Return ``(protocol, actual inbound tag)`` grants.
+
+        Studio tags are admin-defined identities. Comparing grants only with
+        hardcoded aliases (notably ``l2tp-raw``) made a valid custom
+        ``l2tp_raw`` inbound resolve to “No transports granted”. Canonical
+        aliases remain accepted for pre-migration accounts.
+        """
+        wanted = {str(tag) for tag in account.settings.get("inbound_tags") or []}
+        excluded = {str(tag) for tag in account.settings.get("excluded_inbounds") or []}
+        out: list[tuple[str, str]] = []
         for proto, facts in self._TRANSPORTS.items():
-            tag = facts["catalog_tag"]
-            if wanted and tag not in wanted:
+            actual = self._feature_tag(proto)
+            aliases = {actual, str(facts["catalog_tag"])}
+            if aliases & excluded:
                 continue
-            if tag in excluded:
-                continue
-            out.append(proto)
+            if wanted:
+                selected = aliases & wanted
+                if not selected:
+                    continue
+                # Preserve the exact grant identity in the portal/Host engine.
+                tag = actual if actual in selected else sorted(selected)[0]
+            else:
+                tag = actual
+            out.append((proto, tag))
         return out
 
     async def describe_delivery(
@@ -532,8 +587,8 @@ class SoftEtherDriver(BaseCoreDriver):
         account: UserAccount,
         context: "DeliveryContext | None" = None,
     ) -> "DeliveryProfile":
-        """SoftEther delivery (item 15): one section per GRANTED compat
-        transport — L2TP/IPsec (+PSK), SSTP, PPTP and the OpenVPN clone —
+        """SoftEther delivery: one section per GRANTED compatibility
+        transport — native, L2TP/IPsec, raw L2TP, SSTP and OpenVPN —
         with full connection fields. Missing server facts (advertise_host,
         an unset IPsec PSK, a disabled hub feature) become honest NOTE
         artifacts instead of failing the whole delivery."""
@@ -552,7 +607,7 @@ class SoftEtherDriver(BaseCoreDriver):
         password = str(account.settings["password"])
         profile = DeliveryProfile(core_id=self.metadata.id)
 
-        for proto in self._granted_transports(account):
+        for proto, inbound_tag in self._granted_transports(account):
             facts = self._TRANSPORTS[proto]
             if facts["port"]:
                 port = facts["port"]
@@ -601,7 +656,7 @@ class SoftEtherDriver(BaseCoreDriver):
                     kind=ArtifactKind.NOTE, label="Attention", note=text))
             profile.sections.append(DeliverySection(
                 protocol=proto, title=f"{self.metadata.name} · {facts['title']}",
-                engine="softether", inbound_tag=facts["catalog_tag"],
+                engine="softether", inbound_tag=inbound_tag,
                 artifacts=artifacts,
             ))
         if not profile.sections:
@@ -648,28 +703,6 @@ class SoftEtherDriver(BaseCoreDriver):
                 },
                 display_name="VPN (SSTP)",
             )
-        if account.protocol == "pptp":
-            if not server:
-                raise CoreError(
-                    "PPTP client config requires settings.advertise_host — clients "
-                    "dial the PPTP endpoint by address."
-                )
-            return ClientConfig(
-                core_id=self.metadata.id,
-                protocol="pptp",
-                engine="pptp",
-                payload={
-                    "format": "pptp",
-                    "server": server,
-                    "port": 1723,
-                    "username": account.account_id,
-                    "password": password,
-                    "hub": s["hub"],
-                    "note": "PPTP is served by SoftEther's L2TP/PPTP compatible mode; "
-                            "enable it in the server's IPsec/L2TP settings.",
-                },
-                display_name="VPN (PPTP)",
-            )
         if account.protocol == "ovpn":
             if not server:
                 raise CoreError(
@@ -687,14 +720,37 @@ class SoftEtherDriver(BaseCoreDriver):
                     "username": account.account_id,
                     "password": password,
                     "hub": s["hub"],
-                    "note": "SoftEther's OpenVPN-clone listener — the clone is "
-                            "toggled ONLY by SoftEther Server Manager (vpncmd "
-                            "5.02 has no verb); make sure the operator enabled "
-                            "it there, then import with any OpenVPN client.",
+                    "note": "SoftEther's OpenVPN compatibility listener; "
+                            "Zagros enables it with the stable-line "
+                            "OpenVpnEnable command.",
                 },
                 display_name="VPN (OpenVPN clone)",
             )
-        # l2tp (default) — IPsec/L2TP needs the hub's pre-shared key
+        if account.protocol == "l2tp_raw":
+            if not server:
+                raise CoreError(
+                    "Raw L2TP client config requires settings.advertise_host."
+                )
+            return ClientConfig(
+                core_id=self.metadata.id,
+                protocol="l2tp_raw",
+                engine="l2tp",
+                payload={
+                    "format": "l2tp-raw",
+                    "server": server,
+                    "port": 1701,
+                    "username": account.account_id,
+                    "password": password,
+                    "hub": s["hub"],
+                    "warning": "Raw L2TP has no IPsec encryption.",
+                },
+                display_name="VPN (Raw L2TP)",
+            )
+        if account.protocol != "l2tp":
+            raise CoreError(
+                f"no SoftEther client config renderer for '{account.protocol}'"
+            )
+        # L2TP/IPsec uses one server-wide PSK (the live IPsecGet value).
         if not s.get("ipsec_psk"):
             raise CoreError(
                 "L2TP/IPsec client config requires settings.ipsec_psk — set the "

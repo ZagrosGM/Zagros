@@ -247,7 +247,13 @@ def test_server_config_has_management_auth_hook_and_tls() -> None:
     # shared PKI via absolute paths (per-listener cwd since alpha.7.2)
     assert "tls-crypt /var/lib/zagros/cores/openvpn/ta.key" in conf
     assert "ca /var/lib/zagros/cores/openvpn/ca.crt" in conf
+    # PUSH_REQUEST can only complete when server mode has a pool and a real
+    # PUSH_REPLY payload (route/DNS/keepalive). Pin the exact server side.
+    assert "topology subnet" in conf
+    assert "server 10.8.0.0 255.255.255.0" in conf
+    assert 'push "redirect-gateway def1 bypass-dhcp"' in conf
     assert 'push "dhcp-option DNS 1.1.1.1"' in conf
+    assert "keepalive 10 60" in conf
     assert "script-security 2" in conf
     assert "up /wd/listeners/openvpn/network-hook.sh" in conf
     network = backend.network_hooks["openvpn"]

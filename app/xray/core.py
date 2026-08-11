@@ -1,5 +1,6 @@
 import atexit
 import logging
+import os
 import re
 import subprocess
 import threading
@@ -13,8 +14,8 @@ from config import DEBUG
 
 class XRayCore:
     def __init__(self,
-                 executable_path: str = "/usr/bin/xray",
-                 assets_path: str = "/usr/share/xray"):
+                 executable_path: str = "/var/lib/zagros/cores/xray/bin/xray",
+                 assets_path: str = "/var/lib/zagros/cores/xray/assets"):
         self.executable_path = executable_path
         self.assets_path = assets_path
 
@@ -27,9 +28,9 @@ class XRayCore:
         except (OSError, subprocess.SubprocessError) as exc:
             self.version = None
             logging.getLogger("uvicorn.error").warning(
-                "xray binary not usable at '%s' (%s) — legacy xray core will "
-                "stay down; set XRAY_EXECUTABLE_PATH or let a core driver "
-                "self-install it.", executable_path, exc)
+                "xray binary not usable at '%s' (%s) — Start will restore it "
+                "through the shared installer into the persistent core path.",
+                executable_path, exc)
         self.process = None
         self.restarting = False
 
@@ -121,9 +122,26 @@ class XRayCore:
 
         return False
 
+    def _ensure_binary(self) -> None:
+        if os.path.isfile(self.executable_path) and os.access(
+                self.executable_path, os.X_OK):
+            return
+        # The legacy singleton starts before CoreManager attaches the built-in
+        # driver. Use that driver's shared, checksum-aware installer directly,
+        # targeting the mounted data tree so an image update never discards it.
+        from app.cores.drivers.xray.driver import _install_xray
+
+        _install_xray({
+            "executable_path": self.executable_path,
+            "assets_path": self.assets_path,
+            "release_version": "",
+        })
+        self.version = self.get_version()
+
     def start(self, config: XRayConfig):
         if self.started is True:
             raise RuntimeError("Xray is started already")
+        self._ensure_binary()
 
         if config.get('log', {}).get('logLevel') in ('none', 'error'):
             config['log']['logLevel'] = 'warning'

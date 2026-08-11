@@ -316,6 +316,67 @@ def _se_backend():
     return LocalSoftEtherBackend({})
 
 
+def test_persistent_runtime_resolves_after_container_recreation(tmp_path, monkeypatch) -> None:
+    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
+
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    root = tmp_path / "persistent-runtime"
+    root.mkdir()
+    for name in ("vpnserver", "vpncmd"):
+        path = root / name
+        path.write_text("#!/bin/sh\nexit 0\n")
+        path.chmod(0o755)
+    backend = LocalSoftEtherBackend({
+        "install_root": str(root), "executable_path": "vpncmd",
+    })
+    assert backend.server_binary() == str(root / "vpnserver")
+    assert backend.vpncmd_binary() == str(root / "vpncmd")
+
+
+def test_fresh_server_password_recovery_requires_blank_authority(monkeypatch) -> None:
+    backend = _se_backend()
+    backend.password = "persisted-admin"
+    calls: list[tuple[str, str]] = []
+
+    def command(value, **_kwargs):
+        calls.append((backend.password, value))
+        return "ok"
+
+    monkeypatch.setattr(backend, "_cmd", command)
+    monkeypatch.setattr(backend, "reachable", lambda: True)
+    assert backend.recover_fresh_server_password() is True
+    assert calls == [
+        ("", "ServerInfoGet"),
+        ("", "ServerPasswordSet /PASSWORD:persisted-admin"),
+    ]
+    assert backend.password == "persisted-admin"
+
+
+def test_start_repairs_missing_runtime_without_manual_reinstall() -> None:
+    class UpgradeBackend(FakeSEBackend):
+        def __init__(self):
+            super().__init__()
+            self._reachable = False
+            self.binary = None
+            self.repairs = 0
+            self.starts = 0
+
+        def server_binary(self): return self.binary
+        def install_packages(self):
+            self.repairs += 1
+            self.binary = "/persistent/softether/vpnserver"
+            return "restored from persistent stable cache"
+        def server_start(self):
+            self.starts += 1
+            self._reachable = True
+
+    backend = UpgradeBackend()
+    driver, _ = _driver(backend=backend)
+    asyncio.run(driver.start())
+    assert backend.repairs == 1 and backend.starts == 1
+    assert backend.reachable() is True
+
+
 def test_second_install_short_circuits_without_download_or_build(tmp_path) -> None:
     from unittest import mock
 

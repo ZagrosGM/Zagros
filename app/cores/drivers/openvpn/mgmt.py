@@ -237,7 +237,18 @@ class ManagementClient:
             payload = body[len("CLIENT:ENV,"):]
             if payload == "END":
                 request = self._pending.pop(self._active_cid, None)  # type: ignore[arg-type]
-                if request is not None and self._auth_handler is not None:
+                if request is not None:
+                    if self._auth_handler is None:
+                        # Fail closed, but always ANSWER. Silently dropping a
+                        # complete CONNECT request leaves OpenVPN waiting for
+                        # management auth and the client frozen at PUSH_REQUEST.
+                        logger.error(
+                            "no OpenVPN auth handler for cid=%s; denying instead of hanging",
+                            request.cid,
+                        )
+                        self.authorize(request, False,
+                                       reason="authentication handler unavailable")
+                        return
                     try:
                         allow = self._auth_handler(request)
                     except Exception:  # noqa: BLE001 - never hang the handshake

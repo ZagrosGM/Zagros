@@ -21,6 +21,17 @@ and therefore wins).
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
+# Production defaults live on the mounted /var/lib/zagros tree. Unit tests run
+# unprivileged and must never seed host state, so bind the legacy singleton to
+# the repository fixture before importing any app module.
+_ROOT = Path(__file__).resolve().parents[1]
+os.environ.setdefault("XRAY_JSON", str(_ROOT / "xray_config.json"))
+os.environ.setdefault("XRAY_EXECUTABLE_PATH", str(_ROOT / ".test-xray"))
+os.environ.setdefault("XRAY_ASSETS_PATH", str(_ROOT / ".test-xray-assets"))
+
 import pytest
 
 from app.cores.exceptions import CoreError

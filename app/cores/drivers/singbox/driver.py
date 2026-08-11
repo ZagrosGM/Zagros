@@ -854,13 +854,26 @@ class SingBoxDriver(BaseCoreDriver):
         for line in await asyncio.to_thread(self._backend.logs, tail):
             yield line
 
+    def _persist_backend_executable(self) -> None:
+        """Keep the resolved persistent binary path in core settings.
+
+        Older installs stored only ``sing-box`` even though SELF_INSTALL had
+        placed the binary under ``work_dir``. Persisting the resolved path
+        makes image upgrades independent of the old container's PATH.
+        """
+        executable = str(getattr(self._backend, "executable", "") or "").strip()
+        if executable:
+            self.settings["executable_path"] = executable
+
     async def install(self) -> None:
         """Fetch the latest sing-box release binary matching this OS/arch."""
         await asyncio.to_thread(self._backend.install_binary)
+        self._persist_backend_executable()
         self._v2ray_supported = None  # binary changed: re-probe on next render
 
     async def update(self, version: str | None = None) -> str:
         await asyncio.to_thread(self._backend.install_binary)
+        self._persist_backend_executable()
         self._v2ray_supported = None
         new_version = await asyncio.to_thread(self._backend.version) or "unknown"
         return new_version

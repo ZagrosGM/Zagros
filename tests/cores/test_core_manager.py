@@ -455,6 +455,25 @@ def test_get_logs_and_status_all() -> None:
     asyncio.run(main())
 
 
+def test_studio_apply_heals_error_record_when_daemon_is_already_live() -> None:
+    async def main() -> None:
+        manager, store, _ = _make_manager()
+        driver = FakeDriver()
+        driver.running = True
+
+        async def apply(_document): pass
+
+        driver.apply_studio_document = apply
+        manager.attach("fakebox", driver, enabled=True, state=CoreState.ERROR)
+        await store.save_state("fakebox", state=CoreState.ERROR,
+                               enabled=True, settings=driver.settings)
+        await manager.apply_studio_document("fakebox", {"inbounds": []})
+        assert manager._states["fakebox"] is CoreState.RUNNING
+        assert (await store.load())["fakebox"]["state"] == "running"
+
+    asyncio.run(main())
+
+
 def test_studio_apply_serializes_and_persists_driver_settings() -> None:
     async def main() -> None:
         manager, store, _ = _make_manager()

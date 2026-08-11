@@ -78,6 +78,9 @@ class SoftEtherDriver(BaseCoreDriver):
             "type": "object",
             "properties": {
                 "executable_path": {"type": "string", "default": "vpncmd"},
+                "install_root": {"type": "string",
+                                 "default": "/var/lib/zagros/cores/softether/runtime",
+                                 "description": "persistent vpnserver root; must survive panel container upgrades"},
                 "server": {"type": "string", "default": "localhost"},
                 "hub": {"type": "string", "default": "DEFAULT"},
                 "admin_password": {"type": "string"},
@@ -91,6 +94,7 @@ class SoftEtherDriver(BaseCoreDriver):
         },
         default_settings={
             "executable_path": "vpncmd",
+            "install_root": "/var/lib/zagros/cores/softether/runtime",
             "server": "localhost",
             "hub": "DEFAULT",
             "admin_password": "",
@@ -328,19 +332,40 @@ class SoftEtherDriver(BaseCoreDriver):
     async def start(self) -> None:
         if await asyncio.to_thread(self._backend.reachable):
             return
-        # not reachable: if the binaries exist (systemd-less container), bring
-        # the daemon up ourselves once, honestly re-check, then decide
+        server_binary = getattr(self._backend, "server_binary", lambda: None)
+        # Package/container filesystems are replaced during panel upgrades.
+        # Recover the daemon automatically into the persistent install root;
+        # the stable-bundle installer reuses its mounted cache and preserves
+        # vpn_server.config when present. A saved core must never require a
+        # manual Reinstall merely because the image changed.
+        if server_binary() is None:
+            repair = getattr(self._backend, "install_packages", None)
+            if not callable(repair):
+                raise CoreError(
+                    "SoftEther runtime disappeared after upgrade and this "
+                    "backend cannot repair it automatically."
+                )
+            detail = await asyncio.to_thread(repair)
+            logger.info("softether automatic runtime recovery: %s", detail)
         server_start = getattr(self._backend, "server_start", None)
-        if callable(server_start) and getattr(self._backend, "server_binary", lambda: None)() is not None:
+        if callable(server_start) and server_binary() is not None:
             await asyncio.to_thread(server_start)
-            for _ in range(10):
+            for _ in range(20):
                 await asyncio.sleep(0.5)
                 if await asyncio.to_thread(self._backend.reachable):
                     return
+            recover_password = getattr(
+                self._backend, "recover_fresh_server_password", None)
+            if callable(recover_password) and await asyncio.to_thread(recover_password):
+                logger.warning(
+                    "softether recovered persisted admin authority on a fresh "
+                    "post-upgrade server; Studio/accounts will now reconcile"
+                )
+                return
         raise CoreError(
             f"SoftEther hub '{self.settings['hub']}' unreachable via vpncmd "
-            f"at {self.settings['server']} — press Install first or check "
-            f"server/credentials."
+            f"at {self.settings['server']} after automatic runtime recovery — "
+            f"check the persisted admin password/hub and core logs."
         )
 
     async def stop(self) -> None:

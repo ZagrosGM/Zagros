@@ -304,7 +304,13 @@ class CoreManager:
             # listener is a lie. STOPPED/INSTALLED remain operator-controlled.
             if state_before in (CoreState.RUNNING, CoreState.ERROR):
                 actual = await driver.status()
-                if actual.state is not CoreState.RUNNING:
+                if actual.state is CoreState.RUNNING:
+                    # A system-owned daemon (notably SoftEther) can recover
+                    # while the manager record is still ERROR. Persist probe
+                    # truth now instead of waiting for the health-monitor tick.
+                    if state_before is not CoreState.RUNNING:
+                        await self._set_state(core_id, CoreState.RUNNING)
+                else:
                     await self._set_state(core_id, CoreState.STARTING)
                     try:
                         await driver.start()
@@ -516,6 +522,18 @@ class CoreManager:
     # ------------------------------------------------------------------ #
     # user provisioning fan-out (saga-lite)
     # ------------------------------------------------------------------ #
+    async def sync_accounts(self, core_id: str,
+                            accounts: list[UserAccount]) -> None:
+        """Serialize a full desired-account replay with core lifecycle.
+
+        Startup/upgrade recovery uses this before listeners start whenever the
+        driver supports offline reconciliation. Keeping it on CoreManager
+        prevents a concurrent Studio restart or account mutation from
+        publishing a half-restored config.
+        """
+        async with self._locks[core_id]:
+            await self.get(core_id).sync_accounts(accounts)
+
     async def provision_user(
         self, accounts: Mapping[str, UserAccount]
     ) -> list[ProvisionResult]:

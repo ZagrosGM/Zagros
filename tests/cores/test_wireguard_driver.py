@@ -146,6 +146,27 @@ def _driver(tmp: str | None = None, dump: str = DUMP_SAMPLE) -> tuple[WireGuardD
 # pure parsing / rendering helpers                                       #
 # ---------------------------------------------------------------------- #
 
+def test_real_backend_readiness_uses_authoritative_wg_listen_port(monkeypatch) -> None:
+    from app.cores.drivers.wireguard.backend import LocalWireGuardBackend
+
+    backend = object.__new__(LocalWireGuardBackend)
+    backend.interface = "mzwg0"
+    monkeypatch.setattr(backend, "is_running", lambda: True)
+    monkeypatch.setattr(backend, "dump", lambda: parse_wg_dump(DUMP_SAMPLE))
+    monkeypatch.setattr(backend, "_ss_udp_ports", lambda: {51820})
+    backend.wait_ready(51820, timeout=0.01)
+
+    # Kernel-owned WireGuard sockets are not exposed by ss on every kernel;
+    # the authoritative wg dump still proves the listener is active.
+    monkeypatch.setattr(backend, "_ss_udp_ports", lambda: set())
+    backend.wait_ready(51820, timeout=0.01)
+
+    wrong_port = DUMP_SAMPLE.replace("\t51820\toff", "\t0\toff", 1)
+    monkeypatch.setattr(backend, "dump", lambda: parse_wg_dump(wrong_port))
+    with pytest.raises(CoreError, match="wg reports 0"):
+        backend.wait_ready(51820, timeout=0.01)
+
+
 def test_parse_wg_dump_real_shape() -> None:
     dump = parse_wg_dump(DUMP_SAMPLE)
     assert dump.interfaces == ("mzwg0",)
@@ -216,6 +237,22 @@ def test_render_interface_forwarding_nat_hooks() -> None:
     assert "PostUp" not in stripped and "sysctl" not in stripped
     # syncconf payload keeps exactly the interface/peer crypto keys
     assert "PrivateKey = PRIV" in stripped and "ListenPort = 51820" in stripped
+
+
+def test_start_failure_on_missing_udp_readiness_cleans_interface() -> None:
+    async def run() -> None:
+        driver, backend = _driver()
+
+        def not_ready(_port):
+            raise CoreError("kernel UDP listener absent")
+
+        backend.wait_ready = not_ready
+        with pytest.raises(CoreError, match="UDP listener absent"):
+            await driver.start()
+        assert backend.down_calls == 1
+        assert backend.running is False
+
+    asyncio.run(run())
 
 
 def test_driver_render_carries_hooks_by_default(monkeypatch) -> None:

@@ -82,12 +82,18 @@ VITE_BASE_API = f"http://127.0.0.1:{UVICORN_PORT}/api/" \
     if DEBUG and config("VITE_BASE_API", default="/api/") == "/api/" \
     else config("VITE_BASE_API", default="/api/")
 
-XRAY_JSON = config("XRAY_JSON", default="./xray_config.json")
+XRAY_JSON = config(
+    "XRAY_JSON", default="/var/lib/zagros/cores/xray/xray_config.json"
+)
 XRAY_FALLBACKS_INBOUND_TAG = config("XRAY_FALLBACKS_INBOUND_TAG", cast=str, default="") or config(
     "XRAY_FALLBACK_INBOUND_TAG", cast=str, default=""
 )
-XRAY_EXECUTABLE_PATH = config("XRAY_EXECUTABLE_PATH", default="/usr/local/bin/xray")
-XRAY_ASSETS_PATH = config("XRAY_ASSETS_PATH", default="/usr/local/share/xray")
+XRAY_EXECUTABLE_PATH = config(
+    "XRAY_EXECUTABLE_PATH", default="/var/lib/zagros/cores/xray/bin/xray"
+)
+XRAY_ASSETS_PATH = config(
+    "XRAY_ASSETS_PATH", default="/var/lib/zagros/cores/xray/assets"
+)
 XRAY_EXCLUDE_INBOUND_TAGS = config("XRAY_EXCLUDE_INBOUND_TAGS", default='').split()
 
 # ─────────────────────────── Subscription ──────────────────────────────── #

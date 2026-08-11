@@ -84,7 +84,7 @@ _counter = 0
 def _sudo_token() -> str:
     global _counter
     _counter += 1
-    name = f"lifesudo{_counter}"
+    name = f"lifesudo{uuid.uuid4().hex[:12]}"
     with GetDB() as db:
         crud.create_admin(db, AdminCreate(username=name, password="secret-pass-1",
                                           is_sudo=True))
@@ -173,6 +173,53 @@ def _wizard_body(tag: str, port: int, **settings) -> dict:
 
 def _studio_doc(core_id: str) -> dict:
     return asyncio.run(_runtime().studio_store.get_document(core_id)) or {}
+
+
+# --------------------------------------------------------------------- #
+# production sing-box Wizard → HTTP → renderer contract
+# --------------------------------------------------------------------- #
+
+def test_singbox_api_create_renders_hysteria2_and_tuic_udp_listeners(tmp_path):
+    from app.cores.drivers.singbox import SingBoxDriver
+    from app.cores.types import CoreState
+    from tests.cores.fakes import FakeSingBoxBackend, FakeV2RayStats
+
+    token = _sudo_token()
+    backend = FakeSingBoxBackend(running=True)
+    driver = SingBoxDriver({
+        "work_dir": str(tmp_path), "cert_dir": str(tmp_path / "certs"),
+        "stats_enabled": False,
+    }, backend=backend, stats=FakeV2RayStats())
+    _runtime().core_manager.attach(
+        "sing-box", driver, enabled=True, state=CoreState.RUNNING)
+    asyncio.run(_runtime().studio_store.save_document(
+        "sing-box", {"inbounds": []}))
+
+    for tag, proto, port, settings in (
+        ("hy-api", "hysteria2", 38473,
+         {"transport": "quic", "security": "tls"}),
+        ("tu-api", "tuic", 38474,
+         {"transport": "quic", "security": "tls",
+          "congestion_control": "bbr", "zero_rtt": False}),
+    ):
+        response = _client.post(
+            "/api/zagros/studio/sing-box/wizard/inbound",
+            headers=_auth(token),
+            json={"tag": tag, "protocol": proto, "listen": "0.0.0.0",
+                  "port": port, "settings": settings},
+        )
+        assert response.status_code == 200, response.text
+
+    rendered = {ib["tag"]: ib for ib in backend.configs[-1]["inbounds"]}
+    assert set(rendered) >= {"hy-api", "tu-api"}
+    for tag, port in (("hy-api", 38473), ("tu-api", 38474)):
+        assert rendered[tag]["listen"] == "0.0.0.0"
+        assert rendered[tag]["listen_port"] == port
+        assert rendered[tag]["users"] == []
+        assert rendered[tag]["tls"]["enabled"] is True
+        assert Path(rendered[tag]["tls"]["certificate_path"]).is_file()
+        assert Path(rendered[tag]["tls"]["key_path"]).is_file()
+    assert rendered["tu-api"]["congestion_control"] == "bbr"
 
 
 # --------------------------------------------------------------------- #

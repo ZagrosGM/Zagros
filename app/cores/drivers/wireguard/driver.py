@@ -190,6 +190,14 @@ class WireGuardDriver(BaseCoreDriver):
             forward_nat=bool(s.get("enable_nat", True)),
         )
 
+    async def _wait_ready(self) -> None:
+        """Do not report a running interface without its configured UDP port."""
+        import asyncio
+
+        verify = getattr(self._backend, "wait_ready", None)
+        if callable(verify):
+            await asyncio.to_thread(verify, int(self.settings["port"]))
+
     async def _publish(self) -> None:
         """Render desired state and push it to the kernel (syncconf live apply).
 
@@ -207,6 +215,7 @@ class WireGuardDriver(BaseCoreDriver):
         config = self.render_server_config()
         try:
             await asyncio.to_thread(self._backend.sync, config)
+            await self._wait_ready()
             self._last_sync_error = None
         except CoreError as exc:
             self._last_sync_error = str(exc)
@@ -300,6 +309,13 @@ class WireGuardDriver(BaseCoreDriver):
             self._backend.ensure_server_keys
         )
         await asyncio.to_thread(self._backend.up, self.render_server_config())
+        try:
+            await self._wait_ready()
+        except Exception:
+            # Never leave a key-configured but non-listening interface behind
+            # while CoreManager reports ERROR/RUNNING ambiguously.
+            await asyncio.to_thread(self._backend.down)
+            raise
 
     async def stop(self) -> None:
         import asyncio
@@ -313,19 +329,30 @@ class WireGuardDriver(BaseCoreDriver):
         health = HealthStatus.UNKNOWN
         version: str | None = None
         metrics = None
+        message = self._last_sync_error
         if running:
             version = await asyncio.to_thread(self._backend.version)
             metrics = await asyncio.to_thread(self._backend.metrics)
             sessions = await self.get_online_devices()
             metrics.active_sessions = len(sessions)
-            health = HealthStatus.DEGRADED if self._last_sync_error else HealthStatus.HEALTHY
+            dump = await asyncio.to_thread(self._backend.dump)
+            observed = int(dump.listen_ports.get(
+                str(self.settings.get("interface") or "mzwg0"), 0))
+            expected = int(self.settings["port"])
+            if observed != expected:
+                health = HealthStatus.UNHEALTHY
+                message = (f"WireGuard interface exists but ListenPort is "
+                           f"{observed}; configured port is {expected}.")
+            else:
+                health = (HealthStatus.DEGRADED if self._last_sync_error
+                          else HealthStatus.HEALTHY)
         return CoreStatus(
             core_id=self.metadata.id,
             state=CoreState.RUNNING if running else CoreState.STOPPED,
             health=health,
             core_version=version,
             metrics=metrics,
-            message=self._last_sync_error,
+            message=message,
         )
 
     async def get_logs(self, tail: int = 200) -> AsyncIterator[str]:

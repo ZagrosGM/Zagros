@@ -232,6 +232,33 @@ def test_xray_start_self_installs_missing_binary(monkeypatch, tmp_path):
     assert FakeBackend.started
 
 
+def test_legacy_xray_singleton_self_installs_into_persistent_path(tmp_path, monkeypatch):
+    import app.cores.drivers.xray.driver as xray_mod
+    from app.xray.core import XRayCore
+
+    exe = tmp_path / "bin" / "xray"
+    assets = tmp_path / "assets"
+    installed = []
+
+    def install(settings):
+        installed.append(dict(settings))
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("#!/bin/sh\nexit 0\n")
+        exe.chmod(0o755)
+        return "v-test"
+
+    monkeypatch.setattr(xray_mod, "_install_xray", install)
+    core = XRayCore.__new__(XRayCore)
+    core.executable_path = str(exe)
+    core.assets_path = str(assets)
+    core.version = None
+    core.get_version = lambda: "test"
+    core._ensure_binary()
+    assert installed[0]["executable_path"] == str(exe)
+    assert installed[0]["assets_path"] == str(assets)
+    assert core.version == "test"
+
+
 def test_xray_export_reads_real_config_document():
     from app.cores.drivers.xray.driver import XrayDriver
 

@@ -208,6 +208,17 @@ def test_management_client_auth_session_allow_deny_reauth() -> None:
     ]
 
 
+def test_missing_auth_handler_denies_instead_of_push_request_deadlock() -> None:
+    sent: list[str] = []
+    client = ManagementClient(writer=sent.append)
+    for line in ("CLIENT:CONNECT,8,0", "CLIENT:ENV,username=1.x",
+                 "CLIENT:ENV,password=p", "CLIENT:ENV,END"):
+        client._feed_line(">" + line)
+    assert sent == [
+        'client-deny 8 0 "authentication handler unavailable"'
+    ]
+
+
 def test_auth_handler_crash_denies_instead_of_hanging() -> None:
     sent: list[str] = []
     client = ManagementClient(writer=sent.append)
@@ -225,6 +236,25 @@ def test_auth_handler_crash_denies_instead_of_hanging() -> None:
 # --------------------------------------------------------------------------- #
 # driver behaviour
 # --------------------------------------------------------------------------- #
+
+def test_auth_callback_is_registered_before_listener_socket_opens() -> None:
+    driver, backend = _driver()
+    events: list[str] = []
+    original_set = backend.set_auth_handler
+
+    def set_handler(handler):
+        events.append("auth-handler")
+        original_set(handler)
+
+    def start():
+        events.append("listener-start")
+        backend.running = True
+
+    backend.set_auth_handler = set_handler
+    backend.start = start
+    asyncio.run(driver.start())
+    assert events == ["auth-handler", "listener-start"]
+
 
 def test_server_config_has_management_auth_hook_and_tls() -> None:
     driver, backend = _driver()

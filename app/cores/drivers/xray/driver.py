@@ -86,15 +86,15 @@ class XrayDriver(BaseCoreDriver):
         config_schema={
             "type": "object",
             "properties": {
-                "executable_path": {"type": "string", "default": "/usr/bin/xray"},
-                "assets_path": {"type": "string", "default": "/usr/share/xray"},
-                "config_path": {"type": "string", "default": "xray_config.json"},
+                "executable_path": {"type": "string", "default": "/var/lib/zagros/cores/xray/bin/xray"},
+                "assets_path": {"type": "string", "default": "/var/lib/zagros/cores/xray/assets"},
+                "config_path": {"type": "string", "default": "/var/lib/zagros/cores/xray/xray_config.json"},
             },
         },
         default_settings={
-            "executable_path": "/usr/bin/xray",
-            "assets_path": "/usr/share/xray",
-            "config_path": "xray_config.json",
+            "executable_path": "/var/lib/zagros/cores/xray/bin/xray",
+            "assets_path": "/var/lib/zagros/cores/xray/assets",
+            "config_path": "/var/lib/zagros/cores/xray/xray_config.json",
         },
         homepage="https://github.com/XTLS/Xray-core",
         release_repo="XTLS/Xray-core",

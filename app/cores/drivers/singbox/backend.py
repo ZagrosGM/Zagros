@@ -181,12 +181,25 @@ class LocalSingBoxBackend:
 
     def __init__(self, settings: dict[str, Any]):
         self.settings = settings
-        self.executable = settings.get("executable_path", "sing-box")
         self.work_dir = settings.get("work_dir", ".")
+        os.makedirs(self.work_dir, exist_ok=True)
+        configured = str(settings.get("executable_path") or "sing-box")
+        if os.path.basename(configured) == configured:
+            # SELF_INSTALL writes a bare executable into the persistent core
+            # work_dir. The install-time backend updated only its own argv;
+            # after a panel/container restart a fresh backend looked on PATH,
+            # ignored the still-present binary and marked the core ERROR until
+            # the operator pressed Reinstall. Prefer the persistent artifact,
+            # then a real system package, and otherwise keep the persistent
+            # path as the future install target.
+            persistent = os.path.abspath(os.path.join(self.work_dir, configured))
+            self.executable = (persistent if os.path.isfile(persistent)
+                               else (shutil.which(configured) or persistent))
+        else:
+            self.executable = configured
         self.config_path = settings.get(
             "config_path", os.path.join(self.work_dir, "sing-box.json")
         )
-        os.makedirs(self.work_dir, exist_ok=True)
         os.makedirs(os.path.dirname(os.path.abspath(self.config_path)), exist_ok=True)
         self._log_buffer = int(settings.get("log_buffer", 200))
         self._proc = self._make_proc()

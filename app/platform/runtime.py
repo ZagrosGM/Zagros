@@ -13,6 +13,8 @@ missing (run ``alembic upgrade head`` first).
 """
 from __future__ import annotations
 
+import asyncio
+import copy
 import hashlib
 import logging
 
@@ -133,11 +135,42 @@ class PlatformRuntime:
 
     async def boot_cores(self) -> None:
         await self.core_manager.boot()
-        await self._hydrate_studio_documents()
+        # Restore listener documents first, then replay encrypted account
+        # desired state BEFORE start where the driver can work offline. This
+        # closes the image-upgrade gap where a fresh driver instance had zero
+        # users/peers: sing-box omitted old listeners, OpenVPN could not
+        # authorize, and subscriptions became "unavailable" until a manual
+        # sync/reinstall.
+        studio_deferred = await self._hydrate_studio_documents()
+        account_deferred = await self._restore_core_accounts()
         await self.core_manager.start_enabled()
+        # Live-managed engines (SoftEther in particular) cannot apply Studio
+        # or user state until their daemon is up. Retry only the operations
+        # that honestly failed offline; successful config cores are not
+        # restarted a second time.
+        if studio_deferred:
+            await self._hydrate_studio_documents(studio_deferred)
+        if account_deferred:
+            await self._restore_core_accounts(account_deferred)
         await self._attach_builtin_xray()
+        # Xray is attached after add-on auto-start so CoreManager never starts
+        # it twice. Its SQL Studio document must nevertheless be replayed: in
+        # alpha.7.7 XRAY_JSON lived in the replaceable image layer, while the
+        # complete accepted document already survived in SQL.
+        if "xray" in self.core_manager.list_cores():
+            await self._hydrate_studio_documents({"xray"})
+            try:
+                status = await self.core_manager.status("xray")
+                from app.cores.types import CoreState
 
-    async def _hydrate_studio_documents(self) -> None:
+                if status.state is not CoreState.RUNNING:
+                    await self.core_manager.start_core("xray")
+            except Exception as exc:  # noqa: BLE001 — other cores still boot
+                logger.error("built-in xray recovery/start failed: %s", exc)
+
+    async def _hydrate_studio_documents(
+        self, core_ids: set[str] | None = None,
+    ) -> set[str]:
         """Re-apply persisted studio documents into drivers BEFORE they start.
 
         Root fix (alpha.7.1): Studio documents live in SQL and drivers keep
@@ -153,7 +186,10 @@ class PlatformRuntime:
         fields) is logged LOUDLY and skipped — it must never abort panel
         boot; the surfaces the operator anyway (status/delivery) stay honest.
         """
+        deferred: set[str] = set()
         for core_id in self.core_manager.list_cores():
+            if core_ids is not None and core_id not in core_ids:
+                continue
             try:
                 driver = self.core_manager.get(core_id)
             except Exception:  # noqa: BLE001 — core vanished mid-boot
@@ -166,6 +202,7 @@ class PlatformRuntime:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("studio hydration: cannot read document for %s: %s",
                                core_id, exc)
+                deferred.add(core_id)
                 continue
             if not doc:
                 continue
@@ -173,12 +210,112 @@ class PlatformRuntime:
                 await self.core_manager.apply_studio_document(core_id, doc)
                 logger.info("studio hydration: %s restored from persisted document", core_id)
             except Exception as exc:  # noqa: BLE001
+                deferred.add(core_id)
                 logger.error(
-                    "studio hydration: persisted document for %s no longer "
-                    "applies (%s) — the core boots from its default config; "
-                    "open the Studio to review the stored document.",
+                    "studio hydration: persisted document for %s could not "
+                    "apply in this boot phase (%s) — it will be retried after "
+                    "enabled daemons start; the stored document is unchanged.",
                     core_id, exc,
                 )
+        return deferred
+
+    async def _restore_core_accounts(
+        self, core_ids: set[str] | None = None,
+    ) -> set[str]:
+        """Replay every persisted non-Xray account into fresh driver memory.
+
+        Core processes are not the desired-state database. Container/image
+        replacement reconstructs driver objects, so users/peers/auth tables
+        must be replayed from encrypted SQL on every boot. Drivers that can
+        reconcile while stopped do so before Start; live-only drivers are
+        returned for one post-start retry. Any credential repaired from an
+        old incomplete row is written back even when the first phase fails.
+        """
+        deferred: set[str] = set()
+        for core_id in self.core_manager.list_cores():
+            if core_ids is not None and core_id not in core_ids:
+                continue
+            if not self.core_manager.is_enabled(core_id):
+                continue
+            try:
+                rows = await asyncio.to_thread(
+                    self.users.accounts_of_core, core_id, decrypt=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("account hydration: cannot read %s accounts: %s",
+                             core_id, exc)
+                deferred.add(core_id)
+                continue
+            accounts = []
+            originals: dict[str, tuple[bool, dict]] = {}
+            for row in rows:
+                try:
+                    owner = await asyncio.to_thread(
+                        self.users.get_user, int(row["user_id"]))
+                except Exception as exc:  # noqa: BLE001
+                    deferred.add(core_id)
+                    logger.error(
+                        "account hydration: owner lookup failed for %s/%s: %s",
+                        core_id, row.get("account_id"), exc,
+                    )
+                    continue
+                if owner is None:
+                    logger.warning(
+                        "account hydration: %s/%s has no owner row; skipped",
+                        core_id, row["account_id"],
+                    )
+                    continue
+                from app.cores.types import UserAccount
+
+                stored_enabled = bool(row["enabled"])
+                settings = copy.deepcopy(row["settings"] or {})
+                account = UserAccount(
+                    user_id=int(row["user_id"]),
+                    username=str(owner.username),
+                    account_id=str(row["account_id"]),
+                    protocol=str(row["protocol"]),
+                    enabled=stored_enabled and str(owner.status) == "active",
+                    settings=settings,
+                )
+                accounts.append(account)
+                originals[account.account_id] = (
+                    stored_enabled, copy.deepcopy(settings))
+            try:
+                await self.core_manager.sync_accounts(core_id, accounts)
+                logger.info("account hydration: %s restored %d account(s)",
+                            core_id, len(accounts))
+            except Exception as exc:  # noqa: BLE001
+                deferred.add(core_id)
+                logger.error(
+                    "account hydration: %s could not reconcile in this boot "
+                    "phase (%s); it will be retried after daemon start",
+                    core_id, exc,
+                )
+            finally:
+                # Drivers may repair credentials in place before a later I/O
+                # failure. Persist only real changes; do not churn ciphertext
+                # for byte-identical rows on every reboot.
+                for account in accounts:
+                    stored_enabled, before = originals[account.account_id]
+                    if account.settings == before:
+                        continue
+                    try:
+                        await asyncio.to_thread(
+                            self.users.upsert_core_account,
+                            user_id=account.user_id,
+                            core_id=core_id,
+                            account_id=account.account_id,
+                            protocol=account.protocol,
+                            enabled=stored_enabled,
+                            settings=account.settings,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        deferred.add(core_id)
+                        logger.error(
+                            "account hydration: repaired credentials for %s/%s "
+                            "could not be persisted (%s)",
+                            core_id, account.account_id, exc,
+                        )
+        return deferred
 
     async def _attach_builtin_xray(self) -> None:
         """Attach the panel's built-in xray engine as a protected core.

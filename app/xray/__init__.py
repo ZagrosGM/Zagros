@@ -1,3 +1,6 @@
+import os
+import shutil
+from pathlib import Path
 from random import randint
 from typing import TYPE_CHECKING, Dict, Sequence
 
@@ -13,6 +16,37 @@ from xray_api import XRay as XRayAPI
 from xray_api import exceptions, types
 from xray_api import exceptions as exc
 
+
+def _ensure_persistent_config() -> None:
+    """Seed the mounted Xray config once; never overwrite operator state.
+
+    Production containers run with a writable mounted /var/lib/zagros. A
+    direct unprivileged developer checkout cannot create that path; it falls
+    back to the bundled read/write fixture instead of making `import app`
+    crash. The host config module is updated too so Studio uses the same file.
+    """
+    global XRAY_JSON
+    if os.path.exists(XRAY_JSON):
+        return
+    target = Path(XRAY_JSON)
+    bundled = Path(__file__).resolve().parents[2] / "xray_config.json"
+    if not bundled.is_file():
+        raise FileNotFoundError(
+            f"Xray config is missing at {XRAY_JSON} and bundled seed {bundled}"
+        )
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        part = target.with_name(target.name + ".part")
+        shutil.copy2(bundled, part)
+        os.replace(part, target)
+    except OSError:
+        XRAY_JSON = str(bundled)
+        import config as host_config
+
+        host_config.XRAY_JSON = XRAY_JSON
+
+
+_ensure_persistent_config()
 core = XRayCore(XRAY_EXECUTABLE_PATH, XRAY_ASSETS_PATH)
 
 # Search for a free API port

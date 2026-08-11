@@ -10,6 +10,107 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.7.7] — 2026-08-11 — Listener readiness, non-Xray templates, SoftEther DHCP, public delivery, and SSH accounting
+
+Post-`alpha.7.6` field-fix release. This cycle follows each reported failure
+through the production schema, core lifecycle, generated config and real
+runtime where the host kernel permits it. It does not treat fake cores as
+runtime evidence.
+
+### Fixed — users, studio lifecycle, and public delivery
+
+* **Template users no longer fail HTTP 422 when they intentionally have no
+  Xray proxy.** Creation now accepts either at least one Xray proxy or one
+  non-empty `core_access` grant, while partial `UserModify` semantics remain
+  unchanged. Template affixes are normalized and bounded in the dashboard so
+  the generated username is valid before Save. The regression runs through
+  the real HTTP, Pydantic, legacy DB, platform DB and core-provisioning path.
+* **Studio apply is now a CoreManager lifecycle operation.** Apply, start,
+  stop and restart share the per-core lock; driver-mutated settings such as
+  ports, endpoints, listener sets and PSKs persist immediately. A corrected
+  Studio document recovers a previously `ERROR` core whose process is not
+  actually running instead of reporting success with no listener.
+* **`{SERVER_IP}` no longer inherits historical loopback defaults for
+  sing-box and WireGuard.** Client delivery resolves the explicit non-loopback
+  core address, configured subscription hostname, actual public subscription
+  request hostname, then a usable listener fallback. Intentional localhost
+  advertising requires the explicit `allow_loopback_advertise` setting.
+
+### Fixed — core runtimes
+
+* **sing-box Hysteria2 and TUIC listeners bind before their first user grant.**
+  Explicit QUIC inbounds remain rendered with `users: []`; start, restart,
+  Studio apply and account republish wait for every expected TCP/UDP socket
+  using `ss` and fail closed if the process exits or a socket never binds.
+  TUIC users now carry the stable account `name` required by StatsService.
+  Real Hysteria2 and TUIC clients passed traffic and produced non-zero
+  per-user upload/download counters.
+* **WireGuard Studio recovery and status are real.** A corrected inbound can
+  recover the manager from `ERROR`, bring up the interface and persist the
+  actual endpoint/port. `wg show all dump` values `off` and `(none)` now parse
+  as zero keepalive instead of crashing. A real namespace peer completed a
+  handshake, ping and traffic/accounting cycle.
+* **OpenVPN PUSH behavior was re-verified against OpenVPN 2.6.** The released
+  management-auth, server pool/topology, route/DNS pushes and certificate
+  profile received `PUSH_REPLY`, an address, routes and DNS, initialized the
+  tunnel and passed traffic. Regression assertions now pin the exact
+  server-side push prerequisites.
+
+### Fixed — SoftEther
+
+* **Custom L2TP RAW Wizard tags are stable grant identities.** Server-wide
+  feature tags persist in `feature_tags`; portal delivery compares grants to
+  the real tag while still accepting canonical aliases for migration. Raw
+  L2TP client output uses UDP 1701, username/password and an explicit
+  unencrypted warning, and never asks for or leaks an IPsec PSK.
+* **Remote-access hubs get a real IP-assignment path by default.** SoftEther
+  apply idempotently enables SecureNAT and Virtual DHCP and validates the
+  `DhcpGet` pool before accepting L2TP/IPsec, raw L2TP, SSTP, OpenVPN
+  compatibility or native remote access. Operators using an external DHCP or
+  local bridge can explicitly set `secure_nat=false`.
+* **The live SoftEther PSK is authoritative.** PSK precedence is fresh Wizard
+  input, live `IPsecGet`, then persisted state; the selected server value is
+  persisted so the subscription and daemon cannot silently disagree.
+* **PPTP remains absent by design.** SoftEther Server does not implement PPTP;
+  stale client-renderer code was removed and the Wizard exposes only real
+  SoftEther transports.
+
+### Fixed — SSH accounting
+
+* **Modern SCP/SFTP traffic is counted in both directions after OpenSSH
+  decrypts it.** A binary-safe ForceCommand proxy measures stdin as uplink and
+  stdout as downlink, then sends bounded cumulative events to a Unix datagram
+  collector. `SO_PASSCRED` supplies kernel-authenticated sender UID; state is
+  written atomically with root-only permissions and survives restarts.
+* **Forwarding accounting no longer claims impossible bidirectional totals.**
+  The `xt_owner` matcher is probed against the real kernel and contributes
+  forwarding uplink only. SFTP and forwarding sources degrade independently,
+  with actionable status rather than fabricated zeroes. Real OpenSSH and
+  modern SCP passed byte-identical 1 MiB upload/download tests with non-zero
+  usage records in both directions.
+
+### Verified before tagging
+
+* Full Python suite: **712 passed / 7 environment-gated skipped / 0 failed**.
+* CLI suite: **244 passed / 0 failed**.
+* TypeScript `tsc --noEmit` and production Vite build: **PASS**.
+* Real Chromium regression gate: **33 passed / 0 failed**, including Template
+  create/no-422, sing-box and WireGuard Host Settings, public subscription
+  artifacts without loopback, and SoftEther RAW/L2TP/SSTP transport behavior.
+* Real runtime: OpenVPN `PUSH_REPLY` + tunnel traffic; sing-box Hysteria2/TUIC
+  UDP bind + clients + stats; WireGuard interface + handshake + traffic;
+  SoftEther stable SecureNAT/DHCP pool + live PSK/tag; OpenSSH modern SCP/SFTP
+  upload/download + accounting.
+
+### Known limitations
+
+* This sandbox kernel lacks XFRM SAD support and the `l2tp_ppp`/`pppol2tp`
+  modules. IKE reached an established SA, and the real SoftEther DHCP pool was
+  verified, but a complete L2TP/IPsec PPP client session could not finish in
+  this environment.
+* Dynamic SSH forwarding downlink is not attributable with `xt_owner`; only
+  forwarding uplink plus bidirectional SFTP/SCP is currently reported.
+
 ## [1.0.0-alpha.7.6] — 2026-08-10 — Runtime networking, SoftEther installer, OpenVPN PKI, and dashboard fixes
 
 Root-cause bug-fix cycle following `alpha.7.5`. This release replaces the

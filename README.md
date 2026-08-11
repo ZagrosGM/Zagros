@@ -16,7 +16,7 @@ one driver among many, with no special status anywhere in the codebase.
 
 ## ⚠️ Alpha Warning
 
-**Current release: `1.0.0-alpha.7.4` — this is an ALPHA build.**
+**Current release: `1.0.0-alpha.7.7` — this is an ALPHA build.**
 
 * Suitable for evaluation, testing and feedback — **not recommended for
   production** unless you fully understand the limitations.
@@ -31,14 +31,14 @@ one driver among many, with no special status anywhere in the codebase.
 ## Features
 
 * **8 built-in core drivers** — xray, sing-box, WireGuard, OpenVPN,
-  Hysteria 2, TUIC v5, SSH tunnel, SoftEther (L2TP/IPsec, SSTP, PPTP) — all
+  Hysteria 2, TUIC v5, SSH tunnel, SoftEther (L2TP/IPsec, raw L2TP, SSTP) — all
   behind one `BaseCoreDriver` contract.
 * **Unified quota** — one counter per user across *all* cores
   (1 GB xray + 2 GB OpenVPN + 3 GB WireGuard + 4 GB sing-box = exactly
   10 GB), with persistent baselines (exactly-once across core restarts).
 * **One user, any protocols from any cores** — a single dashboard user can
-  hold VLESS from xray, Hysteria 2, WireGuard and SoftEther (PPTP/SSTP/L2TP)
-  simultaneously, sharing ONE quota, ONE expiry and ONE global device limit
+  hold VLESS from xray, Hysteria 2, WireGuard and SoftEther (raw L2TP, SSTP,
+  L2TP/IPsec) simultaneously, sharing ONE quota, ONE expiry and ONE global device limit
   (`core_access` grants; the built-in xray is a protected platform core).
 * **Multi-format subscription** — the portal serves each granted config
   exactly once, auto-negotiated per client: share-link list (v2rayNG &
@@ -209,7 +209,7 @@ Release images are published to **GitHub Container Registry only**
 (multi-arch: linux/amd64, linux/arm64):
 
 ```bash
-docker pull ghcr.io/zagrosgm/zagros:v1.0.0-alpha.7.4
+docker pull ghcr.io/zagrosgm/zagros:v1.0.0-alpha.7.7
 docker pull ghcr.io/zagrosgm/zagros:latest        # tracks stable releases
 ```
 

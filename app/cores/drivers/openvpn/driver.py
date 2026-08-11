@@ -558,8 +558,11 @@ class OpenVPNDriver(BaseCoreDriver):
             await asyncio.to_thread(self._backend.configure, self._listener_specs())
             return
         await asyncio.to_thread(self._backend.configure, self._listener_specs())
-        await asyncio.to_thread(self._backend.restart)
+        # Register before restart opens listener sockets. Auto-reconnecting
+        # clients can emit CONNECT immediately and must always receive a
+        # client-auth/client-deny verdict (never hang at PUSH_REQUEST).
         await asyncio.to_thread(self._backend.set_auth_handler, self._authorize)
+        await asyncio.to_thread(self._backend.restart)
 
     def _listener_specs(self) -> list[dict[str, Any]]:
         """configure() payload: fully rendered conf + hook per listener,
@@ -750,15 +753,15 @@ want_pass="${creds#*:}"
         if str(self.settings.get("auth_mode") or "management") == "static":
             await asyncio.to_thread(self._install_static_auth)
         await asyncio.to_thread(self._backend.configure, self._listener_specs())
-        await asyncio.to_thread(self._backend.start)
         await asyncio.to_thread(self._backend.set_auth_handler, self._authorize)
+        await asyncio.to_thread(self._backend.start)
 
     async def stop(self) -> None:
         await asyncio.to_thread(self._backend.stop)
 
     async def restart(self) -> None:
-        await asyncio.to_thread(self._backend.restart)
         await asyncio.to_thread(self._backend.set_auth_handler, self._authorize)
+        await asyncio.to_thread(self._backend.restart)
 
     async def status(self) -> CoreStatus:
         running = await asyncio.to_thread(self._backend.is_running)

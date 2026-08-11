@@ -16,6 +16,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
@@ -105,6 +106,9 @@ class WireGuardBackend(Protocol):
         ...
     def down(self) -> None: ...
     def is_running(self) -> bool: ...
+    def wait_ready(self, expected_port: int, timeout: float = 5.0) -> None:
+        """Verify the authoritative kernel interface ListenPort."""
+        ...
 
     # telemetry
     def dump(self) -> WireGuardDump: ...
@@ -389,6 +393,59 @@ class LocalWireGuardBackend:
         except CoreError:
             return False
         return self.interface in out.split()
+
+    @staticmethod
+    def _ss_udp_ports() -> set[int]:
+        ss = shutil.which("ss")
+        if ss is None:
+            raise CoreError("'ss' (iproute2) is required to verify WireGuard UDP readiness")
+        proc = subprocess.run([ss, "-H", "-lun"], capture_output=True,
+                              text=True, timeout=10)
+        if proc.returncode != 0:
+            raise CoreError(f"ss -H -lun failed: {(proc.stderr or proc.stdout).strip()}")
+        ports: set[int] = set()
+        for line in proc.stdout.splitlines():
+            columns = line.split()
+            if len(columns) < 5:
+                continue
+            try:
+                ports.add(int(columns[4].rsplit(":", 1)[1]))
+            except (IndexError, ValueError):
+                continue
+        return ports
+
+    def wait_ready(self, expected_port: int, timeout: float = 5.0) -> None:
+        """Require the kernel WireGuard interface to report ListenPort.
+
+        ``ss`` is intentionally diagnostic-only: Linux WireGuard owns its UDP
+        socket in kernel space and several kernels (including the real runtime
+        gate) omit it from ``ss -lunp`` even while handshakes and traffic work.
+        Treating that omission as "not listening" reproduces the field's false
+        negative. ``wg show all dump`` is the authoritative API.
+        """
+        deadline = time.monotonic() + timeout
+        observed_port = 0
+        while time.monotonic() < deadline:
+            if not self.is_running():
+                break
+            dump = self.dump()
+            observed_port = int(dump.listen_ports.get(self.interface, 0))
+            if observed_port == expected_port:
+                try:
+                    if expected_port not in self._ss_udp_ports():
+                        logger.debug(
+                            "WireGuard %s ListenPort=%d is active but this kernel "
+                            "does not expose its in-kernel socket through ss",
+                            self.interface, expected_port,
+                        )
+                except CoreError:
+                    pass
+                return
+            time.sleep(0.1)
+        raise CoreError(
+            f"WireGuard interface '{self.interface}' is not ready: expected "
+            f"ListenPort={expected_port}, wg reports {observed_port}."
+        )
 
     # ------------------------------------------------------------------ #
     # telemetry

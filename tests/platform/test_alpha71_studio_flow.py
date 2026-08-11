@@ -169,10 +169,11 @@ def test_hydration_reapplies_persisted_documents(caplog):
          "openvpn": {"inbounds": [{"tag": "b"}]}},
     )
     with caplog.at_level(logging.ERROR):
-        asyncio.run(_bind_hydration(runtime)())
+        deferred = asyncio.run(_bind_hydration(runtime)())
+    assert deferred == {"openvpn"}
     assert good.received == [{"inbounds": [{"tag": "a"}]}]
-    # a stale document is logged loudly and NEVER aborts boot
-    assert "openvpn" in caplog.text and "no longer applies" in caplog.text
+    # a stale/live-only document is logged loudly, deferred, and never aborts boot
+    assert "openvpn" in caplog.text and "retried after" in caplog.text
 
 
 def test_hydration_skips_cores_without_documents():

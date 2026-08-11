@@ -31,6 +31,9 @@ print(json.dumps({
     "TLS_MODE": config.TLS_MODE,
     "TRUSTED_HOSTS": config.TRUSTED_HOSTS,
     "ALLOWED_ORIGINS": config.ALLOWED_ORIGINS,
+    "XRAY_JSON": config.XRAY_JSON,
+    "XRAY_EXECUTABLE_PATH": config.XRAY_EXECUTABLE_PATH,
+    "XRAY_ASSETS_PATH": config.XRAY_ASSETS_PATH,
 }))
 """
 
@@ -118,6 +121,9 @@ def test_defaults_without_any_file_settings(tmp_path):
     assert cfg["UVICORN_HOST"] == "0.0.0.0"
     assert cfg["UVICORN_PORT"] == 8000
     assert cfg["TLS_MODE"] == "auto"
+    assert cfg["XRAY_JSON"] == "/var/lib/zagros/cores/xray/xray_config.json"
+    assert cfg["XRAY_EXECUTABLE_PATH"] == "/var/lib/zagros/cores/xray/bin/xray"
+    assert cfg["XRAY_ASSETS_PATH"] == "/var/lib/zagros/cores/xray/assets"
     assert cfg["PANEL_BASE_URL"] == ""
     assert cfg["TRUSTED_HOSTS"] == []
     assert cfg["ALLOWED_ORIGINS"] == []

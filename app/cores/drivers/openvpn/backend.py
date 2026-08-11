@@ -114,6 +114,11 @@ class LocalOpenVPNBackend:
         os.makedirs(self.work_dir, exist_ok=True)
         self._listeners: dict[str, _Listener] = {}
         self._order: list[str] = []
+        # Stored before any listener opens. Auto-reconnecting clients can send
+        # >CLIENT:CONNECT immediately after the UDP/TCP socket binds; attaching
+        # auth only after start created a real no-response window and left the
+        # client stuck forever at PUSH_REQUEST.
+        self._auth_handler: AuthCallback | None = None
 
     # ------------------------------------------------------------------ #
     # listener-set materialization                                        #
@@ -470,6 +475,11 @@ class LocalOpenVPNBackend:
     def _connect_management(self, listener: _Listener,
                             timeout: float = 15.0) -> None:
         client = ManagementClient()
+        if self._auth_handler is not None:
+            # Install the callback BEFORE connect starts the reader thread.
+            # Otherwise an eager reconnect can complete ENV while no handler
+            # exists, and OpenVPN blocks that session waiting for a verdict.
+            client.set_auth_handler(self._bridge_auth_request)
         deadline = time.monotonic() + timeout
         last_error: Exception | None = None
         while time.monotonic() < deadline:
@@ -544,21 +554,25 @@ class LocalOpenVPNBackend:
                 continue
         return killed
 
-    def set_auth_handler(self, handler: AuthCallback) -> None:
-        def _bridge(request: AuthRequest) -> bool:
-            meta = {
-                "platform": request.platform,
-                "client_version": request.client_version,
-                "reauth": request.reauth,
-                **{k: v for k, v in request.env.items()
-                   if k.startswith("IV_") or k in ("remote_ip", "untrusted_ip")},
-            }
-            return bool(handler(request.username, request.password, meta))
+    def _bridge_auth_request(self, request: AuthRequest) -> bool:
+        handler = self._auth_handler
+        if handler is None:
+            return False
+        meta = {
+            "platform": request.platform,
+            "client_version": request.client_version,
+            "reauth": request.reauth,
+            **{k: v for k, v in request.env.items()
+               if k.startswith("IV_") or k in ("remote_ip", "untrusted_ip")},
+        }
+        return bool(handler(request.username, request.password, meta))
 
+    def set_auth_handler(self, handler: AuthCallback) -> None:
+        self._auth_handler = handler
         for tag in self._order:
             listener = self._listeners[tag]
             if listener.mgmt is not None:
-                listener.mgmt.set_auth_handler(_bridge)
+                listener.mgmt.set_auth_handler(self._bridge_auth_request)
 
     # ------------------------------------------------------------------ #
     # accounting

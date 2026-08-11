@@ -312,6 +312,7 @@ class LegacyXrayBackend:
                 f"xray rejected the studio document (nothing was applied): {exc}"
             ) from exc
 
+        os.makedirs(os.path.dirname(os.path.abspath(XRAY_JSON)), exist_ok=True)
         tmp_path = f"{XRAY_JSON}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as fh:
             json.dump(document, fh, indent=2, ensure_ascii=False)

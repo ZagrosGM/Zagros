@@ -52,6 +52,9 @@ class SoftEtherBackend(Protocol):
     def secure_nat_ensure(self) -> None:
         """Ensure this backend's Virtual Hub has SecureNAT + DHCP enabled."""
         ...
+    def recover_fresh_server_password(self) -> bool:
+        """Restore a persisted admin password onto a fresh blank server."""
+        ...
 
 
 class LocalSoftEtherBackend:
@@ -63,6 +66,13 @@ class LocalSoftEtherBackend:
         self.hub = settings.get("hub", "DEFAULT")
         self.password = settings.get("admin_password", "")
         self.timeout = float(settings.get("vpncmd_timeout", 30.0))
+        # The panel container is recreated on every image upgrade. SoftEther's
+        # daemon configuration lives beside vpnserver, so /usr/local was both
+        # a binary-loss and a configuration-loss boundary. New installs use
+        # the mounted data root; an explicit install_root remains available
+        # for direct-host/package deployments.
+        if settings.get("install_root"):
+            self._INSTALL_ROOT = str(settings["install_root"])
 
     # ------------------------------------------------------------------ #
     # command plumbing
@@ -76,6 +86,41 @@ class LocalSoftEtherBackend:
         return re.sub(r"(?i)(/(?:PSK|PASSWORD):)(?:\"[^\"]*\"|\S+)",
                       r"\1<redacted>", command)
 
+    @staticmethod
+    def _usable_executable(path: str) -> bool:
+        if not os.path.isfile(path) or not os.access(path, os.X_OK):
+            return False
+        # Panel wrappers are tiny `exec "<real>" "$@"` scripts. A leftover
+        # wrapper whose old container/temp target vanished is not an install.
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as fh:
+                head = fh.read(512)
+            if head.startswith("#!") and "exec " in head:
+                import re
+
+                match = re.search(r"\bexec\s+[\"']?([^\"'\s]+)", head)
+                if match and os.path.isabs(match.group(1)):
+                    return os.path.isfile(match.group(1))
+        except OSError:
+            return False
+        return True
+
+    def vpncmd_binary(self) -> str | None:
+        """Resolve vpncmd across explicit, persistent and package installs."""
+        configured = str(self.vpncmd or "vpncmd")
+        if os.path.sep in configured and self._usable_executable(configured):
+            return configured
+        for candidate in (
+            os.path.join(self._INSTALL_ROOT, "vpncmd"),
+            shutil.which(configured) or "",
+            "/usr/local/softether/vpncmd",  # pre-fix direct-host compatibility
+            "/usr/lib/softether/vpncmd",
+            "/usr/libexec/softether/vpncmd",
+        ):
+            if candidate and self._usable_executable(candidate):
+                return candidate
+        return None
+
     def _cmd(self, command: str, *, csv: bool = False,
              hub: bool = True) -> str:
         """Run a hub-scoped or entire-server vpncmd command.
@@ -84,13 +129,14 @@ class LocalSoftEtherBackend:
         must omit /HUB; user/session operations intentionally keep it.
         """
         safe = self._safe_command(command)
-        if shutil.which(self.vpncmd) is None:
+        executable = self.vpncmd_binary()
+        if executable is None:
             raise CoreError(
-                "vpncmd not found — press Install for this core (or run its "
-                "install_packages()): apt 'softether-vpnserver' on supported "
-                "distros, otherwise the official GitHub release is fetched."
+                "vpncmd not found — the core will repair its persistent "
+                "runtime on Start; use Install only if automatic recovery "
+                "reports that no package/cache source is available."
             )
-        argv = [self.vpncmd, self.server, "/SERVER"]
+        argv = [executable, self.server, "/SERVER"]
         if hub:
             argv.append(f"/HUB:{self.hub}")
         argv.append(f"/PASSWORD:{self.password}")
@@ -209,6 +255,35 @@ class LocalSoftEtherBackend:
                 "provide a real external DHCP/local bridge."
             )
 
+    def recover_fresh_server_password(self) -> bool:
+        """Apply the persisted admin password to a demonstrably blank server.
+
+        Alpha.7.7 kept vpn_server.config in the replaceable container layer.
+        On the first fixed upgrade a fresh daemon may therefore answer with an
+        empty password while SQL still contains the operator's password. We
+        probe blank authority first; only that proves this is a fresh server
+        rather than an incorrect credential against valuable existing state.
+        """
+        desired = str(self.password or "")
+        if not desired:
+            return False
+        self.password = ""
+        try:
+            self._cmd("ServerInfoGet", hub=False)  # fail closed unless blank works
+            if any(ch in desired for ch in ('"', "\n", "\r")):
+                raise CoreError(
+                    "persisted SoftEther admin password contains characters "
+                    "that cannot be encoded for automatic recovery"
+                )
+            password_arg = (f'"{desired}"' if any(ch.isspace() for ch in desired)
+                            else desired)
+            self._cmd(f"ServerPasswordSet /PASSWORD:{password_arg}", hub=False)
+        except CoreError:
+            return False
+        finally:
+            self.password = desired
+        return self.reachable()
+
     # ------------------------------------------------------------------ #
     # setup — real SELF_INSTALL (3-stage chain, alpha.7.2)
     # ------------------------------------------------------------------ #
@@ -247,7 +322,10 @@ class LocalSoftEtherBackend:
                        "openssl-dev", "zlib-dev", "readline-dev", "ncurses-dev"]),
     }
 
-    _INSTALL_ROOT = "/usr/local/softether"
+    # Persist across Docker image replacement. ``vpn_server.config`` is
+    # stored beside vpnserver by SoftEther itself, so this is runtime state,
+    # not merely a re-downloadable executable directory.
+    _INSTALL_ROOT = "/var/lib/zagros/cores/softether/runtime"
 
     def install_packages(self) -> str:
         """Install SoftEther once, under an inter-process build lock.
@@ -879,13 +957,15 @@ class LocalSoftEtherBackend:
         return proc.stdout or ""
 
     def server_binary(self) -> str | None:
-        """Path of the vpnserver daemon binary, PATH first then known layouts."""
-        hit = shutil.which("vpnserver")
-        if hit:
-            return hit
-        for candidate in ("/usr/local/bin/vpnserver", "/usr/local/softether/vpnserver",
-                          "/usr/lib/softether/vpnserver", "/usr/libexec/softether/vpnserver"):
-            if os.path.exists(candidate):
+        """Path of vpnserver, rejecting wrappers with vanished targets."""
+        for candidate in (
+            os.path.join(self._INSTALL_ROOT, "vpnserver"),
+            shutil.which("vpnserver") or "",
+            "/usr/local/softether/vpnserver",  # pre-fix direct-host compatibility
+            "/usr/lib/softether/vpnserver",
+            "/usr/libexec/softether/vpnserver",
+        ):
+            if candidate and self._usable_executable(candidate):
                 return candidate
         return None
 

@@ -82,6 +82,22 @@ def _inbound(config: dict, tag: str) -> dict:
 
 # --------------------------------------------------------------------------- #
 
+def test_persisted_self_installed_binary_survives_backend_recreation(tmp_path) -> None:
+    from app.cores.drivers.singbox.backend import LocalSingBoxBackend
+
+    binary = tmp_path / "sing-box"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    backend = LocalSingBoxBackend({
+        "work_dir": str(tmp_path),
+        # Exact alpha.7.7 persisted shape: a bare name, while SELF_INSTALL
+        # had actually written work_dir/sing-box.
+        "executable_path": "sing-box",
+    })
+    assert backend.executable == str(binary)
+    assert backend._proc.argv[0] == str(binary)
+
+
 def test_listener_readiness_classifies_native_quic_as_udp() -> None:
     from app.cores.drivers.singbox.backend import LocalSingBoxBackend
 

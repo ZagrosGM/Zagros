@@ -277,8 +277,11 @@ class TestSingBoxHostsMergedProtocols:
                                     "password": hy2_acc.settings["password"]}]
         assert hy2_ib["tls"]["enabled"] is True
         tuic_ib = next(ib for ib in rendered["inbounds"] if ib["tag"] == "tuic")
-        assert tuic_ib["users"] == [{"uuid": tuic_acc.settings["uuid"],
-                                     "password": tuic_acc.settings["password"]}]
+        assert tuic_ib["users"] == [{
+            "name": "1.bob.tuic",
+            "uuid": tuic_acc.settings["uuid"],
+            "password": tuic_acc.settings["password"],
+        }]
         # panel metadata never leaks into the rendered binary config
         assert not any(k.startswith("_") for ib in rendered["inbounds"] for k in ib)
 
@@ -331,9 +334,9 @@ class TestSingBoxHostsMergedProtocols:
                  if a.kind.value == "link"]
         assert len(links) == 1 and ":443?" in links[0]
 
-    def test_dead_listener_never_blocks_other_protocols(self, tmp_path):
-        """A hy2 listener with zero enabled users is dropped honestly; the
-        tuic listener with users still renders and the config stays valid."""
+    def test_explicit_quic_listener_binds_before_first_user(self, tmp_path):
+        """Explicit Hysteria2/TUIC listeners accept an empty user list and
+        bind immediately; granting TUIC later does not remove Hysteria2."""
         d = _driver(str(tmp_path))
         asyncio.run(d.apply_studio_document({"inbounds": [
             translate_entry("hysteria2", {"tag": "hysteria2", "port": 443}),
@@ -342,7 +345,10 @@ class TestSingBoxHostsMergedProtocols:
         asyncio.run(d.create_account(_acct("bob", "tuic")))
         rendered = d.render_config()
         tags = {ib["tag"] for ib in rendered["inbounds"]}
-        assert "hysteria2" not in tags and "tuic" in tags
+        assert {"hysteria2", "tuic"} <= tags
+        hy2 = next(ib for ib in rendered["inbounds"]
+                   if ib["tag"] == "hysteria2")
+        assert hy2["users"] == []
 
     def test_no_usable_inbound_honest_note(self, tmp_path):
         d = _driver(str(tmp_path))

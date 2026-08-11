@@ -7,17 +7,13 @@
   * :const:`ACCT_CHAIN` + :func:`parse_acct_counters` — per-UID byte
     accounting through an iptables owner-match chain (alpha.7.4, item 5).
 
-Accounting design — REAL bytes, no fabrication (supersedes the old "no
-mainstream per-user method" note): for a proxied SSH session the sshd child
-runs as the account's UID, and EVERY proxied payload byte is re-emitted by
-that process in BOTH directions (client→dest *and* dest→client are both
-OUTPUT from sshd's perspective). An ``-m owner --uid-owner`` rule on the
-OUTPUT chain therefore counts exactly the tunnel's total payload — the
-number quota enforcement needs — deterministically, at kernel level, across
-restarts (counters are never zeroed on read). The client→sshd ingress is
-not double-charged: it carries the same payload once more as ciphertext.
-Mapping: the cumulative counter is reported as the account's downlink with
-uplink = 0, documented so totals stay meaningful per user.
+Accounting design — REAL bytes, no fabrication: xt_owner can identify only
+locally-created OUTPUT sockets. It therefore provides forwarding uplink but
+cannot see data sent on the root-created accepted SSH socket and must never be
+claimed as a bidirectional total. SFTP/SCP uses a separate decrypted stream
+proxy with kernel-credential attribution; it reports cumulative upload and
+download independently. The driver combines these sources and persists its
+baseline across recorder ticks/restarts.
 """
 from __future__ import annotations
 

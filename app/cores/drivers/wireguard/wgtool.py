@@ -74,7 +74,8 @@ def parse_wg_dump(text: str) -> WireGuardDump:
                 latest_handshake=int(handshake),
                 transfer_rx=int(rx),
                 transfer_tx=int(tx),
-                persistent_keepalive=int(keepalive),
+                persistent_keepalive=(0 if keepalive in ("off", "(none)")
+                                      else int(keepalive)),
             ))
         else:  # pragma: no cover - defensive: unknown row from newer wg
             continue

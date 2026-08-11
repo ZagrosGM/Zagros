@@ -297,6 +297,7 @@ class FakeSEBackend:
         self.disconnected.append(session_name)
         self.sessions = [s for s in self.sessions if s.session_name != session_name]
     def ipsec_psk(self): return None
+    def secure_nat_ensure(self): self.secure_nat = True
     def ipsec_get(self):
         from app.cores.drivers.softether.setool import IPsecServices
         return getattr(self, "_ipsec", IPsecServices(

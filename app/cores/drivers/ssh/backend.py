@@ -7,11 +7,15 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import shutil
+import socket
+import struct
 import subprocess
+import sys
 import threading
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
@@ -59,6 +63,18 @@ class LocalSystemSSHBackend:
 
     def __init__(self, settings: dict):
         self.settings = settings
+        self.work_dir = str(settings.get("work_dir") or
+                            "/var/lib/zagros/cores/ssh")
+        self._sftp_socket_path = str(settings.get("sftp_accounting_socket") or
+                                     os.path.join(self.work_dir, "accounting.sock"))
+        self._sftp_state_path = os.path.join(self.work_dir,
+                                             "sftp-usage.json")
+        self._sftp_lock = threading.Lock()
+        self._sftp_totals: dict[int, tuple[int, int]] = {}
+        self._sftp_socket: socket.socket | None = None
+        self._sftp_thread: threading.Thread | None = None
+        self._sftp_stop = threading.Event()
+        self._load_sftp_totals()
 
     # ------------------------------------------------------------------ #
     # helpers
@@ -91,7 +107,115 @@ class LocalSystemSSHBackend:
         return proc.returncode
 
     # ------------------------------------------------------------------ #
-    # per-UID traffic accounting — iptables owner-match chain (alpha.7.4)
+    # SFTP/SCP stream accounting — both directions, capability independent
+    # ------------------------------------------------------------------ #
+    def _load_sftp_totals(self) -> None:
+        try:
+            raw = json.loads(open(self._sftp_state_path, encoding="utf-8").read())
+            self._sftp_totals = {
+                int(uid): (max(0, int(values[0])), max(0, int(values[1])))
+                for uid, values in raw.items()
+                if isinstance(values, list) and len(values) == 2
+            }
+        except (OSError, ValueError, TypeError):
+            self._sftp_totals = {}
+
+    def _save_sftp_totals_locked(self) -> None:
+        os.makedirs(self.work_dir, mode=0o755, exist_ok=True)
+        part = self._sftp_state_path + ".part"
+        with open(part, "w", encoding="utf-8") as fh:
+            json.dump({str(uid): [up, down]
+                       for uid, (up, down) in self._sftp_totals.items()}, fh)
+        os.chmod(part, 0o600)
+        os.replace(part, self._sftp_state_path)
+
+    def _sftp_collect(self) -> None:
+        sock = self._sftp_socket
+        assert sock is not None
+        cred_size = struct.calcsize("3i")
+        while not self._sftp_stop.is_set():
+            try:
+                data, ancdata, _flags, _address = sock.recvmsg(1024,
+                    socket.CMSG_SPACE(cred_size))
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            uid: int | None = None
+            for level, kind, payload in ancdata:
+                if level == socket.SOL_SOCKET and kind == socket.SCM_CREDENTIALS:
+                    _pid, uid, _gid = struct.unpack("3i", payload[:cred_size])
+                    break
+            if uid is None or uid <= 0:
+                continue
+            try:
+                event = json.loads(data.decode("utf-8"))
+                up = max(0, int(event["uplink"]))
+                down = max(0, int(event["downlink"]))
+            except (ValueError, TypeError, KeyError, UnicodeDecodeError):
+                continue
+            # Bound one event to prevent a compromised account from integer
+            # bombing the quota store; legitimate sessions can report up to
+            # one PiB per direction.
+            if up > 1 << 50 or down > 1 << 50:
+                continue
+            with self._sftp_lock:
+                old_up, old_down = self._sftp_totals.get(uid, (0, 0))
+                self._sftp_totals[uid] = (old_up + up, old_down + down)
+                try:
+                    self._save_sftp_totals_locked()
+                except OSError as exc:
+                    logger.warning("ssh SFTP accounting state write failed: %s", exc)
+
+    def sftp_acct_start(self) -> str:
+        """Start the credential-checked local collector used by the OpenSSH
+        ForceCommand helper; returns its socket path."""
+        if self._sftp_thread is not None and self._sftp_thread.is_alive():
+            return self._sftp_socket_path
+        if not hasattr(socket, "SO_PASSCRED"):
+            raise CoreError("kernel/Python lacks SO_PASSCRED for secure SFTP accounting")
+        socket_dir = os.path.dirname(self._sftp_socket_path)
+        os.makedirs(socket_dir, mode=0o755, exist_ok=True)
+        # The sshd child has already dropped to the account UID when the
+        # wrapper connects; every parent directory must be traversable while
+        # state files inside remain root-only 0600.
+        os.chmod(socket_dir, 0o755)
+        try:
+            os.remove(self._sftp_socket_path)
+        except FileNotFoundError:
+            pass
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+        sock.bind(self._sftp_socket_path)
+        os.chmod(self._sftp_socket_path, 0o666)
+        sock.settimeout(0.5)
+        self._sftp_socket = sock
+        self._sftp_stop.clear()
+        self._sftp_thread = threading.Thread(
+            target=self._sftp_collect, name="zagros-ssh-sftp-accounting",
+            daemon=True)
+        self._sftp_thread.start()
+        return self._sftp_socket_path
+
+    def sftp_acct_stop(self) -> None:
+        self._sftp_stop.set()
+        if self._sftp_socket is not None:
+            self._sftp_socket.close()
+            self._sftp_socket = None
+        if self._sftp_thread is not None:
+            self._sftp_thread.join(timeout=2)
+            self._sftp_thread = None
+        try:
+            os.remove(self._sftp_socket_path)
+        except FileNotFoundError:
+            pass
+
+    def sftp_acct_read(self) -> dict[int, tuple[int, int]]:
+        with self._sftp_lock:
+            return dict(self._sftp_totals)
+
+    # ------------------------------------------------------------------ #
+    # per-UID forwarding uplink accounting — iptables owner match
     # ------------------------------------------------------------------ #
     def acct_available(self) -> str | None:
         """None when per-UID accounting can run; else a DIAGNOSIS for the
@@ -102,8 +226,18 @@ class LocalSystemSSHBackend:
             None,
         )
         if iptables is None:
-            return ("iptables not found — per-SSH-user accounting needs it "
-                    "(panel image ships it since 1.0.0-alpha.7.4).")
+            return ("iptables not found — SSH forwarding accounting needs it "
+                    "(SFTP accounting remains independent).")
+        # Probe the actual kernel owner matcher, not merely the iptables
+        # executable. Minimal/container kernels can list rules yet reject
+        # `-m owner` with rc=4; the old readiness check produced a false PASS.
+        probe = subprocess.run(
+            [iptables, "-C", "OUTPUT", "-m", "owner", "--uid-owner", "0",
+             "-j", "ACCEPT"],
+            capture_output=True, text=True, timeout=15)
+        if probe.returncode not in (0, 1):
+            detail = (probe.stderr or probe.stdout or "owner matcher unavailable").strip()
+            return f"iptables owner matcher unavailable: {detail}"
         try:
             self._run([iptables, "-S", ACCT_CHAIN], timeout=15)
         except CoreError as exc:
@@ -396,7 +530,17 @@ class LocalSystemSSHBackend:
                 fh.write(str(s["banner"]).rstrip("\n") + "\n")
             lines.append(f"Banner {banner_path}")
         if s.get("sftp", True):
-            lines.append("Subsystem sftp internal-sftp")
+            # Do not redeclare Subsystem in a drop-in (Debian's main config
+            # already defines it and duplicate declarations make `sshd -t`
+            # fail). Intercept only panel users via ForceCommand; the helper
+            # delegates non-SFTP commands unchanged.
+            wrapper = os.path.join(os.path.dirname(__file__),
+                                   "sftp_accounting.py")
+            lines += [
+                "Match User zg-*",
+                f"    ForceCommand {sys.executable} {wrapper} {self._sftp_socket_path}",
+                "Match all",
+            ]
         return "\n".join(lines) + "\n"
 
     def _write_dropin_if_changed(self) -> bool:

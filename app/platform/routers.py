@@ -331,12 +331,14 @@ async def _serve_subscription(runtime, user_id: int, request: Request,
             userinfo_header = ""
 
     if is_browser:
-        page = await runtime.portal.build_page(user_id, lang=lang)
+        page = await runtime.portal.build_page(
+            user_id, lang=lang, public_host=request.url.hostname)
         if page is None:
             raise HTTPException(404, "subscription not found")
         return HTMLResponse(render_page_html(page))
 
-    bundle = await runtime.portal.build_links(user_id)
+    bundle = await runtime.portal.build_links(
+        user_id, public_host=request.url.hostname)
     if bundle is None:
         raise HTTPException(404, "subscription not found")
     links, notes = bundle
@@ -484,7 +486,11 @@ async def _materialize_studio(runtime, core_id: str, driver, doc) -> str | None:
         return ("document saved; this engine applies it on next start "
                 "(no live studio→core bridge for this driver)")
     try:
-        await hook(doc)
+        # CoreManager owns the lifecycle lock and persists any settings the
+        # service driver derives from this document (port, PSK, endpoint,
+        # listener set). Direct driver calls here raced start/restart and lost
+        # settings on panel reboot.
+        await runtime.core_manager.apply_studio_document(core_id, doc)
     except CoreError as exc:
         raise HTTPException(422, f"{core_id}: {exc}") from exc
     return None

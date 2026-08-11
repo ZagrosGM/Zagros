@@ -52,10 +52,14 @@ class FakeSSHBackend:
         # alpha.7.4 accounting simulation (kernel chain): uid per zg-* user,
         # cumulative byte counters, last-converged rule set
         self.counters: dict[int, int] = {}
+        self.sftp_counters: dict[int, tuple[int, int]] = {}
         self.synced_uids: set[int] = set()
-        self._acct_reason = acct_reason        # non-None = accounting unavailable
+        self._acct_reason = acct_reason        # non-None = forwarding accounting unavailable
 
-    # accounting surface mirrors LocalSystemSSHBackend (alpha.7.4)
+    # accounting surface mirrors LocalSystemSSHBackend
+    def sftp_acct_start(self): return "/tmp/fake-ssh-accounting.sock"
+    def sftp_acct_stop(self): pass
+    def sftp_acct_read(self): return dict(self.sftp_counters)
     def acct_available(self): return self._acct_reason
     def acct_ensure(self): pass
     def acct_sync_users(self, uids): self.synced_uids = set(uids)
@@ -223,25 +227,21 @@ def test_chain_account_and_usage_degrade_honesty() -> None:
         endpoint2 = await driver.ensure_chain_listener("ssh", 0)
         assert endpoint2.metadata["password"] == md["password"]
 
-        # alpha.7.4: usage accounting is claimed only when the deployment
-        # can actually account — this host has no usable iptables → the
-        # capability degrades honestly (no fake zeros, explicit diagnosis).
-        assert not driver.supports(Capability.USAGE_ACCOUNTING)
+        # Owner-match can degrade while the decrypted SFTP accounting source
+        # remains real. Capability stays available, status names the partial
+        # gap, and no fabricated forwarding bytes are returned.
+        assert driver.supports(Capability.USAGE_ACCOUNTING)
         assert not driver.supports(Capability.DEVICE_DETECTION)
-        try:
-            await driver.get_usage()
-            raise AssertionError("usage must raise when accounting has no backend support")
-        except Exception as exc:
-            assert "usage_accounting" in str(exc) and "NET_ADMIN" in str(exc)
-            state = await driver.status()
-            assert state.health.value == "degraded"
-            assert "NET_ADMIN" in (state.message or "")
+        assert await driver.get_usage() == []
+        state = await driver.status()
+        assert state.health.value == "degraded"
+        assert "NET_ADMIN" in (state.message or "")
     asyncio.run(run())
 
 
-def test_usage_accounting_owner_match_deltas() -> None:
-    """Real-chain math: kernel counters → per-tick deltas, deleted accounts
-    forgotten, uplink documented as 0 (payload of both directions in down)."""
+def test_usage_accounting_combines_forwarding_and_sftp_directions() -> None:
+    """Kernel forwarding uplink + decrypted SFTP up/down become restart-safe
+    per-tick deltas; deleted accounts are forgotten."""
     async def run():
         driver, backend = _driver()
         await driver.start()
@@ -254,16 +254,19 @@ def test_usage_accounting_owner_match_deltas() -> None:
         # tick 1: kernel counters appear → full counter counts as the delta
         backend.counters[uid_a] = 1000
         backend.counters[uid_b] = 500
+        backend.sftp_counters[uid_a] = (200, 700)
+        backend.sftp_counters[uid_b] = (100, 300)
         r1 = {r.account_id: (r.uplink_bytes, r.downlink_bytes)
               for r in await driver.get_usage()}
-        assert r1 == {"1.alice": (0, 1000), "2.bob": (0, 500)}
+        assert r1 == {"1.alice": (1200, 700), "2.bob": (600, 300)}
         assert backend.synced_uids == {uid_a, uid_b}      # rules converged
 
         # tick 2: grow one counter → only the growth is billed (no double count)
         backend.counters[uid_a] = 1400
+        backend.sftp_counters[uid_a] = (350, 900)
         r2 = {r.account_id: (r.uplink_bytes, r.downlink_bytes)
               for r in await driver.get_usage()}
-        assert r2 == {"1.alice": (0, 400), "2.bob": (0, 0)}
+        assert r2 == {"1.alice": (550, 200), "2.bob": (0, 0)}
 
         # counter reset (fresh chain) never produces a negative bill
         backend.counters[uid_a] = 50

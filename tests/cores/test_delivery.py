@@ -264,8 +264,10 @@ async def _xray_profile() -> DeliveryProfile:
 async def _singbox_profile() -> DeliveryProfile:
     from app.cores.drivers.singbox import SingBoxDriver
     from tests.cores.fakes import FakeSingBoxBackend
-    driver = SingBoxDriver(settings={"work_dir": tempfile.mkdtemp(prefix="dlvsb-")},
-                           backend=FakeSingBoxBackend())
+    driver = SingBoxDriver(settings={
+        "work_dir": tempfile.mkdtemp(prefix="dlvsb-"),
+        "advertise_host": "203.0.113.10",
+    }, backend=FakeSingBoxBackend())
     account = _acct(1, "alice", "vless", {"id": "uuid-1"})
     await driver.create_account(account)
     return await driver.describe_delivery(account)
@@ -274,8 +276,10 @@ async def _singbox_profile() -> DeliveryProfile:
 async def _wireguard_profile() -> DeliveryProfile:
     from app.cores.drivers.wireguard import WireGuardDriver
     from tests.cores.fakes import FakeWireGuardBackend
-    driver = WireGuardDriver({"work_dir": tempfile.mkdtemp(prefix="dlvwg-")},
-                             backend=FakeWireGuardBackend())
+    driver = WireGuardDriver({
+        "work_dir": tempfile.mkdtemp(prefix="dlvwg-"),
+        "advertise_host": "203.0.113.10",
+    }, backend=FakeWireGuardBackend())
     await driver.start()
     account = _acct(1, "alice", "wireguard")
     await driver.create_account(account)

@@ -170,7 +170,7 @@ class PlatformRuntime:
             if not doc:
                 continue
             try:
-                await hook(doc)
+                await self.core_manager.apply_studio_document(core_id, doc)
                 logger.info("studio hydration: %s restored from persisted document", core_id)
             except Exception as exc:  # noqa: BLE001
                 logger.error(

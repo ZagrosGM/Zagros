@@ -49,6 +49,9 @@ class SoftEtherBackend(Protocol):
     def ipsec_get(self) -> IPsecServices: ...
     def ipsec_services_set(self, *, l2tp: bool, l2tp_raw: bool, etherip: bool,
                            psk: str, default_hub: str) -> None: ...
+    def secure_nat_ensure(self) -> None:
+        """Ensure this backend's Virtual Hub has SecureNAT + DHCP enabled."""
+        ...
 
 
 class LocalSoftEtherBackend:
@@ -164,6 +167,47 @@ class LocalSoftEtherBackend:
             f"/ETHERIP:{yn(etherip)} /PSK:{psk_arg} /DEFAULTHUB:{hub}",
             hub=False,
         )
+
+    def secure_nat_ensure(self) -> None:
+        """Enable the hub's self-contained NAT and DHCP service idempotently.
+
+        This is the production-safe default for a VPS with no LAN bridge. A
+        successful L2TP/CHAP session otherwise reaches PPP and dies with
+        "Could not determine local IP address" because no DHCP lease exists.
+        """
+        for command in ("SecureNatEnable", "DhcpEnable"):
+            try:
+                self._cmd(command, hub=True)
+            except CoreError as exc:
+                text = str(exc).lower()
+                if not any(marker in text for marker in
+                           ("already", "enabled", "exist")):
+                    raise CoreError(
+                        f"SoftEther hub '{self.hub}' cannot enable Virtual "
+                        f"NAT/DHCP via {command}: {exc}"
+                    ) from exc
+        # Read back real pool facts. The output includes START/END/MASK/GW/DNS
+        # addresses; fewer than four valid IPv4 values means clients still
+        # cannot receive a usable lease and the apply must fail honestly.
+        status = self._cmd("DhcpGet", hub=True)
+        import ipaddress
+        import re
+
+        valid: list[str] = []
+        for candidate in re.findall(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])",
+                                    status):
+            try:
+                ipaddress.IPv4Address(candidate)
+            except ipaddress.AddressValueError:
+                continue
+            valid.append(candidate)
+        if len(set(valid)) < 4:
+            raise CoreError(
+                f"SoftEther SecureNAT is enabled on hub '{self.hub}', but "
+                "DhcpGet did not report a complete lease pool (start/end/"
+                "mask/gateway). Configure DhcpSet or disable secure_nat and "
+                "provide a real external DHCP/local bridge."
+            )
 
     # ------------------------------------------------------------------ #
     # setup — real SELF_INSTALL (3-stage chain, alpha.7.2)

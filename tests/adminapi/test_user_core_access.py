@@ -201,6 +201,50 @@ def test_create_user_with_core_access_provisions_on_the_core(monkeypatch):
     assert any(a["core_id"] == "xray" and a["protocol"] == "shadowsocks" for a in accounts)
 
 
+def test_create_template_style_user_without_xray_proxy(monkeypatch):
+    """From Template may grant only a non-Xray inbound. The real HTTP/schema/
+    legacy DB/platform DB flow must accept it instead of failing Pydantic 422."""
+    core_id = f"rec-{uuid.uuid4().hex[:6]}"
+    driver = _recording_driver(core_id, "wireguard")
+    _stub_catalog(monkeypatch, core_id, "wireguard", ["wg-template"])
+    token = _sudo_token()
+    name = f"tpl{uuid.uuid4().hex[:10]}"
+
+    payload = {
+        "username": name,
+        "proxies": {},
+        "inbounds": {},
+        "core_access": {core_id: ["wg-template"]},
+        "data_limit_reset_strategy": "no_reset",
+    }
+    response = _client.post("/api/user", headers=_auth(token), json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["core_access"] == payload["core_access"]
+    assert driver.created, "template grant never reached the core provisioner"
+
+    # Both databases contain one coherent user; no phantom Xray proxy was
+    # invented merely to satisfy the old schema.
+    with GetDB() as db:
+        legacy = crud.get_user(db, name)
+        assert legacy is not None and list(legacy.proxies) == []
+    runtime = _runtime()
+    platform = runtime.users.get_user_by_username(name)
+    assert platform is not None
+    accounts = runtime.users.accounts_of(platform.id)
+    assert [(row["core_id"], row["protocol"], row["settings"]["inbound_tags"])
+            for row in accounts] == [(core_id, "wireguard", ["wg-template"])]
+
+
+def test_create_rejects_user_without_any_access():
+    token = _sudo_token()
+    response = _client.post("/api/user", headers=_auth(token), json={
+        "username": f"empty{uuid.uuid4().hex[:8]}",
+        "proxies": {}, "inbounds": {}, "core_access": {},
+    })
+    assert response.status_code == 422
+    assert "proxy or one core_access" in response.text
+
+
 def test_create_user_unknown_core_rolls_back_legacy_row():
     token = _sudo_token()
     name = f"cx{uuid.uuid4().hex[:10]}"

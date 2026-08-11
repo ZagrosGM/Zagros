@@ -306,7 +306,8 @@ def test_ssh_dropin_keeps_port_22_and_panel_port(tmp_path):
     assert "Port 22" in content          # operator lockout guard — contractual
     assert "Port 2022" in content        # panel tunnel port
     assert "MaxSessions 10" in content
-    assert "Subsystem sftp internal-sftp" in content
+    assert "Subsystem sftp" not in content  # main sshd_config owns it once
+    assert "Match User zg-*" in content and "sftp_accounting.py" in content
 
 
 def test_ssh_dropin_idempotent_write(tmp_path):

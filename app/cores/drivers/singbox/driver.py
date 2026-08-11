@@ -119,7 +119,9 @@ class SingBoxDriver(BaseCoreDriver):
                 "listen": {"type": "string", "default": "::"},
                 "ports": {"type": "object"},
                 "advertise_host": {"type": "string",
-                                   "description": "public address the client app connects to"},
+                                   "description": "public address the client app connects to; blank uses the subscription request host"},
+                "allow_loopback_advertise": {"type": "boolean", "default": False,
+                                             "description": "explicitly allow localhost in client links (development only)"},
                 "ss_method": {"type": "string", "default": "aes-128-gcm"},
                 "final_outbound": {"type": "string", "default": "direct"},
                 "stats_enabled": {"type": "boolean", "default": True},
@@ -134,7 +136,8 @@ class SingBoxDriver(BaseCoreDriver):
             "listen": "::",
             "ports": {"vless": 10001, "vmess": 10002, "trojan": 10003, "shadowsocks": 10004,
                       "hysteria2": 4430, "tuic": 5443},
-            "advertise_host": "127.0.0.1",
+            "advertise_host": "",
+            "allow_loopback_advertise": False,
             "ss_method": "aes-128-gcm",
             "final_outbound": "direct",
             "geoip_db": "",
@@ -193,11 +196,12 @@ class SingBoxDriver(BaseCoreDriver):
             if protocol == "vless" and account.settings.get("flow"):
                 entry["flow"] = account.settings["flow"]
         elif protocol == "tuic":
-            # sing-box tuic users are {uuid, password} — NO name field
-            # (the generic branch rendered a tuic user without uuid, which
-            # the binary rejects with "missing uuid for user 0"; caught by
-            # the wizard matrix probe against the real binary)
+            # TUIC requires uuid+password. Current sing-box also accepts the
+            # optional `name`, and the v2ray stats service needs that identity
+            # to emit user>>>... counters. Omitting it made TUIC traffic
+            # invisible while Hysteria2 accounted correctly.
             entry = {
+                "name": account.account_id,
                 "uuid": str(account.settings.get("uuid") or account.settings.get("id")),
                 "password": str(account.settings["password"]),
             }
@@ -280,6 +284,18 @@ class SingBoxDriver(BaseCoreDriver):
         await asyncio.to_thread(self._backend.apply_config, rendered)
         if await asyncio.to_thread(self._backend.is_running):
             await asyncio.to_thread(self._backend.restart)
+            await self._wait_listeners(rendered)
+
+    async def _wait_listeners(self, rendered: dict[str, Any]) -> None:
+        verify = getattr(self._backend, "wait_listeners", None)
+        if callable(verify):
+            try:
+                await asyncio.to_thread(verify, rendered)
+            except Exception:
+                # A failed readiness gate must not leave a partially-bound
+                # process pretending to be healthy.
+                await asyncio.to_thread(self._backend.stop)
+                raise
 
     def _merge_studio_inbounds(self) -> list[dict[str, Any]]:
         merged: list[dict[str, Any]] = []
@@ -308,8 +324,16 @@ class SingBoxDriver(BaseCoreDriver):
                 if users:
                     ib["users"] = users
                     merged.append(ib)
-                # else: dead listener (no enabled user) — dropped honestly,
-                # same rule as the derived rendering
+                elif ptype in ("hysteria2", "tuic"):
+                    # These native QUIC inbounds accept an empty users list
+                    # (verified against real sing-box 1.12.4/current). Keep an
+                    # explicitly created listener bound immediately; it simply
+                    # authenticates nobody until the first grant arrives.
+                    ib["users"] = []
+                    merged.append(ib)
+                # Other account protocols retain the conservative no-user
+                # drop because older sing-box versions reject some empty
+                # listener shapes.
             else:
                 merged.append(ib)
         for (protocol, port), _ep in sorted(self._chain_listeners.items()):
@@ -781,9 +805,11 @@ class SingBoxDriver(BaseCoreDriver):
         return self._v2ray_supported
 
     async def _republish(self) -> None:
-        await asyncio.to_thread(self._backend.apply_config, self.render_config())
+        rendered = self.render_config()
+        await asyncio.to_thread(self._backend.apply_config, rendered)
         if await asyncio.to_thread(self._backend.is_running):
             await asyncio.to_thread(self._backend.restart)
+            await self._wait_listeners(rendered)
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -793,14 +819,19 @@ class SingBoxDriver(BaseCoreDriver):
         # stale by definition (the listener field was dying on a pre-start
         # socket); the next probe-driven tick settles the verdict freshly.
         self._stats_error = None
-        await asyncio.to_thread(self._backend.apply_config, self.render_config())
+        rendered = self.render_config()
+        await asyncio.to_thread(self._backend.apply_config, rendered)
         await asyncio.to_thread(self._backend.start)
+        await self._wait_listeners(rendered)
 
     async def stop(self) -> None:
         await asyncio.to_thread(self._backend.stop)
 
     async def restart(self) -> None:
+        rendered = self.render_config()
+        await asyncio.to_thread(self._backend.apply_config, rendered)
         await asyncio.to_thread(self._backend.restart)
+        await self._wait_listeners(rendered)
 
     async def status(self) -> CoreStatus:
         running = await asyncio.to_thread(self._backend.is_running)
@@ -1285,19 +1316,23 @@ class SingBoxDriver(BaseCoreDriver):
         return out
 
     def _compose_outbound(
-        self, account: UserAccount, tag: str, ib: dict[str, Any], meta: dict[str, Any]
+        self, account: UserAccount, tag: str, ib: dict[str, Any],
+        meta: dict[str, Any], context: Any | None = None,
     ) -> dict[str, Any]:
         """Mirror one rendered listener into a client outbound fragment
         (share-link shape consumed by ``share_url_for_outbound``)."""
         proto = str(ib["type"])
-        server = str(self.settings.get("advertise_host") or "").strip() \
-            or str(ib.get("listen") or "").strip()
-        if server in ("::", "0.0.0.0", "[::]", ""):
+        from app.cores.delivery import resolve_delivery_host
+
+        server = resolve_delivery_host(
+            self.settings.get("advertise_host"), context, ib.get("listen"),
+            allow_loopback=bool(self.settings.get("allow_loopback_advertise", False)),
+        )
+        if not server:
             raise CoreError(
-                "no advertise_host configured for the sing-box core and the "
-                f"inbound '{tag}' listens on a wildcard address — set "
-                "advertise_host in the core settings so clients know where "
-                "to connect."
+                "no public host is available for the sing-box inbound "
+                f"'{tag}' — configure advertise_host/subscription_url_prefix "
+                "or fetch the subscription through its public hostname."
             )
         outbound: dict[str, Any] = {
             "type": proto, "tag": f"{tag}-svc",
@@ -1438,7 +1473,7 @@ class SingBoxDriver(BaseCoreDriver):
                 engine="sing-box",
                 inbound_tag=tag,
             )
-            outbound = self._compose_outbound(account, tag, ib, meta)
+            outbound = self._compose_outbound(account, tag, ib, meta, context)
             try:
                 link = share_url_for_outbound(outbound, remark)
             except ShareLinkError as exc:

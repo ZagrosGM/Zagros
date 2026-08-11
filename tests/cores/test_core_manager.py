@@ -455,6 +455,31 @@ def test_get_logs_and_status_all() -> None:
     asyncio.run(main())
 
 
+def test_studio_apply_serializes_and_persists_driver_settings() -> None:
+    async def main() -> None:
+        manager, store, _ = _make_manager()
+        driver = FakeDriver({"bin": "/bin/true"})
+
+        async def apply(document):
+            driver.settings["listen_port"] = document["inbounds"][0]["port"]
+            driver.settings["ipsec_psk"] = "persisted-secret"
+
+        driver.apply_studio_document = apply
+        manager.attach("fakebox", driver, enabled=True, state=CoreState.RUNNING)
+        await store.save_state("fakebox", state=CoreState.RUNNING,
+                               enabled=True, settings=driver.settings)
+        await manager.apply_studio_document("fakebox", {
+            "inbounds": [{"tag": "new", "port": 43123}],
+        })
+        saved = (await store.load())["fakebox"]
+        assert saved["state"] == "running"
+        assert driver.running is True  # stale RUNNING record recovered process
+        assert saved["settings"]["listen_port"] == 43123
+        assert saved["settings"]["ipsec_psk"] == "persisted-secret"
+
+    asyncio.run(main())
+
+
 # --------------------------------------------------------------------------- #
 # health-monitor lifecycle reconciliation (alpha.7.2 item 3):
 # a healthy RUNNING process must never be displayed as Error

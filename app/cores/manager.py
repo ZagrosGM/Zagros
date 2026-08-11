@@ -278,6 +278,48 @@ class CoreManager:
     # ------------------------------------------------------------------ #
     # start / stop / restart + state machine
     # ------------------------------------------------------------------ #
+    async def apply_studio_document(self, core_id: str,
+                                    document: dict[str, Any]) -> None:
+        """Serialize studio materialization with lifecycle operations and
+        persist driver-mutated settings on the same core-state row.
+
+        Service drivers (WireGuard/OpenVPN/SSH/SoftEther) translate studio
+        fields into their settings. Previously those mutations lived only in
+        memory: panel restart reloaded stale ports/PSKs/endpoint hosts even
+        though the studio document itself survived. This is the single
+        orchestration boundary for apply vs start/stop/restart races.
+        """
+        async with self._locks[core_id]:
+            driver = self.get(core_id)
+            hook = getattr(driver, "apply_studio_document", None)
+            if hook is None:
+                raise CapabilityNotSupportedError(
+                    core_id, "studio_document_apply")
+            state_before = self._states[core_id]
+            await hook(document)
+
+            # A corrected inbound is the recovery path for a core whose prior
+            # default config failed. RUNNING must also mean the process is
+            # really alive; otherwise a successful wizard response with no
+            # listener is a lie. STOPPED/INSTALLED remain operator-controlled.
+            if state_before in (CoreState.RUNNING, CoreState.ERROR):
+                actual = await driver.status()
+                if actual.state is not CoreState.RUNNING:
+                    await self._set_state(core_id, CoreState.STARTING)
+                    try:
+                        await driver.start()
+                    except Exception:
+                        await self._set_state(core_id, CoreState.ERROR)
+                        raise
+                    await self._set_state(core_id, CoreState.RUNNING)
+
+            await self._store.save_state(
+                core_id,
+                state=self._states[core_id],
+                enabled=self._enabled.get(core_id, False),
+                settings=driver.settings,
+            )
+
     async def start_core(self, core_id: str) -> CoreStatus:
         async with self._locks[core_id]:
             driver = self.get(core_id)

@@ -11,7 +11,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
+import time
 from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
@@ -361,6 +363,61 @@ class LocalSingBoxBackend:
             )
         self._proc.start()
         logger.warning("sing-box started (pid=%s)", self._proc.pid)
+
+    @staticmethod
+    def _expected_listeners(config: dict[str, Any]) -> set[tuple[str, int]]:
+        expected: set[tuple[str, int]] = set()
+        for inbound in config.get("inbounds") or []:
+            port = int(inbound.get("listen_port") or 0)
+            if not port:
+                continue
+            kind = str(inbound.get("type") or "")
+            if kind in ("hysteria2", "tuic"):
+                expected.add(("udp", port))
+            elif kind == "shadowsocks":
+                expected |= {("tcp", port), ("udp", port)}
+            else:
+                expected.add(("tcp", port))
+        return expected
+
+    def wait_listeners(self, config: dict[str, Any], timeout: float = 10.0) -> None:
+        """Do not report RUNNING until every rendered listener is bound."""
+        expected = self._expected_listeners(config)
+        if not expected:
+            return
+        ss = shutil.which("ss")
+        if ss is None:
+            raise CoreError("'ss' (iproute2) is required to verify sing-box listeners")
+        deadline = time.monotonic() + timeout
+        missing = set(expected)
+        while time.monotonic() < deadline:
+            if not self._proc.is_running:
+                tail = " | ".join(self._proc.logs(20)) or "no process output"
+                raise CoreError(f"sing-box exited before binding listeners: {tail}")
+            proc = subprocess.run([ss, "-H", "-lntu"], capture_output=True,
+                                  text=True, timeout=5)
+            found: set[tuple[str, int]] = set()
+            if proc.returncode == 0:
+                for line in proc.stdout.splitlines():
+                    columns = line.split()
+                    if len(columns) < 5:
+                        continue
+                    network = "udp" if columns[0].startswith("udp") else "tcp"
+                    address = columns[4]
+                    try:
+                        port = int(address.rsplit(":", 1)[1])
+                    except (IndexError, ValueError):
+                        continue
+                    found.add((network, port))
+            missing = expected - found
+            if not missing:
+                return
+            time.sleep(0.1)
+        tail = " | ".join(self._proc.logs(20)) or "no process output"
+        raise CoreError(
+            f"sing-box did not bind rendered listeners within {timeout:g}s; "
+            f"missing={sorted(missing)}; process output: {tail}"
+        )
 
     def stop(self) -> None:
         self._proc.stop()

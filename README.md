@@ -16,7 +16,7 @@ one driver among many, with no special status anywhere in the codebase.
 
 ## ⚠️ Alpha Warning
 
-**Current release: `1.0.0-alpha.7.7` — this is an ALPHA build.**
+**Current release: `1.0.0-alpha.7.8` — this is an ALPHA build.**
 
 * Suitable for evaluation, testing and feedback — **not recommended for
   production** unless you fully understand the limitations.
@@ -209,7 +209,7 @@ Release images are published to **GitHub Container Registry only**
 (multi-arch: linux/amd64, linux/arm64):
 
 ```bash
-docker pull ghcr.io/zagrosgm/zagros:v1.0.0-alpha.7.7
+docker pull ghcr.io/zagrosgm/zagros:v1.0.0-alpha.7.8
 docker pull ghcr.io/zagrosgm/zagros:latest        # tracks stable releases
 ```
 

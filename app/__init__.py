@@ -8,7 +8,7 @@ stack (fastapi/apscheduler/xray singletons) into their interpreter.
 """
 import logging
 
-__version__ = "1.0.0-alpha.7.7"  # Zagros begins a new version line after the rebrand
+__version__ = "1.0.0-alpha.7.8"  # Zagros begins a new version line after the rebrand
 
 
 _building = False

@@ -10,6 +10,108 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.7.8] — 2026-08-11 — Upgrade-safe core recovery, listener readiness, and OpenVPN auth completion
+
+Critical post-`alpha.7.7` upgrade-fix release. The field symptoms — cores
+falling out of RUNNING after an image update, manual Reinstall being required,
+old subscriptions becoming unavailable, OpenVPN stopping at `PUSH_REQUEST`,
+and QUIC/WireGuard listeners appearing absent — traced to process-local desired
+state and core artifacts living across the wrong persistence boundary.
+
+### Fixed — no-reinstall upgrade recovery
+
+* **Every enabled core account is replayed from encrypted SQL on boot.** Fresh
+  driver objects now receive their users, credentials, inbound grants and
+  peers before Start whenever offline reconciliation is possible. Live-only
+  engines are retried after their daemon starts. Credentials repaired from an
+  older incomplete row are encrypted and persisted without churning unchanged
+  ciphertext. Replay is serialized by the CoreManager lifecycle lock.
+* **Studio hydration is two-phase.** Listener documents apply before Start;
+  engines such as SoftEther that require a live control plane are deferred and
+  retried after Start. A live daemon whose stored manager state is `ERROR` is
+  immediately reconciled to `RUNNING`.
+* **Old subscriptions stay resolvable after process/image replacement.** The
+  upgrade suite checks encrypted SQL rehydration and byte-identical sing-box
+  links; real SoftEther delivery was identical before and after daemon
+  replacement.
+
+### Fixed — sing-box Hysteria2 / TUIC
+
+* A bare persisted `executable_path=sing-box` now resolves the already-installed
+  binary under the mounted core `work_dir` instead of searching only the new
+  container's PATH and demanding Reinstall. Install/update persists the
+  resolved absolute path.
+* Wizard → API → Studio → native config tests pin Hysteria2/TUIC `listen`,
+  UDP port, users, TLS certificate/key, UUID/password and congestion control.
+  Existing strict `sing-box check` and socket readiness remain fail-closed.
+* Real sing-box 1.12.4 verification passed config validation, UDP bind, actual
+  Hysteria2 and TUIC clients, traffic, per-user upload/download stats, and a
+  second backend/process start from the persisted bare-path state.
+
+### Fixed — OpenVPN PUSH_REQUEST deadlock
+
+* The management auth callback is registered before listener sockets open and
+  before the management reader thread can receive `CLIENT:CONNECT`. An eager
+  reconnect can no longer arrive in the old callback-free race window.
+* A complete auth request without a handler is now explicitly denied rather
+  than silently removed; every session receives `client-auth`,
+  `client-auth-nt`, or `client-deny`.
+* Boot-time SQL replay ensures the auth callback has the persisted account
+  map before Start. Real OpenVPN 2.6.14 passed `PUSH_REPLY`, address, DNS,
+  redirect route, tunnel traffic and accounting both before and after a full
+  driver/backend recreation, with `verb 6` diagnostics.
+
+### Fixed — WireGuard listener truth
+
+* Start and live `syncconf` now require the kernel WireGuard API to report the
+  configured `ListenPort`; a mismatch fails and removes the partial interface.
+  Status reports an existing interface with the wrong port as unhealthy.
+* `wg show all dump` is authoritative. `ss` remains diagnostic because some
+  kernels delay or omit kernel-owned WireGuard sockets even while real
+  handshakes pass.
+* Real namespace verification passed interface UP, `ListenPort`, `ss`, peer,
+  preshared key, handshake, ping, traffic and accounting before and after
+  recreation without Reinstall.
+
+### Fixed — persistent SoftEther and Xray state
+
+* SoftEther now installs under
+  `/var/lib/zagros/cores/softether/runtime`, preserving `vpn_server.config`
+  beside the daemon across image replacement. Missing runtime is repaired
+  automatically from the mounted cache/package source. Stale PATH wrappers
+  whose targets vanished are rejected. A fresh blank daemon can safely regain
+  the persisted admin password only after blank authority is proven.
+* Xray config, binary and geo assets now default to mounted paths under
+  `/var/lib/zagros/cores/xray/`. The legacy singleton uses the shared installer
+  when its binary is absent; SQL Studio state is re-applied after the built-in
+  core is attached. Existing exact historical `/usr/local` defaults migrate,
+  while operator-custom paths are preserved.
+* The CLI backup retains SoftEther `vpn_server.config` while excluding its
+  re-downloadable binaries. Fresh installs and updates write/migrate persistent
+  Xray paths before container replacement.
+
+### Verified before tagging
+
+* Full Python suite: **728 passed / 7 environment-gated skipped / 0 failed**.
+* `zagros-scripts` pytest gate: **1 passed**; it executes the complete Bash CLI
+  harness, which finished with **0 failed**.
+* TypeScript `tsc --noEmit` and production Vite build: **PASS** (2017 modules).
+* Chromium fixture regression gate: **33 passed / 0 failed**.
+* Real fresh-panel browser smoke: login, real API user creation, 18 pages,
+  modal/scroll behavior, three reloads and logout/login all passed.
+* Real runtime: Xray 26.3.27 config/self-install reuse; sing-box Hysteria2/TUIC
+  clients+stats; OpenVPN 2.6.14 PUSH/tunnel/accounting; WireGuard namespace
+  handshake/traffic; SoftEther persistent daemon/config/user/DHCP/tag.
+
+### Environment limitations
+
+* The sandbox has no Docker daemon, so the exact `docker compose` image-to-image
+  command was represented by real process/backend recreation against mounted
+  files and encrypted SQL rather than claimed as a Docker smoke.
+* Full L2TP/IPsec PPP remains kernel-limited here by missing XFRM SAD and
+  `l2tp_ppp`/`pppol2tp` support. Dynamic SSH forwarding downlink also remains
+  outside `xt_owner`; bidirectional SFTP/SCP accounting is unchanged.
+
 ## [1.0.0-alpha.7.7] — 2026-08-11 — Listener readiness, non-Xray templates, SoftEther DHCP, public delivery, and SSH accounting
 
 Post-`alpha.7.6` field-fix release. This cycle follows each reported failure

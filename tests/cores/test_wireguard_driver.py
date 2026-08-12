@@ -157,7 +157,7 @@ def _driver(tmp: str | None = None, dump: str = DUMP_SAMPLE) -> tuple[WireGuardD
 # pure parsing / rendering helpers                                       #
 # ---------------------------------------------------------------------- #
 
-def test_real_backend_readiness_uses_authoritative_wg_listen_port(monkeypatch) -> None:
+def test_wireguard_listener_test(monkeypatch) -> None:
     from app.cores.drivers.wireguard.backend import LocalWireGuardBackend
 
     backend = object.__new__(LocalWireGuardBackend)
@@ -401,7 +401,7 @@ def test_usage_deltas_and_reset_clamp() -> None:
     asyncio.run(run())
 
 
-def test_online_detection_handshake_threshold() -> None:
+def test_wireguard_handshake_test() -> None:
     async def run() -> None:
         driver, backend = _driver()
         # handshake freshness must be measured against the EXECUTION clock,

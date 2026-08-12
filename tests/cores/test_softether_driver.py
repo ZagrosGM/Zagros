@@ -16,6 +16,7 @@ import asyncio
 import sys
 import tempfile
 import os
+import subprocess
 import traceback
 import types as _types
 from pathlib import Path
@@ -32,11 +33,16 @@ if "app" not in sys.modules:
 from app.cores import Capability, CoreError  # noqa: E402
 from app.cores.drivers.softether import (  # noqa: E402
     SoftEtherDriver,
+    parse_session_get,
     parse_session_list,
     parse_user_get,
     parse_user_list,
 )
-from app.cores.drivers.softether.setool import SESession, UserStatistics  # noqa: E402
+from app.cores.drivers.softether.setool import (  # noqa: E402
+    SESession,
+    SessionStatistics,
+    UserStatistics,
+)
 from app.cores.types import UserAccount  # noqa: E402
 
 REAL_USER_GET = """\
@@ -71,6 +77,17 @@ REAL_SESSION_LIST_CSV = """\
 "SID-2.bob-9","Established","2.bob","iPhone-X (198.51.100.9)","iPhone-X","Client/Bridge"
 """
 
+REAL_SESSION_GET = """\
+Item                                      |Value
+------------------------------------------+----------------------------------------
+User Name (Authentication)                |1.alice
+User Name (Database)                      |1.alice
+Session Name                              |SID-1.alice-42
+Outgoing Data Size                        |24,059 bytes
+Incoming Data Size                        |5,397,726 bytes
+The command completed successfully.
+"""
+
 
 class FakeSEBackend:
     """Fake SoftEtherBackend: user/session tables as dicts, recorded calls."""
@@ -80,6 +97,7 @@ class FakeSEBackend:
         self.expires: dict[str, str | None] = {}
         self.stats: dict[str, tuple[int, int]] = {}
         self.sessions: list[SESession] = []
+        self.session_stats: dict[str, tuple[int, int]] = {}
         self.disconnected: list[str] = []
         self._reachable = True
 
@@ -96,6 +114,12 @@ class FakeSEBackend:
         return UserStatistics(username=username, incoming_bytes=inc, outgoing_bytes=out)
     def user_list(self): return sorted(self.users)
     def session_list(self): return list(self.sessions)
+    def session_get(self, session_name):
+        session = next(s for s in self.sessions if s.session_name == session_name)
+        incoming, outgoing = self.session_stats.get(session_name, (0, 0))
+        return SessionStatistics(
+            session_name=session_name, username=session.username,
+            incoming_bytes=incoming, outgoing_bytes=outgoing)
     def session_disconnect(self, session_name):
         self.disconnected.append(session_name)
         self.sessions = [s for s in self.sessions if s.session_name != session_name]
@@ -134,6 +158,36 @@ def test_parse_real_vpncmd_fixtures() -> None:
     assert sessions[0].session_name == "SID-1.alice-42"
     assert sessions[0].username == "1.alice"
     assert "DESKTOP-AB12" in sessions[0].source_host
+
+    live = parse_session_get(REAL_SESSION_GET)
+    assert live.session_name == "SID-1.alice-42"
+    assert live.username == "1.alice"
+    assert live.incoming_bytes == 5_397_726
+    assert live.outgoing_bytes == 24_059
+
+
+def test_softether_start_waits_for_real_daemon_warmup(monkeypatch) -> None:
+    backend = FakeSEBackend()
+    probes = 0
+    started = []
+
+    def reachable():
+        nonlocal probes
+        probes += 1
+        return probes >= 25  # beyond the removed 20-probe/10-second gate
+
+    backend.reachable = reachable
+    backend.server_binary = lambda: "/persistent/vpnserver"
+    backend.server_start = lambda: started.append(True)
+
+    async def no_wait(_seconds):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+    driver, _ = _driver(backend=backend)
+    asyncio.run(driver.start())
+    assert started == [True]
+    assert probes == 25
 
 
 def test_live_user_management_no_restart() -> None:
@@ -203,6 +257,58 @@ def test_usage_deltas_from_native_counters() -> None:
         by_id = {r.account_id: r for r in second}
         assert by_id["1.alice"].uplink_bytes == 1000
         assert by_id["1.alice"].downlink_bytes == 0
+
+    asyncio.run(run())
+
+
+def test_softether_accounting_delta_test() -> None:
+    """Completed UserGet + live SessionGet is monotonic and exactly-once.
+
+    Pins the real L2TP behavior: UserGet stays unchanged during a 50 MB
+    session, then absorbs SessionGet counters at disconnect. Panel restart
+    with a persisted baseline must emit neither zero traffic nor the same
+    session twice.
+    """
+    async def run():
+        driver, backend = _driver()
+        await driver.start()
+        account = _account(1, "alice")
+        await driver.create_account(account)
+        backend.stats["1.alice"] = (0, 0)
+        backend.sessions = [
+            SESession("SID-1.alice-live", "1.alice", "198.51.100.4", {})]
+        backend.session_stats["SID-1.alice-live"] = (5_000_000, 50_000_000)
+
+        first = (await driver.get_usage())[0]
+        assert (first.uplink_bytes, first.downlink_bytes) == (5_000_000, 50_000_000)
+
+        # SoftEther's delayed UserGet refresh catches up while the session is
+        # STILL connected. Those same 55 MB must not be emitted twice.
+        backend.stats["1.alice"] = (5_000_000, 50_000_000)
+        caught_up = (await driver.get_usage())[0]
+        assert (caught_up.uplink_bytes, caught_up.downlink_bytes) == (0, 0)
+
+        # Five more MB while the same PPP session remains connected.
+        backend.session_stats["SID-1.alice-live"] = (5_500_000, 54_500_000)
+        second = (await driver.get_usage())[0]
+        assert (second.uplink_bytes, second.downlink_bytes) == (500_000, 4_500_000)
+
+        # Disconnect commits the live totals into UserGet. Effective totals
+        # stay identical, therefore this poll must not double count them.
+        backend.stats["1.alice"] = (5_500_000, 54_500_000)
+        backend.sessions = []
+        committed = (await driver.get_usage())[0]
+        assert (committed.uplink_bytes, committed.downlink_bytes) == (0, 0)
+
+        # A new driver process receives the persisted account baseline.
+        snapshot = driver.usage_tracker_snapshot()
+        restarted, restarted_backend = _driver()
+        await restarted.start()
+        await restarted.create_account(account)
+        restarted_backend.stats["1.alice"] = (5_500_000, 54_500_000)
+        restarted.restore_usage_baselines(snapshot)
+        after_restart = (await restarted.get_usage())[0]
+        assert (after_restart.uplink_bytes, after_restart.downlink_bytes) == (0, 0)
 
     asyncio.run(run())
 
@@ -314,6 +420,31 @@ def test_softether_install_runs_package_strategies(monkeypatch) -> None:
 def _se_backend():
     from app.cores.drivers.softether.backend import LocalSoftEtherBackend
     return LocalSoftEtherBackend({})
+
+
+def test_vpncmd_protocol_guard_backs_off_then_retries(monkeypatch) -> None:
+    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
+
+    backend = LocalSoftEtherBackend({"protocol_backoff_seconds": 10})
+    monkeypatch.setattr(backend, "vpncmd_binary", lambda: "/vpncmd")
+    results = iter([
+        subprocess.CompletedProcess(
+            [], 2, stdout="Error code: 2\nProtocol error occurred.\n", stderr=""),
+        subprocess.CompletedProcess(
+            [], 0, stdout="The command completed successfully.\n", stderr=""),
+    ])
+    runs = []
+    sleeps = []
+
+    def run(*args, **kwargs):
+        runs.append((args, kwargs))
+        return next(results)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+    assert "completed successfully" in backend._cmd("UserList")
+    assert len(runs) == 2
+    assert sleeps == [10.0]
 
 
 def test_persistent_runtime_resolves_after_container_recreation(tmp_path, monkeypatch) -> None:

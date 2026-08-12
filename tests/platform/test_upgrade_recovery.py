@@ -239,7 +239,29 @@ def test_live_boot_report_is_atomic_and_names_incomplete_reconciliation(
     asyncio.run(run())
 
 
-def test_wireguard_upgrade_restores_peer_before_interface_up(tmp_path) -> None:
+def test_deferred_live_core_retries_through_daemon_warmup() -> None:
+    async def run() -> None:
+        calls = 0
+
+        async def reconcile(pending: set[str]) -> set[str]:
+            nonlocal calls
+            calls += 1
+            return {"softether"} if calls < 4 else set()
+
+        runtime = SimpleNamespace()
+        retry = PlatformRuntime._retry_deferred_boot_work.__get__(
+            runtime, type(runtime))
+        remaining = await retry(
+            reconcile, {"softether"}, label="account",
+            attempts=6, delay_seconds=0,
+        )
+        assert remaining == set()
+        assert calls == 4
+
+    asyncio.run(run())
+
+
+def test_upgrade_runtime_persistence_test(tmp_path) -> None:
     async def run() -> None:
         backend = FakeWireGuardBackend()
         backend.running = False

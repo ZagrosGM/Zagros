@@ -10,6 +10,60 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.8] — 2026-08-12 — Final runtime blocker closure
+
+Runtime-verified blocker release based on the published `alpha.7.9` state. The
+fixes below were reproduced and validated on a real Ubuntu VPS, real Docker,
+real QUIC and WireGuard clients, a real L2TP/PPP session, image recreation,
+`zagros update`, `zagros repair`, service restart and host reboot.
+
+### Fixed — sing-box Hysteria2 and TUIC protocol runtime
+
+* Hysteria2/TUIC no longer inherit the generic TLS wizard default
+  `h2,http/1.1`. The production renderer converges both QUIC protocols to the
+  required `h3` ALPN and delivery mirrors the repaired native TLS block.
+* Existing Studio documents carrying the old HTTP ALPN are repaired at render
+  time without a UI change or manual inbound recreation.
+* Real clients passed `sing-box check`, TLS/auth negotiation and Internet
+  traffic through both Hysteria2 and TUIC before and after update/reboot.
+
+### Fixed — SoftEther live and exactly-once accounting
+
+* Active L2TP/SSTP/native sessions are read from real `SessionGet` directional
+  counters instead of waiting for delayed `UserGet` settlement at disconnect.
+* `_SoftEtherUsageTracker` reconciles live SessionGet deltas with delayed
+  UserGet catch-up. The same bytes are recorded once whether UserGet refreshes
+  during the session, at disconnect, or after panel restart.
+* A real raw-L2TP PPP client downloaded 52,428,800 bytes. The panel advanced by
+  approximately 54.1 MB including protocol overhead while the session remained
+  connected; delayed catch-up, disconnect and panel restart added no duplicate.
+
+### Fixed — SoftEther upgrade/reboot account replay
+
+* `vpncmd rc=2 Protocol error` during daemon/config warm-up now receives one
+  quiet backoff and exact retry. Startup probes and deferred reconciliation are
+  paced to avoid triggering SoftEther's localhost DoS guard.
+* Persistent server startup waits through real `vpn_server.config`, SecureNAT
+  and log initialization before account mutation. Passwords and grants replay
+  automatically after image replacement and host reboot.
+* Final boot reports are clean: every enabled core is `running / healthy` with
+  empty Studio/account deferred sets.
+
+### Re-verified — WireGuard runtime
+
+* Both real kernel interfaces exposed their configured ListenPort through
+  `wg show` and `ss`, completed fresh handshakes, pinged tunnel gateways and
+  passed Internet traffic before and after update/reboot. No additional
+  WireGuard production change was required in this cycle.
+
+### Verification
+
+* Panel suite locally and on the VPS: **745 passed, 7 skipped**.
+* CLI harness: **254 passed, 0 failed**; scripts pytest, TypeScript, Vite and
+  real browser E2E passed.
+* Real L2TP, Hysteria2, TUIC and two WireGuard interfaces passed post-reboot
+  runtime checks without reinstall.
+
 ## [1.0.0-alpha.7.9] — 2026-08-12 — Real WireGuard multi-inbound and blocker closure
 
 Critical runtime-verified follow-up to `alpha.7.8`. This release removes the

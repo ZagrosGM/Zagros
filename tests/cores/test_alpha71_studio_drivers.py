@@ -263,9 +263,23 @@ def test_singbox_apply_writes_and_restarts_when_running(tmp_path):
 # ===================================================================== #
 
 class _WGFakeBackend:
-    def __init__(self):
+    def __init__(self, settings=None, family=None):
+        self.settings = settings or {"interface": "mzwg0"}
+        self.interface = self.settings.get("interface", "mzwg0")
         self.written_key: str | None = None
         self.syncs: list[str] = []
+        self.up_calls: list[str] = []
+        self.down_calls = 0
+        self.running = True
+        self.family = family if family is not None else []
+        self.family.append(self)
+
+    def for_listener(self, settings):
+        return _WGFakeBackend(settings, self.family)
+
+    def ensure_server_keys(self):
+        suffix = self.interface[-4:]
+        return (f"SERVER_PRIVATE_{suffix}", f"SERVER_PUBLIC_{suffix}")
 
     def public_from_private(self, private):
         return f"PUB({private})"
@@ -276,8 +290,19 @@ class _WGFakeBackend:
     def sync(self, config):
         self.syncs.append(config)
 
+    def down(self):
+        self.down_calls += 1
+        self.running = False
+
+    def up(self, config):
+        self.up_calls.append(config)
+        self.running = True
+
+    def wait_ready(self, _port):
+        return None
+
     def is_running(self):
-        return True
+        return self.running
 
 
 def _wg_driver(tmp_path, **settings):
@@ -328,10 +353,23 @@ def test_wireguard_apply_maps_settings_and_writes_custom_key(tmp_path):
     assert backend.written_key is None
 
 
-def test_wireguard_apply_rejects_multi_document_and_wrong_protocol(tmp_path):
+def test_wireguard_apply_materializes_multiple_interfaces_and_rejects_wrong_protocol(tmp_path):
     d = _wg_driver(tmp_path)
-    with pytest.raises(CoreError, match="exactly ONE interface"):
-        asyncio.run(d.apply_studio_document({"inbounds": [{}, {}]}))
+    asyncio.run(d.apply_studio_document({"inbounds": [
+        {"tag": "wg-a", "protocol": "wireguard", "port": 51820,
+         "address": "10.90.0.0/24", "endpoint": "a.example.com"},
+        {"tag": "wg-b", "protocol": "wireguard", "port": 51821,
+         "address": "10.91.0.0/24", "endpoint": "b.example.com"},
+    ]}))
+    listeners = d.settings["listeners"]
+    assert [listener["tag"] for listener in listeners] == ["wg-a", "wg-b"]
+    assert [listener["port"] for listener in listeners] == [51820, 51821]
+    assert len({listener["interface"] for listener in listeners}) == 2
+    assert len(d._backends) == 2
+    assert all(backend.running for backend in d._backends.values())
+    assert "ListenPort = 51820" in d._backends["wg-a"].up_calls[-1]
+    assert "Address = 10.91.0.1/24" in d._backends["wg-b"].up_calls[-1]
+
     with pytest.raises(CoreError, match="cannot host"):
         asyncio.run(d.apply_studio_document({"inbounds": [{"protocol": "shadowsocks"}]}))
 

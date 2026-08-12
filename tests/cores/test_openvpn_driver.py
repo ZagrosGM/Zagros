@@ -9,8 +9,10 @@ Run: pytest tests/cores/test_openvpn_driver.py -v   OR   python tests/cores/test
 from __future__ import annotations
 
 import asyncio
+import socket
 import sys
 import threading
+import time
 import traceback
 import types as _types
 from pathlib import Path
@@ -179,6 +181,33 @@ def test_management_client_command_roundtrip() -> None:
     thread.join(timeout=5)
     assert sent == ["status 3"]
     assert "CLIENT_LIST" in result_box["out"]
+
+
+def test_management_reader_survives_idle_longer_than_connect_timeout() -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    def server() -> None:
+        conn, _ = listener.accept()
+        with conn:
+            assert conn.recv(128).strip() == b"pid"
+            # Longer than the connect timeout: alpha.7.8 left that timeout on
+            # recv(), killed the reader, and deadlocked later PUSH_REQUESTs.
+            time.sleep(0.2)
+            conn.sendall(b"SUCCESS: pid=123\n")
+
+    thread = threading.Thread(target=server, daemon=True)
+    thread.start()
+    client = ManagementClient()
+    try:
+        client.connect("127.0.0.1", port, timeout=0.05)
+        assert client.command("pid", timeout=1) == "SUCCESS: pid=123"
+    finally:
+        client.close()
+        listener.close()
+    thread.join(timeout=1)
 
 
 def test_management_client_auth_session_allow_deny_reauth() -> None:

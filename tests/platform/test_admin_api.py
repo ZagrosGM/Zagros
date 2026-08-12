@@ -522,7 +522,12 @@ class TestCertificates:
         listed = client.get("/api/zagros/certificates").json()
         names = {c["name"] for c in listed["certificates"]}
         assert "lab-cert" in names
-        assert listed["acme"]["available"] is False  # honest roadmap label
+        # Environment-honest: the production image ships certbot, while a
+        # minimal unit runner may have no ACME client at all.
+        assert listed["acme"]["available"] is bool(listed["acme"]["providers"])
+        if listed["acme"]["available"]:
+            assert any(p["id"] in ("certbot", "acme.sh", "lego")
+                       for p in listed["acme"]["providers"])
 
         r = client.post("/api/zagros/certificates/self-signed", json={
             "name": "lab-cert", "common_name": "dup.example.com"})

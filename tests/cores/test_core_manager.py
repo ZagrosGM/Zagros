@@ -20,6 +20,8 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 # --- import shim: load `app.cores` WITHOUT executing app/__init__.py --------
 # (the real one builds the FastAPI app and reads env at import time)
 ROOT = Path(__file__).resolve().parents[2]
@@ -470,6 +472,28 @@ def test_studio_apply_heals_error_record_when_daemon_is_already_live() -> None:
         await manager.apply_studio_document("fakebox", {"inbounds": []})
         assert manager._states["fakebox"] is CoreState.RUNNING
         assert (await store.load())["fakebox"]["state"] == "running"
+
+    asyncio.run(main())
+
+
+def test_failed_live_studio_recreate_marks_core_error() -> None:
+    async def main() -> None:
+        manager, store, _ = _make_manager()
+        driver = FakeDriver()
+        driver.running = True
+
+        async def apply(_document):
+            driver.running = False
+            raise RuntimeError("listener recreate failed")
+
+        driver.apply_studio_document = apply
+        manager.attach("fakebox", driver, enabled=True, state=CoreState.RUNNING)
+        await store.save_state("fakebox", state=CoreState.RUNNING,
+                               enabled=True, settings=driver.settings)
+        with pytest.raises(RuntimeError, match="recreate failed"):
+            await manager.apply_studio_document("fakebox", {"inbounds": []})
+        assert manager._states["fakebox"] is CoreState.ERROR
+        assert (await store.load())["fakebox"]["state"] == "error"
 
     asyncio.run(main())
 

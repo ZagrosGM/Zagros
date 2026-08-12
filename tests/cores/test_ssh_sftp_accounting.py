@@ -7,10 +7,14 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from app.cores.drivers.ssh.backend import LocalSystemSSHBackend
 
 
 def test_sftp_stream_proxy_reports_both_directions_and_persists(tmp_path):
+    if os.getuid() == 0:
+        pytest.skip("SO_PASSCRED collector intentionally rejects root senders")
     backend = LocalSystemSSHBackend({"work_dir": str(tmp_path)})
     socket_path = backend.sftp_acct_start()
 

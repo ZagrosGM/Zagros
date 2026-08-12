@@ -10,6 +10,75 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.7.9] — 2026-08-12 — Real WireGuard multi-inbound and blocker closure
+
+Critical runtime-verified follow-up to `alpha.7.8`. This release removes the
+single-interface assumption from the WireGuard core and includes the production
+fixes proven during the P0 blocker cycle on a real Ubuntu VPS, real Docker,
+real kernel interfaces, NAT, external clients, image recreation and host reboot.
+
+### Fixed — WireGuard multi-inbound
+
+* **Add Inbound now appends instead of replacing.** Every Studio entry owns a
+  stable Linux interface, independent UDP `ListenPort`, non-overlapping tunnel
+  subnet, forwarding/NAT lifecycle, persistent server key and config directory.
+  Legacy flat settings migrate losslessly to the first `wireguard` listener.
+* The driver reconciles the complete interface set atomically. Duplicate tags,
+  interfaces or ports and overlapping subnets fail before mutation. A failed
+  live apply restores the previous desired state and attempts to bring every
+  former interface back.
+* One account can be granted any subset of WireGuard inbounds. Its client
+  identity is preserved while encrypted `inbound_addresses` stores a stable
+  address per listener. Grant reconciliation persists newly generated addresses
+  immediately, so the second profile survives container replacement and reboot.
+* Delivery emits one QR/importable `.conf` per granted inbound with the correct
+  address, endpoint, port and server public key. Multi-inbound file downloads
+  retain the inbound tag in their filename, preventing browser overwrites.
+* Usage sums the same peer identity across all granted kernel interfaces without
+  double-counting, and online sessions report their `inbound_tag` and interface.
+* Real runtime gate: `51830/udp` (`10.92.0.0/24`) and `51831/udp`
+  (`10.93.0.0/24`) listened simultaneously; two isolated network namespaces
+  handshook concurrently, pinged both tunnel gateways and each passed Internet
+  traffic with HTTP 200. Both listeners, peers, NAT rules, encrypted addresses
+  and profiles survived force-recreate, `zagros repair` and a real host reboot.
+
+### Fixed — P0 lifecycle blockers
+
+* **OpenVPN:** the management socket now returns to blocking mode after its
+  connect timeout. The reader thread no longer dies during idle periods and
+  strand clients forever after `PUSH_REQUEST`; real clients receive
+  `PUSH_REPLY`, address, DNS, redirect routes and Internet traffic.
+* **WireGuard stale state:** subnet/MTU changes perform a real `wg-quick`
+  lifecycle; stale host-network interfaces and their duplicate firewall/NAT
+  rules are removed before bring-up. Listener readiness is verified from the
+  authoritative kernel `wg` API.
+* Managed cores stop during graceful panel shutdown. Failed live materialization
+  cannot leave CoreManager reporting a stale `RUNNING` state.
+* An atomic `0600` runtime boot report records Studio/account deferred sets and
+  the health of every enabled core. `zagros repair` now backs up first, repairs
+  persistent state, force-recreates, migrates, waits for reconciliation and
+  fails closed on any deferred account/listener or non-running core.
+
+### Fixed — credential and subscription continuity
+
+* Editing `core_access` preserves decrypted generated credentials and updates an
+  existing account instead of recreating it. WireGuard keys/addresses and the
+  passwords/UUIDs of OpenVPN, SSH, sing-box and SoftEther no longer rotate.
+* Xray self-signed listener state is persisted and delivered with
+  `allowInsecure`; VLESS gRPC `service_name` now survives outbound composition
+  and sing-box/Clash subscription conversion.
+* Existing subscription URLs and the original WireGuard profile remain valid
+  through image replacement, repair and reboot; no unavailable section is
+  emitted.
+
+### Verification
+
+* Panel suite: **739 passed, 7 skipped** after the alpha.7.9 regression set.
+* CLI harness: **254 passed, 0 failed**; scripts pytest, TypeScript and Vite
+  production build pass.
+* Real VPS: all six enabled cores report `running / healthy` with empty
+  `studio_deferred` and `account_deferred` after recreation and reboot.
+
 ## [1.0.0-alpha.7.8] — 2026-08-11 — Upgrade-safe core recovery, listener readiness, and OpenVPN auth completion
 
 Critical post-`alpha.7.7` upgrade-fix release. The field symptoms — cores

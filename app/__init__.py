@@ -8,7 +8,7 @@ stack (fastapi/apscheduler/xray singletons) into their interpreter.
 """
 import logging
 
-__version__ = "1.0.0-alpha.7.8"  # Zagros begins a new version line after the rebrand
+__version__ = "1.0.0-alpha.7.9"  # Zagros begins a new version line after the rebrand
 
 
 _building = False
@@ -145,6 +145,16 @@ def _build_app_inner():
                 except Exception as _exc:  # noqa: BLE001 - never block boot
                     logging.getLogger("uvicorn.error").warning(
                         "usage baseline restore failed: %s", _exc)
+
+        @app.on_event("shutdown")
+        async def zagros_stop_managed_cores():
+            runtime = getattr(app.state, "zagros", None)
+            if runtime is not None:
+                # Host-network processes/interfaces outlive ordinary Python
+                # object state. A graceful container replacement must tear
+                # them down so the next image cannot inherit stale wg-quick
+                # Address/NAT or listener processes.
+                await runtime.core_manager.stop_all()
     except Exception as exc:  # noqa: BLE001 - import-level failure
         logging.getLogger("uvicorn.error").critical(
             "Zagros product layer unavailable: %s", exc)

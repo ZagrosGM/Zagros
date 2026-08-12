@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 from types import SimpleNamespace
 
 from app.cores.delivery import ArtifactKind, DeliveryContext
@@ -16,7 +17,7 @@ from app.cores.drivers.openvpn import OpenVPNDriver
 from app.cores.drivers.singbox import SingBoxDriver
 from app.cores.drivers.wireguard import WireGuardDriver
 from app.cores.manager import CoreManager
-from app.cores.types import CoreState
+from app.cores.types import CoreState, CoreStatus, HealthStatus
 from app.platform.runtime import PlatformRuntime
 from tests.cores.fakes import (
     FakeOpenVPNBackend,
@@ -200,6 +201,40 @@ def test_openvpn_upgrade_repairs_and_persists_old_missing_password() -> None:
         assert len(runtime.users.upserts) == 1
         repaired = runtime.users.upserts[0]["settings"]["password"]
         assert repaired and driver._authorize("1.upgrade.ovpn", repaired, {})
+
+    asyncio.run(run())
+
+
+def test_live_boot_report_is_atomic_and_names_incomplete_reconciliation(
+        tmp_path, monkeypatch) -> None:
+    async def run() -> None:
+        async def statuses():
+            return [
+                CoreStatus(
+                    core_id="sing-box", state=CoreState.RUNNING,
+                    health=HealthStatus.HEALTHY, enabled=True,
+                    core_version="1.12.4",
+                ),
+                CoreStatus(
+                    core_id="wireguard", state=CoreState.ERROR,
+                    health=HealthStatus.UNHEALTHY, enabled=True,
+                    message="listener mismatch",
+                ),
+            ]
+
+        report = tmp_path / "runtime-boot-report.json"
+        monkeypatch.setenv("ZAGROS_BOOT_REPORT", str(report))
+        runtime = SimpleNamespace(
+            core_manager=SimpleNamespace(status_all=statuses))
+        write = PlatformRuntime._write_boot_report.__get__(runtime, type(runtime))
+        await write({"softether"}, {"openvpn"})
+        payload = json.loads(report.read_text())
+        assert payload["studio_deferred"] == ["softether"]
+        assert payload["account_deferred"] == ["openvpn"]
+        assert payload["cores"][0]["state"] == "running"
+        assert payload["cores"][1]["state"] == "error"
+        assert report.stat().st_mode & 0o777 == 0o600
+        assert not (tmp_path / "runtime-boot-report.json.part").exists()
 
     asyncio.run(run())
 

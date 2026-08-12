@@ -358,7 +358,12 @@ class HostSettingsEngine:
                 out_sections.append(section)
                 continue
             changed = True
-            out_sections.append(self._expand_section(section, entries, variables))
+            out_sections.append(self._expand_section(
+                section,
+                entries,
+                variables,
+                file_identity=(section.inbound_tag if len(profile.sections) > 1 else None),
+            ))
         if not changed:
             # zero host entries matched — the original profile instance
             # passes through object-identical (nothing to re-validate)
@@ -372,6 +377,8 @@ class HostSettingsEngine:
         section: DeliverySection,
         entries: list[HostEntry],
         variables: Mapping[str, Any],
+        *,
+        file_identity: str | None = None,
     ) -> DeliverySection:
         artifacts: list[DeliveryArtifact] = []
         inapplicable: list[str] = []
@@ -390,7 +397,8 @@ class HostSettingsEngine:
                                                    inapplicable,
                                                    section_proto=section.protocol))
             elif artifact.kind is ArtifactKind.FILE:
-                artifacts.extend(self._expand_file(artifact, entries, local_vars))
+                artifacts.extend(self._expand_file(
+                    artifact, entries, local_vars, identity=file_identity))
             elif artifact.kind is ArtifactKind.FIELDS:
                 artifacts.extend(self._expand_fields(artifact, entries, local_vars))
             else:
@@ -571,6 +579,8 @@ class HostSettingsEngine:
         artifact: DeliveryArtifact,
         entries: list[HostEntry],
         variables: Mapping[str, Any],
+        *,
+        identity: str | None = None,
     ) -> list[DeliveryArtifact]:
         out: list[DeliveryArtifact] = []
         for entry in entries:
@@ -601,9 +611,17 @@ class HostSettingsEngine:
             else:
                 continue  # unknown file shape — never patch blindly
             label = render_host_remark(entry.remark or DEFAULT_REMARK, local) or artifact.label
-            stem = artifact.filename or "config"
-            stem = re.sub(r"[^A-Za-z0-9._-]+", "-", label) + \
-                ("" if "." not in stem else "." + stem.rsplit(".", 1)[1])
+            original = artifact.filename or "config"
+            stem = re.sub(r"[^A-Za-z0-9._-]+", "-", label)
+            # Multiple file-based inbounds commonly share the default Host
+            # Settings remark. Keep the stable inbound identity in each
+            # download name so two valid WireGuard/OpenVPN profiles never
+            # arrive with the same filename and overwrite one another.
+            if identity:
+                suffix = re.sub(r"[^A-Za-z0-9._-]+", "-", identity).strip("-")
+                if suffix and suffix.lower() not in stem.lower():
+                    stem = f"{stem}-{suffix}"
+            stem += "" if "." not in original else "." + original.rsplit(".", 1)[1]
             out.append(DeliveryArtifact(
                 kind=ArtifactKind.FILE, label=label, content=content,
                 filename=stem, mime=artifact.mime,

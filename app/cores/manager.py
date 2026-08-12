@@ -296,7 +296,21 @@ class CoreManager:
                 raise CapabilityNotSupportedError(
                     core_id, "studio_document_apply")
             state_before = self._states[core_id]
-            await hook(document)
+            try:
+                await hook(document)
+            except Exception:
+                # A live apply may need to recreate an interface/process. If
+                # that fails, do not preserve a stale RUNNING record while the
+                # listener is physically gone; the boot report/repair command
+                # must see the real blocker.
+                try:
+                    actual = await driver.status()
+                except Exception:
+                    actual = None
+                if (state_before is CoreState.RUNNING and
+                        (actual is None or actual.state is not CoreState.RUNNING)):
+                    await self._set_state(core_id, CoreState.ERROR)
+                raise
 
             # A corrected inbound is the recovery path for a core whose prior
             # default config failed. RUNNING must also mean the process is

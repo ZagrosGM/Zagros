@@ -131,6 +131,25 @@ def test_sing_box_json_is_valid_and_exact():
     assert any("garbage" in n for n in notes)
 
 
+def test_grpc_service_name_survives_link_to_client_formats():
+    link = (
+        "vless://00000000-0000-4000-8000-000000000001@vpn.example.com:443"
+        "?type=grpc&security=tls&allowInsecure=1&serviceName=p0grpc#grpc"
+    )
+    from app.platform.sub_formats import to_clash_meta, to_sing_box
+    import yaml
+
+    sing = json.loads(to_sing_box([link])[0])
+    outbound = next(o for o in sing["outbounds"] if o.get("type") == "vless")
+    assert outbound["transport"] == {"type": "grpc", "service_name": "p0grpc"}
+    assert outbound["tls"]["insecure"] is True
+
+    clash = yaml.safe_load(to_clash_meta([link])[0])
+    proxy = clash["proxies"][0]
+    assert proxy["network"] == "grpc"
+    assert proxy["grpc-opts"] == {"grpc-service-name": "p0grpc"}
+
+
 def test_sing_box_quic_protocols_always_emit_tls():
     """hy2/tuic are TLS-mandatory in sing-box — links carry no `security`
     param, yet the rendered outbound MUST still carry a valid tls block

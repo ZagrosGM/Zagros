@@ -279,15 +279,31 @@ async def apply_grants(runtime, user: Any, platform_id: int,
             all_proto_tags = [i.tag for i in catalog[core_id].inbounds
                               if i.protocol == protocol]
             excluded = sorted(set(all_proto_tags) - set(proto_tags))
-            settings: dict[str, Any] = {"inbound_tags": list(proto_tags)}
+            previous = next(
+                (a for a in existing
+                 if a["protocol"] == protocol and a["account_id"] == account_id),
+                None,
+            )
+            # Inbound selection is metadata, not credentials. Alpha.7.8 rebuilt
+            # settings from tags on every Edit User and silently rotated/lost
+            # WireGuard keys, OpenVPN/SSH passwords and sing-box UUIDs. Preserve
+            # the encrypted desired state and replace only grant-derived keys.
+            settings: dict[str, Any] = dict(previous["settings"] if previous else {})
+            settings["inbound_tags"] = list(proto_tags)
             if excluded:
                 settings["excluded_inbounds"] = excluded
+            else:
+                settings.pop("excluded_inbounds", None)
             account = UserAccount(
                 user_id=platform_id, username=user.username, account_id=account_id,
                 protocol=protocol, enabled=active, settings=settings,
             )
             try:
-                await runtime.core_manager.get(core_id).create_account(account)
+                driver = runtime.core_manager.get(core_id)
+                if previous:
+                    await driver.update_account(account)
+                else:
+                    await driver.create_account(account)
             except Exception as exc:  # noqa: BLE001 — name the failing core
                 raise GrantError(f"core '{core_id}' failed to provision account: {exc}") from exc
             await asyncio.to_thread(
@@ -387,6 +403,7 @@ async def reconcile_accounts_after_inbound_change(runtime, core_id: str) -> dict
       sweep for the others (logged, counted).
     """
     from collections import Counter
+    import copy
 
     groups = await build_inbound_catalog(runtime)
     group = next((g for g in groups if g.core_id == core_id), None)
@@ -398,33 +415,11 @@ async def reconcile_accounts_after_inbound_change(runtime, core_id: str) -> dict
         return {"skipped": "store cannot list core accounts"}
     for acc in accounts:
         settings = dict(acc.get("settings") or {})
+        before = copy.deepcopy(settings)
         current_tags = list(settings.get("inbound_tags") or [])
-        if not current_tags:
-            continue  # whole-core account — no per-inbound binding to prune
-        kept = [t for t in current_tags if t in known]
-        if kept == current_tags:
-            continue  # nothing dangling
+        kept = [tag for tag in current_tags if tag in known]
         try:
-            if kept:
-                proto = acc["protocol"]
-                all_proto = sorted(t for t, p in known.items() if p == proto)
-                settings["inbound_tags"] = kept
-                settings["excluded_inbounds"] = sorted(set(all_proto) - set(kept))
-                await asyncio.to_thread(
-                    runtime.users.upsert_core_account,
-                    user_id=acc["user_id"], core_id=core_id,
-                    account_id=acc["account_id"], protocol=proto,
-                    enabled=acc["enabled"], settings=settings)
-                await runtime.core_manager.get(core_id).update_account(UserAccount(
-                    user_id=acc["user_id"], username="",
-                    account_id=acc["account_id"], protocol=proto,
-                    enabled=acc["enabled"], settings=settings,
-                ))
-                report["pruned"] += 1
-                logger.info("inbound cascade: pruned dangling tags for %s on %s "
-                            "(%s → %s)", acc["account_id"], core_id,
-                            current_tags, kept)
-            else:
+            if current_tags and not kept:
                 try:
                     await runtime.core_manager.get(core_id).delete_account(acc["account_id"])
                 except Exception as exc:  # noqa: BLE001 — store row still heals
@@ -438,6 +433,37 @@ async def reconcile_accounts_after_inbound_change(runtime, core_id: str) -> dict
                 logger.info("inbound cascade: revoked %s on %s — its last "
                             "inbound %s is gone", acc["account_id"], core_id,
                             current_tags)
+                continue
+
+            if current_tags and kept != current_tags:
+                proto = acc["protocol"]
+                all_proto = sorted(tag for tag, protocol in known.items()
+                                   if protocol == proto)
+                settings["inbound_tags"] = kept
+                settings["excluded_inbounds"] = sorted(set(all_proto) - set(kept))
+                report["pruned"] += 1
+                logger.info("inbound cascade: pruned dangling tags for %s on %s "
+                            "(%s → %s)", acc["account_id"], core_id,
+                            current_tags, kept)
+
+            # Reconcile every surviving account, including whole-core grants.
+            # Adding a WireGuard inbound creates a new per-inbound tunnel
+            # address in account.settings; persisting the driver's in-place
+            # mutation here is what makes the second profile survive reboot.
+            model = UserAccount(
+                user_id=acc["user_id"], username="",
+                account_id=acc["account_id"], protocol=acc["protocol"],
+                enabled=acc["enabled"], settings=settings,
+            )
+            await runtime.core_manager.get(core_id).update_account(model)
+            if model.settings != before:
+                await asyncio.to_thread(
+                    runtime.users.upsert_core_account,
+                    user_id=acc["user_id"], core_id=core_id,
+                    account_id=acc["account_id"], protocol=acc["protocol"],
+                    enabled=acc["enabled"], settings=model.settings)
+                if kept == current_tags:
+                    report["hydrated"] += 1
         except Exception as exc:  # noqa: BLE001 — one row must not block the sweep
             report["errors"] += 1
             logger.warning("inbound cascade failed for %s on %s: %s",

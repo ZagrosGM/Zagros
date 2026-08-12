@@ -12,6 +12,7 @@ through ``wg-quick``.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import logging
 import os
 import shutil
@@ -350,17 +351,96 @@ class LocalWireGuardBackend:
                 f"created — {exc}",
             )) from exc
 
+    def _live_interface_subnets(self) -> set[str]:
+        """Networks currently assigned to the kernel interface, before delete."""
+        ip = shutil.which("ip") or "ip"
+        try:
+            out = self._run([ip, "-o", "addr", "show", "dev", self.interface])
+        except CoreError:
+            return set()
+        networks: set[str] = set()
+        for line in out.splitlines():
+            columns = line.split()
+            for marker in ("inet", "inet6"):
+                if marker not in columns:
+                    continue
+                try:
+                    value = columns[columns.index(marker) + 1]
+                    networks.add(str(ipaddress.ip_interface(value).network))
+                except (ValueError, IndexError):
+                    pass
+        return networks
+
+    def _delete_rule_all(self, check: list[str], delete: list[str]) -> None:
+        for _ in range(32):  # bounded duplicate cleanup from historical flaps
+            probe = subprocess.run(check, capture_output=True, timeout=10)
+            if probe.returncode != 0:
+                return
+            subprocess.run(delete, capture_output=True, timeout=10)
+
+    def _cleanup_stale_firewall(self, subnets: set[str]) -> None:
+        """Remove rules owned by a previous container/process incarnation."""
+        iptables = shutil.which("iptables")
+        if not iptables:
+            return
+        for direction in ("-i", "-o"):
+            rule = ["FORWARD", direction, self.interface, "-j", "ACCEPT"]
+            self._delete_rule_all(
+                [iptables, "-C", *rule], [iptables, "-D", *rule])
+        try:
+            route = self._run([shutil.which("ip") or "ip", "route", "show", "default"])
+            egress = next((line.split()[4] for line in route.splitlines()
+                           if line.startswith("default") and len(line.split()) > 4), "")
+        except CoreError:
+            egress = ""
+        if not egress:
+            return
+        for subnet in subnets:
+            if ":" in subnet:  # current hooks are IPv4 iptables only
+                continue
+            rule = ["POSTROUTING", "-s", subnet, "-o", egress,
+                    "-j", "MASQUERADE"]
+            self._delete_rule_all(
+                [iptables, "-t", "nat", "-C", *rule],
+                [iptables, "-t", "nat", "-D", *rule],
+            )
+
+    def _replace_stale_interface(self) -> None:
+        """A host-network container can die while its kernel interface lives.
+
+        `wg syncconf` cannot repair Address, MTU, routes, or PostUp/NAT hooks.
+        Capture the old subnet, tear down with the best available config, then
+        remove any orphan interface/firewall rules before a full wg-quick up.
+        """
+        if not self.is_running():
+            return
+        stale_subnets = self._live_interface_subnets()
+        try:
+            self.down()
+        finally:
+            if self.is_running():
+                subprocess.run(
+                    [shutil.which("ip") or "ip", "link", "delete", self.interface],
+                    capture_output=True, timeout=20,
+                )
+            self._cleanup_stale_firewall(stale_subnets)
+        if self.is_running():
+            raise CoreError(
+                f"stale WireGuard interface '{self.interface}' survived forced cleanup"
+            )
+
     def up(self, config_text: str) -> None:
         self._ensure_host_tools()
+        # A fresh panel process must fully own wg-quick state. Reusing a kernel
+        # interface left by the previous host-network container makes the file
+        # look correct while live Address/NAT stay stale.
+        self._replace_stale_interface()
         # NAT configs are recognizable by their firewall hook. Forwarding is
         # settled before writing/creating the interface, so a read-only proc
         # can never strand a half-created interface.
         if "MASQUERADE" in config_text:
             self._ensure_forwarding()
         self._atomic_write(self.config_path, config_text)
-        if self.is_running():
-            self.sync(config_text)
-            return
         self._run_up()
 
     def sync(self, config_text: str) -> None:

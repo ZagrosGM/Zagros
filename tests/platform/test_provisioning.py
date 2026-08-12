@@ -254,11 +254,15 @@ def test_apply_grants_creates_accounts_on_both_cores(runtime, monkeypatch):
         assert rows["rec-one"]["settings"]["inbound_tags"] == ["wg0"]
         assert rows["rec-one"]["settings"]["excluded_inbounds"] == ["wg1"]  # subset select
         assert rows["rec-two"]["settings"]["inbound_tags"] == ["hy2"]
-        # idempotent: full re-sync provisions nothing twice
-        await provisioning.sync_user(runtime, user, grants={"rec-one": ["wg0"], "rec-two": ["hy2"]})
-        assert runtime.rec_one.created.count(acc_one) >= 1  # upsert path re-runs create
+        # Idempotent metadata edits preserve generated credentials byte-for-byte.
+        private_before = rows["rec-one"]["settings"]["private_key"]
+        await provisioning.sync_user(runtime, user, grants={
+            "rec-one": ["wg1"], "rec-two": ["hy2"]})
         counts = [a for a in runtime.users.accounts_of(pid) if a["core_id"] == "rec-one"]
         assert len(counts) == 1
+        assert counts[0]["settings"]["private_key"] == private_before
+        assert counts[0]["settings"]["inbound_tags"] == ["wg1"]
+        assert counts[0]["settings"]["excluded_inbounds"] == ["wg0"]
 
 
     asyncio.run(_go())
@@ -387,6 +391,37 @@ def test_deleted_inbound_cascades_revoke_and_prune(runtime, monkeypatch):
         assert report.get("revoked") == 1
         assert [a for a in runtime.users.accounts_of(pid) if a["core_id"] == "rec-one"] == []
         assert runtime.rec_one.deleted, "driver must hear the revocation"
+    asyncio.run(_go())
+
+
+def test_added_inbound_persists_driver_generated_per_inbound_credentials(runtime, monkeypatch):
+    """alpha.7.9: adding an inbound must persist credentials/addresses that
+    update_account generates in place; otherwise profile two dies on reboot."""
+    async def _go():
+        from app.platform import provisioning
+
+        _stub_catalog(monkeypatch, _catalog(("rec-one", "wireguard", ["wg-a"])))
+        user = LegacyUser("cascade-hydrate", user_id=73)
+        pid = await provisioning.sync_user(
+            runtime, user, grants={"rec-one": ["wg-a"]})
+
+        original_update = runtime.rec_one.update_account
+
+        async def _hydrate(account):
+            await original_update(account)
+            account.settings.setdefault("inbound_addresses", {})["wg-b"] = "10.91.0.2/32"
+
+        runtime.rec_one.update_account = _hydrate
+        _stub_catalog(monkeypatch, _catalog(
+            ("rec-one", "wireguard", ["wg-a", "wg-b"])))
+        report = await provisioning.reconcile_accounts_after_inbound_change(
+            runtime, "rec-one")
+        assert report.get("hydrated") == 1
+        stored = [account for account in runtime.users.accounts_of(pid)
+                  if account["core_id"] == "rec-one"][0]
+        assert stored["settings"]["inbound_addresses"]["wg-b"] == "10.91.0.2/32"
+        assert stored["settings"]["inbound_tags"] == ["wg-a"]
+
     asyncio.run(_go())
 
 

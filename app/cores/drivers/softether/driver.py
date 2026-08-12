@@ -37,7 +37,6 @@ logger = logging.getLogger("zagros.cores.drivers.softether")
 
 from app.cores.base import BaseCoreDriver
 from app.cores.exceptions import CoreError
-from app.cores.stats import DeltaTracker
 from app.cores.types import (
     Capability,
     ClientConfig,
@@ -49,6 +48,116 @@ from app.cores.types import (
     UsageRecord,
     UserAccount,
 )
+
+
+class _SoftEtherUsageTracker:
+    """Exactly-once merger for delayed UserGet and live SessionGet counters.
+
+    SoftEther can copy active session counters into UserGet on a delayed
+    internal tick *before* disconnect. Therefore simply adding both ledgers
+    can double bill a 50 MB transfer. This tracker emits the union of their
+    deltas: a UserGet increase first absorbs live bytes already emitted from
+    SessionGet; only any excess is new completed-session traffic.
+    """
+
+    def __init__(self) -> None:
+        self._billed: dict[str, tuple[int, int]] = {}
+        self._last_user: dict[str, tuple[int, int]] = {}
+        self._last_sessions: dict[tuple[str, str], tuple[int, int]] = {}
+        self._outstanding: dict[str, tuple[int, int]] = {}
+        self._cold_after_restore: set[str] = set()
+
+    def register(self, account_id: str) -> None:
+        self._billed.setdefault(account_id, (0, 0))
+        self._last_user.setdefault(account_id, (0, 0))
+        self._outstanding.setdefault(account_id, (0, 0))
+
+    @staticmethod
+    def _delta(current: tuple[int, int], previous: tuple[int, int]) -> tuple[int, int]:
+        return (max(0, current[0] - previous[0]),
+                max(0, current[1] - previous[1]))
+
+    def observe(
+        self,
+        account_id: str,
+        completed: tuple[int, int],
+        live_sessions: dict[str, tuple[int, int]],
+    ) -> tuple[int, int]:
+        self.register(account_id)
+        if account_id in self._cold_after_restore:
+            # The persisted baseline is the authoritative already-billed
+            # total. Seed volatile session/user cursors from live state; only
+            # a completed counter beyond that baseline is immediately new.
+            billed = self._billed[account_id]
+            emitted = self._delta(completed, billed)
+            self._billed[account_id] = (
+                billed[0] + emitted[0], billed[1] + emitted[1])
+            self._last_user[account_id] = completed
+            for session_name, counters in live_sessions.items():
+                self._last_sessions[(account_id, session_name)] = counters
+            self._outstanding[account_id] = (0, 0)
+            self._cold_after_restore.discard(account_id)
+            return emitted
+
+        user_delta = self._delta(completed, self._last_user[account_id])
+        self._last_user[account_id] = completed
+
+        live_delta = [0, 0]
+        current_keys: set[tuple[str, str]] = set()
+        for session_name, counters in live_sessions.items():
+            key = (account_id, session_name)
+            current_keys.add(key)
+            previous = self._last_sessions.get(key, (0, 0))
+            delta = self._delta(counters, previous)
+            live_delta[0] += delta[0]
+            live_delta[1] += delta[1]
+            self._last_sessions[key] = counters
+        for key in [key for key in self._last_sessions
+                    if key[0] == account_id and key not in current_keys]:
+            self._last_sessions.pop(key, None)
+
+        outstanding = self._outstanding[account_id]
+        # UserGet's delayed increase may represent live bytes emitted on a
+        # previous poll OR bytes SessionGet exposed for the first time in this
+        # same poll. Subtract that overlap once, direction by direction.
+        available = (outstanding[0] + live_delta[0],
+                     outstanding[1] + live_delta[1])
+        overlap = (min(user_delta[0], available[0]),
+                   min(user_delta[1], available[1]))
+        emitted = (user_delta[0] + live_delta[0] - overlap[0],
+                   user_delta[1] + live_delta[1] - overlap[1])
+        self._outstanding[account_id] = (
+            available[0] - overlap[0], available[1] - overlap[1])
+        billed = self._billed[account_id]
+        self._billed[account_id] = (
+            billed[0] + emitted[0], billed[1] + emitted[1])
+        return emitted
+
+    def forget(self, account_id: str) -> None:
+        self._billed.pop(account_id, None)
+        self._last_user.pop(account_id, None)
+        self._outstanding.pop(account_id, None)
+        self._cold_after_restore.discard(account_id)
+        for key in [key for key in self._last_sessions if key[0] == account_id]:
+            self._last_sessions.pop(key, None)
+
+    def baseline_snapshot(
+        self, keys: list[object] | None = None,
+    ) -> dict[object, tuple[int, int]]:
+        if keys is None:
+            return dict(self._billed)
+        return {key: self._billed[key] for key in keys if key in self._billed}
+
+    def restore(self, baseline: dict[object, tuple[int, int]]) -> None:
+        for raw_key, totals in baseline.items():
+            key = str(raw_key)
+            self._billed[key] = (int(totals[0]), int(totals[1]))
+            self._last_user.pop(key, None)
+            self._outstanding[key] = (0, 0)
+            for session_key in [item for item in self._last_sessions
+                                if item[0] == key]:
+                self._last_sessions.pop(session_key, None)
+            self._cold_after_restore.add(key)
 
 
 class SoftEtherDriver(BaseCoreDriver):
@@ -129,7 +238,7 @@ class SoftEtherDriver(BaseCoreDriver):
             backend = LocalSoftEtherBackend(self.settings)
         self._backend = backend
         self._accounts: dict[str, UserAccount] = {}
-        self._usage = DeltaTracker()
+        self._usage = _SoftEtherUsageTracker()
         self._suspended_expire_restore: dict[str, str | None] = {}
 
     # ------------------------------------------------------------------ #
@@ -350,10 +459,16 @@ class SoftEtherDriver(BaseCoreDriver):
         server_start = getattr(self._backend, "server_start", None)
         if callable(server_start) and server_binary() is not None:
             await asyncio.to_thread(server_start)
-            for _ in range(20):
-                await asyncio.sleep(0.5)
+            # Real persistent servers can spend well over ten seconds loading
+            # vpn_server.config, SecureNAT and packet/security logs after a
+            # container/host restart. Probe slowly: rapid localhost vpncmd TLS
+            # connections trigger SoftEther's own DoS guard and prevent the
+            # daemon from ever becoming ready. Bound the quiet wait at 60s.
+            await asyncio.sleep(3.0)
+            for _ in range(30):
                 if await asyncio.to_thread(self._backend.reachable):
                     return
+                await asyncio.sleep(2.0)
             recover_password = getattr(
                 self._backend, "recover_fresh_server_password", None)
             if callable(recover_password) and await asyncio.to_thread(recover_password):
@@ -453,6 +568,7 @@ class SoftEtherDriver(BaseCoreDriver):
         await asyncio.to_thread(self._backend.user_password_set, account.account_id,
                                 str(account.settings["password"]))
         self._accounts[account.account_id] = account
+        self._usage.register(account.account_id)
         if account.enabled:
             await asyncio.to_thread(self._backend.user_expires_set, account.account_id, None)
         else:
@@ -517,15 +633,42 @@ class SoftEtherDriver(BaseCoreDriver):
     ) -> list[UsageRecord]:
         wanted = account_ids if account_ids is not None else list(self._accounts)
         records: list[UsageRecord] = []
+        # SessionGet is the immediate ledger; UserGet catches up on a delayed
+        # internal tick and/or disconnect. _SoftEtherUsageTracker reconciles
+        # their overlap so long-lived sessions advance quota without counting
+        # the later UserGet catch-up a second time.
+        try:
+            sessions = await asyncio.to_thread(self._backend.session_list)
+        except CoreError:
+            sessions = []
+        session_get = getattr(self._backend, "session_get", None)
+        by_account: dict[str, list[Any]] = {}
+        for session in sessions:
+            by_account.setdefault(session.username, []).append(session)
+
         for account_id in wanted:
             if account_id not in self._accounts:
                 continue
             try:
-                stats = await asyncio.to_thread(self._backend.user_get, account_id)
+                completed = await asyncio.to_thread(self._backend.user_get, account_id)
             except CoreError:
                 continue  # user vanished server-side; nothing to report
+            live_sessions: dict[str, tuple[int, int]] = {}
+            if callable(session_get):
+                for session in by_account.get(account_id, []):
+                    try:
+                        live = await asyncio.to_thread(
+                            session_get, session.session_name)
+                    except CoreError:
+                        # Disconnect raced this poll. The committed bytes show
+                        # up in UserGet on this or the next 30-second tick.
+                        continue
+                    live_sessions[session.session_name] = (
+                        int(live.incoming_bytes), int(live.outgoing_bytes))
             up, down = self._usage.observe(
-                account_id, stats.incoming_bytes, stats.outgoing_bytes
+                account_id,
+                (completed.incoming_bytes, completed.outgoing_bytes),
+                live_sessions,
             )
             records.append(UsageRecord(
                 core_id=self.metadata.id, account_id=account_id,

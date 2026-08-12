@@ -9,6 +9,7 @@ import asyncio
 import sys
 import traceback
 import types as _types
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,65 @@ def test_listener_readiness_classifies_native_quic_as_udp() -> None:
         ("udp", 4430), ("udp", 5443), ("tcp", 8443),
         ("tcp", 8388), ("udp", 8388),
     }
+
+
+def test_singbox_hysteria_runtime_test() -> None:
+    """Legacy generic-TLS ALPN is repaired to Hysteria2's real QUIC ALPN."""
+    async def run():
+        driver, backend, _ = _driver({"advertise_host": "203.0.113.7"})
+        driver._studio_materialize_certificate = lambda *_args: ("/cert.pem", "/key.pem")
+        await driver.apply_studio_document({"inbounds": [{
+            "tag": "hy-runtime", "protocol": "hysteria2",
+            "listen": "0.0.0.0", "port": 4430,
+            "transport": "quic", "security": "tls",
+            "sni": "hy.example.com", "alpn": ["h2", "http/1.1"],
+        }]})
+        account = UserAccount(
+            user_id=2, username="hy", account_id="2.hy",
+            protocol="hysteria2", settings={"password": "secret"})
+        await driver.create_account(account)
+        inbound = _inbound(backend.configs[-1], "hy-runtime")
+        assert inbound["tls"]["enabled"] is True
+        assert inbound["tls"]["alpn"] == ["h3"]
+        profile = await driver.describe_delivery(account)
+        link = next(a.content for a in profile.sections[0].artifacts
+                    if getattr(a.kind, "value", a.kind) == "link")
+        assert urllib.parse.parse_qs(urllib.parse.urlsplit(link).query)["alpn"] == ["h3"]
+
+    asyncio.run(run())
+
+
+def test_singbox_tuic_runtime_test() -> None:
+    """TUIC rendering/delivery uses h3 while retaining protocol extras."""
+    async def run():
+        driver, backend, _ = _driver({"advertise_host": "203.0.113.7"})
+        driver._studio_materialize_certificate = lambda *_args: ("/cert.pem", "/key.pem")
+        await driver.apply_studio_document({"inbounds": [{
+            "tag": "tuic-runtime", "protocol": "tuic",
+            "listen": "0.0.0.0", "port": 5443,
+            "transport": "quic", "security": "tls",
+            "sni": "tuic.example.com", "alpn": ["h2", "http/1.1"],
+            "congestion_control": "bbr", "zero_rtt": False,
+        }]})
+        account = UserAccount(
+            user_id=3, username="tuic", account_id="3.tuic",
+            protocol="tuic", settings={
+                "uuid": "2dc9a20f-38d9-4d1e-a5b9-c32c4a141433",
+                "password": "secret",
+            })
+        await driver.create_account(account)
+        inbound = _inbound(backend.configs[-1], "tuic-runtime")
+        assert inbound["tls"]["alpn"] == ["h3"]
+        assert inbound["congestion_control"] == "bbr"
+        profile = await driver.describe_delivery(account)
+        link = next(a.content for a in profile.sections[0].artifacts
+                    if getattr(a.kind, "value", a.kind) == "link")
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(link).query)
+        assert query["alpn"] == ["h3"]
+        assert query["congestion_control"] == ["bbr"]
+        assert query["udp_relay_mode"] == ["native"]
+
+    asyncio.run(run())
 
 
 def test_render_contains_all_protocol_inbounds_and_users() -> None:

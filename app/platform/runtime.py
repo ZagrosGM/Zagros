@@ -136,6 +136,37 @@ class PlatformRuntime:
         secret = os.environ.get("ZAGROS_SECRET_KEY", "")
         return cls(database_url=url, master_secret=secret)
 
+    async def _retry_deferred_boot_work(
+        self,
+        operation,
+        pending: set[str],
+        *,
+        label: str,
+        attempts: int = 30,
+        delay_seconds: float = 2.0,
+    ) -> set[str]:
+        """Bounded warm-up retries for live-control-plane cores.
+
+        SoftEther can answer the first reachability probe while vpncmd user
+        mutation still returns protocol error 2 for several seconds. A single
+        immediate post-start replay left encrypted accounts deferred until an
+        operator edited/reinstalled them. Retry only the already-deferred core
+        set; successful engines are never touched twice.
+        """
+        remaining = set(pending)
+        for attempt in range(1, attempts + 1):
+            if not remaining:
+                break
+            if attempt > 1 and delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+            remaining = await operation(remaining)
+            if remaining:
+                logger.warning(
+                    "%s reconciliation still deferred after warm-up attempt %d/%d: %s",
+                    label, attempt, attempts, sorted(remaining),
+                )
+        return remaining
+
     async def boot_cores(self) -> None:
         await self.core_manager.boot()
         # Restore listener documents first, then replay encrypted account
@@ -152,9 +183,15 @@ class PlatformRuntime:
         # that honestly failed offline; successful config cores are not
         # restarted a second time.
         if studio_deferred:
-            studio_deferred = await self._hydrate_studio_documents(studio_deferred)
+            studio_deferred = await self._retry_deferred_boot_work(
+                self._hydrate_studio_documents, studio_deferred,
+                label="studio",
+            )
         if account_deferred:
-            account_deferred = await self._restore_core_accounts(account_deferred)
+            account_deferred = await self._retry_deferred_boot_work(
+                self._restore_core_accounts, account_deferred,
+                label="account",
+            )
         await self._attach_builtin_xray()
         # Xray is attached after add-on auto-start so CoreManager never starts
         # it twice. Its SQL Studio document must nevertheless be replayed: in

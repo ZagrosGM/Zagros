@@ -545,8 +545,15 @@ class SingBoxDriver(BaseCoreDriver):
                 headers["Host"] = str(raw["host"])
             ib["transport"] = {"type": "ws", "path": raw.get("path") or "/",
                                **({"headers": headers} if headers else {})}
-        # security — explicit; reality is verified per-protocol below
-        alpn = raw.get("alpn")
+        # security — explicit; reality is verified per-protocol below.
+        # Hysteria2 and TUIC are QUIC application protocols whose wire ALPN is
+        # h3. The generic TLS wizard historically persisted its HTTP/TCP
+        # default (h2,http/1.1): sing-box accepted the JSON and bound UDP, but
+        # real clients immediately closed during protocol negotiation. Repair
+        # that legacy desired state at the renderer boundary so existing
+        # Studio documents and newly-created listeners both become usable;
+        # delivery mirrors this native TLS block and therefore also emits h3.
+        alpn = ["h3"] if proto in ("hysteria2", "tuic") else raw.get("alpn")
         if proto in ("socks", "mixed"):
             if security not in ("", "none"):
                 raise CoreError(

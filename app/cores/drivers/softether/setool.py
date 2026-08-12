@@ -46,6 +46,21 @@ class SESession:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionStatistics:
+    """Live counters of one active SoftEther session (``SessionGet``).
+
+    ``UserGet`` only commits these bytes when the session disconnects. Adding
+    active SessionGet counters to the completed UserGet total yields one
+    monotonic effective counter that works both during and after a session.
+    """
+
+    session_name: str
+    username: str
+    incoming_bytes: int
+    outgoing_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
 class IPsecServices:
     """Server IPsec service state per `IPsecGet` (alpha.7.5 item 7)."""
 
@@ -161,6 +176,39 @@ def _csv_rows(text: str) -> list[dict[str, str]]:
         rows.append({h: (values[i] if i < len(values) else "")
                      for i, h in enumerate(reader)})
     return rows
+
+
+def parse_session_get(text: str) -> SessionStatistics:
+    """Parse live ``SessionGet`` directional byte counters.
+
+    SoftEther prints ``Incoming/Outgoing Data Size`` while a session is
+    active. They are not reflected in ``UserGet`` until disconnect, which is
+    why polling UserGet alone left long-lived L2TP/SSTP sessions at zero.
+    """
+    fields: dict[str, str] = {}
+    for raw in text.splitlines():
+        if "|" not in raw:
+            continue
+        left, _, right = raw.partition("|")
+        key = left.strip(" -")
+        if not key or set(left.strip()) <= {"-"}:
+            continue
+        fields[key.lower()] = right.strip()
+
+    def _get(*names: str) -> str:
+        for name in names:
+            for key, value in fields.items():
+                if key.startswith(name.lower()):
+                    return value
+        return ""
+
+    return SessionStatistics(
+        session_name=_get("Session Name"),
+        username=(_get("User Name (Database)")
+                  or _get("User Name (Authentication)")),
+        incoming_bytes=_bytes(_get("Incoming Data Size")),
+        outgoing_bytes=_bytes(_get("Outgoing Data Size")),
+    )
 
 
 def parse_user_list(text: str) -> list[SEUser]:

@@ -19,8 +19,10 @@ from typing import Protocol, runtime_checkable
 from app.cores.drivers.softether.setool import (
     IPsecServices,
     SESession,
+    SessionStatistics,
     UserStatistics,
     parse_ipsec_get,
+    parse_session_get,
     parse_session_list,
     parse_user_get,
     parse_user_list,
@@ -44,6 +46,7 @@ class SoftEtherBackend(Protocol):
     def user_get(self, username: str) -> UserStatistics: ...
     def user_list(self) -> list[str]: ...
     def session_list(self) -> list[SESession]: ...
+    def session_get(self, session_name: str) -> SessionStatistics: ...
     def session_disconnect(self, session_name: str) -> None: ...
     def ipsec_psk(self) -> str | None: ...
     def ipsec_get(self) -> IPsecServices: ...
@@ -66,6 +69,7 @@ class LocalSoftEtherBackend:
         self.hub = settings.get("hub", "DEFAULT")
         self.password = settings.get("admin_password", "")
         self.timeout = float(settings.get("vpncmd_timeout", 30.0))
+        self.protocol_backoff = float(settings.get("protocol_backoff_seconds", 10.0))
         # The panel container is recreated on every image upgrade. SoftEther's
         # daemon configuration lives beside vpnserver, so /usr/local was both
         # a binary-loss and a configuration-loss boundary. New installs use
@@ -148,13 +152,33 @@ class LocalSoftEtherBackend:
         # '"UserCreate": Command not found' on the 5.2 developer edition
         # (verified live against a real source-built vpncmd 5.02.5187).
         argv += ["/CMD", *shlex.split(command)]
-        try:
-            proc = subprocess.run(
-                argv, capture_output=True, text=True, timeout=self.timeout
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise CoreError(f"vpncmd timed out on '{safe}'.") from exc
-        out = (proc.stdout or "") + (proc.stderr or "")
+        proc = None
+        out = ""
+        # SoftEther's built-in DoS guard can transiently reject localhost
+        # vpncmd RPCs with rc=2 "Protocol error" during daemon/config warm-up
+        # or a burst of account replay commands. Immediate retries extend the
+        # ban. Give it one quiet backoff window, then retry the exact redacted
+        # command once; permanent auth/config errors still surface unchanged.
+        for attempt in range(2):
+            try:
+                proc = subprocess.run(
+                    argv, capture_output=True, text=True, timeout=self.timeout
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise CoreError(f"vpncmd timed out on '{safe}'.") from exc
+            out = (proc.stdout or "") + (proc.stderr or "")
+            if (proc.returncode == 2 and "protocol error" in out.lower()
+                    and attempt == 0):
+                logger.warning(
+                    "vpncmd '%s' hit transient SoftEther protocol/DoS guard; "
+                    "waiting %.1fs before one retry",
+                    safe, self.protocol_backoff,
+                )
+                if self.protocol_backoff > 0:
+                    time.sleep(self.protocol_backoff)
+                continue
+            break
+        assert proc is not None  # subprocess either returned or raised
         safe_out = self._safe_command(out)
         if proc.returncode != 0:
             raise CoreError(f"vpncmd '{safe}' failed (rc={proc.returncode}): {safe_out.strip()[-1200:]}")
@@ -1017,6 +1041,9 @@ class LocalSoftEtherBackend:
 
     def session_list(self) -> list[SESession]:
         return parse_session_list(self._cmd("SessionList", csv=True))
+
+    def session_get(self, session_name: str) -> SessionStatistics:
+        return parse_session_get(self._cmd(f"SessionGet {session_name}"))
 
     def session_disconnect(self, session_name: str) -> None:
         self._cmd(f"SessionDisconnect {session_name}")

@@ -270,6 +270,33 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
     reader.readAsText(file);
   };
 
+  const uploadWireGuard = (file: File) => {
+    const reader = new FileReader();
+    setImporting(true); setError(""); setImportOK("");
+    reader.onerror = () => { setError("could not read WireGuard profile"); setImporting(false); };
+    reader.onload = async () => {
+      try {
+        const parsed = await api.post<{
+          kind: "wireguard"; settings: Record<string, unknown>; name_hint?: string;
+        }>("/zagros/utils/parse-wireguard-profile", {
+          content: String(reader.result ?? ""),
+        });
+        setOb((cur) => ({
+          ...cur,
+          kind: "wireguard",
+          name: cur.name || parsed.name_hint || file.name.replace(/\.conf$/i, ""),
+          settings: parsed.settings,
+        }));
+        setImportOK(`imported ${file.name} — review the endpoint and keys below`);
+      } catch (e) {
+        setError(e instanceof ApiError ? e.message : t("common.error"));
+      } finally {
+        setImporting(false);
+      }
+    };
+    reader.readAsText(file);
+  };
+
   const validate = () => {
     if (!NAME_RE.test(ob.name)) return "name: 2–64 chars, letters/digits with -_. separators (uppercase is fine)";
     if (isNew && takenNames.has(ob.name)) return `outbound "${ob.name}" already exists`;
@@ -344,6 +371,22 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
           </label>
         </div>
       )}
+
+      {ob.kind === "wireguard" && (
+        <div className="mb-4 flex items-center justify-between gap-2 rounded-xl border border-brand/30 bg-brand-soft/30 px-3 py-2.5">
+          <span className="text-[12px] text-content-2">upload a WireGuard client .conf to import Endpoint, Address, DNS, MTU and all keys</span>
+          <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-[12px] font-medium text-white hover:opacity-90">
+            <Upload size={13} /> {importing ? "importing…" : "upload .conf"}
+            <input type="file" accept=".conf,.txt" className="hidden" disabled={importing}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) uploadWireGuard(file);
+                e.target.value = "";
+              }} />
+          </label>
+        </div>
+      )}
+      {ob.kind === "wireguard" && importOK && <p className="mb-4 text-[11px] text-ok">{importOK}</p>}
 
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="name" required>

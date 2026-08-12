@@ -239,6 +239,45 @@ def test_live_boot_report_is_atomic_and_names_incomplete_reconciliation(
     asyncio.run(run())
 
 
+def test_studio_hydration_persists_driver_normalization() -> None:
+    async def run() -> None:
+        document = {"inbounds": [{
+            "tag": "l2tp-old", "protocol": "l2tp", "port": 19592,
+        }]}
+        saved = []
+
+        class Driver:
+            def normalize_studio_document(self, doc):
+                doc["inbounds"][0]["port"] = 1701
+                return doc
+
+            async def apply_studio_document(self, doc):
+                return None
+
+        class Studio:
+            async def get_document(self, core_id):
+                return copy.deepcopy(document)
+
+            async def save_document(self, core_id, doc):
+                saved.append((core_id, copy.deepcopy(doc)))
+
+        class Manager:
+            def list_cores(self): return ["softether"]
+            def get(self, core_id): return Driver()
+            async def apply_studio_document(self, core_id, doc):
+                assert doc["inbounds"][0]["port"] == 1701
+
+        runtime = SimpleNamespace(core_manager=Manager(), studio_store=Studio())
+        hydrate = PlatformRuntime._hydrate_studio_documents.__get__(
+            runtime, type(runtime))
+        assert await hydrate() == set()
+        assert saved == [("softether", {"inbounds": [{
+            "tag": "l2tp-old", "protocol": "l2tp", "port": 1701,
+        }]})]
+
+    asyncio.run(run())
+
+
 def test_deferred_live_core_retries_through_daemon_warmup() -> None:
     async def run() -> None:
         calls = 0

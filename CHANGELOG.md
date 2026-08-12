@@ -10,6 +10,72 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.8.1] — 2026-08-13 — Runtime and UI blocker closure
+
+Runtime-verified follow-up to `alpha.8`. The four reported production blockers
+were reproduced where possible and validated on a real Ubuntu VPS, real Docker,
+a real browser, real VPN clients, image recreation, `zagros repair` and a host
+reboot.
+
+### Fixed — truthful SoftEther ports
+
+* L2TP/IPsec and raw L2TP no longer pretend to support an arbitrary Wizard
+  port. Their fixed protocol ports are represented honestly, the port field is
+  disabled with an explanation, and legacy fake values are normalized to
+  `1701` during Studio hydration. IPsec continues to use its standard
+  UDP `500/4500` transport ports.
+* SSTP preserves its selected custom port through Studio, daemon
+  materialization, catalog, delivery and subscription output. The runtime now
+  enables SSTP and creates the requested SoftEther TCP listener instead of
+  silently relying on `443`.
+* A real SSTP client established PPP and passed Internet traffic on a custom
+  high TCP port before and after host reboot. The subscription portal exposed
+  that real port and omitted the legacy fake L2TP port.
+
+### Fixed — protocol-aware outbound Test
+
+* Hysteria2, TUIC and WireGuard no longer receive a misleading TCP connection
+  attempt from the Test action. Their UDP endpoint now receives a DNS, route
+  and socket preflight whose result explicitly states that protocol
+  authentication occurs on deploy.
+* OpenVPN Test reads both structured settings and uploaded `.ovpn` content,
+  including its first `remote` endpoint and `proto`, so UDP profiles no longer
+  fail with a false `ConnectionRefusedError`.
+* Complete uploaded OpenVPN profiles no longer require a duplicate
+  `settings.server` field. Existing TCP outbound protocols retain a real TCP
+  dial test.
+
+### Added — WireGuard outbound profile import
+
+* The outbound editor now provides an `upload .conf` action backed by an
+  authenticated strict parser endpoint.
+* Client profiles import endpoint, private/public/preshared keys, local
+  addresses, AllowedIPs, DNS, MTU and keepalive. Bracketed IPv6 endpoints are
+  supported; malformed keys, addresses, endpoints and ambiguous multi-peer
+  profiles fail closed.
+* sing-box and Xray translation preserve imported list addresses, AllowedIPs,
+  preshared key, MTU, keepalive and reserved values.
+
+### Re-verified — WireGuard inbound runtime
+
+* The reported missing WireGuard listener did not reproduce on the current
+  runtime. Two real kernel interfaces exposed their configured UDP ports,
+  peers and NAT rules; a profile decoded from the live subscription completed
+  a fresh handshake, tunnel ping and Internet request before and after reboot.
+* `wg show` remains authoritative for kernel-owned WireGuard listener state.
+  No speculative inbound change was introduced.
+
+### Verification
+
+* Panel suite locally and on the VPS: **756 passed, 7 skipped**.
+* CLI harness: **254 passed, 0 failed**; scripts pytest, TypeScript and Vite
+  production build passed.
+* Real browser E2E passed fixed L2TP display, custom SSTP editing, WireGuard
+  `.conf` upload and the outbound Test flow with no console or page errors.
+* Final boot reconciliation had no deferred Studio/account state; all six
+  enabled cores were healthy and both persistent SQLite databases passed
+  integrity checks.
+
 ## [1.0.0-alpha.8] — 2026-08-12 — Final runtime blocker closure
 
 Runtime-verified blocker release based on the published `alpha.7.9` state. The

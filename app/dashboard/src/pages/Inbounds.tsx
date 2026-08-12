@@ -27,7 +27,7 @@ interface WizardField {
 }
 interface WizardSecurity { id: string; label: string; fields: WizardField[] }
 interface WizardTransport { id: string; label: string; securities: WizardSecurity[] }
-interface WizardProtocol { id: string; label: string; default_port: number; transports: WizardTransport[] }
+interface WizardProtocol { id: string; label: string; default_port: number; fixed_port?: boolean; transports: WizardTransport[] }
 interface WizardSchema { core_id: string; protocols: WizardProtocol[] }
 
 interface InboundRow { tag: string; protocol: string; listen?: string; port: number | string; [k: string]: unknown }
@@ -242,7 +242,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
   const suggestPort = useQuery({
     queryKey: ["zagros", "suggest-port", coreId, proto?.id ?? "auto", dialogSeed],
     queryFn: () => api.get<{ port: number }>(`/zagros/cores/${coreId}/suggest-port`),
-    enabled: mode !== "edit" && !!coreId,
+    enabled: mode !== "edit" && !!coreId && !proto?.fixed_port,
     staleTime: Infinity, gcTime: 0, retry: false,
   });
   useEffect(() => {
@@ -280,8 +280,10 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
     // to one socket; everything else is carried over, so re-typing the old
     // port is one keystroke if that is really intended.
     if (mode === "edit") {
-      const portNum = Number(initial.port);
-      if (portNum > 0) { setPort(portNum); portTouchedRef.current = true; }
+      const portNum = p.fixed_port ? p.default_port : Number(initial.port);
+      if (portNum > 0) { setPort(portNum); portTouchedRef.current = !p.fixed_port; }
+    } else if (p.fixed_port) {
+      setPort(p.default_port); portTouchedRef.current = false;
     }
     // certificate path mode restores cleanly (paths are not secrets); pasted
     // PEM content still never round-trips.
@@ -306,9 +308,13 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
   const pickProto = (p: WizardProtocol) => {
     setProto(p); setTransport(null); setSecurity(null); setFields({}); setTouched(new Set());
     setCertRef(""); setCertMode("auto");
-    // the port: an untouched wizard gets a fresh suggestion for the new
-    // protocol (the suggest query is keyed on the protocol id); a port the
-    // USER typed survives — explicit input always wins (alpha.7.5 item 3).
+    if (p.fixed_port) {
+      // L2TP/IPsec and raw L2TP have wire-standard ports. Showing a random
+      // editable value made Studio promise a listener SoftEther cannot bind.
+      setPort(p.default_port); portTouchedRef.current = false;
+    } else if (!portTouchedRef.current) {
+      setPort(""); // the protocol-keyed suggestion query supplies a fresh port
+    }
   };
   const pickTransport = (tr: WizardTransport) => { setTransport(tr); setSecurity(null); setCertRef(""); setCertMode("auto"); };
   const pickSecurity = (next: WizardSecurity) => {
@@ -542,16 +548,20 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
             )}
             <Field label="port" required
               hint={
-                !port || port < 1 || port > 65535
-                  ? "1–65535"
-                  : mode !== "edit" && !portTouchedRef.current
-                    ? "random suggestion (host-collision-checked) — clear or type your own"
-                    : undefined
+                effProto?.fixed_port
+                  ? "fixed by the protocol/SoftEther engine — not configurable"
+                  : !port || port < 1 || port > 65535
+                    ? "1–65535"
+                    : mode !== "edit" && !portTouchedRef.current
+                      ? "random suggestion (host-collision-checked) — clear or type your own"
+                      : undefined
               }>
               <Input type="number" min={1} max={65535}
                 value={port === "" ? "" : port}
+                disabled={Boolean(effProto?.fixed_port)}
                 placeholder={suggestPort.isFetching ? "suggesting…" : "e.g. 38472"}
                 onChange={(e) => {
+                  if (effProto?.fixed_port) return;
                   portTouchedRef.current = true;
                   setPort(e.target.value === "" ? "" : Number(e.target.value));
                 }} dir="ltr"

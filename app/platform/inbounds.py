@@ -64,8 +64,8 @@ _SERVICE_ENTRIES: dict[str, tuple[tuple[str, str, str | None], ...]] = {
         ("l2tp", "l2tp", None),
         ("l2tp-raw", "l2tp_raw", None),
         ("etherip", "etherip", None),
-        ("sstp", "sstp", None),
-        ("softether-openvpn", "ovpn", None),
+        ("sstp", "sstp", "sstp_port"),
+        ("softether-openvpn", "ovpn", "ovpn_ports"),
     ),
 }
 
@@ -123,14 +123,19 @@ async def _studio_inbounds(runtime, core_id: str) -> list[CatalogInbound]:
 def _service_inbounds(core_id: str, settings: dict[str, Any]) -> list[CatalogInbound]:
     out: list[CatalogInbound] = []
     for tag, protocol, port_key in _SERVICE_ENTRIES.get(core_id, ()):
-        if core_id == "softether" and not settings.get(f"feature_{protocol}"):
-            # Capability catalog = what the hub is configured to serve, not a
-            # static list of everything SoftEther could theoretically do.
-            continue
-        port = None
+        if core_id == "softether":
+            if not settings.get(f"feature_{protocol}"):
+                # Capability catalog = what the hub is configured to serve,
+                # not a static list of theoretical protocols.
+                continue
+            tag = str((settings.get("feature_tags") or {}).get(protocol) or tag)
+        port = {"l2tp": 1701, "l2tp_raw": 1701}.get(protocol)
         if port_key is not None:
             try:
-                port = int(settings.get(port_key)) if settings.get(port_key) else None
+                raw_port = settings.get(port_key)
+                if protocol == "ovpn" and raw_port:
+                    raw_port = str(raw_port).split(",", 1)[0].strip()
+                port = int(raw_port) if raw_port else None
             except (TypeError, ValueError):
                 port = None
         out.append(CatalogInbound(tag=tag, protocol=protocol, port=port))

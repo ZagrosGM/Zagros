@@ -9,6 +9,7 @@ real-binary E2E suite).
 """
 from __future__ import annotations
 
+import base64
 import importlib.util
 import os
 import subprocess
@@ -418,6 +419,48 @@ class TestOutboundsAlpha7:
         ovpn_props = schemas["openvpn"]["properties"]
         assert {"ovpn_content", "username", "password",
                 "ca_pem", "cert_pem", "key_pem"} <= set(ovpn_props)
+
+    def test_udp_outbound_tests_are_protocol_aware(self, stack):
+        client = stack["client"]
+        payloads = [
+            {"name": "hy-udp", "kind": "hysteria2", "settings": {
+                "server": "127.0.0.1", "server_port": 9, "password": "pw"}},
+            {"name": "wg-udp", "kind": "wireguard", "settings": {
+                "server": "127.0.0.1", "server_port": 9,
+                "private_key": "A", "peer_public_key": "B",
+                "local_address": ["10.0.0.2/32"]}},
+            {"name": "ovpn-udp", "kind": "openvpn", "settings": {
+                "ovpn_content": "client\nproto udp\nremote 127.0.0.1 9\n"}},
+        ]
+        for payload in payloads:
+            result = client.post("/api/zagros/outbounds/test", json=payload)
+            assert result.status_code == 200, result.text
+            assert result.json()["ok"] is True
+            assert "udp" in result.json()["detail"]
+            assert result.json()["latency_ms"] is not None
+
+    def test_wireguard_profile_import_endpoint(self, stack):
+        key = lambda value: base64.b64encode(bytes([value]) * 32).decode()  # noqa: E731
+        content = (
+            f"[Interface]\nPrivateKey = {key(1)}\nAddress = 10.77.0.2/32\n"
+            "DNS = 1.1.1.1\n"
+            f"[Peer]\nPublicKey = {key(2)}\nPresharedKey = {key(3)}\n"
+            "AllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = wg.example.com:51830\n"
+            "PersistentKeepalive = 25\n"
+        )
+        response = stack["client"].post(
+            "/api/zagros/utils/parse-wireguard-profile", json={"content": content})
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["kind"] == "wireguard"
+        assert data["settings"]["server"] == "wg.example.com"
+        assert data["settings"]["server_port"] == 51830
+        assert data["settings"]["local_address"] == ["10.77.0.2/32"]
+        assert data["settings"]["allowed_ips"] == ["0.0.0.0/0", "::/0"]
+        bad = stack["client"].post(
+            "/api/zagros/utils/parse-wireguard-profile",
+            json={"content": "[Interface]\nAddress=bad\n"})
+        assert bad.status_code == 422
 
     def test_parse_share_url_endpoint(self, stack):
         r = stack["client"].post("/api/zagros/utils/parse-share-url", json={

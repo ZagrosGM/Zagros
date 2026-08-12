@@ -115,14 +115,19 @@ def test_softether_catalog_is_enabled_capability_aware():
     settings = {
         "feature_softether": True, "native_port": 5555,
         "feature_l2tp": True, "feature_l2tp_raw": True,
-        "feature_etherip": True, "feature_sstp": True,
-        "feature_ovpn": True,
+        "feature_etherip": True, "feature_sstp": True, "sstp_port": 46704,
+        "feature_ovpn": True, "ovpn_ports": "1195",
+        "feature_tags": {"sstp": "sstp-custom", "l2tp": "l2tp-custom"},
     }
     entries = _service_inbounds("softether", settings)
     assert [(e.tag, e.protocol) for e in entries] == [
-        ("softether", "softether"), ("l2tp", "l2tp"),
+        ("softether", "softether"), ("l2tp-custom", "l2tp"),
         ("l2tp-raw", "l2tp_raw"), ("etherip", "etherip"),
-        ("sstp", "sstp"), ("softether-openvpn", "ovpn")]
+        ("sstp-custom", "sstp"), ("softether-openvpn", "ovpn")]
+    assert {e.protocol: e.port for e in entries} == {
+        "softether": 5555, "l2tp": 1701, "l2tp_raw": 1701,
+        "etherip": None, "sstp": 46704, "ovpn": 1195,
+    }
     assert all(e.protocol != "pptp" for e in entries)
 
 

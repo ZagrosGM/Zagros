@@ -25,6 +25,8 @@ platform) with the surfaces the unified dashboard needs:
 from __future__ import annotations
 
 import asyncio
+import shlex
+import socket
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -582,9 +584,61 @@ async def outbounds_save(body: OutboundsSetBody, runtime=Depends(get_runtime)):
     return {"ok": True, "count": len(saved)}
 
 
+def _openvpn_endpoint(settings: dict[str, Any]) -> tuple[Any, Any, str]:
+    """First remote + effective transport from an uploaded/manual profile."""
+    server, port = settings.get("server"), settings.get("server_port")
+    proto = str(settings.get("proto") or "udp").lower()
+    content = str(settings.get("ovpn_content") or "")
+    for raw in content.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(('#', ';')):
+            continue
+        try:
+            parts = shlex.split(line)
+        except ValueError:
+            continue
+        if parts and parts[0].lower() == "proto" and len(parts) > 1:
+            proto = parts[1].lower()
+        elif (parts and parts[0].lower() == "remote" and len(parts) > 1
+              and (not server or not port)):
+            server = server or parts[1]
+            if len(parts) > 2 and not port:
+                port = parts[2]
+            if len(parts) > 3:
+                proto = parts[3].lower()
+    return server, port, proto
+
+
+async def _udp_outbound_preflight(server: str, port: int) -> tuple[float, str]:
+    """Resolve and route-connect a datagram endpoint without lying about auth.
+
+    TCP dialing a UDP-only Hysteria2/TUIC/WireGuard/OpenVPN listener always
+    returned ConnectionRefused even when the protocol worked. UDP itself has
+    no connect handshake, so this test verifies DNS/address/route/socket
+    readiness and says explicitly that authentication happens on deployment.
+    """
+    loop = asyncio.get_running_loop()
+    started = time.monotonic()
+    infos = await asyncio.wait_for(
+        loop.getaddrinfo(server, port, type=socket.SOCK_DGRAM), timeout=6)
+    if not infos:
+        raise OSError("endpoint did not resolve to a UDP address")
+    family, socktype, proto, _canonname, sockaddr = infos[0]
+    sock = socket.socket(family, socktype, proto)
+    try:
+        sock.setblocking(False)
+        await asyncio.wait_for(loop.sock_connect(sock, sockaddr), timeout=6)
+        local = sock.getsockname()
+        if not local:
+            raise OSError("kernel did not select a route/source address")
+    finally:
+        sock.close()
+    return round((time.monotonic() - started) * 1000, 1), \
+        f"udp {server}:{port} route ready; protocol authentication runs on deploy"
+
+
 async def _test_outbound(runtime, outbound: Outbound) -> dict[str, Any]:
-    """REAL reachability: TCP dial to server:port with latency for upstream
-    kinds; registry/state checks for CORE chains; direct/sinks pass trivially."""
+    """Protocol-aware endpoint test; never TCP-probe a UDP-only profile."""
     if outbound.kind is OutboundKind.CORE:
         core_id = str(outbound.settings.get("core_id", ""))
         manager = runtime.core_manager
@@ -600,27 +654,51 @@ async def _test_outbound(runtime, outbound: Outbound) -> dict[str, Any]:
                          OutboundKind.BLACKHOLE, OutboundKind.DNS):
         return {"ok": True, "latency_ms": None,
                 "detail": f"'{outbound.kind.value}' needs no remote endpoint"}
-    server = outbound.settings.get("server")
-    port = outbound.settings.get("server_port")
+
+    settings = outbound.settings
+    if outbound.kind is OutboundKind.OPENVPN:
+        server, port, transport = _openvpn_endpoint(settings)
+    else:
+        server, port = settings.get("server"), settings.get("server_port")
+        transport = str(settings.get("network") or "tcp").lower()
     try:
+        server = str(server).strip()
         port = int(port)
     except (TypeError, ValueError):
         return {"ok": False, "latency_ms": None,
-                "error": f"invalid server_port: {port!r}"}
+                "error": f"invalid server/server_port: {server!r}:{port!r}"}
+    if not server or not 1 <= port <= 65535:
+        return {"ok": False, "latency_ms": None,
+                "error": f"invalid server/server_port: {server!r}:{port!r}"}
+
+    udp = outbound.kind in {
+        OutboundKind.HYSTERIA2, OutboundKind.TUIC, OutboundKind.WIREGUARD,
+    } or (outbound.kind is OutboundKind.OPENVPN and transport.startswith("udp"))
+    if udp:
+        try:
+            latency, detail = await _udp_outbound_preflight(server, port)
+        except Exception as exc:  # noqa: BLE001 - preflight failure is the answer
+            message = str(exc).strip() or "UDP endpoint preflight failed"
+            return {"ok": False, "latency_ms": None,
+                    "error": f"{type(exc).__name__}: {message}"}
+        return {"ok": True, "latency_ms": latency, "detail": detail}
+
     started = time.monotonic()
     try:
         _reader, writer = await asyncio.wait_for(
             asyncio.open_connection(server, port), timeout=6)
     except Exception as exc:  # noqa: BLE001 - dial failure IS the answer
-        return {"ok": False, "latency_ms": None, "error": f"{type(exc).__name__}: {exc}"}
-    finally:
-        latency = round((time.monotonic() - started) * 1000, 1)
+        message = str(exc).strip() or f"TCP connection to {server}:{port} failed"
+        return {"ok": False, "latency_ms": None,
+                "error": f"{type(exc).__name__}: {message}"}
+    latency = round((time.monotonic() - started) * 1000, 1)
     writer.close()
     try:
         await writer.wait_closed()
     except Exception:  # noqa: BLE001, S110 - close is best-effort cleanup
         pass
-    return {"ok": True, "latency_ms": latency, "detail": f"tcp {server}:{port} reachable"}
+    return {"ok": True, "latency_ms": latency,
+            "detail": f"tcp {server}:{port} reachable"}
 
 
 @zagros_admin_router.post("/outbounds/test")
@@ -656,6 +734,31 @@ async def parse_share_url_endpoint(body: ShareURLBody, runtime=Depends(get_runti
     except ShareURLError as exc:
         raise HTTPException(422, str(exc)) from exc
     return {**parsed.model_dump(mode="json"), "supported_schemes": SUPPORTED_SCHEMES}
+
+
+class WireGuardProfileBody(BaseModel):
+    content: str = Field(min_length=1, max_length=128 * 1024)
+
+
+@zagros_admin_router.post("/utils/parse-wireguard-profile")
+async def parse_wireguard_profile_endpoint(
+    body: WireGuardProfileBody, runtime=Depends(get_runtime),
+):
+    """Import a standard WireGuard client ``.conf`` into outbound settings."""
+    from app.cores.outbounds.wireguard_profile import (
+        WireGuardProfileError,
+        parse_wireguard_profile,
+    )
+
+    try:
+        settings = parse_wireguard_profile(body.content)
+    except WireGuardProfileError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {
+        "kind": OutboundKind.WIREGUARD.value,
+        "settings": settings,
+        "name_hint": f"wireguard-{settings['server_port']}",
+    }
 
 
 def _render_ovpn(name: str, settings: dict[str, Any]) -> str:

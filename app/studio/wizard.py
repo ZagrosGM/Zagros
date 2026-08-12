@@ -169,8 +169,14 @@ def _tr(id_: str, label: str, securities: list[Security]) -> Transport:
     return {"id": id_, "label": label, "securities": securities}
 
 
-def _proto(id_: str, label: str, default_port: int, transports: list[Transport]) -> Protocol:
-    return {"id": id_, "label": label, "default_port": default_port, "transports": transports}
+def _proto(
+    id_: str, label: str, default_port: int, transports: list[Transport],
+    *, fixed_port: bool = False,
+) -> Protocol:
+    return {
+        "id": id_, "label": label, "default_port": default_port,
+        "fixed_port": fixed_port, "transports": transports,
+    }
 
 
 def _none(extra: list[Field] | None = None) -> Security:
@@ -511,10 +517,10 @@ def _softether_blueprint() -> list[Protocol]:
                    default=psk, section="general",
                    help="secure random 9-character default; visible, copyable and editable"),
             ])]),
-        ]),
+        ], fixed_port=True),
         _proto("l2tp_raw", "L2TP RAW (no IPsec)", 1701, [
             _tr("udp", "UDP 1701 (unencrypted)", [_none()]),
-        ]),
+        ], fixed_port=True),
         _proto("sstp", "Microsoft SSTP compatibility", 443, [
             # SoftEther owns its server certificate. Generic Xray-style PEM
             # upload fields would be a lie here; certificate management is a

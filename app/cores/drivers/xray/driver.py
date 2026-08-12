@@ -1268,16 +1268,31 @@ class XrayDriver(BaseCoreDriver):
                     "settings": {"servers": [{"address": s["server"], "port": int(s["server_port"]),
                                               "method": s.get("method", "chacha20-ietf-poly1305"), "password": s["password"]}]}}, None
         if kind is OutboundKind.WIREGUARD:
+            allowed = s.get("allowed_ips", ["0.0.0.0/0", "::/0"])
+            if isinstance(allowed, str):
+                allowed = [value.strip() for value in allowed.split(",") if value.strip()]
+            local = s.get("local_address", [])
+            if isinstance(local, str):
+                local = [value.strip() for value in local.split(",") if value.strip()]
             peer: dict[str, Any] = {
                 "publicKey": s["peer_public_key"],
                 "endpoint": f"{s['server']}:{int(s['server_port'])}",
-                "allowedIPs": s.get("allowed_ips", ["0.0.0.0/0", "::/0"]),
+                "allowedIPs": allowed,
             }
+            if s.get("preshared_key"):
+                peer["preSharedKey"] = s["preshared_key"]
+            if s.get("keepalive") is not None:
+                peer["keepAlive"] = int(s["keepalive"])
             if s.get("reserved"):
                 peer["reserved"] = s["reserved"]
+            settings: dict[str, Any] = {
+                "secretKey": s["private_key"], "peers": [peer],
+                "address": local,
+            }
+            if s.get("mtu"):
+                settings["mtu"] = int(s["mtu"])
             return {"protocol": "wireguard", "tag": name,
-                    "settings": {"secretKey": s["private_key"], "peers": [peer],
-                                 "address": s.get("local_address", [])}}, None
+                    "settings": settings}, None
         if kind is OutboundKind.SSH:
             if gap := need("server", "server_port", "username"):
                 return None, gap

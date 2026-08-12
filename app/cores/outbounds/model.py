@@ -62,7 +62,14 @@ class Outbound(BaseModel):
             OutboundKind.WIREGUARD, OutboundKind.HYSTERIA2, OutboundKind.TUIC,
             OutboundKind.OPENVPN, OutboundKind.SSH,
         ):
-            if not self.settings.get("server"):
+            # A full uploaded OpenVPN profile carries its own remote/proto;
+            # requiring duplicate form fields made Upload succeed visually but
+            # Save/Test fail validation before the profile could be parsed.
+            profile_supplies_endpoint = (
+                self.kind is OutboundKind.OPENVPN
+                and bool(str(self.settings.get("ovpn_content") or "").strip())
+            )
+            if not self.settings.get("server") and not profile_supplies_endpoint:
                 raise ValueError(f"Outbound '{self.name}': kind={self.kind.value} requires settings.server.")
         return self
 

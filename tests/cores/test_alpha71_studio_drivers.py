@@ -736,6 +736,52 @@ def test_softether_vpncmd_convergence(tmp_path):
     assert "pre-shared key" not in flat2.lower()
 
 
+def test_softether_custom_sstp_port_is_materialized_and_delivered(tmp_path):
+    from app.cores.drivers.softether.driver import SoftEtherDriver
+
+    backend = _SEFakeBackend()
+    driver = SoftEtherDriver(
+        settings={"hub": "DEFAULT", "advertise_host": "vpn.example.com"},
+        backend=backend)
+    asyncio.run(driver.apply_studio_document({"inbounds": [{
+        "tag": "sstp-custom", "protocol": "sstp", "port": 46704,
+    }]}))
+    flat = " | ".join(backend.cmds)
+    assert "SstpEnable yes" in flat
+    assert "ListenerCreate 46704" in flat
+    assert driver.settings["sstp_port"] == 46704
+    assert driver.export_config_document()["inbounds"][0] == {
+        "tag": "sstp-custom", "protocol": "sstp", "port": 46704,
+    }
+    account = _acct(
+        "sstp", "sstp", password="pw", inbound_tags=["sstp-custom"])
+    profile = asyncio.run(driver.describe_delivery(account))
+    port_field = next(
+        field.value
+        for artifact in profile.sections[0].artifacts
+        for field in artifact.fields
+        if field.key == "port"
+    )
+    assert port_field == "46704/tcp"
+    config = asyncio.run(driver.build_client_config(account))
+    assert config.payload["port"] == 46704
+
+
+def test_softether_legacy_fake_l2tp_port_normalizes_to_standard(tmp_path):
+    from app.cores.drivers.softether.driver import SoftEtherDriver
+
+    backend = _SEFakeBackend()
+    driver = SoftEtherDriver(settings={"hub": "DEFAULT"}, backend=backend)
+    document = {"inbounds": [{
+        "tag": "l2tp-old", "protocol": "l2tp", "port": 19592,
+        "ipsec_psk": "valid-psk",
+    }]}
+    asyncio.run(driver.apply_studio_document(document))
+    assert document["inbounds"][0]["port"] == 1701
+    assert driver.export_config_document()["inbounds"][0]["port"] == 1701
+    assert not any("19592" in command for command in backend.cmds)
+
+
 def test_softether_l2tp_raw_preserves_wizard_tag(tmp_path):
     from app.cores.drivers.softether.driver import SoftEtherDriver
 

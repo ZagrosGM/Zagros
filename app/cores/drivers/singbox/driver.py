@@ -1235,9 +1235,16 @@ class SingBoxDriver(BaseCoreDriver):
         if kind is OutboundKind.WIREGUARD:
             if gap := need("server", "server_port", "private_key", "peer_public_key", "local_address"):
                 return None, gap
+            local = s["local_address"]
+            if isinstance(local, str):
+                local = [value.strip() for value in local.split(",") if value.strip()]
             native = {"type": "wireguard", "tag": name, "server": s["server"],
-                      "server_port": int(s["server_port"]), "local_address": s["local_address"],
+                      "server_port": int(s["server_port"]), "local_address": local,
                       "private_key": s["private_key"], "peer_public_key": s["peer_public_key"]}
+            if s.get("preshared_key"):
+                native["pre_shared_key"] = s["preshared_key"]
+            if s.get("mtu"):
+                native["mtu"] = int(s["mtu"])
             if s.get("reserved"):
                 native["reserved"] = s["reserved"]
             return native, None

@@ -195,6 +195,7 @@ class SoftEtherDriver(BaseCoreDriver):
                 "admin_password": {"type": "string"},
                 "ipsec_psk": {"type": "string", "minLength": 1, "maxLength": 128},
                 "native_port": {"type": "integer", "default": 5555},
+                "sstp_port": {"type": "integer", "default": 443},
                 "ovpn_ports": {"type": "string", "default": "1194"},
                 "secure_nat": {"type": "boolean", "default": True,
                                "description": "enable the hub's Virtual NAT + DHCP so remote-access clients receive an IP; disable only when an external DHCP/local bridge is configured"},
@@ -209,6 +210,7 @@ class SoftEtherDriver(BaseCoreDriver):
             "admin_password": "",
             "ipsec_psk": "",
             "native_port": 5555,
+            "sstp_port": 443,
             "ovpn_ports": "1194",
             "secure_nat": True,
             "feature_tags": {},
@@ -258,6 +260,22 @@ class SoftEtherDriver(BaseCoreDriver):
         tags = self.settings.get("feature_tags") or {}
         return str(tags.get(protocol) or defaults[protocol])
 
+    _FIXED_PROTOCOL_PORTS = {"l2tp": 1701, "l2tp_raw": 1701}
+
+    def normalize_studio_document(self, document: dict[str, Any]) -> dict[str, Any]:
+        """Repair legacy fake-custom ports for wire-standard protocols.
+
+        SoftEther/IPsec cannot move IKE 500/4500 or L2TP 1701. Older wizards
+        accepted a random number and persisted it even though the daemon kept
+        the standards. Normalize in place so API transactions persist the
+        truthful port and boot hydration can migrate old documents.
+        """
+        for inbound in (document or {}).get("inbounds") or []:
+            protocol = str(inbound.get("protocol") or "")
+            if protocol in self._FIXED_PROTOCOL_PORTS:
+                inbound["port"] = self._FIXED_PROTOCOL_PORTS[protocol]
+        return document
+
     def export_config_document(self) -> dict[str, Any]:
         """Current enabled feature set. An unconfigured hub exports an EMPTY
         list — never an invented blank L2TP inbound. That phantom entry was
@@ -277,7 +295,10 @@ class SoftEtherDriver(BaseCoreDriver):
         if s.get("feature_etherip"):
             inbounds.append({"tag": self._feature_tag("etherip"), "protocol": "etherip", "port": 0})
         if s.get("feature_sstp"):
-            inbounds.append({"tag": self._feature_tag("sstp"), "protocol": "sstp", "port": 443})
+            inbounds.append({
+                "tag": self._feature_tag("sstp"), "protocol": "sstp",
+                "port": int(s.get("sstp_port") or 443),
+            })
         if s.get("feature_ovpn"):
             inbounds.append({"tag": self._feature_tag("ovpn"), "protocol": "ovpn",
                              "port": int(str(s.get("ovpn_ports") or "1194").split(",")[0]),
@@ -291,6 +312,7 @@ class SoftEtherDriver(BaseCoreDriver):
         Every entry maps to a server-side effect; entries with unknown
         protocols or missing required fields (the L2TP pre-shared key)
         fail loudly BEFORE anything is commanded."""
+        self.normalize_studio_document(document)
         inbounds = (document or {}).get("inbounds") or []
         if not inbounds:
             raise CoreError(
@@ -415,11 +437,22 @@ class SoftEtherDriver(BaseCoreDriver):
         # alone does NOT turn a port into PPTP/SSTP (the prior implementation
         # did exactly that); PPTP is absent because SoftEther does not support it.
         sstp = "sstp" in wanted
+        old_sstp_port = int(s.get("sstp_port") or 443)
+        sstp_port = int(wanted.get("sstp", {}).get("port") or 443)
+        if not 1 <= sstp_port <= 65535:
+            raise CoreError(f"SoftEther SSTP port out of range: {sstp_port}.")
         if sstp != bool(s.get("feature_sstp")):
             await command(f"SstpEnable {'yes' if sstp else 'no'}")
         if sstp:
-            await command("ListenerCreate 443", ignore_exists=True)
+            # SSTP is enabled server-wide and is accepted on SoftEther TCP
+            # listeners. Materialize the exact wizard port instead of always
+            # creating 443 while displaying a different saved value.
+            await command(f"ListenerCreate {sstp_port}", ignore_exists=True)
+        if (old_sstp_port != 443 and old_sstp_port != sstp_port
+                and old_sstp_port != int(s.get("native_port") or 5555)):
+            await command(f"ListenerDelete {old_sstp_port}", ignore_exists=True)
         s["feature_sstp"] = sstp
+        s["sstp_port"] = sstp_port
 
         ovpn = "ovpn" in wanted
         ovpn_port = int(wanted.get("ovpn", {}).get("port") or 1194)
@@ -718,7 +751,7 @@ class SoftEtherDriver(BaseCoreDriver):
         "etherip": {"catalog_tag": "etherip", "title": "EtherIP / L2TPv3 over IPsec",
                     "port": "UDP 500 · 4500", "feature": "feature_etherip", "needs_psk": False},
         "sstp": {"catalog_tag": "sstp", "title": "VPN (SSTP)",
-                 "port": "443/tcp", "feature": "feature_sstp", "needs_psk": False},
+                 "port": None, "feature": "feature_sstp", "needs_psk": False},
         "ovpn": {"catalog_tag": "softether-openvpn", "title": "VPN (OpenVPN compatibility)",
                  "port": None, "feature": "feature_ovpn", "needs_psk": False},
     }
@@ -781,6 +814,8 @@ class SoftEtherDriver(BaseCoreDriver):
                 port = facts["port"]
             elif proto == "ovpn":
                 port = f"{str(s.get('ovpn_ports') or '1194').split(',')[0].strip()}/udp"
+            elif proto == "sstp":
+                port = f"{int(s.get('sstp_port') or 443)}/tcp"
             else:
                 port = f"{int(s.get('native_port') or 5555)}/tcp"
             fields = [
@@ -862,7 +897,7 @@ class SoftEtherDriver(BaseCoreDriver):
                 payload={
                     "format": "sstp",
                     "server": server,
-                    "port": 443,
+                    "port": int(s.get("sstp_port") or 443),
                     "username": account.account_id,
                     "password": password,
                     "hub": s["hub"],

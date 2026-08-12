@@ -290,7 +290,19 @@ class PlatformRuntime:
             if not doc:
                 continue
             try:
+                before = copy.deepcopy(doc)
+                normalizer = getattr(driver, "normalize_studio_document", None)
+                if callable(normalizer):
+                    normalized = normalizer(doc)
+                    if normalized is not None:
+                        doc = normalized
                 await self.core_manager.apply_studio_document(core_id, doc)
+                if doc != before:
+                    await self.studio_store.save_document(core_id, doc)
+                    logger.warning(
+                        "studio hydration: %s legacy document normalized and persisted",
+                        core_id,
+                    )
                 logger.info("studio hydration: %s restored from persisted document", core_id)
             except Exception as exc:  # noqa: BLE001
                 deferred.add(core_id)

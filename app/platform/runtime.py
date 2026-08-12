@@ -16,7 +16,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import json
 import logging
+import os
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -149,16 +152,16 @@ class PlatformRuntime:
         # that honestly failed offline; successful config cores are not
         # restarted a second time.
         if studio_deferred:
-            await self._hydrate_studio_documents(studio_deferred)
+            studio_deferred = await self._hydrate_studio_documents(studio_deferred)
         if account_deferred:
-            await self._restore_core_accounts(account_deferred)
+            account_deferred = await self._restore_core_accounts(account_deferred)
         await self._attach_builtin_xray()
         # Xray is attached after add-on auto-start so CoreManager never starts
         # it twice. Its SQL Studio document must nevertheless be replayed: in
         # alpha.7.7 XRAY_JSON lived in the replaceable image layer, while the
         # complete accepted document already survived in SQL.
         if "xray" in self.core_manager.list_cores():
-            await self._hydrate_studio_documents({"xray"})
+            studio_deferred |= await self._hydrate_studio_documents({"xray"})
             try:
                 status = await self.core_manager.status("xray")
                 from app.cores.types import CoreState
@@ -167,6 +170,49 @@ class PlatformRuntime:
                     await self.core_manager.start_core("xray")
             except Exception as exc:  # noqa: BLE001 — other cores still boot
                 logger.error("built-in xray recovery/start failed: %s", exc)
+        await self._write_boot_report(studio_deferred, account_deferred)
+
+    async def _write_boot_report(
+        self, studio_deferred: set[str], account_deferred: set[str],
+    ) -> None:
+        """Persist one secret-free, atomic reconciliation verdict for host repair.
+
+        The host CLI cannot introspect process-local driver state from another
+        Python process. This report is emitted by the live panel *after* Studio,
+        account replay and starts, allowing ``zagros repair`` to fail loudly on
+        any enabled core that is still down without needing admin credentials.
+        """
+        try:
+            statuses = await self.core_manager.status_all()
+            payload = {
+                "generated_at": int(time.time()),
+                "studio_deferred": sorted(studio_deferred),
+                "account_deferred": sorted(account_deferred),
+                "cores": [
+                    {
+                        "id": status.core_id,
+                        "enabled": bool(status.enabled),
+                        "state": status.state.value,
+                        "health": status.health.value,
+                        "version": status.core_version,
+                        "message": status.message,
+                    }
+                    for status in statuses
+                ],
+            }
+            path = os.environ.get(
+                "ZAGROS_BOOT_REPORT",
+                "/var/lib/zagros/runtime-boot-report.json",
+            )
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            part = path + ".part"
+            with open(part, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, sort_keys=True)
+                fh.write("\n")
+            os.chmod(part, 0o600)
+            os.replace(part, path)
+        except Exception as exc:  # noqa: BLE001 — report failure cannot kill panel
+            logger.error("cannot write runtime boot report: %s", exc)
 
     async def _hydrate_studio_documents(
         self, core_ids: set[str] | None = None,

@@ -16,6 +16,7 @@ Run: pytest tests/cores/test_wireguard_driver.py -v   OR   python tests/cores/te
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
 import sys
 import tempfile
@@ -66,15 +67,25 @@ DUMP_ALICE_RESET = DUMP_SAMPLE.replace("\t1048576\t2097152\t", "\t1000\t1000\t")
 
 
 class FakeWireGuardBackend:
-    """Fake WireGuardBackend: canned keys, recorded up/sync/down, queued dumps."""
+    """Fake backend family: one instance per real kernel interface."""
 
-    def __init__(self, dump_text: str = DUMP_SAMPLE):
+    def __init__(self, dump_text: str = DUMP_SAMPLE, *, settings=None, family=None):
         self.dump_text = dump_text
+        self.settings = settings or {"interface": "mzwg0"}
+        self.interface = self.settings.get("interface", "mzwg0")
         self.synced: list[str] = []
         self.up_calls: list[str] = []
         self.down_calls = 0
         self.running = True
         self._key_counter = 0
+        self.family = family if family is not None else []
+        self.family.append(self)
+
+    def for_listener(self, settings):
+        child = FakeWireGuardBackend(
+            self.dump_text, settings=settings, family=self.family)
+        child.running = self.running
+        return child
 
     # setup ---------------------------------------------------------- #
     def is_installed(self) -> bool:
@@ -617,6 +628,137 @@ def test_wizard_apply_on_stopped_core_needs_no_daemon():
     asyncio.run(run())
 
 
+def test_studio_wizard_appends_second_wireguard_inbound_instead_of_replacing():
+    """alpha.7.9 blocker: Add Inbound must keep the first kernel interface."""
+    from app.studio.service import (
+        ConfigStudioService, InboundSpec, InMemoryStudioStore)
+
+    async def run():
+        driver, backend = _driver()
+        backend.running = False
+        store = InMemoryStudioStore()
+        await store.save_document("wireguard", driver.export_config_document())
+        service = ConfigStudioService(store)
+        result = await service.wizard_create(
+            driver,
+            InboundSpec(
+                tag="wg-second", protocol="wireguard", listen="0.0.0.0",
+                port=51821, settings={
+                    "address": "10.77.0.0/24",
+                    "endpoint": "wg-two.example.com",
+                },
+            ),
+            materialize=driver.apply_studio_document,
+        )
+        assert result.valid and result.changed
+        persisted = await store.get_document("wireguard")
+        assert [row["tag"] for row in persisted["inbounds"]] == [
+            "wireguard", "wg-second"]
+        assert [row["tag"] for row in driver.settings["listeners"]] == [
+            "wireguard", "wg-second"]
+        assert len(driver._backends) == 2
+        assert len({row["interface"] for row in driver.settings["listeners"]}) == 2
+
+    asyncio.run(run())
+
+
+def test_multiple_wireguard_inbounds_listen_provision_and_deliver_independent_profiles():
+    async def run():
+        driver, backend = _driver()
+        backend.running = False
+        await driver.apply_studio_document({"inbounds": [
+            {"tag": "wg-a", "protocol": "wireguard", "port": 51820,
+             "address": "10.90.0.0/24", "endpoint": "a.example.com"},
+            {"tag": "wg-b", "protocol": "wireguard", "port": 51821,
+             "address": "10.91.0.0/24", "endpoint": "b.example.com"},
+        ]})
+        account = _account(7, "multi")
+        await driver.create_account(account)
+        assert set(account.settings["inbound_addresses"]) == {"wg-a", "wg-b"}
+        assert account.settings["inbound_addresses"]["wg-a"].startswith("10.90.0.")
+        assert account.settings["inbound_addresses"]["wg-b"].startswith("10.91.0.")
+
+        await driver.start()
+        a_backend, b_backend = driver._backends["wg-a"], driver._backends["wg-b"]
+        assert "ListenPort = 51820" in a_backend.up_calls[-1]
+        assert "Address = 10.90.0.1/24" in a_backend.up_calls[-1]
+        assert "ListenPort = 51821" in b_backend.up_calls[-1]
+        assert "Address = 10.91.0.1/24" in b_backend.up_calls[-1]
+        assert account.settings["public_key"] in a_backend.up_calls[-1]
+        assert account.settings["public_key"] in b_backend.up_calls[-1]
+
+        profile = await driver.describe_delivery(account)
+        assert [section.inbound_tag for section in profile.sections] == ["wg-a", "wg-b"]
+        a_conf = profile.sections[0].artifacts[0].content
+        b_conf = profile.sections[1].artifacts[0].content
+        assert "Endpoint = a.example.com:51820" in a_conf
+        assert "Address = 10.90.0.2/32" in a_conf
+        assert "Endpoint = b.example.com:51821" in b_conf
+        assert "Address = 10.91.0.2/32" in b_conf
+
+        narrowed = account.model_copy(update={"settings": {
+            **account.settings,
+            "inbound_tags": ["wg-b"],
+            "excluded_inbounds": ["wg-a"],
+        }})
+        await driver.update_account(narrowed)
+        narrowed_profile = await driver.describe_delivery(narrowed)
+        assert [section.inbound_tag for section in narrowed_profile.sections] == ["wg-b"]
+        assert narrowed.settings["public_key"] not in a_backend.synced[-1]
+        assert narrowed.settings["public_key"] in b_backend.synced[-1]
+
+    asyncio.run(run())
+
+
+def test_wireguard_multi_inbound_validation_and_persistent_backend_paths(tmp_path):
+    driver, backend = _driver(tmp=str(tmp_path))
+    backend.running = False
+    valid = {"inbounds": [
+        {"tag": "wg-a", "protocol": "wireguard", "port": 51820,
+         "address": "10.90.0.0/24"},
+        {"tag": "wg-b", "protocol": "wireguard", "port": 51821,
+         "address": "10.91.0.0/24"},
+    ]}
+    asyncio.run(driver.apply_studio_document(valid))
+    saved = copy.deepcopy(driver.settings)
+
+    with pytest.raises(CoreError, match="share UDP port"):
+        asyncio.run(driver.apply_studio_document({"inbounds": [
+            valid["inbounds"][0], {**valid["inbounds"][1], "port": 51820},
+        ]}))
+    with pytest.raises(CoreError, match="overlapping tunnel subnets"):
+        asyncio.run(driver.apply_studio_document({"inbounds": [
+            valid["inbounds"][0],
+            {**valid["inbounds"][1], "address": "10.90.0.128/25"},
+        ]}))
+
+    # A new panel process reconstructs one LocalWireGuardBackend per stored
+    # listener.  Config and server-key paths remain distinct and stable.
+    restored = WireGuardDriver(saved)
+    paths = [restored._backends[tag].key_path for tag in ("wg-a", "wg-b")]
+    assert len(set(paths)) == 2
+    assert restored._backend_specs == driver._backend_specs
+
+
+def test_running_studio_subnet_change_recreates_wgquick_lifecycle():
+    async def run():
+        driver, backend = _driver()
+        backend.running = True
+        doc = {"inbounds": [{
+            "tag": "wireguard", "protocol": "wireguard", "port": 51830,
+            "address": "10.92.0.0/24", "endpoint": "vpn.example.com",
+            "persistent_keepalive": 25,
+        }]}
+        await driver.apply_studio_document(doc)
+        assert backend.down_calls == 1
+        assert len(backend.up_calls) == 1
+        assert "Address = 10.92.0.1/24" in backend.up_calls[0]
+        assert "POSTROUTING -s 10.92.0.0/24" in backend.up_calls[0]
+        assert "ListenPort = 51830" in backend.up_calls[0]
+
+    asyncio.run(run())
+
+
 def test_account_provisioning_on_stopped_core():
     """Peers created while the daemon is down persist and appear in the
     interface config at start (no sync attempts against a dead kernel if)."""
@@ -633,6 +775,37 @@ def test_account_provisioning_on_stopped_core():
         await driver.start()
         assert account.settings["public_key"] in backend.up_calls[0]
     asyncio.run(run())
+
+
+def test_backend_up_replaces_stale_kernel_interface_before_reapply(tmp_path, monkeypatch):
+    from app.cores.drivers.wireguard.backend import LocalWireGuardBackend
+
+    backend = LocalWireGuardBackend({"work_dir": str(tmp_path)})
+    state = {"running": True}
+    events: list[object] = []
+    monkeypatch.setattr(backend, "_ensure_host_tools", lambda: events.append("tools"))
+    monkeypatch.setattr(backend, "is_running", lambda: state["running"])
+    monkeypatch.setattr(backend, "_live_interface_subnets",
+                        lambda: {"10.66.66.0/24"})
+
+    def down():
+        events.append("down-old")
+        state["running"] = False
+
+    monkeypatch.setattr(backend, "down", down)
+    monkeypatch.setattr(backend, "_cleanup_stale_firewall",
+                        lambda nets: events.append(("cleanup", nets)))
+    monkeypatch.setattr(backend, "_ensure_forwarding", lambda: events.append("forward"))
+    monkeypatch.setattr(backend, "_run_up", lambda: events.append("up-new"))
+    config = render_interface(
+        private_key="PRIV", address="10.92.0.1/24", listen_port=51830,
+        peers=[], forward_nat=True)
+    backend.up(config)
+    assert events == [
+        "tools", "down-old", ("cleanup", {"10.66.66.0/24"}),
+        "forward", "up-new",
+    ]
+    assert "Address = 10.92.0.1/24" in Path(backend.config_path).read_text()
 
 
 def test_local_backend_forwarding_preflight_is_environment_aware(tmp_path, monkeypatch):

@@ -81,6 +81,11 @@ def _clash_transport(settings: dict[str, Any], proxy: dict[str, Any]) -> None:
         if host:
             ws["headers"] = {"Host": host}
         proxy["ws-opts"] = ws
+    elif network == "grpc":
+        service = settings.get("serviceName") or settings.get("service_name")
+        if service:
+            proxy["network"] = "grpc"
+            proxy["grpc-opts"] = {"grpc-service-name": service}
 
 
 def _clash_proxy(name: str, ob: Any) -> dict[str, Any] | None:
@@ -223,6 +228,10 @@ def _sb_transport(s: dict[str, Any]) -> dict[str, Any] | None:
         if s.get("host"):
             tr["headers"] = {"Host": s["host"]}
         return tr
+    if network == "grpc":
+        service = s.get("serviceName") or s.get("service_name")
+        if service:
+            return {"type": "grpc", "service_name": service}
     return None
 
 

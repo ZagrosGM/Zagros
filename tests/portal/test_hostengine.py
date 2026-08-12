@@ -22,6 +22,7 @@ from app.cores.delivery import (
     DeliverySection,
 )
 from app.portal.hostengine import (
+    DEFAULT_REMARK,
     HostEntry,
     HostSettingsEngine,
     render_host_remark,
@@ -321,6 +322,32 @@ class TestTagMatching:
         assert "Endpoint = wg1.example.com:51820" in files[0].content
         assert "Endpoint = wg2.example.com:51830" in files[1].content
         assert files[0].filename.endswith(".conf") and "DC1" in files[0].filename
+
+    def test_multi_wireguard_inbounds_keep_unique_download_filenames(self, engine):
+        def section(tag: str, port: int) -> DeliverySection:
+            content = (
+                "[Interface]\nPrivateKey = K\nAddress = 10.0.0.2/32\n\n"
+                f"[Peer]\nPublicKey = P\nEndpoint = wg.example.com:{port}\n"
+            )
+            return DeliverySection(
+                protocol="wireguard", title=tag, engine="wireguard",
+                inbound_tag=tag, artifacts=[DeliveryArtifact(
+                    kind=ArtifactKind.FILE, label="WireGuard configuration",
+                    content=content, filename=f"alice-{tag}.conf")])
+
+        profile = DeliveryProfile(core_id="wireguard", sections=[
+            section("wg-a", 51820), section("wg-b", 51821)])
+        entries = {
+            "wg-a": [HostEntry(remark=DEFAULT_REMARK, address="a.example.com")],
+            "wg-b": [HostEntry(remark=DEFAULT_REMARK, address="b.example.com")],
+        }
+        out = engine.expand(profile, entries, _vars())
+        files = [next(a for a in section.artifacts if a.kind is ArtifactKind.FILE)
+                 for section in out.sections]
+        assert len({artifact.filename for artifact in files}) == 2
+        assert "wg-a" in files[0].filename and "wg-b" in files[1].filename
+        assert "Endpoint = a.example.com:51820" in files[0].content
+        assert "Endpoint = b.example.com:51821" in files[1].content
 
     def test_file_entry_without_address_or_port_produces_nothing(self, engine):
         profile = DeliveryProfile(core_id="wireguard", sections=[

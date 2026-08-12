@@ -341,6 +341,15 @@ def test_xray_tls_self_signed_materialization(tmp_path):
     key_text = Path(key).read_text()
     assert "PRIVATE KEY" in key_text
     assert oct(Path(key).stat().st_mode & 0o777) == "0o600"
+    marker = Path(d._self_signed_marker("tls-1"))
+    assert marker.is_file() and oct(marker.stat().st_mode & 0o777) == "0o600"
+    outbound = d._compose_outbound(
+        "vless", {"id": "00000000-0000-4000-8000-000000000001"},
+        "tls-1", {"sni": ["vpn.example.com"], "tls": "tls",
+                  "port": 1443, "network": "ws", "path": "/w"},
+        {"address": ["203.0.113.10"]}, {},
+    )
+    assert outbound["tls"]["insecure"] is True
     # idempotent second apply: same files, no rewrite ripple
     mtime = Path(key).stat().st_mtime_ns
     _apply_doc(d, [{
@@ -392,6 +401,13 @@ def test_xray_grpc_service_name_survives_final_config(tmp_path):
         "service_name": "my-service",
     }])
     assert doc["inbounds"][0]["streamSettings"]["grpcSettings"]["serviceName"] == "my-service"
+    outbound = d._compose_outbound(
+        "vless", {"id": "00000000-0000-4000-8000-000000000001"}, "g",
+        {"network": "grpc", "path": "my-service", "port": 2053,
+         "tls": "none"},
+        {"address": ["203.0.113.10"]}, {},
+    )
+    assert outbound["transport"] == {"type": "grpc", "service_name": "my-service"}
 
 
 def test_certificate_material_rejected_without_tls(tmp_path):

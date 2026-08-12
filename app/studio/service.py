@@ -442,10 +442,10 @@ class ConfigStudioService:
         call — the ROUTED flow passes a ``materialize`` hook so a refused
         live apply never moves the document.
 
-        Single-listener engines (``studio_max_inbounds == 1``: wireguard,
-        openvpn, ssh) physically bind ONE socket — the wizard
-        replaces that listener instead of appending a second entry the
-        engine could never serve.
+        Engines that explicitly declare ``studio_max_inbounds == 1`` bind a
+        single listener and therefore replace it. Multi-interface/process
+        engines (including WireGuard and OpenVPN) leave the limit unset and
+        append independent listeners.
         """
         return await self.wizard_create(driver, spec)
 

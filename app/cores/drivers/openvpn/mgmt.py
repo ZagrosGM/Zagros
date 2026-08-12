@@ -144,6 +144,13 @@ class ManagementClient:
         self._sock = socket.create_connection((host, port), timeout=timeout)
         if password is not None:
             self._write(password)
+        # create_connection's timeout remains attached to the socket. The
+        # management channel is intentionally long-lived and often idle; if
+        # left in place, recv() raises socket.timeout after a few seconds, the
+        # reader thread exits silently, and later CLIENT/PUSH events pile up
+        # unread forever. Keep the connect deadline, then switch to blocking
+        # mode before starting the permanent reader.
+        self._sock.settimeout(None)
         self._writer = self._write
         self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
         self._reader_thread.start()

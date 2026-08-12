@@ -505,6 +505,7 @@ class XrayDriver(BaseCoreDriver):
                 except CertificateError as exc:
                     raise CoreError(str(exc)) from exc
                 cert_path, key_path = str(cert_file), str(key_file)
+                self._set_certificate_trust_marker(tag, cert_path)
             else:
                 cert_pem = raw.get("certificate")
                 key_pem = raw.get("certificate_key")
@@ -544,6 +545,36 @@ class XrayDriver(BaseCoreDriver):
             }
         raise CoreError(f"unknown security '{security}' for inbound '{tag}'.")
 
+    def _self_signed_marker(self, tag: str) -> str:
+        import re as _re
+
+        safe_tag = _re.sub(r"[^A-Za-z0-9_.-]+", "_", tag)
+        cert_dir = self.settings.get("cert_dir") or "/var/lib/zagros/cores/xray/certs"
+        return os.path.join(cert_dir, f"{safe_tag}.self-signed")
+
+    def _set_certificate_trust_marker(self, tag: str, cert_path: str) -> None:
+        """Persist whether delivery must opt into an untrusted TLS certificate."""
+        from cryptography import x509
+
+        marker = self._self_signed_marker(tag)
+        try:
+            with open(cert_path, "rb") as fh:
+                cert = x509.load_pem_x509_certificate(fh.read())
+            self_signed = cert.subject == cert.issuer
+        except (OSError, ValueError):
+            self_signed = False
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        if self_signed:
+            with open(marker + ".part", "w", encoding="ascii") as fh:
+                fh.write("self-signed\n")
+            os.chmod(marker + ".part", 0o600)
+            os.replace(marker + ".part", marker)
+        else:
+            try:
+                os.remove(marker)
+            except FileNotFoundError:
+                pass
+
     def _materialize_certificate(
         self, tag: str, sni: str,
         cert_pem: Any, key_pem: Any,
@@ -579,6 +610,7 @@ class XrayDriver(BaseCoreDriver):
             # self-signed default already materialized for this tag: REUSE it.
             # minting a fresh pair on every apply would rotate the server
             # identity under connected clients (and needlessly restart-ripple).
+            self._set_certificate_trust_marker(tag, cert_path)
             return cert_path, key_path
         else:
             from app.utils.crypto import generate_certificate
@@ -597,6 +629,7 @@ class XrayDriver(BaseCoreDriver):
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(text)
             os.chmod(path, mode)
+        self._set_certificate_trust_marker(tag, cert_path)
         return cert_path, key_path
 
 
@@ -950,6 +983,11 @@ class XrayDriver(BaseCoreDriver):
                     "enabled": bool(host.get("fingerprint")),
                     "fingerprint": host.get("fingerprint") or None,
                 },
+                # Wizard-generated certificates are deliberately self-signed.
+                # Persist a sidecar marker so delivery remains connectable even
+                # after panel/image restart; a CA-signed replacement removes it.
+                "insecure": bool(host.get("allowinsecure")) or
+                            os.path.exists(self._self_signed_marker(tag)),
             }
             if tls_level == "reality":
                 outbound["tls"]["reality"] = {
@@ -975,6 +1013,18 @@ class XrayDriver(BaseCoreDriver):
             transport.update(
                 {"path": path, "headers": {"Host": req_host} if req_host else {}}
             )
+        elif network in ("grpc", "gun"):
+            # The legacy catalog stores grpcSettings.serviceName in `path`
+            # and authority in the first `host` item. Omitting these from the
+            # outbound made generated subscriptions dial TLS successfully but
+            # speak raw VLESS to a gRPC listener, ending in immediate EOF.
+            service_name = str(inbound.get("path") or "")
+            if not service_name:
+                raise CoreError(
+                    f"Xray gRPC inbound '{tag}' has no service name in the live catalog"
+                )
+            transport["type"] = "grpc"
+            transport["service_name"] = service_name
         outbound["transport"] = transport
         return outbound
 

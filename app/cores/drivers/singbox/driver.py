@@ -1167,6 +1167,23 @@ class SingBoxDriver(BaseCoreDriver):
     ) -> tuple[dict[str, Any] | None, UnsupportedOutbound | None]:
         s, kind, name = ob.settings, ob.kind, ob.name
 
+        # Native cores enter policy domains through their loopback SOCKS
+        # gateways; kernel-forwarded service traffic still uses fwmark/table.
+        if s.get("_policy_socks_port"):
+            return {
+                "type": "socks", "tag": name, "server": "127.0.0.1",
+                "server_port": int(s["_policy_socks_port"]), "version": "5",
+            }, None
+        # Compatibility fallback for externally supplied policy managers.
+        if s.get("_policy_mark") is not None:
+            native = {
+                "type": "direct", "tag": name,
+                "routing_mark": int(s["_policy_mark"]),
+            }
+            if s.get("_policy_vrf"):
+                native["bind_interface"] = str(s["_policy_vrf"])
+            return native, None
+
         def need(*keys: str) -> UnsupportedOutbound | None:
             missing = [k for k in keys if s.get(k) in (None, "")]
             if missing:

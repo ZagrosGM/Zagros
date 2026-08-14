@@ -198,7 +198,14 @@ class SoftEtherDriver(BaseCoreDriver):
                 "sstp_port": {"type": "integer", "default": 443},
                 "ovpn_ports": {"type": "string", "default": "1194"},
                 "secure_nat": {"type": "boolean", "default": True,
-                               "description": "enable the hub's Virtual NAT + DHCP so remote-access clients receive an IP; disable only when an external DHCP/local bridge is configured"},
+                               "description": "enable the hub's Virtual NAT + DHCP so remote-access clients receive an IP; policy routing automatically switches NAT to routed TAP while keeping DHCP"},
+                "policy_tap_device": {"type": "string", "default": "zgsoft"},
+                "policy_subnet": {"type": "string", "default": "192.168.30.0/24"},
+                "policy_gateway": {"type": "string", "default": "192.168.30.254"},
+                "policy_routing_scope": {
+                    "type": "string", "enum": ["shared_hub"],
+                    "default": "shared_hub",
+                    "description": "all SoftEther transports in this instance share one hub/TAP routing decision"},
                 "advertise_host": {"type": "string"},
             },
         },
@@ -213,6 +220,10 @@ class SoftEtherDriver(BaseCoreDriver):
             "sstp_port": 443,
             "ovpn_ports": "1194",
             "secure_nat": True,
+            "policy_tap_device": "zgsoft",
+            "policy_subnet": "192.168.30.0/24",
+            "policy_gateway": "192.168.30.254",
+            "policy_routing_scope": "shared_hub",
             "feature_tags": {},
             "feature_softether": False,
             "feature_l2tp": False,
@@ -242,6 +253,74 @@ class SoftEtherDriver(BaseCoreDriver):
         self._accounts: dict[str, UserAccount] = {}
         self._usage = _SoftEtherUsageTracker()
         self._suspended_expire_restore: dict[str, str | None] = {}
+        self._policy_source: dict[str, str] | None = None
+
+    def ensure_policy_source(self) -> dict[str, str]:
+        """Switch SecureNAT to DHCP+routed TAP and configure its Linux gateway.
+
+        SoftEther's default Virtual NAT creates root-owned host sockets, so
+        netfilter never sees a client's source subnet. A TAP local bridge is
+        required for real per-service policy routing; this method is invoked
+        only when an enabled rule targets a SoftEther inbound.
+        """
+        import ipaddress
+        import shutil
+        import subprocess
+        import time
+
+        ensure = getattr(self._backend, "routed_tap_ensure", None)
+        if not callable(ensure):
+            raise CoreError("SoftEther backend has no routed TAP capability")
+        device = str(self.settings.get("policy_tap_device") or "zgsoft")
+        subnet = str(self.settings.get("policy_subnet") or "192.168.30.0/24")
+        gateway = str(self.settings.get("policy_gateway") or "192.168.30.254")
+        network = ipaddress.ip_network(subnet, strict=False)
+        prefix = network.prefixlen
+        interface = ensure(device=device, subnet=str(network), gateway=gateway)
+        ip = shutil.which("ip")
+        if not ip:
+            raise CoreError("SoftEther routed TAP needs iproute2")
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if subprocess.run([ip, "link", "show", "dev", interface],
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL).returncode == 0:
+                break
+            time.sleep(0.25)
+        else:
+            raise CoreError(
+                f"SoftEther BridgeCreate succeeded but Linux interface '{interface}' did not appear")
+        for argv in (
+            [ip, "address", "replace", f"{gateway}/{prefix}", "dev", interface],
+            [ip, "link", "set", "dev", interface, "up"],
+        ):
+            result = subprocess.run(argv, text=True, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE)
+            if result.returncode:
+                raise CoreError(result.stderr.strip() or f"cannot configure {interface}")
+        self._policy_source = {
+            "interface": interface, "subnet": str(network), "gateway": gateway,
+        }
+        return dict(self._policy_source)
+
+    def disable_policy_source(self) -> None:
+        import shutil
+        import subprocess
+
+        device = str(self.settings.get("policy_tap_device") or "zgsoft")
+        disable = getattr(self._backend, "routed_tap_disable", None)
+        if callable(disable):
+            disable(device=device)
+        source = self._policy_source or {}
+        interface = source.get("interface") or f"tap_{device}"
+        ip = shutil.which("ip")
+        if ip:
+            subprocess.run([ip, "link", "set", "dev", interface, "down"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self._policy_source = None
+
+    def policy_source(self) -> dict[str, str] | None:
+        return dict(self._policy_source) if self._policy_source else None
 
     # ------------------------------------------------------------------ #
     # Config Studio bridge — every offered entry maps to a REAL stable-line

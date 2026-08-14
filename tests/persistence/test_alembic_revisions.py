@@ -48,6 +48,21 @@ def _upgrade(platform_url: str, legacy_url: str, target: str = "head") -> None:
         f"alembic upgrade {target} failed:\n{proc.stdout[-800:]}\n{proc.stderr[-1500:]}")
 
 
+def _downgrade(platform_url: str, legacy_url: str, target: str) -> None:
+    env = dict(os.environ)
+    env.update({
+        "ZAGROS_DATABASE_URL": platform_url,
+        "SQLALCHEMY_DATABASE_URL": legacy_url,
+        "ZAGROS_SECRET_KEY": "alembic-test-key-0123456789abcd",
+        "ZAGROS_ALEMBIC_INI": str(ROOT / "alembic.ini"),
+    })
+    proc = subprocess.run(
+        [sys.executable, "-m", "alembic", "downgrade", target],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, (
+        f"alembic downgrade {target} failed:\n{proc.stdout[-800:]}\n{proc.stderr[-1500:]}")
+
+
 def _load_revision_module():
     import importlib.util
 
@@ -76,7 +91,7 @@ def test_0002_seeds_required_singletons() -> None:
         assert uplink == 0
         (head,) = sqlite3.connect(base / "zagros.db").execute(
             "SELECT version_num FROM alembic_version").fetchone()
-        assert head == "0008_core_host_inbound_tag"
+        assert head == "0009_policy_routing_domains"
 
 
 def test_0002_reseed_never_rotates_keys() -> None:
@@ -137,7 +152,7 @@ def test_0003_adds_extras_to_preexisting_databases() -> None:
             "SELECT extras FROM core_hosts WHERE remark = 'old'").fetchone()
         assert extras_val == "{}", "old rows must be backfilled to {}"
         (head,) = db.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert head == "0008_core_host_inbound_tag"
+        assert head == "0009_policy_routing_domains"
 
 
 def test_0004_adds_governance_columns_to_preexisting_databases() -> None:
@@ -281,10 +296,71 @@ def test_0008_promotes_marzban_extras_to_inbound_tags() -> None:
         (head,) = db.execute("SELECT version_num FROM alembic_version").fetchone()
     assert rows["old"] == "VLESS-TCP", "extras tag must be promoted"
     assert rows["inert"] == "", "tag-less rows stay inert — never guessed"
-    assert head == "0008_core_host_inbound_tag"
+    assert head == "0009_policy_routing_domains"
 
     # replay is a no-op (column/index guards)
     _upgrade(platform_url, legacy_url)
     with sqlite3.connect(base / "zagros.db") as db:
         (head,) = db.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert head == "0008_core_host_inbound_tag"
+    assert head == "0009_policy_routing_domains"
+
+
+def test_0009_backfills_stable_domains_and_rule_defaults_with_lossless_downgrade() -> None:
+    """alpha.7.9/8/8.1 KV documents gain derived identities/defaults only.
+
+    The original outbound/rule JSON survives both upgrade and downgrade;
+    routing_domains is disposable runtime metadata, not the user's source of
+    truth.
+    """
+    import json
+    import sqlite3
+
+    base = Path(tempfile.mkdtemp(prefix="zgpolicy0009-"))
+    platform_url = f"sqlite:///{base}/zagros.db"
+    legacy_url = f"sqlite:///{base}/legacy.db"
+    _upgrade(platform_url, legacy_url, "0008_core_host_inbound_tag")
+    outbounds = [
+        {"name": "old-openvpn", "kind": "openvpn", "settings": {"ovpn_content": "client"}, "enabled": True},
+        {"name": "old-wireguard", "kind": "wireguard", "settings": {"server": "example.test"}, "enabled": True},
+    ]
+    rules = [
+        {"name": "old-rule", "matcher": {"inbounds": ["openvpn"]},
+         "action": "route_to", "outbound": "old-wireguard"},
+    ]
+    with sqlite3.connect(base / "zagros.db") as db:
+        db.execute(
+            "INSERT OR REPLACE INTO settings (key, value_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+            ("admin.outbounds.v1", json.dumps(outbounds)),
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO settings (key, value_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+            ("admin.routing.rules.v1", json.dumps(rules)),
+        )
+        db.commit()
+
+    _upgrade(platform_url, legacy_url)
+    with sqlite3.connect(base / "zagros.db") as db:
+        domains = db.execute(
+            "SELECT outbound_name, table_id, fwmark FROM routing_domains ORDER BY outbound_name"
+        ).fetchall()
+        stored_outbounds = json.loads(db.execute(
+            "SELECT value_json FROM settings WHERE key='admin.outbounds.v1'").fetchone()[0])
+        stored_rules = json.loads(db.execute(
+            "SELECT value_json FROM settings WHERE key='admin.routing.rules.v1'").fetchone()[0])
+    assert [row[0] for row in domains] == ["old-openvpn", "old-wireguard"]
+    assert len({row[1] for row in domains}) == 2
+    assert all(11000 <= row[1] < 29000 and row[1] == row[2] for row in domains)
+    assert stored_outbounds == outbounds, "migration must not rewrite credentials/outbounds"
+    assert stored_rules[0]["priority"] == 10 and stored_rules[0]["enabled"] is True
+
+    _downgrade(platform_url, legacy_url, "0008_core_host_inbound_tag")
+    with sqlite3.connect(base / "zagros.db") as db:
+        tables = {row[0] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        after_outbounds = json.loads(db.execute(
+            "SELECT value_json FROM settings WHERE key='admin.outbounds.v1'").fetchone()[0])
+        after_rules = json.loads(db.execute(
+            "SELECT value_json FROM settings WHERE key='admin.routing.rules.v1'").fetchone()[0])
+    assert "routing_domains" not in tables
+    assert after_outbounds == outbounds
+    assert after_rules == stored_rules

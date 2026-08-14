@@ -346,3 +346,30 @@ def test_uninstall_removes_marked_binary(tmp_path) -> None:
     (tmp_path / "xray.zagros-installed").write_text("v1.0.0\n")
     _uninstall_xray({"executable_path": str(exe), "assets_path": None}, purge=False)
     assert not exe.exists()
+
+
+def test_outbound_redeploy_and_base_rules_keep_one_copy_of_custom_tag() -> None:
+    """Repeat Deploy used to append custom names, then base setup deleted them."""
+    from app.cores.outbounds.model import Outbound, OutboundKind
+    from app.cores.routing.model import RouteContext, RoutingRule, RuleAction, RuleMatcher
+
+    driver, backend = _driver()
+    outbound = Outbound(
+        name="Open", kind=OutboundKind.OPENVPN,
+        settings={"ovpn_content": "client\nremote vpn.example 443",
+                  "_policy_mark": 12001},
+    )
+    asyncio.run(driver.deploy_outbounds([outbound]))
+    asyncio.run(driver.deploy_outbounds([outbound]))
+    rule = RoutingRule(
+        name="via-open", matcher=RuleMatcher(inbounds=["VLESS_TCP_REALITY"]),
+        action=RuleAction.ROUTE_TO, outbound="Open", priority=10,
+    )
+    asyncio.run(driver.deploy_routing_rules(
+        [rule], RouteContext(available_outbounds=["Open"])))
+    tags = [item["tag"] for item in backend.outbounds]
+    assert tags.count("Open") == 1
+    assert {"zg-direct", "zg-block", "zg-dns", "Open"} <= set(tags)
+    custom = next(item for item in backend.outbounds if item["tag"] == "Open")
+    assert custom["protocol"] == "freedom"
+    assert custom["streamSettings"]["sockopt"]["mark"] == 12001

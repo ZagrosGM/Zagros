@@ -77,6 +77,10 @@ ALLOWED_ORIGINS = [o.strip() for o in config("ALLOWED_ORIGINS", default="").spli
 # default = the middleware is not installed at all (no behavior change);
 # when set, requests with an unlisted Host are rejected with 400.
 TRUSTED_HOSTS = [h.strip() for h in config("TRUSTED_HOSTS", default="").split(",") if h.strip()]
+TRUSTED_PROXIES = [h.strip() for h in config("TRUSTED_PROXIES", default="").split(",") if h.strip()]
+ZAGROS_HSTS = config("ZAGROS_HSTS", default=False, cast=bool)
+ZAGROS_REDIRECT_HTTP_TO_HTTPS = config(
+    "ZAGROS_REDIRECT_HTTP_TO_HTTPS", default=False, cast=bool)
 
 VITE_BASE_API = f"http://127.0.0.1:{UVICORN_PORT}/api/" \
     if DEBUG and config("VITE_BASE_API", default="/api/") == "/api/" \

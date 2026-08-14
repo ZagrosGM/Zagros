@@ -294,6 +294,25 @@ class OutboundProfileModel(Base):
     definition_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class RoutingDomainModel(Base):
+    """Stable Linux table/mark identity for one named outbound.
+
+    Runtime process/interface details are deliberately not persisted; they
+    are reconstructed and verified on every boot. Keeping the identity row
+    makes upgrades and rollback preserve table ids even when outbound order
+    changes.
+    """
+
+    __tablename__ = "routing_domains"
+
+    outbound_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    table_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    fwmark: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    definition_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utcnow,
+                                                 onupdate=_utcnow)
+
+
 # --------------------------------------------------------------------- #
 # platform settings / tokens / audit / plugins
 # --------------------------------------------------------------------- #

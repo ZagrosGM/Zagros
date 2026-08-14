@@ -283,6 +283,18 @@ class TestRouting:
         for cid in (routing_id, plain_id):
             client.post(f"/api/zagros/cores/{cid}/install", json={"enabled": True})
 
+        # Enabled rules fail closed until their target exists; saving a typo
+        # must never create a graph that can only fail later at Deploy.
+        r = client.put("/api/zagros/routing/rules", json={"rules": [_rule()]})
+        assert r.status_code == 422
+
+        # surrogate outbound so route_to resolves during save/preview
+        client.put("/api/zagros/outbounds", json={"outbounds": [
+            {"name": "warp-up", "kind": "socks",
+             "settings": {"server": "127.0.0.1", "server_port": 1080}, "enabled": True},
+        ]})
+        # Test runtimes have no Linux policy domain; this fake router is not a
+        # production service core, so name existence is the validation edge.
         r = client.put("/api/zagros/routing/rules", json={"rules": [_rule()]})
         assert r.status_code == 200, r.text
         assert r.json()["count"] == 1
@@ -290,12 +302,6 @@ class TestRouting:
         listed = client.get("/api/zagros/routing/rules").json()["rules"]
         assert listed[0]["matcher"]["inbounds"] == ["reality-in"]
         assert listed[0]["outbound"] == "warp-up"
-
-        # surrogate outbound so route_to resolves during preview
-        client.put("/api/zagros/outbounds", json={"outbounds": [
-            {"name": "warp-up", "kind": "socks",
-             "settings": {"server": "127.0.0.1", "server_port": 1080}, "enabled": True},
-        ]})
 
         preview = client.post("/api/zagros/routing/preview", json={"rules": [_rule()]})
         assert preview.status_code == 200, preview.text

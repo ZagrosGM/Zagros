@@ -62,8 +62,9 @@ _METADATA_KEYS = {
 
 
 class OutboundManager:
-    def __init__(self, core_manager: "CoreManager") -> None:
+    def __init__(self, core_manager: "CoreManager", *, policy_router=None) -> None:
         self._cores = core_manager
+        self._policy = policy_router
         self._outbounds: dict[str, Outbound] = {}
         self._last_report: "OutboundDeploymentReport | None" = None
 
@@ -207,8 +208,21 @@ class OutboundManager:
     async def deploy(
         self, *, core_ids: list[str] | None = None
     ) -> OutboundDeploymentReport:
-        """Push outbounds to every target core (native translation + report)."""
+        """Converge kernel domains, then push marked outbounds to native cores.
+
+        A route must never reference a name that was merely saved in SQL.  The
+        policy layer first proves every VPN/proxy domain has a live interface,
+        fwmark and table. Xray/sing-box receive deployment-only marked-direct
+        copies; service cores use the same domains through source classifiers.
+        """
+        import asyncio
+
+        active = self.list()
         targets = core_ids if core_ids is not None else self._cores.list_cores()
+        domains = {}
+        policy_cores = {"xray", "sing-box", "openvpn", "wireguard", "softether", "ssh"}
+        if self._policy is not None and policy_cores.intersection(targets):
+            domains = await asyncio.to_thread(self._policy.prepare, active)
         results: dict[str, TranslatedOutbound] = {}
         plan_edges: dict[str, set[str]] = {}
         for core_id in targets:
@@ -217,28 +231,40 @@ class OutboundManager:
             except CoreNotFoundError:
                 continue
             if not driver.supports(Capability.OUTBOUND_MANAGEMENT):
+                applied: list[str] = []
+                unsupported: list[UnsupportedOutbound] = []
+                for outbound in active:
+                    if outbound.kind in (
+                        OutboundKind.DIRECT, OutboundKind.BLOCK,
+                        OutboundKind.BLACKHOLE,
+                    ) or outbound.name in domains:
+                        applied.append(outbound.name)
+                    else:
+                        unsupported.append(UnsupportedOutbound(
+                            name=outbound.name,
+                            reason=(
+                                f"Core '{core_id}' has no native outbound management "
+                                "and no kernel policy domain could represent this profile."
+                            ),
+                        ))
                 results[core_id] = TranslatedOutbound(
-                    core_id=core_id,
-                    unsupported=[
-                        UnsupportedOutbound(
-                            name=o.name,
-                            reason=f"Core '{core_id}' has no outbound management.",
-                        )
-                        for o in self.list()
-                    ],
+                    core_id=core_id, applied=applied, unsupported=unsupported,
+                    notes=["service traffic uses the shared Linux policy-routing plane"],
                 )
                 continue
             resolved: list[Outbound] = []
             notes: list[str] = []
-            for ob in self.list():
+            for ob in active:
                 if ob.kind is OutboundKind.CORE and ob.settings["core_id"] == core_id:
                     notes.append(
                         f"outbound '{ob.name}' chains INTO this core; not materialized locally."
                     )
                     continue
-                resolved.append(
-                    await self.materialize(ob, requester_core_id=core_id, chain_edges=plan_edges)
-                )
+                materialized = await self.materialize(
+                    ob, requester_core_id=core_id, chain_edges=plan_edges)
+                if self._policy is not None:
+                    materialized = self._policy.decorate(materialized)
+                resolved.append(materialized)
             report = await driver.deploy_outbounds(resolved)
             report.notes.extend(notes)
             results[core_id] = report

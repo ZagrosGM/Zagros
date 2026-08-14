@@ -111,6 +111,7 @@ class XrayDriver(BaseCoreDriver):
         from app.cores.stats import DeltaTracker
 
         self._deltas = DeltaTracker()
+        self._managed_native_outbounds: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------ #
     # helpers / policy
@@ -1233,6 +1234,27 @@ class XrayDriver(BaseCoreDriver):
     def _outbound_to_native(self, ob: Outbound) -> tuple[dict | None, UnsupportedOutbound | None]:
         s = ob.settings
         kind, name = ob.kind, ob.name
+        # Native cores enter every policy domain through a loopback SOCKS
+        # gateway. This avoids VRF socket-demux ambiguity while service-core
+        # packets still use fwmark/table directly.
+        if s.get("_policy_socks_port"):
+            return {
+                "protocol": "socks", "tag": name,
+                "settings": {"servers": [{
+                    "address": "127.0.0.1",
+                    "port": int(s["_policy_socks_port"]),
+                    "udp": True,
+                }]},
+            }, None
+        # Compatibility fallback for externally supplied policy managers.
+        if s.get("_policy_mark") is not None:
+            sockopt: dict[str, Any] = {"mark": int(s["_policy_mark"])}
+            if s.get("_policy_vrf"):
+                sockopt["interface"] = str(s["_policy_vrf"])
+            return {
+                "protocol": "freedom", "tag": name,
+                "streamSettings": {"sockopt": sockopt},
+            }, None
         if kind is OutboundKind.DIRECT:
             return {"protocol": "freedom", "tag": name}, None
         if kind in (OutboundKind.BLOCK, OutboundKind.BLACKHOLE):
@@ -1307,12 +1329,18 @@ class XrayDriver(BaseCoreDriver):
         )
 
     async def _ensure_base_outbounds(self) -> None:
-        native = [
+        base = [
             {"protocol": "freedom", "tag": self._BASE_OUTBOUNDS["direct"]},
             {"protocol": "blackhole", "tag": self._BASE_OUTBOUNDS["block"]},
             {"protocol": "dns", "tag": self._BASE_OUTBOUNDS["dns"]},
         ]
-        await asyncio.to_thread(self._backend.set_outbounds, native)
+        # Base action targets and admin outbounds are one managed set. The old
+        # second set_outbounds(base) call replaced every just-deployed custom
+        # outbound, leaving route rules pointing at absent tags.
+        await asyncio.to_thread(
+            self._backend.set_outbounds,
+            [*base, *self._managed_native_outbounds],
+        )
 
     async def deploy_outbounds(self, outbounds: list[Outbound]) -> TranslatedOutbound:
         native: list[dict] = []
@@ -1325,7 +1353,8 @@ class XrayDriver(BaseCoreDriver):
             else:
                 native.append(translated)
                 applied.append(ob.name)
-        await asyncio.to_thread(self._backend.set_outbounds, native)
+        self._managed_native_outbounds = list(native)
+        await self._ensure_base_outbounds()
         return TranslatedOutbound(core_id=self.metadata.id, applied=applied,
                                   unsupported=unsupported, payload=native)
 

@@ -6,9 +6,10 @@ multicore subsystem, tests — can import subpackages (``app.cores``,
 ``app.persistence``, ``app.portal`` ...) without pulling the entire HTTP
 stack (fastapi/apscheduler/xray singletons) into their interpreter.
 """
+import asyncio
 import logging
 
-__version__ = "1.0.0-alpha.8.1"  # Zagros begins a new version line after the rebrand
+__version__ = "1.0.0-alpha.8.2"  # Zagros begins a new version line after the rebrand
 
 
 _building = False
@@ -65,7 +66,10 @@ def _build_app_inner():
     from fastapi.responses import JSONResponse
     from fastapi.routing import APIRoute
 
-    from config import ALLOWED_ORIGINS, DOCS, TRUSTED_HOSTS
+    from config import (
+        ALLOWED_ORIGINS, DOCS, TRUSTED_HOSTS,
+        ZAGROS_HSTS, ZAGROS_REDIRECT_HTTP_TO_HTTPS,
+    )
 
     app = FastAPI(
         title="Zagros API",
@@ -88,6 +92,19 @@ def _build_app_inner():
     # middleware is simply not installed (zero behavior change).
     if TRUSTED_HOSTS:
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
+
+    @app.middleware("http")
+    async def panel_network_headers(request: Request, call_next):
+        if ZAGROS_REDIRECT_HTTP_TO_HTTPS and request.url.scheme != "https":
+            from fastapi.responses import RedirectResponse
+
+            return RedirectResponse(str(request.url.replace(scheme="https")),
+                                    status_code=308)
+        response = await call_next(request)
+        if ZAGROS_HSTS and request.url.scheme == "https":
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=31536000; includeSubDomains")
+        return response
 
     # Preseed BEFORE importing the legacy sub-packages (dashboard, jobs,
     # routers, telegram): they execute `from app import app` / `from app
@@ -150,6 +167,14 @@ def _build_app_inner():
         async def zagros_stop_managed_cores():
             runtime = getattr(app.state, "zagros", None)
             if runtime is not None:
+                # Policy outbounds own additional TUN/WireGuard interfaces,
+                # ip rules and nftables state. Tear those down before service
+                # inbounds so a replacement image cannot inherit stale marks.
+                try:
+                    await asyncio.to_thread(runtime.policy_router.stop)
+                except Exception as _exc:  # noqa: BLE001 — continue core cleanup
+                    logging.getLogger("uvicorn.error").warning(
+                        "policy routing cleanup failed: %s", _exc)
                 # Host-network processes/interfaces outlive ordinary Python
                 # object state. A graceful container replacement must tear
                 # them down so the next image cannot inherit stale wg-quick

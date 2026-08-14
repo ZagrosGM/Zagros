@@ -14,7 +14,10 @@ UI hints `x-group` (basic/transport/security/auth) and `x-widget`
 """
 from __future__ import annotations
 
-from app.cores.outbounds.model import OutboundKind
+from app.cores.outbounds.model import (
+    SOFTETHER_CLIENT_LIMITATION,
+    OutboundKind,
+)
 
 _NETWORKS = ["tcp", "kcp", "ws", "http", "grpc", "quic",
              "httpupgrade", "splithttp"]
@@ -108,11 +111,14 @@ def _security_fields(securities=_SECURITIES) -> dict:
     }
 
 
-def _schema(properties, required=(), description=""):
+def _schema(properties, required=(), description="", *, supported=True,
+            disabled_reason: str | None = None):
     doc = {"type": "object", "properties": properties,
-           "required": sorted(set(required))}
+           "required": sorted(set(required)), "x-supported": bool(supported)}
     if description:
         doc["description"] = description
+    if disabled_reason:
+        doc["x-disabled-reason"] = disabled_reason
     return doc
 
 
@@ -260,6 +266,24 @@ _KIND_SCHEMAS: dict[OutboundKind, dict] = {
          "host_key": _str("host_key", "server host key (optional)", group="auth")},
         required=("server", "server_port", "username"),
         description="SSH tunnel upstream"),
+    **{
+        kind: _schema(
+            {**_server_fields(),
+             "username": _str("username", "username", group="auth"),
+             "password": _str("password", "password", group="auth", secret=True)},
+            required=("server", "server_port", "username"),
+            description=f"{title} client (currently unavailable)",
+            supported=False,
+            disabled_reason=SOFTETHER_CLIENT_LIMITATION,
+        )
+        for kind, title in (
+            (OutboundKind.SOFTETHER_L2TP, "SoftEther L2TP/IPsec"),
+            (OutboundKind.SOFTETHER_L2TP_RAW, "SoftEther raw L2TP"),
+            (OutboundKind.SOFTETHER_SSTP, "SoftEther SSTP"),
+            (OutboundKind.SOFTETHER_PPTP, "PPTP"),
+            (OutboundKind.SOFTETHER_NATIVE, "SoftEther native VPN"),
+        )
+    },
     OutboundKind.CORE: _schema(
         {"core_id": _str("core_id", "target core", group="basic",
                          hint="chain through another managed core instance"),

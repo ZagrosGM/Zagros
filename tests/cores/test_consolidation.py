@@ -632,4 +632,4 @@ class TestAlembicConsolidation:
             keys = {r[0] for r in db.execute("SELECT key FROM settings")}
             assert not any(k.startswith("studio.document.") for k in keys)
             (head,) = db.execute("SELECT version_num FROM alembic_version").fetchone()
-            assert head == "0008_core_host_inbound_tag"
+            assert head == "0009_policy_routing_domains"

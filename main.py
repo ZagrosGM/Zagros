@@ -9,8 +9,11 @@ from cryptography.hazmat.backends import default_backend
 
 from app import app as app, logger  # noqa: F401  (re-exported uvicorn target: `uvicorn main:app`)
 from app.platform.bindargs import BindArgsError, compute_bind_args
-from config import (DEBUG, TLS_MODE, UVICORN_HOST, UVICORN_PORT, UVICORN_SSL_CA_CERTFILE,
-                    UVICORN_SSL_CA_TYPE, UVICORN_SSL_CERTFILE, UVICORN_SSL_KEYFILE, UVICORN_UDS)
+from config import (
+    DEBUG, TLS_MODE, TRUSTED_PROXIES, UVICORN_HOST, UVICORN_PORT,
+    UVICORN_SSL_CA_CERTFILE, UVICORN_SSL_CA_TYPE, UVICORN_SSL_CERTFILE,
+    UVICORN_SSL_KEYFILE, UVICORN_UDS,
+)
 
 
 def validate_cert_and_key(cert_file_path, key_file_path, ca_type):
@@ -117,6 +120,8 @@ if __name__ == "__main__":
             **bind_args,
             workers=1,
             reload=DEBUG,
+            proxy_headers=bool(TRUSTED_PROXIES),
+            forwarded_allow_ips=",".join(TRUSTED_PROXIES) if TRUSTED_PROXIES else "",
             log_level=logging.DEBUG if DEBUG else logging.INFO
         )
     except FileNotFoundError:  # to prevent error on removing unix sock

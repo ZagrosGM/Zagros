@@ -31,7 +31,31 @@ class OutboundKind(str, Enum):
     TUIC = "tuic"
     OPENVPN = "openvpn"
     SSH = "ssh"
+    # SoftEther Server does not implement these client transports. They are
+    # exposed as disabled capability entries so the UI tells the truth instead
+    # of hiding the entire family or saving a profile that can never run.
+    SOFTETHER_L2TP = "softether_l2tp"
+    SOFTETHER_L2TP_RAW = "softether_l2tp_raw"
+    SOFTETHER_SSTP = "softether_sstp"
+    SOFTETHER_PPTP = "softether_pptp"
+    SOFTETHER_NATIVE = "softether_native"
     CORE = "core"          # chain target: another managed core instance
+
+
+SOFTETHER_CLIENT_KINDS = frozenset({
+    OutboundKind.SOFTETHER_L2TP,
+    OutboundKind.SOFTETHER_L2TP_RAW,
+    OutboundKind.SOFTETHER_SSTP,
+    OutboundKind.SOFTETHER_PPTP,
+    OutboundKind.SOFTETHER_NATIVE,
+})
+
+SOFTETHER_CLIENT_LIMITATION = (
+    "SoftEther Server is an inbound VPN server and ships no supported client "
+    "runtime for L2TP, raw L2TP, SSTP, PPTP or native SoftEther in this image. "
+    "This outbound type is visible but disabled; install a separately managed, "
+    "verified client provider before it can be enabled."
+)
 
 
 class Outbound(BaseModel):

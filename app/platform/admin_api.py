@@ -36,7 +36,12 @@ from pydantic import BaseModel, Field
 
 from app.cores.exceptions import CoreNotFoundError
 from app.cores.outbounds.manager import OutboundManager
-from app.cores.outbounds.model import Outbound, OutboundKind
+from app.cores.outbounds.model import (
+    SOFTETHER_CLIENT_KINDS,
+    SOFTETHER_CLIENT_LIMITATION,
+    Outbound,
+    OutboundKind,
+)
 from app.cores.routing.model import RoutingRule
 from app.platform import certificates
 from app.platform.routers import get_runtime, zagros_admin_router
@@ -45,6 +50,7 @@ _STARTED_MONO = time.monotonic()
 
 _RULES_KEY = "admin.routing.rules.v1"
 _OUTBOUNDS_KEY = "admin.outbounds.v1"
+_PANEL_NETWORK_KEY = "admin.panel.network.v1"
 
 
 # --------------------------------------------------------------------- #
@@ -478,10 +484,22 @@ def _sync_manager(manager: OutboundManager, stored: list[Outbound]) -> None:
         manager.register(outbound)
 
 
+def _validate_outbound_capabilities(outbounds: list[Outbound]) -> None:
+    blocked = [outbound.name for outbound in outbounds
+               if outbound.enabled and outbound.kind in SOFTETHER_CLIENT_KINDS]
+    if blocked:
+        raise HTTPException(
+            422,
+            f"unsupported SoftEther client outbound(s) {blocked}: "
+            f"{SOFTETHER_CLIENT_LIMITATION}",
+        )
+
+
 async def _save_outbounds(runtime, outbounds: list[Outbound]) -> list[Outbound]:
     names = [o.name for o in outbounds]
     if len(names) != len(set(names)):
         raise HTTPException(422, "duplicate outbound names are not allowed")
+    _validate_outbound_capabilities(outbounds)
     await runtime.kv.set_value(
         _OUTBOUNDS_KEY, [o.model_dump(mode="json") for o in outbounds])
     _sync_manager(runtime.outbound_manager, outbounds)
@@ -516,7 +534,34 @@ class RoutingSetBody(BaseModel):
 @zagros_admin_router.put("/routing/rules")
 async def routing_save(body: RoutingSetBody, runtime=Depends(get_runtime)):
     try:
-        normalized = await _save_rules(runtime, body.rules)
+        normalized = runtime.routing_engine.validate(body.rules)
+        policy_router = getattr(runtime, "policy_router", None)
+        if policy_router is not None:
+            policy_router.validate_rule_set(normalized)
+        outbounds = {outbound.name: outbound
+                     for outbound in await _load_outbounds(runtime)}
+        for rule in normalized:
+            if rule.action.value != "route_to":
+                continue
+            outbound = outbounds.get(str(rule.outbound))
+            if outbound is None:
+                raise ValueError(
+                    f"rule '{rule.name}' references missing outbound '{rule.outbound}'")
+            policy_router = getattr(runtime, "policy_router", None)
+            mode = (policy_router._mode(outbound.kind)  # noqa: SLF001
+                    if policy_router is not None else None)
+            policy_cores = {"xray", "sing-box", "openvpn", "wireguard", "softether", "ssh"}
+            policy_required = bool(
+                policy_cores.intersection(runtime.core_manager.list_cores()))
+            if mode and rule.enabled and policy_required:
+                domain = next((item for item in policy_router.domain_views()
+                               if item["outbound"] == outbound.name and item["ready"]), None)
+                if domain is None:
+                    raise ValueError(
+                        f"rule '{rule.name}': outbound '{outbound.name}' is not running; "
+                        "Deploy/Test the outbound before saving this enabled rule")
+        await runtime.kv.set_value(
+            _RULES_KEY, [r.model_dump(mode="json") for r in normalized])
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
@@ -544,19 +589,50 @@ async def routing_preview(body: RoutingBody, runtime=Depends(get_runtime)):
 
 @zagros_admin_router.post("/routing/deploy")
 async def routing_deploy(body: RoutingBody, runtime=Depends(get_runtime)):
+    previous = await _load_rules(runtime)
     try:
-        normalized = await _save_rules(runtime, body.rules)
+        normalized = runtime.routing_engine.validate(body.rules)
         outbounds = await _load_outbounds(runtime)
         _sync_manager(runtime.outbound_manager, outbounds)
+        # A routing transaction owns its dependencies: first prove every
+        # outbound interface/table, then atomically replace classifiers and
+        # native rules. No separate UI click is required.
+        await runtime.outbound_manager.deploy(core_ids=body.core_ids)
         report = await runtime.routing_engine.deploy(
             normalized, core_ids=body.core_ids, outbounds=outbounds)
+        await runtime.kv.set_value(
+            _RULES_KEY, [r.model_dump(mode="json") for r in normalized])
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
+        try:
+            outbounds = await _load_outbounds(runtime)
+            _sync_manager(runtime.outbound_manager, outbounds)
+            await runtime.outbound_manager.deploy(core_ids=body.core_ids)
+            await runtime.routing_engine.deploy(
+                previous, core_ids=body.core_ids, outbounds=outbounds)
+        except Exception as rollback_exc:  # noqa: BLE001
+            raise HTTPException(
+                500,
+                f"routing deployment failed ({exc}); rollback also failed: {rollback_exc}",
+            ) from exc
         raise _err(exc) from exc
     result = report.model_dump(mode="json")
     result["saved"] = True
+    policy_router = getattr(runtime, "policy_router", None)
+    result["policy_domains"] = (policy_router.domain_views() if policy_router else [])
     return result
+
+
+@zagros_admin_router.get("/routing/runtime")
+async def routing_runtime(runtime=Depends(get_runtime)):
+    """Secret-free kernel-domain health for validation/UI diagnostics."""
+    policy_router = getattr(runtime, "policy_router", None)
+    return {
+        "domains": policy_router.domain_views() if policy_router else [],
+        "rules": [rule.model_dump(mode="json")
+                  for rule in await _load_rules(runtime)],
+    }
 
 
 # --------------------------------------------------------------------- #
@@ -639,6 +715,9 @@ async def _udp_outbound_preflight(server: str, port: int) -> tuple[float, str]:
 
 async def _test_outbound(runtime, outbound: Outbound) -> dict[str, Any]:
     """Protocol-aware endpoint test; never TCP-probe a UDP-only profile."""
+    if outbound.kind in SOFTETHER_CLIENT_KINDS:
+        return {"ok": False, "latency_ms": None,
+                "error": SOFTETHER_CLIENT_LIMITATION}
     if outbound.kind is OutboundKind.CORE:
         core_id = str(outbound.settings.get("core_id", ""))
         manager = runtime.core_manager
@@ -820,15 +899,37 @@ class OutboundDeployBody(BaseModel):
 
 @zagros_admin_router.post("/outbounds/deploy")
 async def outbounds_deploy(body: OutboundDeployBody, runtime=Depends(get_runtime)):
+    previous = await _load_outbounds(runtime)
+    names = [outbound.name for outbound in body.outbounds]
+    if len(names) != len(set(names)):
+        raise HTTPException(422, "duplicate outbound names are not allowed")
+    _validate_outbound_capabilities(body.outbounds)
     try:
-        await _save_outbounds(runtime, body.outbounds)  # registers into the manager
+        # Deploy-before-persist: a bad profile/interface/table cannot replace
+        # the last known-good desired state. The manager receives a temporary
+        # candidate registry; SQL changes only after every runtime converges.
+        _sync_manager(runtime.outbound_manager, body.outbounds)
         report = await runtime.outbound_manager.deploy(core_ids=body.core_ids)
+        await runtime.kv.set_value(
+            _OUTBOUNDS_KEY,
+            [o.model_dump(mode="json") for o in body.outbounds],
+        )
     except HTTPException:
         raise
     except Exception as exc:
+        _sync_manager(runtime.outbound_manager, previous)
+        try:
+            await runtime.outbound_manager.deploy(core_ids=body.core_ids)
+        except Exception as rollback_exc:  # noqa: BLE001
+            raise HTTPException(
+                500,
+                f"outbound deployment failed ({exc}); rollback also failed: {rollback_exc}",
+            ) from exc
         raise _err(exc) from exc
     result = report.model_dump(mode="json")
     result["saved"] = True
+    policy_router = getattr(runtime, "policy_router", None)
+    result["policy_domains"] = (policy_router.domain_views() if policy_router else [])
     return result
 
 
@@ -1164,6 +1265,101 @@ async def users_online_states(runtime=Depends(get_runtime)):
     return {"states": states, "collect_ts": snapshot.get("ts"),
             "failed_cores": failed, "probed_cores": probed,
             "window_seconds": int(window)}
+
+
+# --------------------------------------------------------------------- #
+# panel network settings — validated DB desired state + host-agent apply
+# --------------------------------------------------------------------- #
+
+async def _panel_network_settings(runtime):
+    from app.platform.network_settings import PanelNetworkSettings
+
+    raw = await runtime.kv.get_value(_PANEL_NETWORK_KEY)
+    if raw:
+        return PanelNetworkSettings.model_validate(raw)
+    import config
+    return PanelNetworkSettings(
+        domain=config.DOMAIN or None,
+        port=int(config.UVICORN_PORT),
+        scheme="https" if config.TLS_MODE == "on" else "http",
+        bind_address=config.UVICORN_HOST,
+        trusted_proxies=[],
+    )
+
+
+def _validate_network_certificate(runtime, settings) -> None:
+    ident = (settings.tls_certificate_id or "").strip()
+    if not ident:
+        return
+    inventory = certificates.scan(_data_dir(runtime), managed_only=True)
+    found = next((item for item in inventory
+                  if item.id == ident or item.name == ident), None)
+    if found is None:
+        raise ValueError(f"TLS certificate '{ident}' does not exist")
+    if found.expired or not found.has_key:
+        raise ValueError(f"TLS certificate '{ident}' is expired or has no private key")
+
+
+@zagros_admin_router.get("/settings/panel-network")
+async def panel_network_get(runtime=Depends(get_runtime)):
+    return (await _panel_network_settings(runtime)).model_dump(mode="json")
+
+
+@zagros_admin_router.post("/settings/panel-network/test")
+async def panel_network_test(body: dict[str, Any], runtime=Depends(get_runtime)):
+    from app.platform.network_settings import PanelNetworkSettings
+
+    try:
+        settings = PanelNetworkSettings.model_validate(body)
+        _validate_network_certificate(runtime, settings)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {
+        "ok": True,
+        "public_url": settings.public_url(),
+        "bind": f"{settings.bind_address}:{settings.port}",
+        "tls": settings.scheme == "https",
+        "certificate": settings.tls_certificate_id,
+        "trusted_proxy_count": len(settings.trusted_proxies),
+        "apply_mode": "host-agent-atomic-recreate",
+    }
+
+
+@zagros_admin_router.put("/settings/panel-network")
+async def panel_network_save(body: dict[str, Any], runtime=Depends(get_runtime)):
+    from app.platform.network_settings import PanelNetworkSettings
+
+    try:
+        settings = PanelNetworkSettings.model_validate(body)
+        _validate_network_certificate(runtime, settings)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    await runtime.kv.set_value(_PANEL_NETWORK_KEY, settings.model_dump(mode="json"))
+    return {"ok": True, "settings": settings.model_dump(mode="json")}
+
+
+@zagros_admin_router.post("/settings/panel-network/apply")
+async def panel_network_apply(body: dict[str, Any], runtime=Depends(get_runtime)):
+    from app.platform.network_settings import HostNetworkRequest, PanelNetworkSettings
+
+    try:
+        settings = PanelNetworkSettings.model_validate(body)
+        _validate_network_certificate(runtime, settings)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    await runtime.kv.set_value(_PANEL_NETWORK_KEY, settings.model_dump(mode="json"))
+    try:
+        return HostNetworkRequest().request(settings)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@zagros_admin_router.get("/settings/panel-network/apply-status")
+async def panel_network_apply_status(operation_id: str | None = None,
+                                     runtime=Depends(get_runtime)):
+    from app.platform.network_settings import HostNetworkRequest
+
+    return HostNetworkRequest().status(operation_id)
 
 
 # --------------------------------------------------------------------- #

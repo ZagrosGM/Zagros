@@ -4,10 +4,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, Radio, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "../components/feedback";
-import { Badge, Button, Card, CardHeader, Field, Input, Select, Skeleton } from "../components/ui";
+import { Badge, Button, Card, CardHeader, Field, Input, Select, Skeleton, Switch } from "../components/ui";
 import { api, ApiError } from "../lib/api";
 import { useT } from "../lib/i18n";
-import type { PanelInfo, PortalSettings } from "../lib/types";
+import type { CertificateInfo, PanelInfo, PortalSettings } from "../lib/types";
 
 // canonical enum values of the backend contract (ClientAuthMode); the
 // backend keeps accepting the alpha.7 shorthand "app_login" for stray
@@ -22,7 +22,9 @@ export default function Subscriptions() {
   const qc = useQueryClient();
   const settingsQ = useQuery({ queryKey: ["zagros", "portal"], queryFn: () => api.get<PortalSettings>("/zagros/settings/portal") });
   const info = useQuery({ queryKey: ["zagros", "panel-info"], queryFn: () => api.get<PanelInfo>("/zagros/panel/info") });
+  const certsQ = useQuery({ queryKey: ["zagros", "certificates"], queryFn: () => api.get<{ certificates: CertificateInfo[] }>("/zagros/certificates") });
   const [form, setForm] = useState<PortalSettings | null>(null);
+  const [testResult, setTestResult] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => { if (settingsQ.data) setForm(settingsQ.data); }, [settingsQ.data]);
 
@@ -31,9 +33,20 @@ export default function Subscriptions() {
     onSuccess: () => { toast.ok(t("common.saved")); qc.invalidateQueries({ queryKey: ["zagros", "portal"] }); },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
   });
+  const testConfig = useMutation({
+    mutationFn: () => api.post<Record<string, unknown>>("/zagros/settings/portal/test", form),
+    onSuccess: (data) => { setTestResult(data); toast.ok("URL generation is valid"); },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
+  });
 
-  const prefix = settingsQ.data?.subscription_url_prefix || info.data?.panel_base_url || (info.data?.domain ? `https://${info.data.domain}` : "");
-  const example = `${prefix || "https://panel.example.com"}/zagros/${settingsQ.data?.subscription_path ?? "sub"}/<token>`;
+  const host = form?.public_domain
+    ? `${form.custom_subdomain ? `${form.custom_subdomain}.` : ""}${form.public_domain}`
+    : "";
+  const scheme = form?.force_https ? "https" : (form?.public_scheme ?? "https");
+  const defaultPort = scheme === "https" ? 443 : 80;
+  const port = form?.public_port && form.public_port !== defaultPort ? `:${form.public_port}` : "";
+  const prefix = host ? `${scheme}://${host}${port}` : (form?.subscription_url_prefix || info.data?.panel_base_url || (info.data?.domain ? `https://${info.data.domain}` : ""));
+  const example = `${prefix || "https://panel.example.com"}/zagros/${form?.subscription_path ?? "sub"}/<token>`;
 
   return (
     <div className="space-y-4 animate-fade-up">
@@ -48,13 +61,30 @@ export default function Subscriptions() {
             <div className="grid gap-4">
               <Field label="portal title"><Input value={form.portal_title} onChange={(e) => setForm({ ...form, portal_title: e.target.value })} /></Field>
               <Field label="app name"><Input value={form.app_name} onChange={(e) => setForm({ ...form, app_name: e.target.value })} /></Field>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field label="public domain"><Input value={form.public_domain ?? ""} onChange={(e) => setForm({ ...form, public_domain: e.target.value || null })} dir="ltr" placeholder="example.com" /></Field>
+                <Field label="custom subdomain"><Input value={form.custom_subdomain ?? ""} onChange={(e) => setForm({ ...form, custom_subdomain: e.target.value || null })} dir="ltr" placeholder="sub" /></Field>
+                <Field label="scheme"><Select value={form.public_scheme ?? "https"} onChange={(e) => setForm({ ...form, public_scheme: e.target.value as "http" | "https" })}><option value="http">HTTP</option><option value="https">HTTPS</option></Select></Field>
+                <Field label="public port"><Input type="number" min={1} max={65535} value={form.public_port ?? ""} onChange={(e) => setForm({ ...form, public_port: e.target.value ? Number(e.target.value) : null })} dir="ltr" placeholder={form.public_scheme === "http" ? "80" : "443"} /></Field>
+              </div>
+              <label className="flex items-center gap-2.5 text-sm text-content-2"><Switch checked={Boolean(form.force_https)} onChange={(v) => setForm({ ...form, force_https: v })} label="force HTTPS" />Force HTTPS</label>
+              <Field label="TLS certificate" hint="optional when an external reverse proxy terminates TLS">
+                <Select value={form.tls_certificate_id ?? ""} onChange={(e) => setForm({ ...form, tls_certificate_id: e.target.value || null })}>
+                  <option value="">external proxy / none</option>
+                  {(certsQ.data?.certificates ?? []).filter((c) => c.has_key && !c.expired).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </Select>
+              </Field>
               <Field label="subscription path" hint="URL segment for token links">
                 <Input value={form.subscription_path} onChange={(e) => setForm({ ...form, subscription_path: e.target.value })} dir="ltr" />
               </Field>
-              <Field label="public URL prefix" hint="empty = derived from panel domain">
+              <Field label="QR base URL" hint="optional endpoint host override used inside OpenVPN/WireGuard/QR material">
+                <Input value={form.qr_base_url ?? ""} onChange={(e) => setForm({ ...form, qr_base_url: e.target.value || null })} dir="ltr" placeholder="https://edge.example.com" />
+              </Field>
+              <Field label="legacy public URL prefix" hint="migration fallback when public domain is empty">
                 <Input value={form.subscription_url_prefix ?? ""} onChange={(e) => setForm({ ...form, subscription_url_prefix: e.target.value || null })} dir="ltr" placeholder="https://panel.example.com" />
               </Field>
-              <div className="pt-1">
+              <div className="flex flex-wrap gap-2 pt-1">
+                <Button onClick={() => testConfig.mutate()} loading={testConfig.isPending} variant="secondary">test configuration</Button>
                 <Button onClick={() => save.mutate()} loading={save.isPending}><Save size={14} /> {t("common.save")}</Button>
               </div>
             </div>
@@ -81,6 +111,7 @@ export default function Subscriptions() {
             <Card>
               <CardHeader title="link shape" subtitle="tokens are issued per user (Users → subscription link)" />
               <code className="block overflow-x-auto rounded-xl bg-surface p-3 font-mono text-[11px] text-content-2" dir="ltr">{example}</code>
+              {testResult && <pre className="mt-3 max-h-52 overflow-auto rounded-xl bg-surface p-3 text-[10px] text-content-2" dir="ltr">{JSON.stringify(testResult, null, 2)}</pre>}
               <p className="mt-3 text-[11px] leading-5 text-content-3">
                 Links auto-render the right format for v2rayNG / Streisand / Clash / sing-box clients
                 (detected via user-agent). Revoking a user's subscription rotates the token immediately.

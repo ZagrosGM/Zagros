@@ -188,7 +188,7 @@ export interface RoutePreview {
 
 export interface Outbound {
   name: string;
-  kind: "direct" | "block" | "blackhole" | "dns" | "socks" | "http" | "vless" | "vmess" | "trojan" | "shadowsocks" | "wireguard" | "hysteria2" | "tuic" | "openvpn" | "ssh" | "core";
+  kind: "direct" | "block" | "blackhole" | "dns" | "socks" | "http" | "vless" | "vmess" | "trojan" | "shadowsocks" | "wireguard" | "hysteria2" | "tuic" | "openvpn" | "ssh" | "softether_l2tp" | "softether_l2tp_raw" | "softether_sstp" | "softether_pptp" | "softether_native" | "core";
   settings: Record<string, unknown>;
   enabled: boolean;
 }
@@ -212,6 +212,8 @@ export interface OutboundKindSchema {
   description?: string;
   properties: Record<string, OutboundField>;
   required?: string[];
+  "x-supported"?: boolean;
+  "x-disabled-reason"?: string;
 }
 export type OutboundSchemas = Record<string, OutboundKindSchema>;
 
@@ -256,6 +258,13 @@ export interface CertificateInfo {
   managed: boolean;
 }
 
+export interface PanelNetworkSettings {
+  domain?: string | null; port: number; scheme: "http" | "https";
+  bind_address: string; trusted_proxies: string[];
+  hsts: boolean; redirect_http_to_https: boolean;
+  tls_certificate_id?: string | null;
+}
+
 export interface PanelInfo {
   version: string; app_name: string; domain: string;
   panel_base_url: string; app_base_url: string;
@@ -266,6 +275,10 @@ export interface PanelInfo {
 export interface PortalSettings {
   portal_title: string; app_name: string; client_auth_mode: string;
   subscription_path: string; subscription_url_prefix?: string | null;
+  public_domain?: string | null; custom_subdomain?: string | null;
+  public_port?: number | null; public_scheme?: "http" | "https";
+  tls_certificate_id?: string | null; force_https?: boolean;
+  qr_base_url?: string | null;
 }
 
 // Mirror of app/adminapi/dashboard.py DashboardSnapshot — flat fields,

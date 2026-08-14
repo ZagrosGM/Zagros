@@ -10,6 +10,102 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.8.2] — 2026-08-14 — Cross-core routing and safe host networking
+
+Runtime-verified follow-up to `alpha.8.1`. This release replaces UI-only
+outbound selection with one persistent Linux policy-routing plane and closes
+the Panel Network, SoftEther architecture and L2TP/IPsec pre-release blockers
+on a real Ubuntu VPS.
+
+### Fixed — real cross-core outbound routing
+
+* Every materialized OpenVPN, WireGuard and sing-box proxy outbound now owns a
+  stable SQL-backed routing table and fwmark, an isolated egress interface,
+  symmetric conntrack return marking and an atomic nftables classifier.
+* OpenVPN and WireGuard outbound clients run inside dedicated VRFs, preventing
+  overlap with inbound tunnel subnets and keeping connected VPN routes out of
+  the host main table. WireGuard outer UDP has an explicit main-table bypass.
+* Xray and sing-box route through per-domain local SOCKS gateways, so their
+  native rules never target an outbound that exists only as saved UI state.
+  Repeated Xray deploys now replace the exact managed outbound set instead of
+  accumulating arbitrary tags.
+* OpenVPN, WireGuard and routed SoftEther clients are classified from their
+  real source subnets. SSH dynamic-forward traffic is classified by the real
+  `zg-*` account UID and transparently redirected into the selected
+  VRF-bound gateway.
+* Policy processes, interfaces, nftables rules and runtime files have
+  symmetric teardown. Failed or unmaterialized outbounds fail closed instead
+  of silently returning the master VPS address.
+
+### Fixed — persistence across lifecycle operations
+
+* Alembic revision `0009_policy_routing_domains` adds stable outbound
+  table/fwmark identities while preserving the existing KV documents as the
+  compatibility source of truth. Legacy rules receive deterministic
+  `priority` and `enabled` defaults without destructive migration.
+* Boot reconciliation now restores outbounds and routing rules after the
+  service cores are ready. Its secret-free report includes
+  `routing_deferred`, allowing update/repair to fail closed when policy replay
+  does not converge.
+* Routing was re-verified after container recreation, repair and host reboot;
+  no deferred Studio, account or routing work remained.
+
+### Fixed — SoftEther routing and capability honesty
+
+* SoftEther now exposes a routed host TAP while retaining SecureNAT only for
+  address assignment. Client traffic is visible to the kernel policy plane,
+  and direct Virtual NAT is restored when no SoftEther policy is active.
+* L2TP, SSTP and native sessions in one SoftEther instance share one Virtual
+  Hub/TAP dataplane. Distinct per-transport egress decisions are therefore
+  rejected before persistence and deploy, with an explicit instruction to use
+  separate SoftEther instances/Hubs when independent dataplanes are required.
+* SoftEther client outbound families remain visible in the UI but disabled and
+  marked unsupported. The installed server runtime does not pretend to provide
+  a production client implementation.
+* A real isolated L2TP/IPsec client passed IKEv1 PSK, NAT-T, ESP transport mode,
+  xl2tpd/PPP authentication, tunnel ping, DNS and Internet egress through the
+  selected WireGuard outbound. SSTP routing through all supported outbound
+  families was also re-verified with real clients and kernel counters.
+
+### Added — safe Panel Network Apply
+
+* Settings → Panel Network now validates and persists domain, bind address,
+  public port, managed TLS certificate, trusted proxies, HSTS and HTTPS
+  redirect policy.
+* A root-only systemd path agent applies the host `.env`, recreates the panel,
+  probes the resulting HTTP/HTTPS endpoint and atomically reports success.
+  The Docker socket is never mounted into the web container.
+* The release bootstrap now supports `update`, refreshing the CLI, agent and
+  compose healthcheck before the Panel image. This makes the feature available
+  to existing `alpha.8.1` installations instead of only fresh hosts.
+* Failed health checks restore the previous `.env` and service. Real VPS gates
+  passed an HTTPS domain/port/certificate apply, a return to HTTP and a forced
+  failure on an occupied port with successful rollback.
+* HTTPS now fails closed unless a valid managed certificate is selected; the
+  UI no longer claims that this apply path provisions ACME or a reverse proxy.
+
+### Fixed — subscription network settings
+
+* Structured public domain, scheme, port, certificate, QR base, subscription
+  path and URL prefix settings now share one canonical URL builder.
+* The default `/sub/<token>` contract and existing aliases remain valid.
+  With no public domain configured, wildcard bind addresses are never
+  advertised as public subscription URLs.
+
+### Verification
+
+* Panel suite: **790 passed, 7 skipped** after the final HTTPS fail-closed
+  regression was added.
+* Scripts pytest and the full CLI harness passed; ShellCheck 0.10.0, `bash -n`,
+  TypeScript, the Vite production build, `git diff --check`, executable-mode,
+  secret and generated-artifact gates passed.
+* Real browser E2E passed create/edit/deploy/disable/reload routing flows,
+  unsupported SoftEther visibility, Panel Network validation and Subscription
+  URL generation while restoring the original rule set in cleanup.
+* Real routing matrices passed Xray, sing-box, OpenVPN, WireGuard, SoftEther
+  SSTP/L2TP and SSH inbound traffic through OpenVPN, WireGuard and sing-box
+  proxy outbounds where each combination is architecturally supported.
+
 ## [1.0.0-alpha.8.1] — 2026-08-13 — Runtime and UI blocker closure
 
 Runtime-verified follow-up to `alpha.8`. The four reported production blockers

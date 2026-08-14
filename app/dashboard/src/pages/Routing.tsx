@@ -97,6 +97,9 @@ export default function Routing() {
       <p className="text-xs text-content-3">
         Rules are evaluated by priority, first match wins. Drag cards to reorder — priorities renumber automatically (10, 20, 30…).
       </p>
+      <p className="rounded-xl border border-warn/30 bg-warn-soft px-3 py-2 text-[11px] text-warn">
+        SoftEther architecture: L2TP, SSTP and native sessions in one SoftEther instance share a single Virtual Hub/TAP source subnet. They must use one shared egress decision; different per-transport outbounds are rejected before Save/Deploy. Separate decisions require separate SoftEther instances/hubs.
+      </p>
 
       {load.isLoading ? null : rules.length === 0 ? (
         <Card>

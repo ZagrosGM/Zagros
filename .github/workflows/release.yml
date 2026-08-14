@@ -118,10 +118,11 @@ jobs:
             **Install / update on a VPS:**
 
             ```bash
-            sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/main/zagros.sh)" -- install
-            # or pin this exact release:
-            sudo zagros install --version ${{ github.ref_name }}
-            sudo zagros update --version ${{ github.ref_name }}
+            # Fresh install, pinned to matching Panel + Scripts tags:
+            sudo env ZAGROS_SCRIPTS_REF=${{ github.ref_name }} bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/${{ github.ref_name }}/zagros.sh)" -- install --version ${{ github.ref_name }}
+
+            # Existing host: refresh CLI/host-agent/compose first, then update:
+            sudo env ZAGROS_SCRIPTS_REF=${{ github.ref_name }} bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/${{ github.ref_name }}/zagros.sh)" -- update --version ${{ github.ref_name }}
             ```
 
             Curated change notes live in [CHANGELOG.md](https://github.com/ZagrosGM/Zagros/blob/main/CHANGELOG.md).

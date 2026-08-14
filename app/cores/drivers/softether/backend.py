@@ -55,6 +55,9 @@ class SoftEtherBackend(Protocol):
     def secure_nat_ensure(self) -> None:
         """Ensure this backend's Virtual Hub has SecureNAT + DHCP enabled."""
         ...
+    def routed_tap_ensure(self, *, device: str, subnet: str,
+                          gateway: str) -> str: ...
+    def routed_tap_disable(self, *, device: str) -> None: ...
     def recover_fresh_server_password(self) -> bool:
         """Restore a persisted admin password onto a fresh blank server."""
         ...
@@ -237,6 +240,66 @@ class LocalSoftEtherBackend:
             f"/ETHERIP:{yn(etherip)} /PSK:{psk_arg} /DEFAULTHUB:{hub}",
             hub=False,
         )
+
+    def routed_tap_ensure(
+        self, *, device: str = "zgsoft", subnet: str = "192.168.30.0/24",
+        gateway: str = "192.168.30.254",
+    ) -> str:
+        """Expose hub client packets to Linux instead of userspace NAT.
+
+        SecureNAT's DHCP server remains available, but its Virtual NAT is
+        disabled and advertises the host TAP address as gateway. This is the
+        only honest way to classify L2TP/SSTP/native sessions in netfilter.
+        Returns the Linux interface name created by SoftEther.
+        """
+        import ipaddress
+        import re
+
+        network = ipaddress.ip_network(subnet, strict=False)
+        gateway_ip = ipaddress.ip_address(gateway)
+        if network.version != 4 or gateway_ip not in network:
+            raise CoreError("SoftEther routed TAP needs an IPv4 gateway inside its subnet")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,10}", device):
+            raise CoreError("SoftEther TAP device id must be 1-10 safe characters")
+        start = str(network.network_address + 10)
+        end = str(network.broadcast_address - 10)
+        mask = str(network.netmask)
+        # Server-wide bridge. Existing is success; any other failure is real.
+        try:
+            self._cmd(
+                f"BridgeCreate {self.hub} /DEVICE:{device} /TAP:yes", hub=False)
+        except CoreError as exc:
+            if not any(word in str(exc).lower() for word in
+                       ("already", "exist", "duplicate")):
+                raise
+        for command in ("SecureNatEnable", "DhcpEnable", "NatDisable"):
+            try:
+                self._cmd(command, hub=True)
+            except CoreError as exc:
+                if not any(word in str(exc).lower() for word in
+                           ("already", "enabled", "disabled")):
+                    raise
+        self._cmd(
+            f"DhcpSet /START:{start} /END:{end} /MASK:{mask} "
+            f"/EXPIRE:7200 /GW:{gateway} /DNS:1.1.1.1 /DNS2:8.8.8.8 "
+            "/DOMAIN:none /LOG:no",
+            hub=True,
+        )
+        return f"tap_{device}"
+
+    def routed_tap_disable(self, *, device: str = "zgsoft") -> None:
+        """Return to self-contained SecureNAT and remove the policy bridge."""
+        try:
+            self._cmd("NatEnable", hub=True)
+        except CoreError as exc:
+            if not any(word in str(exc).lower() for word in ("already", "enabled")):
+                raise
+        try:
+            self._cmd(f"BridgeDelete {self.hub} /DEVICE:{device}", hub=False)
+        except CoreError as exc:
+            if not any(word in str(exc).lower() for word in
+                       ("not found", "not exist", "none")):
+                raise
 
     def secure_nat_ensure(self) -> None:
         """Enable the hub's self-contained NAT and DHCP service idempotently.

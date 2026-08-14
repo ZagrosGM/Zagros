@@ -56,7 +56,9 @@ class PortalService:
     def _delivery_context(settings, request_host: str | None) -> DeliveryContext:
         from urllib.parse import urlsplit
 
-        configured = str(settings.subscription_url_prefix or "").strip()
+        # QR/client profiles may use an explicit public base, otherwise every
+        # delivered endpoint follows the same normalized subscription origin.
+        configured = str(settings.qr_base_url or settings.subscription_url_prefix or "").strip()
         host = ""
         if configured:
             parsed = urlsplit(configured if "://" in configured

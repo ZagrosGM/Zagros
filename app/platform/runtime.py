@@ -85,8 +85,14 @@ class PlatformRuntime:
         # multicore
         self.core_manager = CoreManager(store=self.core_state)
         discover_builtin()
-        self.routing_engine = RoutingEngine(self.core_manager)
-        self.outbound_manager = OutboundManager(self.core_manager)
+        from app.cores.routing.policy import PolicyRoutingManager
+
+        self.policy_router = PolicyRoutingManager(
+            self.core_manager, identity_provider=self._policy_identities)
+        self.routing_engine = RoutingEngine(
+            self.core_manager, policy_router=self.policy_router)
+        self.outbound_manager = OutboundManager(
+            self.core_manager, policy_router=self.policy_router)
 
         # data adapters + services
         self.online_data = SQLOnlineDataAdapter(
@@ -135,6 +141,30 @@ class PlatformRuntime:
                or "sqlite:///zagros.db")
         secret = os.environ.get("ZAGROS_SECRET_KEY", "")
         return cls(database_url=url, master_secret=secret)
+
+    def _policy_identities(self, names: list[str]) -> dict[str, tuple[int, int]]:
+        """Allocate/read stable table+mark ids in one SQL transaction."""
+        from sqlalchemy import select
+
+        from app.cores.routing.policy import PolicyRoutingManager
+        from app.persistence.models import RoutingDomainModel
+
+        wanted = sorted(set(str(name) for name in names if str(name)))
+        with self.session_factory() as session:
+            rows = session.execute(select(RoutingDomainModel)).scalars().all()
+            mapping = {row.outbound_name: (int(row.table_id), int(row.fwmark))
+                       for row in rows}
+            used = {table for table, _mark in mapping.values()}
+            for name in wanted:
+                if name in mapping:
+                    continue
+                table_id = PolicyRoutingManager._table_for(name, used)  # noqa: SLF001
+                used.add(table_id)
+                session.add(RoutingDomainModel(
+                    outbound_name=name, table_id=table_id, fwmark=table_id))
+                mapping[name] = (table_id, table_id)
+            session.commit()
+        return {name: mapping[name] for name in wanted}
 
     async def _retry_deferred_boot_work(
         self,
@@ -207,10 +237,49 @@ class PlatformRuntime:
                     await self.core_manager.start_core("xray")
             except Exception as exc:  # noqa: BLE001 — other cores still boot
                 logger.error("built-in xray recovery/start failed: %s", exc)
-        await self._write_boot_report(studio_deferred, account_deferred)
+        # Rules/outbounds are desired state just like Studio documents and
+        # accounts. Older boots restored the latter two but silently forgot
+        # the network graph, so every update/restart returned service traffic
+        # to the master's eth0. Replay only after all source interfaces and
+        # the built-in Xray adapter exist.
+        routing_deferred = await self._hydrate_network_policy()
+        await self._write_boot_report(
+            studio_deferred, account_deferred, routing_deferred)
+
+    async def _hydrate_network_policy(self) -> set[str]:
+        """Replay persisted outbounds + rules into native and kernel runtimes.
+
+        The KV documents remain the compatibility source for alpha.7.9,
+        alpha.8 and alpha.8.1.  Deployment is deliberately after core boot:
+        OpenVPN/WireGuard source interfaces and the sing-box binary must exist
+        before policy domains/classifiers can be validated.
+        """
+        try:
+            raw_outbounds = await self.kv.get_value("admin.outbounds.v1") or []
+            raw_rules = await self.kv.get_value("admin.routing.rules.v1") or []
+            from app.cores.outbounds.model import Outbound
+            from app.cores.routing.model import RoutingRule
+
+            outbounds = [Outbound.model_validate(item) for item in raw_outbounds]
+            rules = [RoutingRule.model_validate(item) for item in raw_rules]
+            for existing in list(self.outbound_manager.list()):
+                self.outbound_manager.unregister(existing.name)
+            for outbound in outbounds:
+                self.outbound_manager.register(outbound)
+            await self.outbound_manager.deploy()
+            await self.routing_engine.deploy(rules, outbounds=outbounds)
+            logger.info(
+                "network policy hydration: restored %d outbound(s), %d rule(s)",
+                len(outbounds), len(rules),
+            )
+            return set()
+        except Exception as exc:  # noqa: BLE001 — report must fail closed
+            logger.error("network policy hydration failed: %s", exc)
+            return {"policy"}
 
     async def _write_boot_report(
         self, studio_deferred: set[str], account_deferred: set[str],
+        routing_deferred: set[str] | None = None,
     ) -> None:
         """Persist one secret-free, atomic reconciliation verdict for host repair.
 
@@ -225,6 +294,7 @@ class PlatformRuntime:
                 "generated_at": int(time.time()),
                 "studio_deferred": sorted(studio_deferred),
                 "account_deferred": sorted(account_deferred),
+                "routing_deferred": sorted(routing_deferred or set()),
                 "cores": [
                     {
                         "id": status.core_id,

@@ -86,6 +86,10 @@ class LegacyXrayBackend:
         self._settings = settings or {}
         self._mod = None                          # the `app.xray` module
         self._counters: dict[str, tuple[int, int]] = {}   # online-delta baseline
+        # Admin names do not necessarily use the historical ``zg-`` prefix.
+        # Track exactly what this adapter inserted so a repeat deployment
+        # replaces, rather than appends, arbitrary custom tags.
+        self._managed_outbound_tags: set[str] = set()
 
     # ------------------------------------------------------------------ #
     # bridge
@@ -348,11 +352,17 @@ class LegacyXrayBackend:
 
     def set_outbounds(self, outbounds: list[dict[str, Any]]) -> None:
         mod = self._x()
+        managed = set(self._managed_outbound_tags)
         existing = [
             ob for ob in (mod.config.get("outbounds") or [])
-            if not str(ob.get("tag", "")).startswith("zg-")
+            if (str(ob.get("tag", "")) not in managed
+                and not str(ob.get("tag", "")).startswith("zg-"))
         ]
+        incoming_tags = [str(ob.get("tag") or "") for ob in outbounds]
+        if len(incoming_tags) != len(set(incoming_tags)):
+            raise CoreError("xray outbound deployment contains duplicate tags")
         mod.config["outbounds"] = existing + outbounds
+        self._managed_outbound_tags = set(incoming_tags)
         self._persist_and_maybe_restart()
 
     def ensure_listener(self, protocol: str, port: int) -> None:

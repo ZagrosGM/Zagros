@@ -398,9 +398,12 @@ async def issue_subscription_token(user_id: int, runtime=Depends(get_runtime)):
                                     token_type="sub")
     payload = runtime.tokens.verify(token, expected_type="sub")
     await runtime.kv.set_value(f"portal.sub_jti.{user_id}", payload["jti"])
-    settings = await runtime.portal_settings.get_portal_settings()
-    path = f"/sub/{token}"  # canonical (alpha.7.4 item 12)
-    prefix = (settings.subscription_url_prefix or "").rstrip("/")
+    settings = (await runtime.portal_settings.get_portal_settings()).normalize()
+    # New links honor the configured path. /sub/<token> and
+    # /zagros/sub/<token> remain permanent aliases for every older token.
+    path = (f"/sub/{token}" if settings.subscription_path == "sub"
+            else f"/zagros/{settings.subscription_path}/{token}")
+    prefix = (settings.public_base_url() or "").rstrip("/")
     return {"token": token, "path": path,
             "url": f"{prefix}{path}" if prefix else None}
 
@@ -738,13 +741,64 @@ async def get_portal_settings(runtime=Depends(get_runtime)):
     return await runtime.portal_settings.get_portal_settings()
 
 
+def _validate_portal_certificate(runtime, settings: PortalSettings) -> None:
+    ident = (settings.tls_certificate_id or "").strip()
+    if not ident:
+        return
+    from app.platform import certificates
+
+    data_dir = (str(Path(runtime.database_url[10:]).parent)
+                if runtime.database_url.startswith("sqlite:///")
+                else "/var/lib/zagros")
+    found = next((item for item in certificates.scan(data_dir, managed_only=True)
+                  if item.id == ident or item.name == ident), None)
+    if found is None:
+        raise ValueError(f"TLS certificate '{ident}' does not exist")
+    if found.expired or not found.has_key:
+        raise ValueError(f"TLS certificate '{ident}' is expired or has no private key")
+
+
 @zagros_admin_router.put("/settings/portal", response_model=PortalSettings)
 async def put_portal_settings(settings: PortalSettings,
                               runtime=Depends(get_runtime)):
     try:
+        settings = settings.normalize()
+        _validate_portal_certificate(runtime, settings)
         return await runtime.portal_settings.save_portal_settings(settings)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@zagros_admin_router.post("/settings/portal/test")
+async def portal_settings_test(settings: PortalSettings,
+                               runtime=Depends(get_runtime)):
+    """Validate and show every URL family without mutating persistence."""
+    try:
+        settings = settings.normalize()
+        _validate_portal_certificate(runtime, settings)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    base = settings.public_base_url() or "https://panel.example.com"
+    path = ("/sub/<token>" if settings.subscription_path == "sub"
+            else f"/zagros/{settings.subscription_path}/<token>")
+    subscription = base.rstrip("/") + path
+    qr_base = (settings.qr_base_url or base).rstrip("/")
+    warnings: list[str] = []
+    if settings.public_scheme == "https" and not settings.tls_certificate_id:
+        warnings.append("HTTPS selected without a panel-managed certificate; an external reverse proxy must terminate TLS")
+    return {
+        "ok": True,
+        "base_url": base,
+        "subscription": subscription,
+        "portal": subscription,
+        "clash": subscription + "?format=clash-meta",
+        "sing_box": subscription + "?format=sing-box",
+        "qr_base_url": qr_base,
+        "openvpn_host": qr_base,
+        "wireguard_host": qr_base,
+        "force_https": settings.force_https,
+        "warnings": warnings,
+    }
 
 
 @zagros_admin_router.post("/users/{user_id}/app-credentials",

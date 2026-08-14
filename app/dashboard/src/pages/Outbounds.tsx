@@ -337,7 +337,7 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
-          <Button onClick={save}>{t("common.save")}</Button>
+          <Button onClick={save} disabled={schema?.["x-supported"] === false}>{t("common.save")}</Button>
         </>
       }>
       {URL_BASED.has(ob.kind) && (
@@ -394,9 +394,18 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
         </Field>
         <Field label="protocol" required>
           <Select value={ob.kind} onChange={(e) => setOb({ ...ob, kind: e.target.value as Outbound["kind"], settings: {} })}>
-            {Object.keys(schemas).map((k) => <option key={k} value={k}>{k}</option>)}
+            {Object.keys(schemas).map((k) => {
+              const supported = schemas[k]?.["x-supported"] !== false;
+              return <option key={k} value={k} disabled={!supported}>{k}{supported ? "" : " — unavailable"}</option>;
+            })}
           </Select>
         </Field>
+
+        {schema?.["x-supported"] === false && (
+          <div className="sm:col-span-2 rounded-xl border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn">
+            {schema["x-disabled-reason"] ?? "This client runtime is not available on this build."}
+          </div>
+        )}
 
         {groups.map((g) => {
           const fields = groupFields(g.id);

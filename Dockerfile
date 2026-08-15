@@ -55,6 +55,8 @@ LABEL org.opencontainers.image.title="Zagros" \
 #  * iptables — SSH per-UID usage accounting (owner-match chain, alpha.7.4)
 #  * nftables/iproute2 — atomic cross-core classifiers, per-outbound tables
 #  * openvpn/wireguard-tools — client-side policy domains (not server cores)
+#  * procps — sysctl required by wg-quick and host-network TUN preflights
+#  * openssh-client/server — managed SSH egress and SSH inbound runtime
 #  * certbot  — REAL ACME / Let's Encrypt issuance from the Certificates
 #    page (alpha.7.5 item 9); the panel detects it at runtime, and acme.sh /
 #    lego stay supported for operators who install them instead.
@@ -62,7 +64,8 @@ LABEL org.opencontainers.image.title="Zagros" \
 # the compose spec (installer grants it).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       iptables nftables iproute2 openvpn wireguard-tools certbot \
+       iptables nftables iproute2 openvpn wireguard-tools procps \
+       openssh-client openssh-server certbot \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHON_LIB_PATH=/usr/local/lib/python${PYTHON_VERSION%.*}/site-packages

@@ -37,6 +37,7 @@ class CoreHealthView(BaseModel):
     health: str
     enabled: bool = True
     version: str | None = None
+    version_reason: str | None = None
     uptime_seconds: float | None = None
     active_accounts: int = 0
     active_sessions: int = 0
@@ -154,6 +155,7 @@ class DashboardService:
                 health=s.health.value if isinstance(s.health, HealthStatus) else str(s.health),
                 enabled=s.enabled,
                 version=s.core_version,
+                version_reason=s.version_reason,
                 uptime_seconds=s.uptime_seconds,
                 active_accounts=(s.metrics.active_accounts if s.metrics else 0),
                 active_sessions=(s.metrics.active_sessions if s.metrics else 0),

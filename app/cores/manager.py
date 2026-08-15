@@ -40,6 +40,7 @@ from app.cores.types import (
 logger = logging.getLogger("zagros.cores.manager")
 
 SettingsProvider = Callable[[str], Awaitable[dict[str, Any]]]
+SettingsTransform = Callable[[str, dict[str, Any]], dict[str, Any]]
 
 # Cores the panel itself is made of — attached automatically at boot, never
 # persisted in the platform store and never removable/disablable through the
@@ -81,10 +82,15 @@ class CoreManager:
         store: CoreStateStore,
         bus: EventBus | None = None,
         settings_provider: SettingsProvider | None = None,
+        builtin_core_ids: frozenset[str] | None = None,
+        settings_transform: SettingsTransform | None = None,
     ) -> None:
         self._store = store
+        self._builtin_core_ids = (BUILTIN_CORE_IDS if builtin_core_ids is None
+                                  else frozenset(builtin_core_ids))
         self._bus = bus or EventBus()
         self._settings_provider = settings_provider
+        self._settings_transform = settings_transform
         self._drivers: dict[str, BaseCoreDriver] = {}
         self._states: dict[str, CoreState] = {}
         self._enabled: dict[str, bool] = {}
@@ -105,13 +111,16 @@ class CoreManager:
                     "Persisted core '%s' has no registered driver; skipping.", core_id
                 )
                 continue
-            settings = record.get("settings") or {}
+            settings = dict(record.get("settings") or {})
+            if self._settings_transform is not None:
+                settings = self._settings_transform(core_id, settings)
             self._drivers[core_id] = cls(settings=settings)
             state = CoreState(record.get("state", CoreState.INSTALLED.value))
             # a panel reboot means we must re-verify by starting; never trust RUNNING
             self._states[core_id] = (
                 CoreState.STOPPED
-                if state in (CoreState.RUNNING, CoreState.STARTING)
+                if state in (CoreState.RUNNING, CoreState.STARTING,
+                             CoreState.STOPPING)
                 else state
             )
             self._enabled[core_id] = bool(record.get("enabled", True))
@@ -160,7 +169,10 @@ class CoreManager:
             if core_id in self._drivers:
                 raise CoreStateError(f"Core '{core_id}' is already installed.")
             cls = get_driver_class(core_id)  # KeyError -> DriverNotFoundError
-            driver = cls(settings=settings or await self._resolve_settings(core_id))
+            effective_settings = dict(settings or await self._resolve_settings(core_id))
+            if self._settings_transform is not None:
+                effective_settings = self._settings_transform(core_id, effective_settings)
+            driver = cls(settings=effective_settings)
             self._drivers[core_id] = driver
             self._states[core_id] = CoreState.LOADED
             self._enabled[core_id] = enabled
@@ -184,7 +196,7 @@ class CoreManager:
             return self._states[core_id]
 
     async def uninstall_core(self, core_id: str, *, purge: bool = False, force: bool = False) -> None:
-        if core_id in BUILTIN_CORE_IDS:
+        if core_id in self._builtin_core_ids:
             raise CoreStateError(
                 f"Core '{core_id}' is the panel's built-in engine and cannot be "
                 "uninstalled — it is not a managed add-on. You may start/stop/"
@@ -261,7 +273,7 @@ class CoreManager:
         await self._store.save_state(core_id, state=self._states[core_id], enabled=True)
 
     async def disable_core(self, core_id: str) -> None:
-        if core_id in BUILTIN_CORE_IDS:
+        if core_id in self._builtin_core_ids:
             raise CoreStateError(
                 f"Core '{core_id}' is the panel's built-in engine and cannot be "
                 "disabled through core management — hiding it would silently "
@@ -440,6 +452,7 @@ class CoreManager:
                 core_id=core_id,
                 state=self._states.get(core_id, CoreState.ERROR),
                 health=HealthStatus.UNHEALTHY,
+                version_reason=f"status probe failed: {type(exc).__name__}",
                 message=str(exc),
             )
         status.enabled = self._enabled.get(core_id, False)

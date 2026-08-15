@@ -21,7 +21,9 @@ from app.cores.types import (
     ChainEndpoint,
     CoreMetadata,
     CoreStatus,
+    CoreVersionInfo,
     DeviceSession,
+    ListenerClaim,
     UsageRecord,
     UserAccount,
     ClientConfig,
@@ -82,6 +84,31 @@ class BaseCoreDriver(abc.ABC):
     @abc.abstractmethod
     async def status(self) -> CoreStatus:
         """Current state, health, binary version and live metrics."""
+
+    async def version(self) -> CoreVersionInfo:
+        """Probe the installed engine independently of its running state.
+
+        Backends expose a synchronous ``version()`` command adapter.  Drivers
+        no longer decide ad-hoc that a stopped process has no version: an
+        installed binary is still versionable, and an unknown result carries a
+        reason instead of becoming a silent blank in Overview.
+        """
+        import asyncio
+
+        probe = getattr(getattr(self, "_backend", None), "version", None)
+        if not callable(probe):
+            return CoreVersionInfo(
+                reason=f"{self.metadata.name} adapter has no version probe")
+        try:
+            value = await asyncio.to_thread(probe)
+        except Exception as exc:  # version failure must not break status
+            return CoreVersionInfo(
+                reason=f"version probe failed: {type(exc).__name__}: {exc}")
+        value = str(value or "").strip()
+        if not value:
+            return CoreVersionInfo(
+                reason="runtime binary is not installed or returned no parseable version")
+        return CoreVersionInfo(version=value)
 
     async def restart(self) -> None:
         """Default restart strategy; override for graceful/hot reload."""
@@ -298,6 +325,15 @@ class BaseCoreDriver(abc.ABC):
         self._require(Capability.USER_MANAGEMENT)
         await self.delete_account(account.account_id)
         await self.create_account(account)
+
+    async def listener_claims(self) -> list[ListenerClaim]:
+        """Host-network listeners owned by this adapter (empty = not exposed).
+
+        This is an ownership/introspection contract, not a request to open a
+        socket.  Panel/subscription apply preflight combines these claims with
+        the kernel's live listener table to produce an exact conflict reason.
+        """
+        return []
 
     async def get_chain_endpoints(self) -> list[ChainEndpoint]:
         """Loopback listeners other cores may chain into (empty = none)."""

@@ -93,6 +93,9 @@ class PlatformRuntime:
             self.core_manager, policy_router=self.policy_router)
         self.outbound_manager = OutboundManager(
             self.core_manager, policy_router=self.policy_router)
+        from app.platform.subscription_listener import SubscriptionListenerManager
+
+        self.subscription_listener = SubscriptionListenerManager()
 
         # data adapters + services
         self.online_data = SQLOnlineDataAdapter(

@@ -104,9 +104,16 @@ class XrayDriver(BaseCoreDriver):
     def __init__(self, settings: dict[str, Any] | None = None, *, backend: "Any | None" = None):
         super().__init__(settings)
         if backend is None:
-            from app.cores.drivers.xray.backend import LegacyXrayBackend
+            if self.settings.get("_runtime_mode") == "node":
+                # Native agents must never import the panel's legacy database,
+                # singleton Xray process, or Marzban-compatible node fan-out.
+                from app.cores.drivers.xray.standalone import StandaloneXrayBackend
 
-            backend = LegacyXrayBackend(self.settings)
+                backend = StandaloneXrayBackend(self.settings)
+            else:
+                from app.cores.drivers.xray.backend import LegacyXrayBackend
+
+                backend = LegacyXrayBackend(self.settings)
         self._backend = backend
         from app.cores.stats import DeltaTracker
 
@@ -124,10 +131,14 @@ class XrayDriver(BaseCoreDriver):
         from a bare ``{"inbounds": []}`` — it validates outbounds too)."""
         import json
 
-        try:
-            from config import XRAY_JSON
-        except Exception:  # noqa: BLE001 — stand-alone usage without host config
-            XRAY_JSON = "xray_config.json"
+        instance_settings = getattr(self, "settings", {})
+        if instance_settings.get("_runtime_mode") == "node":
+            XRAY_JSON = str(instance_settings.get("config_path") or "xray_config.json")
+        else:
+            try:
+                from config import XRAY_JSON
+            except Exception:  # noqa: BLE001 — stand-alone usage without host config
+                XRAY_JSON = "xray_config.json"
         if not os.path.exists(XRAY_JSON):
             return {
                 "log": {"loglevel": "warning"},
@@ -741,19 +752,19 @@ class XrayDriver(BaseCoreDriver):
 
     async def status(self) -> CoreStatus:
         running = await asyncio.to_thread(self._backend.is_running)
-        version: str | None = None
+        version = await self.version()
         metrics = None
         if running:
             try:
-                version = await asyncio.to_thread(self._backend.version)
                 metrics = await asyncio.to_thread(self._backend.metrics)
             except CoreError:
-                version = None
+                metrics = None
         return CoreStatus(
             core_id=self.metadata.id,
             state=CoreState.RUNNING if running else CoreState.STOPPED,
             health=HealthStatus.HEALTHY if running else HealthStatus.UNKNOWN,
-            core_version=version,
+            core_version=version.version,
+            version_reason=version.reason,
             metrics=metrics,
         )
 
@@ -1234,6 +1245,15 @@ class XrayDriver(BaseCoreDriver):
     def _outbound_to_native(self, ob: Outbound) -> tuple[dict | None, UnsupportedOutbound | None]:
         s = ob.settings
         kind, name = ob.kind, ob.name
+
+        def need(*keys: str) -> UnsupportedOutbound | None:
+            missing = [key for key in keys if s.get(key) in (None, "")]
+            if not missing:
+                return None
+            return UnsupportedOutbound(
+                name=name,
+                reason=f"{kind.value} outbound is missing required setting(s): {', '.join(missing)}",
+            )
         # Native cores enter every policy domain through a loopback SOCKS
         # gateway. This avoids VRF socket-demux ambiguity while service-core
         # packets still use fwmark/table directly.
@@ -1243,7 +1263,7 @@ class XrayDriver(BaseCoreDriver):
                 "settings": {"servers": [{
                     "address": "127.0.0.1",
                     "port": int(s["_policy_socks_port"]),
-                    "udp": True,
+                    "udp": kind is not OutboundKind.SSH,
                 }]},
             }, None
         # Compatibility fallback for externally supplied policy managers.
@@ -1316,13 +1336,13 @@ class XrayDriver(BaseCoreDriver):
             return {"protocol": "wireguard", "tag": name,
                     "settings": settings}, None
         if kind is OutboundKind.SSH:
-            if gap := need("server", "server_port", "username"):
-                return None, gap
-            native: dict[str, Any] = {"protocol": "ssh", "tag": name, "settings": {
-                "address": s["server"], "port": int(s["server_port"]),
-                "user": s["username"], "password": s.get("password", ""),
-            }}
-            return native, None
+            return None, UnsupportedOutbound(
+                name=name,
+                reason=(
+                    "Xray has no SSH outbound codec; deploy through the managed "
+                    "OpenSSH SOCKS application domain"
+                ),
+            )
         return None, UnsupportedOutbound(
             name=name,
             reason=f"xray has no native '{kind.value}' outbound (use a CORE chain to sing-box instead).",

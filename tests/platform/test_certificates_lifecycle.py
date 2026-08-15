@@ -29,6 +29,8 @@ def test_scanned_core_cert_is_addressable_and_deletable(tmp_path):
     data = str(tmp_path)
     core_dir, _ = _core_materialized_cert(tmp_path)
     managed = certificates.self_signed(data, "panel-x", "panel.example.com", days=90)
+    assert certificates.certificate_covers(managed.path, "panel.example.com")
+    assert not certificates.certificate_covers(managed.path, "other.example.com")
     assert managed.managed and managed.id == "certs/panel-x/fullchain.pem"
 
     # alpha.7.5 item 8: the REGISTRY lists managed certs ONLY — runtime

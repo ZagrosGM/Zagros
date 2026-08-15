@@ -1,6 +1,7 @@
 """Portal data models (framework-agnostic)."""
 from __future__ import annotations
 
+import ipaddress
 import re
 from datetime import datetime, timezone
 from enum import Enum
@@ -77,6 +78,10 @@ class PortalSettings(BaseModel):
     public_scheme: Literal["http", "https"] = "https"
     tls_certificate_id: str | None = None
     force_https: bool = False
+    # shared: routes remain on the panel listener; dedicated: Zagros binds a
+    # second listener; external_proxy: URL ownership belongs to Nginx/Caddy/etc.
+    listener_mode: Literal["shared", "dedicated", "external_proxy"] = "shared"
+    listen_address: str = "0.0.0.0"
     qr_base_url: str | None = None
 
     def public_base_url(self) -> str | None:
@@ -91,6 +96,15 @@ class PortalSettings(BaseModel):
             return f"{scheme}://{host}{suffix}"
         return (self.subscription_url_prefix or "").strip().rstrip("/") or None
 
+    def canonical_path(self, token: str = "<token>") -> str:
+        """Canonical configured route; legacy /zagros/sub remains an alias."""
+        path = (self.subscription_path or "sub").strip().strip("/") or "sub"
+        return f"/{path}/{token}"
+
+    def canonical_url(self, token: str = "<token>") -> str | None:
+        base = self.public_base_url()
+        return f"{base}{self.canonical_path(token)}" if base else None
+
     def normalize(self) -> "PortalSettings":
         path = (self.subscription_path or "sub").strip().strip("/") or "sub"
         if not _SUBSCRIPTION_PATH_RE.match(path):
@@ -98,14 +112,33 @@ class PortalSettings(BaseModel):
                 "subscription_path must be 1-32 chars of a-z 0-9 . _ - "
                 "and start with a letter or digit"
             )
+        if path.lower() in {
+            "api", "dashboard", "statics", "client", "docs", "redoc",
+            "openapi", "favicon", "health",
+        }:
+            raise ValueError(f"subscription_path '{path}' is reserved by the panel")
         domain = (self.public_domain or "").strip().strip(".") or None
         subdomain = (self.custom_subdomain or "").strip().strip(".") or None
         if domain and ("/" in domain or "://" in domain or " " in domain):
             raise ValueError("public_domain must be a hostname without scheme/path")
         if subdomain and not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,61}[A-Za-z0-9])?", subdomain):
             raise ValueError("custom_subdomain is not a valid DNS label")
+        try:
+            ipaddress.ip_address(self.listen_address)
+        except ValueError as exc:
+            raise ValueError("listen_address must be an IPv4/IPv6 address") from exc
+        scheme = "https" if self.force_https else self.public_scheme
+        public_port = self.public_port
+        if self.listener_mode == "dedicated":
+            public_port = public_port or (443 if scheme == "https" else 80)
+            if not domain:
+                raise ValueError("dedicated subscription listener requires public_domain")
+            if scheme == "https" and not self.tls_certificate_id:
+                raise ValueError(
+                    "dedicated HTTPS subscription listener requires a managed TLS certificate")
         prefix = self.model_copy(update={
             "public_domain": domain, "custom_subdomain": subdomain,
+            "public_port": public_port,
         }).public_base_url()
         qr_base = (self.qr_base_url or "").strip().rstrip("/") or None
         if qr_base and not re.match(r"^https?://", qr_base, re.I):
@@ -121,9 +154,11 @@ class PortalSettings(BaseModel):
             "subscription_url_prefix": prefix,
             "public_domain": domain,
             "custom_subdomain": subdomain,
+            "public_port": public_port,
             "tls_certificate_id": certificate,
+            "listen_address": self.listen_address.strip(),
             "qr_base_url": qr_base,
-            "public_scheme": "https" if self.force_https else self.public_scheme,
+            "public_scheme": scheme,
         })
 
 

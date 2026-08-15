@@ -11,7 +11,7 @@ import { Dialog } from "../components/overlays";
 import { Badge, Button, Card, CardHeader, EmptyState, Field, Input, Select, Switch, cn } from "../components/ui";
 import { api, ApiError } from "../lib/api";
 import { useT } from "../lib/i18n";
-import type { Outbound, RoutePreview, RoutingRule } from "../lib/types";
+import type { OutboundsResponse, RoutePreview, RoutingRule } from "../lib/types";
 
 const ACTIONS = ["allow", "block", "route_to", "redirect", "dns", "fake_dns", "dns_override"] as const;
 const GEO_DEFAULT = ["ir", "cn", "ru", "us", "de", "ae", "tr", "private"];
@@ -36,7 +36,7 @@ export default function Routing() {
   });
   const outbounds = useQuery({
     queryKey: ["zagros", "outbounds"],
-    queryFn: () => api.get<{ outbounds: Outbound[] }>("/zagros/outbounds"),
+    queryFn: () => api.get<OutboundsResponse>("/zagros/outbounds"),
     staleTime: 30000,
   });
 
@@ -71,7 +71,15 @@ export default function Routing() {
     markDirty(arrayMove(rules, from, to).map((r, i) => ({ ...r, priority: (i + 1) * 10 })));
   };
 
-  const outboundNames = useMemo(() => (outbounds.data?.outbounds ?? []).map((o) => o.name), [outbounds.data]);
+  const outboundNames = useMemo(() => (outbounds.data?.outbounds ?? [])
+    .filter((o) => {
+      const capability = outbounds.data?.capabilities?.[o.kind];
+      return o.enabled && capability?.state === "supported" && capability.tun;
+    })
+    .map((o) => o.name), [outbounds.data]);
+  const nonTunOutbounds = useMemo(() => (outbounds.data?.outbounds ?? [])
+    .filter((o) => o.enabled && outbounds.data?.capabilities?.[o.kind]?.tun === false)
+    .map((o) => ({ name: o.name, reason: outbounds.data?.capabilities?.[o.kind]?.reason })), [outbounds.data]);
 
   return (
     <div className="space-y-4 animate-fade-up">
@@ -100,6 +108,12 @@ export default function Routing() {
       <p className="rounded-xl border border-warn/30 bg-warn-soft px-3 py-2 text-[11px] text-warn">
         SoftEther architecture: L2TP, SSTP and native sessions in one SoftEther instance share a single Virtual Hub/TAP source subnet. They must use one shared egress decision; different per-transport outbounds are rejected before Save/Deploy. Separate decisions require separate SoftEther instances/hubs.
       </p>
+      {nonTunOutbounds.length > 0 && (
+        <div className="rounded-xl border border-warn/30 bg-warn-soft px-3 py-2 text-[11px] text-warn">
+          Application-only outbounds are excluded from policy TUN targets: {nonTunOutbounds.map((o) => o.name).join(", ")}.
+          {nonTunOutbounds.some((o) => o.reason) && <span> {nonTunOutbounds.find((o) => o.reason)?.reason}</span>}
+        </div>
+      )}
 
       {load.isLoading ? null : rules.length === 0 ? (
         <Card>

@@ -348,6 +348,26 @@ def test_uninstall_removes_marked_binary(tmp_path) -> None:
     assert not exe.exists()
 
 
+def test_legacy_backend_routing_preserves_xray_api_control_plane() -> None:
+    from types import SimpleNamespace
+
+    from app.cores.drivers.xray.backend import LegacyXrayBackend
+
+    api_rule = {
+        "type": "field", "inboundTag": ["API_INBOUND"],
+        "outboundTag": "API",
+    }
+    backend = LegacyXrayBackend({})
+    backend._mod = SimpleNamespace(  # noqa: SLF001 - isolated adapter regression
+        config={"routing": {"rules": [api_rule, {
+            "type": "field", "inboundTag": ["old"], "outboundTag": "DIRECT"}]}},
+        core=SimpleNamespace(started=False),
+    )
+    new_rule = {"type": "field", "inboundTag": ["test"], "outboundTag": "Open"}
+    backend.set_routing_rules([new_rule])
+    assert backend._mod.config["routing"]["rules"] == [api_rule, new_rule]
+
+
 def test_outbound_redeploy_and_base_rules_keep_one_copy_of_custom_tag() -> None:
     """Repeat Deploy used to append custom names, then base setup deleted them."""
     from app.cores.outbounds.model import Outbound, OutboundKind

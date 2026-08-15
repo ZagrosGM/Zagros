@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
-import shlex
+import re
 import shutil
 import subprocess
 import time
@@ -38,6 +38,7 @@ _SUSPENDED_EXPIRES = "2000/01/01 00:00:00"
 @runtime_checkable
 class SoftEtherBackend(Protocol):
     def reachable(self) -> bool: ...
+    def version(self) -> str | None: ...
     def user_create(self, username: str, note: str = "") -> None: ...
     def user_delete(self, username: str) -> None: ...
     def user_password_set(self, username: str, password: str) -> None: ...
@@ -86,10 +87,12 @@ class LocalSoftEtherBackend:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _safe_command(command: str) -> str:
-        """Redact vpncmd argument secrets before errors/logs. The actual argv
-        still receives the value; PSKs and user/admin passwords never do."""
-        import re
+        """Redact vpncmd command secrets before errors or logs.
 
+        Authentication and commands are transported over the child's stdin;
+        this remains a defence-in-depth boundary for vpncmd output and error
+        messages, which can repeat a rejected command.
+        """
         return re.sub(r"(?i)(/(?:PSK|PASSWORD):)(?:\"[^\"]*\"|\S+)",
                       r"\1<redacted>", command)
 
@@ -146,15 +149,20 @@ class LocalSoftEtherBackend:
         argv = [executable, self.server, "/SERVER"]
         if hub:
             argv.append(f"/HUB:{self.hub}")
-        argv.append(f"/PASSWORD:{self.password}")
         if csv:
             argv.append("/CSV")
-        # vpncmd 5.x /CMD one-shot tokenizes argv NATIVELY: pass every token
-        # as its own argv element. The 4.x-era form — the entire command as
-        # ONE quoted string («"UserCreate e2e /GROUP: ..."») — dies with
-        # '"UserCreate": Command not found' on the 5.2 developer edition
-        # (verified live against a real source-built vpncmd 5.02.5187).
-        argv += ["/CMD", *shlex.split(command)]
+        # Never place authentication material OR a secret-bearing vpncmd
+        # command in argv: every local user can normally read /proc/<pid>/cmdline
+        # and process listings. vpncmd's regular interactive protocol accepts
+        # the administrator password first, followed by commands, on stdin on
+        # both the stable 4.x line and the 5.x developer line. A PIPE also
+        # avoids terminal echo. CR/LF are rejected because they are protocol
+        # delimiters, not representable password/command data.
+        if any(ch in self.password for ch in ("\r", "\n")):
+            raise CoreError("SoftEther administrator password contains a newline.")
+        if any(ch in command for ch in ("\r", "\n")):
+            raise CoreError("vpncmd command contains a newline.")
+        stdin_script = f"{self.password}\n{command}\nexit\n"
         proc = None
         out = ""
         # SoftEther's built-in DoS guard can transiently reject localhost
@@ -165,7 +173,8 @@ class LocalSoftEtherBackend:
         for attempt in range(2):
             try:
                 proc = subprocess.run(
-                    argv, capture_output=True, text=True, timeout=self.timeout
+                    argv, input=stdin_script, capture_output=True, text=True,
+                    timeout=self.timeout,
                 )
             except subprocess.TimeoutExpired as exc:
                 raise CoreError(f"vpncmd timed out on '{safe}'.") from exc
@@ -202,12 +211,11 @@ class LocalSoftEtherBackend:
     # declares ALL FIVE arguments — including /PSK: — with CmdEvalNotEmpty,
     # so a missing/empty PSK fails vpncmd's LOCAL validation and the tool
     # exits ERR_INVALID_PARAMETER (38) BEFORE any RPC runs — even when the
-    # intent is to disable every service. The argument string is also
-    # passed through shlex.split here (5.x one-shot tokenizes natively),
-    # so embedded whitespace needs real quoting. Every IPsecEnable issued
-    # by this backend therefore carries the full 5-argument form with a
-    # non-empty PSK + hub, validated locally first so a bad value never
-    # half-commands the server. (alpha.7.5 item 7)
+    # intent is to disable every service. Commands are fed through vpncmd's
+    # interactive stdin parser, so embedded whitespace still needs real
+    # quoting. Every IPsecEnable issued by this backend therefore carries the
+    # full 5-argument form with a non-empty PSK + hub, validated locally first
+    # so a bad value never half-commands the server. (alpha.7.5 item 7)
     # ------------------------------------------------------------------ #
 
     def ipsec_get(self) -> IPsecServices:
@@ -1071,6 +1079,20 @@ class LocalSoftEtherBackend:
     # ------------------------------------------------------------------ #
     # Protocol implementation
     # ------------------------------------------------------------------ #
+    def version(self) -> str | None:
+        executable = self.vpncmd_binary()
+        if executable is None:
+            return None
+        try:
+            proc = subprocess.run(
+                [executable, "/?"], capture_output=True, text=True,
+                timeout=min(self.timeout, 10.0))
+        except (OSError, subprocess.SubprocessError):
+            return None
+        output = (proc.stdout or "") + (proc.stderr or "")
+        match = re.search(r"\bVersion\s+([0-9.]+)\s+Build\s+([0-9]+)", output)
+        return f"{match.group(1)} build {match.group(2)}" if match else None
+
     def reachable(self) -> bool:
         try:
             self._cmd("ServerInfoGet")

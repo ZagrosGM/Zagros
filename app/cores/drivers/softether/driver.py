@@ -45,6 +45,7 @@ from app.cores.types import (
     CoreStatus,
     DeviceSession,
     HealthStatus,
+    ListenerClaim,
     UsageRecord,
     UserAccount,
 )
@@ -255,6 +256,35 @@ class SoftEtherDriver(BaseCoreDriver):
         self._suspended_expire_restore: dict[str, str | None] = {}
         self._policy_source: dict[str, str] | None = None
 
+    async def listener_claims(self) -> list[ListenerClaim]:
+        """Describe configured TCP listeners for host-level collision checks."""
+        claims: list[ListenerClaim] = []
+        if self.settings.get("feature_sstp"):
+            claims.append(ListenerClaim(
+                core_id="softether", protocol="sstp", transport="tcp",
+                port=int(self.settings.get("sstp_port") or 443),
+                label="SoftEther SSTP",
+            ))
+        if self.settings.get("feature_softether"):
+            claims.append(ListenerClaim(
+                core_id="softether", protocol="softether", transport="tcp",
+                port=int(self.settings.get("native_port") or 5555),
+                label="SoftEther native VPN",
+            ))
+        if self.settings.get("feature_ovpn"):
+            for raw in str(self.settings.get("ovpn_ports") or "1194").split(","):
+                try:
+                    port = int(raw.strip())
+                except ValueError:
+                    continue
+                if 1 <= port <= 65535:
+                    claims.append(ListenerClaim(
+                        core_id="softether", protocol="openvpn-clone",
+                        transport="tcp", port=port,
+                        label="SoftEther OpenVPN compatibility",
+                    ))
+        return claims
+
     def ensure_policy_source(self) -> dict[str, str]:
         """Switch SecureNAT to DHCP+routed TAP and configure its Linux gateway.
 
@@ -315,7 +345,13 @@ class SoftEtherDriver(BaseCoreDriver):
         interface = source.get("interface") or f"tap_{device}"
         ip = shutil.which("ip")
         if ip:
-            subprocess.run([ip, "link", "set", "dev", interface, "down"],
+            # BridgeDelete normally closes SoftEther's TAP fd and removes the
+            # interface. If vpnserver was recreated, however, a stale kernel
+            # TAP can survive without a BridgeList row; the next BridgeCreate
+            # reports a duplicate and an unbridged, DHCP-dead device is reused.
+            # This exact interface name is Panel-owned, so remove the stale
+            # link rather than merely setting it DOWN.
+            subprocess.run([ip, "link", "delete", "dev", interface],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self._policy_source = None
 
@@ -551,7 +587,26 @@ class SoftEtherDriver(BaseCoreDriver):
     # lifecycle — the server is external/systemd-owned; we verify reachability
     # ------------------------------------------------------------------ #
     async def start(self) -> None:
+        async def restore_policy_source() -> None:
+            """Re-attach Linux state after vpnserver/service recreation.
+
+            SoftEther persists BridgeCreate in ``vpn_server.config`` and
+            recreates the TAP device, but an OS interface's address/UP state is
+            not persisted by SoftEther.  Without this reconciliation a daemon
+            restart leaves the bridge present but unnumbered, so DHCP clients
+            connect successfully while every routed packet black-holes until
+            the whole Panel is restarted.
+            """
+            if self._policy_source is not None:
+                # A persisted BridgeCreate row can recreate a TAP that looks
+                # UP but no longer forwards frames after the daemon replaced
+                # its bridge object. Rebuild the bridge transactionally; merely
+                # re-adding the Linux address leaves client ARP/DHCP black-holed.
+                await asyncio.to_thread(self.disable_policy_source)
+                await asyncio.to_thread(self.ensure_policy_source)
+
         if await asyncio.to_thread(self._backend.reachable):
+            await restore_policy_source()
             return
         server_binary = getattr(self._backend, "server_binary", lambda: None)
         # Package/container filesystems are replaced during panel upgrades.
@@ -579,6 +634,7 @@ class SoftEtherDriver(BaseCoreDriver):
             await asyncio.sleep(3.0)
             for _ in range(30):
                 if await asyncio.to_thread(self._backend.reachable):
+                    await restore_policy_source()
                     return
                 await asyncio.sleep(2.0)
             recover_password = getattr(
@@ -588,6 +644,7 @@ class SoftEtherDriver(BaseCoreDriver):
                     "softether recovered persisted admin authority on a fresh "
                     "post-upgrade server; Studio/accounts will now reconcile"
                 )
+                await restore_policy_source()
                 return
         raise CoreError(
             f"SoftEther hub '{self.settings['hub']}' unreachable via vpncmd "
@@ -601,6 +658,7 @@ class SoftEtherDriver(BaseCoreDriver):
 
     async def status(self) -> CoreStatus:
         reachable = await asyncio.to_thread(self._backend.reachable)
+        version = await self.version()
         sessions = []
         if reachable:
             try:
@@ -613,6 +671,8 @@ class SoftEtherDriver(BaseCoreDriver):
             core_id=self.metadata.id,
             state=CoreState.RUNNING if reachable else CoreState.STOPPED,
             health=HealthStatus.HEALTHY if reachable else HealthStatus.UNHEALTHY,
+            core_version=version.version,
+            version_reason=version.reason,
             metrics=CoreMetrics(
                 active_accounts=len(self._accounts), active_sessions=len(sessions)
             ) if reachable else None,
@@ -775,11 +835,15 @@ class SoftEtherDriver(BaseCoreDriver):
                         # Disconnect raced this poll. The committed bytes show
                         # up in UserGet on this or the next 30-second tick.
                         continue
+                    # SoftEther names directions from the VPN Server/hub:
+                    # Outgoing leaves the hub toward the Internet (client
+                    # upload); Incoming enters the hub toward the client
+                    # (client download). Expose client semantics everywhere.
                     live_sessions[session.session_name] = (
-                        int(live.incoming_bytes), int(live.outgoing_bytes))
+                        int(live.outgoing_bytes), int(live.incoming_bytes))
             up, down = self._usage.observe(
                 account_id,
-                (completed.incoming_bytes, completed.outgoing_bytes),
+                (completed.outgoing_bytes, completed.incoming_bytes),
                 live_sessions,
             )
             records.append(UsageRecord(

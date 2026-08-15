@@ -10,6 +10,63 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.8.3] — Unreleased — Capability, listener, subscription and node architecture
+
+### Fixed
+
+* Dashboard dependency remediation upgrades React Router to 7.18.2 and the
+  Vite toolchain to Vite 8.2.1 / plugin-react 6.0.5, then refreshes vulnerable
+  transitive nanoid and picomatch locks. The release lock now produces
+  `npm audit` with zero high, moderate, low or critical findings; a static
+  lock-floor regression prevents the audited ranges from silently returning.
+* Python dependency remediation raises aiohttp to 3.14.3+ and Pillow to
+  12.3.0+, and removes the unused `jose`/`python-jose` remnants that pulled a
+  no-fixed-version `ecdsa` advisory. A fresh requirements audit now reports
+  zero known vulnerabilities and the direct PyJWT implementation is pinned by
+  a regression contract.
+* SoftEther routed-TAP restart recovery now rebuilds the persisted local
+  bridge, deletes a stale Panel-owned TAP, and restores its Linux gateway/IP
+  state. A real daemon restart previously recreated an apparently-UP but
+  unnumbered or unbridged TAP: clients authenticated while DHCP/ARP and policy
+  traffic black-holed until the whole Panel restarted.
+* SoftEther `vpncmd` authentication and secret-bearing commands now travel
+  through an anonymous stdin pipe rather than process arguments. Administrator
+  passwords, user passwords and IPsec PSKs are no longer readable from process
+  listings or `/proc/<pid>/cmdline`; newline protocol injection is rejected and
+  output/error redaction remains as defence in depth.
+* SSH outbounds are no longer forced into a sing-box TUN. The shared outbound
+  contract distinguishes application proxy, native renderer, kernel routing
+  and TUN capability; invalid SSH policy-TUN rules fail before mutation while
+  Xray's real native SSH outbound remains available.
+* Panel Network Apply detects live TCP ownership in both the API and root host
+  agent. A SoftEther SSTP listener on 443 returns an explicit non-destructive
+  conflict; TLS health probes now verify certificate identity instead of
+  using `curl -k`. Successful browser transitions probe the new origin before
+  navigating; failures remain on the old URL and surface rollback state.
+* Subscription origin/path generation now comes from SQL portal settings for
+  copied links, QR and format URLs. Configurable canonical links use
+  `/<path>/<token>`, legacy aliases remain valid, and an optional dedicated
+  HTTP/TLS listener exposes subscription routes without exposing admin APIs.
+* Core versions use one stopped-or-running adapter contract. SSH and SoftEther
+  probes were added, WireGuard no longer returns its project URL as a version,
+  and unknown versions carry a reason instead of rendering blank.
+* SoftEther PPTP is visible as an explicit unsupported wizard capability; the
+  real 4.44 runtime has no `PptpGet`/`PptpEnable` command. SoftEther outbound
+  families use the same structured availability matrix rather than a UI-only
+  deny-list.
+
+### Added
+
+* Canonical five-state cross-core capability matrix for Xray, sing-box,
+  OpenVPN, WireGuard, SSH and SoftEther.
+* Native Zagros Node Agent: certificate-pinned HTTPS registration, one-time
+  hash-only bootstrap token, encrypted panel signing credentials, HMAC request
+  signing, replay protection, allowlisted core lifecycle/inbound operations,
+  bounded logs/timeouts, encrypted node core settings, resource metrics and
+  root-private authenticated-operation audit records. The legacy Marzban Xray-only node path remains
+  migration compatibility rather than being renamed.
+* `zagros-node` installer/lifecycle CLI and Node architecture documentation.
+
 ## [1.0.0-alpha.8.2] — 2026-08-14 — Cross-core routing and safe host networking
 
 Runtime-verified follow-up to `alpha.8.1`. This release replaces UI-only

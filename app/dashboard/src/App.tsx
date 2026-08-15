@@ -12,6 +12,7 @@ const Templates = lazy(() => import("./pages/Templates"));
 const Subscriptions = lazy(() => import("./pages/Subscriptions"));
 const Nodes = lazy(() => import("./pages/Nodes"));
 const Cores = lazy(() => import("./pages/Cores"));
+const Capabilities = lazy(() => import("./pages/Capabilities"));
 const Routing = lazy(() => import("./pages/Routing"));
 const Outbounds = lazy(() => import("./pages/Outbounds"));
 const Inbounds = lazy(() => import("./pages/Inbounds"));
@@ -50,6 +51,7 @@ export default function App() {
           <Route path="subscriptions" element={<Suspense fallback={<PageFallback />}><Subscriptions /></Suspense>} />
           <Route path="nodes" element={<Suspense fallback={<PageFallback />}><Nodes /></Suspense>} />
           <Route path="cores" element={<Suspense fallback={<PageFallback />}><Cores /></Suspense>} />
+          <Route path="capabilities" element={<Suspense fallback={<PageFallback />}><Capabilities /></Suspense>} />
           <Route path="routing" element={<Suspense fallback={<PageFallback />}><Routing /></Suspense>} />
           <Route path="outbounds" element={<Suspense fallback={<PageFallback />}><Outbounds /></Suspense>} />
           <Route path="inbounds" element={<Suspense fallback={<PageFallback />}><Inbounds /></Suspense>} />

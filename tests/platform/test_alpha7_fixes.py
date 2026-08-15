@@ -14,6 +14,9 @@ Each test pins ONE reported bug to its fix:
 from __future__ import annotations
 
 import asyncio
+import importlib
+from collections import deque
+from types import SimpleNamespace
 
 import pytest
 
@@ -266,6 +269,32 @@ def test_xray_export_reads_real_config_document():
     doc = XrayDriver.export_config_document(driver)
     assert "inbounds" in doc  # repo's real xray_config.json
     assert doc["inbounds"], "export must not be empty on the shipped config"
+
+
+def test_xray_stdin_preflight_rejects_dead_on_arrival_config_and_redacts(
+        monkeypatch):
+    from app.xray.core import XRayCore
+
+    core = XRayCore.__new__(XRayCore)
+    core.executable_path = "/persistent/xray"
+    core._env = {"XRAY_LOCATION_ASSET": "/persistent/assets"}
+    core._logs_buffer = deque(maxlen=100)
+    config = SimpleNamespace(to_json=lambda: '{"password":"do-not-leak"}')
+    failure = SimpleNamespace(
+        returncode=23,
+        stdout='failed outbound password="do-not-leak" unknown config id: ssh\n',
+    )
+    calls = []
+    core_module = importlib.import_module("app.xray.core")
+    monkeypatch.setattr(
+        core_module.subprocess, "run",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or failure,
+    )
+    with pytest.raises(RuntimeError, match="preflight failed") as exc:
+        core._validate_config(config)
+    assert "do-not-leak" not in str(exc.value)
+    assert calls[0][0][0][-2:] == ["-config", "stdin:"]
+    assert calls[0][1]["input"] == config.to_json()
 
 
 # --------------------------------------------------------------------- #

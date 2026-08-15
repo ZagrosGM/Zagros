@@ -46,8 +46,8 @@ def test_url_generation_shape_covers_portal_clash_singbox_and_qr_origin() -> Non
         public_domain="example.com", custom_subdomain="sub",
         subscription_path="clients", public_scheme="https",
     ).normalize()
-    subscription = settings.public_base_url() + f"/zagros/{settings.subscription_path}/<token>"
-    assert subscription == "https://sub.example.com/zagros/clients/<token>"
+    subscription = settings.canonical_url()
+    assert subscription == "https://sub.example.com/clients/<token>"
     assert (subscription + "?format=clash-meta").endswith("?format=clash-meta")
     assert (subscription + "?format=sing-box").endswith("?format=sing-box")
     ctx = PortalService._delivery_context(settings, None)
@@ -56,6 +56,8 @@ def test_url_generation_shape_covers_portal_clash_singbox_and_qr_origin() -> Non
 
 @pytest.mark.parametrize("field,value", [
     ("subscription_path", "bad/path"),
+    ("subscription_path", "dashboard"),
+    ("subscription_path", "statics"),
     ("public_domain", "https://bad.example"),
     ("qr_base_url", "ftp://bad.example"),
 ])

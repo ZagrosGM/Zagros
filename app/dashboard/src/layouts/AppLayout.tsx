@@ -2,7 +2,7 @@
 // theme/locale toggles, mobile drawer, keyboard shortcuts.
 import { clsx } from "clsx";
 import {
-  Activity, Award, Boxes, ChevronLeft, Cpu, FileTerminal, Globe,
+  Activity, Award, Boxes, ChevronLeft, Cpu, FileTerminal, Globe, Grid3X3,
   HardDrive, LayoutDashboard, LayoutTemplate, LogOut, Menu, Moon, Network,
   Radio, Route, Search, ServerCog, Settings, ShieldCheck, Store, Sun, TerminalSquare,
   Users, Waypoints, Wifi,
@@ -29,6 +29,7 @@ const NAV = [
   ]},
   { section: "nav.section.network", items: [
     { to: "/cores", icon: Cpu, key: "nav.cores" },
+    { to: "/capabilities", icon: Grid3X3, key: "nav.capabilities" },
     { to: "/routing", icon: Route, key: "nav.routing" },
     { to: "/outbounds", icon: Network, key: "nav.outbounds" },
     { to: "/inbounds", icon: Waypoints, key: "nav.inbounds" },
@@ -85,7 +86,7 @@ export default function AppLayout() {
   const sidebar = (
     <div className="flex h-full flex-col">
       <div className={clsx("flex h-16 items-center gap-3 border-b border-border px-4", sidebarCollapsed && "justify-center px-2")}>
-        <img src="./zagros.svg" alt="Zagros" className="h-9 w-9 shrink-0 rounded-xl" />
+        <img src="./statics/zagros.svg" alt="Zagros" className="h-9 w-9 shrink-0 rounded-xl" />
         {!sidebarCollapsed && (
           <div className="min-w-0">
             <p className="truncate text-[15px] font-bold tracking-tight">Zagros</p>

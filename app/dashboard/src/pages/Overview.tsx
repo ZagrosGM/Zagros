@@ -137,7 +137,7 @@ export default function Overview() {
                     <Badge tone="muted">{c.id}</Badge>
                   </div>
                   <div className="flex items-center gap-2 text-[11px] text-content-3">
-                    <span className="tabular-nums">{c.core_version ?? "—"}</span>
+                    <span className="tabular-nums" title={c.version_reason ?? undefined}>{c.core_version ?? "unknown"}</span>
                     <Badge tone={c.state === "running" ? "ok" : c.enabled ? "info" : "muted"} dot>
                       {c.state}{c.health && c.state === "running" ? ` · ${c.health}` : ""}
                     </Badge>

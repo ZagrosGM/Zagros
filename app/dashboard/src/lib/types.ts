@@ -132,6 +132,7 @@ export interface CoreView {
   builtin?: boolean;
   health?: string | null;
   core_version?: string | null;
+  version_reason?: string | null;
   pid?: number | null;
   uptime_seconds?: number | null;
   message?: string | null;
@@ -193,7 +194,24 @@ export interface Outbound {
   enabled: boolean;
 }
 
-export interface OutboundTest { ok: boolean; latency_ms: number | null; error?: string; detail?: string }
+export interface OutboundTest { ok: boolean; latency_ms: number | null; error?: string; detail?: string; availability?: SupportState }
+
+export type SupportState = "supported" | "unsupported" | "environment_limited" | "not_installed" | "not_applicable";
+export interface OutboundCapability {
+  state: SupportState;
+  selectable: boolean;
+  transports: string[];
+  application_proxy: boolean;
+  tun: boolean;
+  kernel_routing: boolean;
+  native_core_translation: string[];
+  host_runtime?: string | null;
+  reason?: string | null;
+}
+export interface OutboundsResponse {
+  outbounds: Outbound[];
+  capabilities: Record<string, OutboundCapability>;
+}
 
 // alpha.7: schema-driven outbound forms (/zagros/outbounds/schema)
 export interface OutboundField {
@@ -213,6 +231,8 @@ export interface OutboundKindSchema {
   properties: Record<string, OutboundField>;
   required?: string[];
   "x-supported"?: boolean;
+  "x-availability"?: SupportState;
+  "x-capability"?: OutboundCapability;
   "x-disabled-reason"?: string;
 }
 export type OutboundSchemas = Record<string, OutboundKindSchema>;
@@ -278,6 +298,8 @@ export interface PortalSettings {
   public_domain?: string | null; custom_subdomain?: string | null;
   public_port?: number | null; public_scheme?: "http" | "https";
   tls_certificate_id?: string | null; force_https?: boolean;
+  listener_mode?: "shared" | "dedicated" | "external_proxy";
+  listen_address?: string;
   qr_base_url?: string | null;
 }
 
@@ -291,7 +313,7 @@ export interface DeployStatusView {
 }
 export interface SnapshotCore {
   core_id: string; name: string; state: string; health: string; enabled: boolean;
-  version?: string | null; uptime_seconds?: number | null;
+  version?: string | null; version_reason?: string | null; uptime_seconds?: number | null;
   active_accounts?: number; active_sessions?: number; message?: string | null;
 }
 export interface SnapshotNode { node_id: number; name: string; address: string; status: string; last_seen?: string | null }

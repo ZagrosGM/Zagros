@@ -17,20 +17,27 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Sequence
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from app.cores.drivers.ssh.sshtool import (
     ACCT_CHAIN,
+    ACCT_INPUT_CHAIN,
+    ACCT_MARK_CHAIN,
     SSHSession,
+    forwarding_mark,
     parse_acct_counters,
+    parse_connmark_counters,
     parse_ps_sshd,
+    uid_from_forwarding_mark,
 )
 from app.cores.exceptions import CoreError
 
 logger = logging.getLogger("zagros.cores.drivers.ssh")
 
 _UID_RULE_S = re.compile(r"--uid-owner (\d+)")
+_CONNMARK_RULE_S = re.compile(r"--mark (0x[0-9a-fA-F]+|\d+)(?:/0x[0-9a-fA-F]+)?")
 
 #: the accounting chain is panel-owned; every writer lives in THIS process
 #: (usage ticks), so one lock gives exact-once converge semantics
@@ -50,6 +57,7 @@ class SSHBackend(Protocol):
     def kill_sessions(self, username: str) -> int: ...
     def sshd_running(self) -> bool: ...
     def logs(self, tail: int = 200) -> Sequence[str]: ...
+    def version(self) -> str | None: ...
     def install_packages(self) -> str: ...
 
 
@@ -75,6 +83,28 @@ class LocalSystemSSHBackend:
         self._sftp_thread: threading.Thread | None = None
         self._sftp_stop = threading.Event()
         self._load_sftp_totals()
+
+        # Generic SSH forwarding accounting uses the accepted encrypted
+        # transport socket itself. ``ss -tinp`` exposes cumulative sent/
+        # received bytes and both the privileged + dropped-UID sshd-session
+        # PIDs, so attribution remains exact even when OpenSSH creates the
+        # forwarding socket in its root monitor.
+        self._transport_state_path = os.path.join(
+            self.work_dir, "transport-usage.json")
+        self._host_transport_state_path = os.path.join(
+            self.work_dir, "host-transport-usage.json")
+        self._transport_ports_path = os.path.join(
+            self.work_dir, "accounting-listeners.json")
+        self._transport_forget_path = os.path.join(
+            self.work_dir, "accounting-forget.json")
+        self._host_transport = False
+        self._transport_lock = threading.Lock()
+        self._transport_totals: dict[int, tuple[int, int]] = {}
+        self._transport_live: dict[str, tuple[int, int, int]] = {}
+        self._transport_ports: set[int] = set()
+        self._transport_thread: threading.Thread | None = None
+        self._transport_stop = threading.Event()
+        self._load_transport_totals()
 
     # ------------------------------------------------------------------ #
     # helpers
@@ -105,6 +135,243 @@ class LocalSystemSSHBackend:
         except (subprocess.SubprocessError, OSError):
             return 127
         return proc.returncode
+
+    # ------------------------------------------------------------------ #
+    # Generic forwarding — bidirectional encrypted transport accounting
+    # ------------------------------------------------------------------ #
+    def _load_transport_totals(self) -> None:
+        try:
+            raw = json.loads(open(
+                self._transport_state_path, encoding="utf-8").read())
+            totals = raw.get("totals") or {}
+            live = raw.get("live") or {}
+            self._transport_totals = {
+                int(uid): (max(0, int(values[0])), max(0, int(values[1])))
+                for uid, values in totals.items()
+                if isinstance(values, list) and len(values) == 2
+            }
+            self._transport_live = {
+                str(key): (int(values[0]), max(0, int(values[1])),
+                           max(0, int(values[2])))
+                for key, values in live.items()
+                if isinstance(values, list) and len(values) == 3
+            }
+        except (OSError, ValueError, TypeError):
+            self._transport_totals = {}
+            self._transport_live = {}
+
+    def _save_transport_totals_locked(self) -> None:
+        os.makedirs(self.work_dir, mode=0o755, exist_ok=True)
+        part = self._transport_state_path + ".part"
+        with open(part, "w", encoding="utf-8") as fh:
+            json.dump({
+                "totals": {str(uid): [up, down]
+                           for uid, (up, down) in self._transport_totals.items()},
+                "live": {key: [uid, received, sent]
+                         for key, (uid, received, sent)
+                         in self._transport_live.items()},
+            }, fh, separators=(",", ":"))
+        os.chmod(part, 0o600)
+        os.replace(part, self._transport_state_path)
+
+    @staticmethod
+    def _pid_uid(pid: int) -> int | None:
+        try:
+            with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
+                line = next(row for row in fh if row.startswith("Uid:"))
+            values = line.split()[1:]
+            # Real/effective UIDs are both non-root on the dropped session.
+            non_root = [int(value) for value in values if int(value) > 0]
+            return non_root[0] if non_root else None
+        except (OSError, StopIteration, ValueError):
+            return None
+
+    def _write_transport_ports(self) -> None:
+        self._atomic_json(self._transport_ports_path,
+                          sorted(self._transport_ports))
+
+    @staticmethod
+    def _atomic_json(path: str, value: Any) -> None:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        part = path + ".part"
+        with open(part, "w", encoding="utf-8") as fh:
+            json.dump(value, fh, separators=(",", ":"))
+        os.chmod(part, 0o600)
+        os.replace(part, path)
+
+    def _host_transport_payload(self, *, max_age: float = 5.0) -> dict[str, Any] | None:
+        try:
+            if time.time() - os.path.getmtime(self._host_transport_state_path) > max_age:
+                return None
+            raw = json.loads(open(
+                self._host_transport_state_path, encoding="utf-8").read())
+            if raw.get("version") != 1 or not isinstance(raw.get("totals"), dict):
+                return None
+            return raw
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def transport_acct_available(self) -> str | None:
+        if self._host_transport_payload() is not None:
+            return None
+        if os.path.exists("/.dockerenv"):
+            return ("host SSH accounting collector is not active or its "
+                    "snapshot is stale; run 'zagros install-host-agent'")
+        binary = shutil.which("ss")
+        if not binary:
+            return "iproute2 ss is required for SSH transport accounting"
+        try:
+            proc = subprocess.run(
+                [binary, "-Htinp", "sport = :1"], capture_output=True,
+                text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"SSH transport accounting probe failed: {exc}"
+        if proc.returncode not in (0, 1):
+            detail = (proc.stderr or proc.stdout or "ss rejected socket query").strip()
+            return f"SSH transport accounting unavailable: {detail}"
+        if os.geteuid() != 0:
+            return "SSH transport accounting needs root to map socket PIDs to account UIDs"
+        return None
+
+    def _transport_snapshot(self) -> dict[str, tuple[int, int, int]]:
+        binary = shutil.which("ss") or "ss"
+        snapshot: dict[str, tuple[int, int, int]] = {}
+        for port in sorted(self._transport_ports):
+            proc = subprocess.run(
+                [binary, "-Htinp", f"sport = :{port}"],
+                capture_output=True, text=True, timeout=15)
+            if proc.returncode not in (0, 1):
+                continue
+            current: str | None = None
+            blocks: list[str] = []
+            for line in proc.stdout.splitlines():
+                if line and not line[0].isspace():
+                    if current:
+                        blocks.append(current)
+                    current = line
+                elif current is not None:
+                    current += " " + line.strip()
+            if current:
+                blocks.append(current)
+            for block in blocks:
+                pids = sorted({int(value) for value in
+                               re.findall(r"\bpid=(\d+)", block)})
+                uids = [uid for uid in (self._pid_uid(pid) for pid in pids)
+                        if uid is not None]
+                if not uids:
+                    continue
+                sent = re.search(r"\bbytes_sent:(\d+)", block)
+                received = re.search(r"\bbytes_received:(\d+)", block)
+                if sent is None or received is None:
+                    continue
+                uid = min(uids)
+                key = f"{port}:" + ",".join(str(pid) for pid in pids)
+                snapshot[key] = (uid, int(received.group(1)), int(sent.group(1)))
+        return snapshot
+
+    def _transport_collect_once(self) -> None:
+        current = self._transport_snapshot()
+        with self._transport_lock:
+            changed = current != self._transport_live
+            for key, (uid, received, sent) in current.items():
+                previous = self._transport_live.get(key)
+                if previous is not None and previous[0] == uid:
+                    up_delta = received - previous[1] if received >= previous[1] else received
+                    down_delta = sent - previous[2] if sent >= previous[2] else sent
+                else:
+                    up_delta, down_delta = received, sent
+                if up_delta or down_delta:
+                    up, down = self._transport_totals.get(uid, (0, 0))
+                    self._transport_totals[uid] = (
+                        up + max(0, up_delta), down + max(0, down_delta))
+                    changed = True
+            self._transport_live = current
+            if changed:
+                self._save_transport_totals_locked()
+
+    def transport_acct_start(self, ports: set[int]) -> None:
+        self._transport_ports = {int(port) for port in ports
+                                 if 1 <= int(port) <= 65535}
+        if not self._transport_ports:
+            raise CoreError("SSH transport accounting has no listener ports")
+        self._write_transport_ports()
+        # The host collector emits a heartbeat even with no live sockets. Give
+        # a just-installed/restarted service a bounded window to acknowledge
+        # the listener manifest before declaring honest degradation.
+        for _ in range(20):
+            if self._host_transport_payload() is not None:
+                self._host_transport = True
+                return
+            if not os.path.exists("/.dockerenv"):
+                break
+            time.sleep(0.25)
+        reason = self.transport_acct_available()
+        if reason:
+            raise CoreError(reason)
+        self._host_transport = False
+        if self._transport_thread is not None and self._transport_thread.is_alive():
+            return
+        self._transport_stop.clear()
+
+        def collect() -> None:
+            while not self._transport_stop.wait(1.0):
+                try:
+                    self._transport_collect_once()
+                except Exception as exc:  # noqa: BLE001 — collector survives ticks
+                    logger.warning("SSH transport accounting poll failed: %s", exc)
+
+        self._transport_thread = threading.Thread(
+            target=collect, name="zagros-ssh-transport-accounting", daemon=True)
+        self._transport_thread.start()
+        self._transport_collect_once()
+
+    def transport_acct_stop(self) -> None:
+        if self._host_transport:
+            self._host_transport = False
+            return
+        self._transport_stop.set()
+        if self._transport_thread is not None:
+            self._transport_thread.join(timeout=3)
+            self._transport_thread = None
+        try:
+            self._transport_collect_once()
+        except Exception:  # noqa: BLE001 — shutdown remains best-effort
+            pass
+
+    def transport_acct_read(self) -> dict[int, tuple[int, int]]:
+        if self._host_transport:
+            payload = self._host_transport_payload(max_age=10.0)
+            if payload is None:
+                raise CoreError("host SSH accounting snapshot is stale")
+            return {
+                int(uid): (max(0, int(values[0])), max(0, int(values[1])))
+                for uid, values in payload["totals"].items()
+                if isinstance(values, list) and len(values) == 2
+            }
+        self._transport_collect_once()
+        with self._transport_lock:
+            return dict(self._transport_totals)
+
+    def transport_acct_forget(self, uid: int) -> None:
+        if self._host_transport or os.path.exists(self._host_transport_state_path):
+            existing: list[int] = []
+            try:
+                raw = json.loads(open(
+                    self._transport_forget_path, encoding="utf-8").read())
+                if isinstance(raw, list):
+                    existing = [int(value) for value in raw]
+            except (OSError, ValueError, TypeError):
+                pass
+            self._atomic_json(self._transport_forget_path,
+                              sorted(set(existing) | {int(uid)}))
+            return
+        with self._transport_lock:
+            self._transport_totals.pop(uid, None)
+            self._transport_live = {
+                key: values for key, values in self._transport_live.items()
+                if values[0] != uid
+            }
+            self._save_transport_totals_locked()
 
     # ------------------------------------------------------------------ #
     # SFTP/SCP stream accounting — both directions, capability independent
@@ -215,38 +482,47 @@ class LocalSystemSSHBackend:
             return dict(self._sftp_totals)
 
     # ------------------------------------------------------------------ #
-    # per-UID forwarding uplink accounting — iptables owner match
+    # per-UID bidirectional forwarding accounting — owner + conntrack
     # ------------------------------------------------------------------ #
     def acct_available(self) -> str | None:
-        """None when per-UID accounting can run; else a DIAGNOSIS for the
-        operator (iptables absent, or NET_ADMIN missing — the panel
-        container needs the capability: installer compose grants it)."""
+        """None when exact forwarding accounting can run; else diagnosis.
+
+        OUTPUT ownership identifies the user's forwarding socket. CONNMARK
+        carries that identity onto reverse INPUT packets, which is the missing
+        downlink attribution xt_owner alone cannot provide.
+        """
         iptables = shutil.which("iptables") or next(
             (p for p in ("/usr/sbin/iptables", "/sbin/iptables") if os.path.exists(p)),
             None,
         )
         if iptables is None:
-            return ("iptables not found — SSH forwarding accounting needs it "
-                    "(SFTP accounting remains independent).")
-        # Probe the actual kernel owner matcher, not merely the iptables
-        # executable. Minimal/container kernels can list rules yet reject
-        # `-m owner` with rc=4; the old readiness check produced a false PASS.
-        probe = subprocess.run(
+            return ("iptables not found — SSH forwarding accounting needs "
+                    "owner and conntrack support (SFTP remains independent).")
+        probes = [
             [iptables, "-C", "OUTPUT", "-m", "owner", "--uid-owner", "0",
              "-j", "ACCEPT"],
-            capture_output=True, text=True, timeout=15)
-        if probe.returncode not in (0, 1):
-            detail = (probe.stderr or probe.stdout or "owner matcher unavailable").strip()
-            return f"iptables owner matcher unavailable: {detail}"
+            [iptables, "-t", "mangle", "-C", "OUTPUT", "-m", "owner",
+             "--uid-owner", "0", "-m", "conntrack", "--ctstate", "NEW",
+             "-j", "CONNMARK", "--set-xmark", "0x10000000/0xffffffff"],
+            [iptables, "-C", "INPUT", "-m", "connmark", "--mark",
+             "0x10000000/0xffffffff", "-j", "ACCEPT"],
+        ]
+        for probe in probes:
+            result = subprocess.run(
+                probe, capture_output=True, text=True, timeout=15)
+            if result.returncode not in (0, 1):
+                detail = (result.stderr or result.stdout or
+                          "owner/conntrack matcher unavailable").strip()
+                return f"iptables SSH accounting unavailable: {detail}"
         try:
-            self._run([iptables, "-S", ACCT_CHAIN], timeout=15)
+            self._run([iptables, "-S", "OUTPUT"], timeout=15)
+            self._run([iptables, "-t", "mangle", "-S", "OUTPUT"], timeout=15)
         except CoreError as exc:
             text = str(exc)
             if "Permission" in text or "Operation not permitted" in text:
                 return ("iptables unavailable inside this container — grant "
                         "NET_ADMIN (installer compose does; existing installs: "
                         "zagros update --force).")
-            return None  # any other error = chain simply absent: creatable
         return None
 
     def _iptables(self) -> str:
@@ -257,79 +533,122 @@ class LocalSystemSSHBackend:
 
     def acct_ensure(self) -> None:
         ipt = self._iptables()
-        try:
-            self._run([ipt, "-N", ACCT_CHAIN], check=False)
-        except CoreError:
-            pass  # exists already
-        rules = self._run([ipt, "-S", "OUTPUT"], check=False)
-        if f" -j {ACCT_CHAIN}" not in rules:
-            self._run([ipt, "-I", "OUTPUT", "1", "-j", ACCT_CHAIN])
+        for table, chain in ((None, ACCT_CHAIN), (None, ACCT_INPUT_CHAIN),
+                             ("mangle", ACCT_MARK_CHAIN)):
+            prefix = [ipt] + (["-t", table] if table else [])
+            self._run([*prefix, "-N", chain], check=False)
+        hooks = (
+            (None, "OUTPUT", ACCT_CHAIN),
+            (None, "INPUT", ACCT_INPUT_CHAIN),
+            ("mangle", "OUTPUT", ACCT_MARK_CHAIN),
+        )
+        for table, parent, child in hooks:
+            prefix = [ipt] + (["-t", table] if table else [])
+            rules = self._run([*prefix, "-S", parent], check=False)
+            if f" -j {child}" not in rules:
+                self._run([*prefix, "-I", parent, "1", "-j", child])
+
+    @staticmethod
+    def _forwarding_rules(uid: int) -> tuple[list[str], list[str], list[str]]:
+        mark = f"0x{forwarding_mark(uid):08x}/0xffffffff"
+        uplink = ["-m", "owner", "--uid-owner", str(uid), "-j", "RETURN"]
+        assign = ["-m", "owner", "--uid-owner", str(uid),
+                  "-m", "conntrack", "--ctstate", "NEW",
+                  "-j", "CONNMARK", "--set-xmark", mark]
+        downlink = ["-m", "connmark", "--mark", mark, "-j", "RETURN"]
+        return uplink, assign, downlink
 
     def acct_sync_users(self, uids: set[int]) -> None:
-        """Converge per-UID accounting rules to exactly ``uids`` — exactly
-        once each (alpha.7.5 item 13).
-
-        Field bug: racing usage ticks left DUPLICATED owner-match rules
-        (the kernel counts a packet against EVERY matching rule → the
-        user's traffic was double-counted), and symmetric racing drains
-        could over-delete to zero. The chain is panel-owned and the race
-        is between this process's threads, so the converge runs under a
-        module-level lock; the kernel-level `-C` existence checks and the
-        bounded duplicate drain stay as defense against out-of-band edits
-        and already-damaged state.
-        """
+        """Converge all three per-UID rules exactly once under one lock."""
         with _ACCT_LOCK:
             self._acct_sync_users_locked(uids)
 
     def _acct_sync_users_locked(self, uids: set[int]) -> None:
         ipt = self._iptables()
         self.acct_ensure()
-        rule_args = lambda uid: ["-m", "owner", "--uid-owner",  # noqa: E731
-                                 str(uid), "-j", "RETURN"]
 
-        def occurrences(uid: int) -> int:
-            count = 0
-            for line in self._run([ipt, "-S", ACCT_CHAIN]).splitlines():
-                m = _UID_RULE_S.search(line)
-                if m and int(m.group(1)) == uid:
-                    count += 1
-            return count
+        specs = (
+            (None, ACCT_CHAIN, 0),
+            ("mangle", ACCT_MARK_CHAIN, 1),
+            (None, ACCT_INPUT_CHAIN, 2),
+        )
+
+        def prefix(table: str | None) -> list[str]:
+            return [ipt] + (["-t", table] if table else [])
+
+        def occurrences(table: str | None, chain: str, args: list[str]) -> int:
+            needle = " ".join(args)
+            return sum(
+                1 for line in self._run([*prefix(table), "-S", chain]).splitlines()
+                if line.endswith(needle)
+            )
 
         current: set[int] = set()
-        for line in self._run([ipt, "-S", ACCT_CHAIN]).splitlines():
-            m = _UID_RULE_S.search(line)
-            if m:
-                current.add(int(m.group(1)))
+        for table, chain, index in specs:
+            for line in self._run([*prefix(table), "-S", chain]).splitlines():
+                match = _UID_RULE_S.search(line)
+                if match:
+                    current.add(int(match.group(1)))
+                    continue
+                if index == 2:
+                    mark_match = _CONNMARK_RULE_S.search(line)
+                    if mark_match:
+                        uid = uid_from_forwarding_mark(int(mark_match.group(1), 0))
+                        if uid is not None:
+                            current.add(uid)
 
         for uid in sorted(uids):
-            if uid not in current and self._rc(
-                    [ipt, "-C", ACCT_CHAIN, *rule_args(uid)]) != 0:
-                self._run([ipt, "-A", ACCT_CHAIN, *rule_args(uid)])
-            for _ in range(8):  # drain duplicates (double-count source)
-                if occurrences(uid) <= 1:
-                    break
-                if self._rc([ipt, "-D", ACCT_CHAIN, *rule_args(uid)]) != 0:
-                    break
-        # rule deletion counters-reset is fine for removed accounts — their
-        # tracker baseline is forgotten alongside (driver does both)
+            rules = self._forwarding_rules(uid)
+            for table, chain, index in specs:
+                args = rules[index]
+                if self._rc([*prefix(table), "-C", chain, *args]) != 0:
+                    self._run([*prefix(table), "-A", chain, *args])
+                for _ in range(8):
+                    if occurrences(table, chain, args) <= 1:
+                        break
+                    if self._rc([*prefix(table), "-D", chain, *args]) != 0:
+                        break
+
+        # Removing an account intentionally drops its counters; the driver's
+        # tracker forgets the same account in the provisioning transaction.
         for uid in sorted(current - uids):
-            for _ in range(8):  # remove every stale instance, incl. dupes
-                if self._rc([ipt, "-D", ACCT_CHAIN, *rule_args(uid)]) != 0:
-                    break
+            rules = self._forwarding_rules(uid)
+            for table, chain, index in specs:
+                args = rules[index]
+                for _ in range(8):
+                    if self._rc([*prefix(table), "-D", chain, *args]) != 0:
+                        break
 
     def acct_read(self) -> dict[int, int]:
-        out = self._run([self._iptables(), "-L", ACCT_CHAIN, "-n", "-v", "-x"])
+        out = self._run([self._iptables(), "-L", ACCT_CHAIN,
+                         "-n", "-v", "-x"])
         return parse_acct_counters(out)
 
-    def acct_teardown(self) -> None:
-        """Remove jump + chain (best-effort; uninstall keeps the host clean)."""
+    def acct_read_bidirectional(self) -> dict[int, tuple[int, int]]:
         ipt = self._iptables()
-        try:
-            self._run([ipt, "-D", "OUTPUT", "-j", ACCT_CHAIN], check=False)
-            self._run([ipt, "-F", ACCT_CHAIN], check=False)
-            self._run([ipt, "-X", ACCT_CHAIN], check=False)
-        except CoreError:
-            logger.debug("ssh acct teardown skipped: chain not removable")
+        uplink = self.acct_read()
+        downlink = parse_connmark_counters(self._run(
+            [ipt, "-L", ACCT_INPUT_CHAIN, "-n", "-v", "-x"]))
+        return {
+            uid: (uplink.get(uid, 0), downlink.get(uid, 0))
+            for uid in uplink.keys() | downlink.keys()
+        }
+
+    def acct_teardown(self) -> None:
+        """Remove all panel-owned hooks and chains, never unrelated rules."""
+        ipt = self._iptables()
+        for table, parent, chain in (
+            (None, "OUTPUT", ACCT_CHAIN),
+            (None, "INPUT", ACCT_INPUT_CHAIN),
+            ("mangle", "OUTPUT", ACCT_MARK_CHAIN),
+        ):
+            prefix = [ipt] + (["-t", table] if table else [])
+            try:
+                self._run([*prefix, "-D", parent, "-j", chain], check=False)
+                self._run([*prefix, "-F", chain], check=False)
+                self._run([*prefix, "-X", chain], check=False)
+            except CoreError:
+                logger.debug("ssh acct teardown skipped for %s", chain)
 
     def uid_of(self, username: str) -> int | None:
         try:
@@ -381,11 +700,11 @@ class LocalSystemSSHBackend:
     def authorize_key(self, username: str, public_key: str) -> str:
         """Install *public_key* as the account's panel-owned authorized key.
 
-        StrictModes-compliant: directory and file root-owned, sshd only
-        requires the chain to be non-group/world-writable, while the file
-        itself is made readable by the target user's primary group is NOT
-        needed — sshd reads authorized keys as root before dropping
-        privileges, so root:root 0600 is sufficient and safest.
+        StrictModes-compliant and immutable by the tunnel user: the directory
+        and file stay root-owned and non-writable, while mode 0644 is required
+        because current OpenSSH temporarily adopts the target UID before
+        opening an absolute AuthorizedKeysFile. Root:root 0600 made every
+        valid key fail with EACCES.
         """
         key = public_key.strip()
         if not key.startswith(("ssh-rsa", "ssh-ed25519", "ecdsa-sha2-", "sk-")):
@@ -399,7 +718,7 @@ class LocalSystemSSHBackend:
         tmp = f"{path}.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(key + "\n")
-        os.chmod(tmp, 0o600)
+        os.chmod(tmp, 0o644)
         os.replace(tmp, path)
         return path
 
@@ -477,6 +796,19 @@ class LocalSystemSSHBackend:
             if os.path.exists(candidate):
                 return candidate
         return None
+
+    def version(self) -> str | None:
+        binary = self._sshd_bin()
+        if binary is None:
+            return None
+        try:
+            proc = subprocess.run(
+                [binary, "-V"], capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        output = (proc.stdout or "") + (proc.stderr or "")
+        match = re.search(r"OpenSSH_([^,\s]+)", output)
+        return match.group(1) if match else None
 
     def render_dropin(self) -> str:
         """Panel-owned sshd overrides. SAFETY CONTRACT: port 22 is always

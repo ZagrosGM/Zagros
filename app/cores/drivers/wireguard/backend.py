@@ -15,6 +15,7 @@ import base64
 import ipaddress
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -538,8 +539,10 @@ class LocalWireGuardBackend:
             out = self._run([self.executable, "--version"])
         except CoreError:
             return None
-        parts = out.strip().split()
-        return parts[-1] if parts else None
+        # wireguard-tools prints: "wireguard-tools v1.0.20210914 - URL".
+        # Returning the last token exposed the project URL as the version.
+        match = re.search(r"\bwireguard-tools\s+v?([^\s]+)", out)
+        return f"v{match.group(1).lstrip('v')}" if match else None
 
     def logs(self, tail: int = 200) -> Sequence[str]:
         if shutil.which("journalctl"):

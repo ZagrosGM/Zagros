@@ -766,16 +766,16 @@ want_pass="${creds#*:}"
     async def status(self) -> CoreStatus:
         running = await asyncio.to_thread(self._backend.is_running)
         health = HealthStatus.UNKNOWN
-        version: str | None = None
+        version = await self.version()
         metrics = None
         if running:
-            version = await asyncio.to_thread(self._backend.version)
             metrics = await asyncio.to_thread(self._backend.metrics)
             alive = await asyncio.to_thread(self._backend.management_alive)
             health = HealthStatus.HEALTHY if alive else HealthStatus.DEGRADED
         return CoreStatus(
             core_id=self.metadata.id, state=CoreState.RUNNING if running else CoreState.STOPPED,
-            health=health, core_version=version, metrics=metrics,
+            health=health, core_version=version.version,
+            version_reason=version.reason, metrics=metrics,
         )
 
     async def health_check(self) -> CoreStatus:

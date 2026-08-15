@@ -1,14 +1,15 @@
 """Linux policy-routing runtime for cross-core egress.
 
 The native rule engines in Xray and sing-box only see traffic accepted by
-those processes.  OpenVPN, WireGuard and SoftEther clients are forwarded by
-the kernel, while SSH dynamic-forward sockets are created by sshd.  This
-module is the shared routing plane that makes those traffic sources obey the
-same named outbounds:
+those processes. OpenVPN, WireGuard and SoftEther clients are forwarded by
+the kernel, while SSH egress uses a managed OpenSSH dynamic-forward process.
+This module is the shared routing plane that makes those traffic sources obey
+the same named outbounds:
 
-* every network outbound owns a stable fwmark and routing table;
+* every IP-network outbound owns a stable fwmark and routing table;
 * OpenVPN and WireGuard profiles become real client interfaces;
 * proxy profiles become a small sing-box TUN gateway;
+* SSH profiles become real TCP-only OpenSSH SOCKS gateways;
 * Xray/sing-box receive a marked direct outbound pointing at the table;
 * service-core source subnets (and SSH account UIDs) are classified by an
   atomically replaced nftables table;
@@ -39,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from app.cores.capabilities import outbound_capability
 from app.cores.exceptions import CoreError
 from app.cores.outbounds.model import Outbound, OutboundKind
 from app.cores.routing.model import RoutingRule, RuleAction, UnsupportedRule
@@ -76,7 +78,7 @@ class PolicyDomain:
     bypass_mark: int
     return_mark: int
     interface: str                    # root-facing policy interface
-    mode: str                         # openvpn | wireguard | proxy
+    mode: str                         # openvpn | wireguard | proxy | ssh
     fingerprint: str
     tunnel_interface: str = ""        # real client/TUN interface
     vrf_interface: str | None = None   # overlapping client subnets stay L3-isolated
@@ -209,7 +211,7 @@ class PolicyRoutingManager:
 
     @classmethod
     def _interface_for(cls, name: str, mode: str) -> str:
-        prefix = {"openvpn": "zgo", "wireguard": "zgw", "proxy": "zgp"}[mode]
+        prefix = {"openvpn": "zgo", "wireguard": "zgw", "proxy": "zgp", "ssh": "zgs"}[mode]
         return prefix + cls._hash(name)[:10]
 
     @classmethod
@@ -225,17 +227,76 @@ class PolicyRoutingManager:
 
     @staticmethod
     def _mode(kind: OutboundKind) -> str | None:
+        """Select a host dataplane from the shared capability contract.
+
+        SSH is deliberately an application-only OpenSSH SOCKS domain.  Xray
+        has no ``ssh`` outbound codec (including current 26.x releases), while
+        OpenSSH ``-D`` is a real TCP application proxy but not a TUN and cannot
+        carry UDP/kernel-forwarded service traffic.
+        """
+        if kind is OutboundKind.SSH:
+            return "ssh"
+        capability = outbound_capability(kind)
+        if not capability.tun:
+            return None
         if kind is OutboundKind.OPENVPN:
             return "openvpn"
         if kind is OutboundKind.WIREGUARD:
             return "wireguard"
-        if kind in {
-            OutboundKind.SOCKS, OutboundKind.HTTP, OutboundKind.VLESS,
-            OutboundKind.VMESS, OutboundKind.TROJAN, OutboundKind.SHADOWSOCKS,
-            OutboundKind.HYSTERIA2, OutboundKind.TUIC, OutboundKind.SSH,
-        }:
-            return "proxy"
-        return None
+        return "proxy"
+
+    def validate_plan(self, rules: list[RoutingRule],
+                      outbounds: Iterable[Outbound],
+                      core_ids: Iterable[str] | None = None) -> None:
+        """Fail before mutation when a selected *service source* needs no TUN.
+
+        Xray-only deployment of its native SSH outbound is valid. OpenVPN,
+        WireGuard, SSH-inbound and SoftEther source traffic, however, reaches
+        egress through the shared host policy plane and therefore requires a
+        real TUN/kernel domain. This distinction preserves the application
+        proxy while refusing the impossible IP-routing interpretation.
+        """
+        by_name = {outbound.name: outbound for outbound in outbounds}
+        service_cores = {"openvpn", "wireguard", "softether", "ssh"}
+        targets = (set(core_ids) if core_ids is not None
+                   else set(self._cores.list_cores()))
+        policy_targets = service_cores.intersection(targets)
+        sources = [source for source in self.traffic_sources()
+                   if source.core_id in policy_targets]
+        for rule in rules:
+            if not rule.enabled or rule.action is not RuleAction.ROUTE_TO:
+                continue
+            outbound = by_name.get(str(rule.outbound))
+            if outbound is None:
+                raise CoreError(
+                    f"rule '{rule.name}' references missing outbound '{rule.outbound}'")
+            if rule.matcher.inbounds:
+                needs_policy = any(
+                    source.inbound_tag in rule.matcher.inbounds
+                    for source in sources)
+                # Keep pure preflight conservative even before an adapter is
+                # installed when a matcher explicitly names a service family.
+                if not needs_policy:
+                    inferable = policy_targets if core_ids is not None else service_cores
+                    needs_policy = any(
+                        str(tag).split("-", 1)[0] in inferable
+                        for tag in rule.matcher.inbounds)
+            else:
+                needs_policy = bool(policy_targets)
+            capability = outbound_capability(outbound.kind)
+            if needs_policy and not capability.tun:
+                raise CoreError(
+                    f"rule '{rule.name}' cannot use outbound '{outbound.name}' "
+                    f"({outbound.kind.value}) as a policy TUN: "
+                    f"{capability.reason or 'this outbound has no TUN dataplane'}. "
+                    "Limit the rule to native-core TCP application routing or choose a real TUN egress."
+                )
+            if outbound.kind is OutboundKind.SSH and not needs_policy:
+                networks = {str(item).lower() for item in rule.matcher.networks}
+                if networks != {"tcp"}:
+                    raise CoreError(
+                        f"rule '{rule.name}' targets TCP-only SSH outbound '{outbound.name}'; "
+                        "set the network matcher explicitly to tcp")
 
     @staticmethod
     def _fingerprint(outbound: Outbound) -> str:
@@ -249,18 +310,21 @@ class PolicyRoutingManager:
         return [self._domains[name].public() for name in sorted(self._domains)]
 
     def decorate(self, outbound: Outbound) -> Outbound:
-        """Return a deployment-only copy carrying kernel-domain metadata."""
+        """Return a deployment-only copy carrying live domain metadata."""
         domain = self._domains.get(outbound.name)
         if domain is None or not domain.ready:
             return outbound
         settings = copy.deepcopy(outbound.settings)
-        settings.update({
-            "_policy_mark": domain.fwmark,
-            "_policy_table": domain.table_id,
-            "_policy_interface": domain.interface,
-            "_policy_vrf": domain.vrf_interface,
-            "_policy_socks_port": domain.proxy_port,
-        })
+        settings["_policy_socks_port"] = domain.proxy_port
+        # An SSH domain is a TCP application SOCKS proxy only.  Advertising a
+        # mark/table/interface for it would falsely imply an IP dataplane.
+        if domain.mode != "ssh":
+            settings.update({
+                "_policy_mark": domain.fwmark,
+                "_policy_table": domain.table_id,
+                "_policy_interface": domain.interface,
+                "_policy_vrf": domain.vrf_interface,
+            })
         return outbound.model_copy(update={"settings": settings})
 
     # ------------------------------------------------------------------ #
@@ -277,6 +341,8 @@ class PolicyRoutingManager:
         return self._run("ip", "link", "show", "dev", name, check=False).returncode == 0
 
     def _domain_interfaces_exist(self, domain: PolicyDomain) -> bool:
+        if domain.mode == "ssh":
+            return self._runner.tcp_ready("127.0.0.1", domain.proxy_port)
         if not self._exists_interface(domain.interface):
             return False
         return (not domain.vrf_interface
@@ -376,9 +442,14 @@ class PolicyRoutingManager:
                     if previous is not None:
                         self._stop_domain(previous)
                     self._start_domain(candidate, outbound)
-                    self._install_table(candidate)
+                    if candidate.mode != "ssh":
+                        self._install_table(candidate)
                     candidate.ready = True
-                    candidate.detail = f"fwmark {candidate.fwmark} → table {candidate.table_id} → {candidate.interface}"
+                    candidate.detail = (
+                        f"TCP application SOCKS → 127.0.0.1:{candidate.proxy_port}"
+                        if candidate.mode == "ssh"
+                        else f"fwmark {candidate.fwmark} → table {candidate.table_id} → {candidate.interface}"
+                    )
                     started[outbound.name] = candidate
             except Exception:
                 for name, domain in started.items():
@@ -432,10 +503,13 @@ class PolicyRoutingManager:
                 self._start_openvpn(domain, outbound)
             elif domain.mode == "wireguard":
                 self._start_wireguard(domain, outbound)
+            elif domain.mode == "ssh":
+                self._start_ssh(domain, outbound)
             else:
                 self._start_proxy(domain, outbound)
-            self._wait_interface(domain)
-            self._attach_vrf(domain)
+            if domain.mode != "ssh":
+                self._wait_interface(domain)
+                self._attach_vrf(domain)
             if domain.mode in ("openvpn", "wireguard"):
                 self._start_gateway(domain)
             else:
@@ -456,6 +530,7 @@ class PolicyRoutingManager:
             if domain.vrf_interface:
                 self._run("ip", "link", "del", "dev", domain.vrf_interface,
                           check=False)
+            shutil.rmtree(domain.runtime_dir, ignore_errors=True)
             raise
 
     def _render_openvpn_profile(self, outbound: Outbound, runtime: Path) -> str:
@@ -607,6 +682,92 @@ class PolicyRoutingManager:
         if not candidate:
             raise CoreError("proxy policy domains need an installed sing-box binary")
         return candidate
+
+    def _start_ssh(self, domain: PolicyDomain, outbound: Outbound) -> None:
+        """Start a real OpenSSH dynamic-forward TCP application proxy.
+
+        Credentials live only in the private runtime directory. Passwords are
+        supplied through SSH_ASKPASS (never argv or process environment), keys
+        are mode 0600, and a provided public host key is pinned. Otherwise a
+        private accept-new TOFU store rejects later key changes.
+        """
+        binary = shutil.which("ssh")
+        env_binary = shutil.which("env")
+        if not binary or not env_binary:
+            raise CoreError("SSH outbound requires the OpenSSH client")
+        settings = outbound.settings
+        server = str(settings.get("server") or "").strip()
+        username = str(settings.get("username") or "").strip()
+        try:
+            port = int(settings.get("server_port") or 22)
+        except (TypeError, ValueError) as exc:
+            raise CoreError(f"SSH outbound '{outbound.name}' has an invalid server port") from exc
+        if not server or not username or not (1 <= port <= 65535):
+            raise CoreError(
+                f"SSH outbound '{outbound.name}' requires server, server_port and username")
+        password = str(settings.get("password") or "")
+        private_key = str(settings.get("private_key") or "").strip()
+        if not password and not private_key:
+            raise CoreError(
+                f"SSH outbound '{outbound.name}' requires a password or private key")
+        if "\n" in password:
+            raise CoreError(f"SSH outbound '{outbound.name}' has an invalid password")
+
+        runtime = Path(domain.runtime_dir)
+        known_hosts = runtime / "known_hosts"
+        known_hosts.touch(mode=0o600, exist_ok=True)
+        os.chmod(known_hosts, 0o600)
+        host_key = str(settings.get("host_key") or "").strip()
+        strict = "accept-new"
+        if host_key:
+            key_type = host_key.split(None, 1)[0]
+            if not (key_type.startswith("ssh-") or key_type.startswith("ecdsa-")
+                    or key_type.startswith("sk-")):
+                raise CoreError(
+                    f"SSH outbound '{outbound.name}' host_key must be a public host key, not a fingerprint")
+            host_label = server if port == 22 else f"[{server}]:{port}"
+            self._atomic_text(known_hosts, f"{host_label} {host_key}\n")
+            strict = "yes"
+
+        askpass = runtime / "askpass.sh"
+        password_file = runtime / "password"
+        if password:
+            self._atomic_text(password_file, password + "\n")
+            self._atomic_text(
+                askpass,
+                "#!/bin/sh\nexec cat " + shlex.quote(str(password_file)) + "\n",
+                mode=0o700,
+            )
+        else:
+            self._atomic_text(askpass, "#!/bin/sh\nexit 1\n", mode=0o700)
+
+        argv = [
+            env_binary,
+            "DISPLAY=zagros:0",
+            "SSH_ASKPASS_REQUIRE=force",
+            f"SSH_ASKPASS={askpass}",
+            binary,
+            "-F", "/dev/null",
+            "-N", "-T", "-D", f"127.0.0.1:{domain.proxy_port}",
+            "-p", str(port), "-l", username,
+            "-o", "ExitOnForwardFailure=yes",
+            "-o", "PermitLocalCommand=no",
+            "-o", "IdentityAgent=none",
+            "-o", "NumberOfPasswordPrompts=1",
+            "-o", "ServerAliveInterval=20",
+            "-o", "ServerAliveCountMax=3",
+            "-o", f"UserKnownHostsFile={known_hosts}",
+            "-o", f"StrictHostKeyChecking={strict}",
+        ]
+        if private_key:
+            key_path = runtime / "identity"
+            self._atomic_text(key_path, private_key.rstrip() + "\n")
+            argv.extend(("-o", "IdentitiesOnly=yes", "-i", str(key_path)))
+        if not password:
+            argv.extend(("-o", "BatchMode=yes"))
+        argv.extend(("--", server))
+        log = open(runtime / "client.log", "a", encoding="utf-8")  # noqa: SIM115
+        domain.process = self._runner.popen(argv, stdout=log)
 
     def _start_gateway(self, domain: PolicyDomain) -> None:
         binary = self._singbox_binary()
@@ -761,6 +922,10 @@ class PolicyRoutingManager:
     def _stop_domain(self, domain: PolicyDomain) -> None:
         self._stop_process(domain.gateway_process)
         self._stop_process(domain.process)
+        if domain.mode == "ssh":
+            shutil.rmtree(domain.runtime_dir, ignore_errors=True)
+            domain.ready = False
+            return
         self._run("ip", "rule", "del", "priority", str(domain.table_id), check=False)
         self._run(
             "ip", "rule", "del", "priority", "800",
@@ -776,6 +941,7 @@ class PolicyRoutingManager:
         if domain.vrf_interface:
             self._run("ip", "link", "del", "dev", domain.vrf_interface,
                       check=False)
+        shutil.rmtree(domain.runtime_dir, ignore_errors=True)
         domain.ready = False
 
     # ------------------------------------------------------------------ #
@@ -1030,6 +1196,8 @@ class PolicyRoutingManager:
         restore_lines: list[str] = []
         output_track: list[str] = []
         for domain in sorted(self._domains.values(), key=lambda item: item.table_id):
+            if domain.mode == "ssh":
+                continue
             restore_lines.append(
                 f"    ct mark {domain.return_mark} counter meta mark set {domain.return_mark}")
             output_track.append(

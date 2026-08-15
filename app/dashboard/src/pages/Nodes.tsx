@@ -1,40 +1,60 @@
-// Nodes — legacy node inventory: status, version, usage share, reconnect,
-// add/edit/remove. (Legacy API is the real backend for nodes.)
+// Native Zagros Node Management. The legacy Marzban Xray-only node transport
+// remains server-side for migration, but this page uses the authenticated,
+// signed, multi-core Zagros agent API exclusively.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { HardDrive, Pencil, Plus, RefreshCcw, RotateCw, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { Activity, HardDrive, Plus, RefreshCcw, ScrollText, Trash2 } from "lucide-react";
+import { useMemo, useState } from "react";
 import { toast } from "../components/feedback";
 import { ConfirmDialog, Dialog } from "../components/overlays";
-import { Badge, Button, Card, CardHeader, EmptyState, Field, Input, Skeleton, StatusDot } from "../components/ui";
+import { Badge, Button, Card, EmptyState, Field, Input, Select, Skeleton, StatusDot } from "../components/ui";
 import { api, ApiError } from "../lib/api";
-import { useDigits, formatBytes } from "../lib/format";
+import { formatBytes, useDigits } from "../lib/format";
 import { useT } from "../lib/i18n";
-import type { Node, NodesUsage } from "../lib/types";
 
-const statusTone = (s: string) => s === "connected" ? "ok" : s === "disabled" ? "muted" : s === "connecting" ? "warn" : "danger";
+interface AgentCoreStatus {
+  core_id: string; state: string; health: string;
+  core_version?: string | null; version_reason?: string | null;
+  message?: string | null;
+}
+interface AgentCoreInventory {
+  installed: Record<string, AgentCoreStatus>;
+  available: string[];
+}
+interface NativeNode {
+  id: number; name: string; address: string; port: number; status: string;
+  usage_coefficient: number; agent_type: "zagros_native";
+  agent_identity: string; certificate_fingerprint: string;
+  last_seen?: string | null;
+  health?: { healthy?: boolean; resources?: Record<string, number | number[] | null> } | null;
+  cores?: AgentCoreInventory | null;
+}
+interface NativeNodes { nodes: NativeNode[] }
+
+const statusTone = (status: string) => status === "connected" ? "ok" : status === "error" ? "danger" : "warn";
 
 export default function Nodes() {
   const t = useT();
   const digits = useDigits();
   const qc = useQueryClient();
-  const [dialog, setDialog] = useState<{ node?: Node } | null>(null);
-  const [deleteFor, setDeleteFor] = useState<Node | null>(null);
+  const [registerOpen, setRegisterOpen] = useState(false);
+  const [deleteFor, setDeleteFor] = useState<NativeNode | null>(null);
+  const [coreFor, setCoreFor] = useState<NativeNode | null>(null);
 
-  const list = useQuery({ queryKey: ["nodes"], queryFn: () => api.get<Node[]>("/nodes"), refetchInterval: 10000 });
-  const usage = useQuery({ queryKey: ["nodes", "usage"], queryFn: () => api.get<NodesUsage>("/nodes/usage"), refetchInterval: 15000, retry: false });
-
-  const reconnect = useMutation({
-    mutationFn: (id: number) => api.post(`/node/${id}/reconnect`),
-    onSuccess: () => { toast.ok("reconnect requested"); qc.invalidateQueries({ queryKey: ["nodes"] }); },
+  const list = useQuery({
+    queryKey: ["zagros", "native-nodes"],
+    queryFn: () => api.get<NativeNodes>("/zagros/nodes"),
+    refetchInterval: 15000,
+  });
+  const heartbeat = useMutation({
+    mutationFn: (id: number) => api.post(`/zagros/nodes/${id}/heartbeat`),
+    onSuccess: () => { toast.ok("signed heartbeat verified"); qc.invalidateQueries({ queryKey: ["zagros", "native-nodes"] }); },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
   });
-  const del = useMutation({
-    mutationFn: (id: number) => api.delete(`/node/${id}`),
-    onSuccess: () => { toast.ok(t("common.deleted")); setDeleteFor(null); qc.invalidateQueries({ queryKey: ["nodes"] }); },
+  const remove = useMutation({
+    mutationFn: (id: number) => api.delete(`/zagros/nodes/${id}`),
+    onSuccess: () => { setDeleteFor(null); toast.ok("node authority revoked and removed"); qc.invalidateQueries({ queryKey: ["zagros", "native-nodes"] }); },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
   });
-
-  const usageOf = (id: number) => usage.data?.usages?.find((u) => u.node_id === id);
 
   return (
     <div className="space-y-4 animate-fade-up">
@@ -43,99 +63,116 @@ export default function Nodes() {
           <HardDrive size={18} className="text-brand" />{t("nav.nodes")}
         </h1>
         <Button variant="ghost" size="sm" onClick={() => list.refetch()}><RefreshCcw size={13} /></Button>
-        <Button size="sm" onClick={() => setDialog({})}><Plus size={13} /> add node</Button>
+        <Button size="sm" onClick={() => setRegisterOpen(true)}><Plus size={13} /> register Zagros Node</Button>
       </div>
+      <p className="rounded-xl border border-brand/30 bg-brand-soft px-3 py-2 text-[11px] text-content-2">
+        Native nodes use certificate-pinned HTTPS, one-time registration and HMAC-signed commands with replay protection. No Docker socket or arbitrary shell endpoint is exposed. Legacy Marzban nodes are Xray-only and are not presented as multi-core nodes here.
+      </p>
 
-      {list.isLoading ? (
-        <div className="grid gap-3 md:grid-cols-2">{[1, 2].map((i) => <Skeleton key={i} className="h-40" />)}</div>
-      ) : !list.data?.length ? (
-        <Card>
-          <EmptyState title="Master-only deployment"
-            hint="Add remote nodes to distribute traffic — each node connects back to this panel for its config."
-            action={<Button size="sm" onClick={() => setDialog({})}><Plus size={13} /> add node</Button>} />
-        </Card>
+      {list.isLoading ? <Skeleton className="h-40" /> : !(list.data?.nodes.length) ? (
+        <Card><EmptyState title="No native Zagros nodes"
+          hint="Install zagros-node on the remote host, then register its one-time token and TLS SHA-256 fingerprint."
+          action={<Button size="sm" onClick={() => setRegisterOpen(true)}><Plus size={13} /> register node</Button>} /></Card>
       ) : (
-        <div className="grid gap-3 md:grid-cols-2">
-          {list.data.map((n) => {
-            const u = usageOf(n.id);
-            return (
-              <Card key={n.id}>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex min-w-0 items-center gap-2.5">
-                    <StatusDot tone={statusTone(n.status) as never} pulse={n.status === "connected"} />
-                    <div className="min-w-0">
-                      <h3 className="truncate text-sm font-semibold">{n.name}</h3>
-                      <p className="font-mono text-[11px] text-content-3" dir="ltr">{n.address}:{n.port} · api:{n.api_port}</p>
-                    </div>
+        <div className="grid gap-3 lg:grid-cols-2">
+          {list.data.nodes.map((node) => {
+            const resources = node.health?.resources ?? {};
+            const installed = Object.values(node.cores?.installed ?? {});
+            return <Card key={node.id}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <StatusDot tone={statusTone(node.status) as never} pulse={node.status === "connected"} />
+                    <h3 className="truncate text-sm font-semibold">{node.name}</h3>
+                    <Badge tone="brand">Zagros Node</Badge>
                   </div>
-                  <Badge tone={statusTone(n.status) as never} dot>{n.status}</Badge>
+                  <p className="mt-1 font-mono text-[11px] text-content-3" dir="ltr">{node.address}:{node.port} · {node.agent_identity.slice(0, 12)}…</p>
                 </div>
-                {n.message && <p className="mt-2 rounded-lg bg-danger-soft px-2.5 py-1.5 text-[11px] text-danger">{n.message}</p>}
-                <div className="mt-3 grid grid-cols-3 gap-2 text-[11px] text-content-3">
-                  <span>xray <b className="text-content">{n.xray_version ?? "—"}</b></span>
-                  <span>coefficient <b className="text-content tabular-nums">×{n.usage_coefficient}</b></span>
-                  <span>usage <b className="text-content tabular-nums">{u ? formatBytes(u.uplink + u.downlink, digits) : "—"}</b></span>
-                </div>
-                <div className="mt-3 flex items-center gap-1.5 border-t border-border pt-3">
-                  <Button variant="ghost" size="sm" onClick={() => reconnect.mutate(n.id)}><RotateCw size={13} /> reconnect</Button>
-                  <Button variant="ghost" size="sm" onClick={() => setDialog({ node: n })}><Pencil size={13} /> {t("common.edit")}</Button>
-                  <Button variant="ghost" size="icon" className="ms-auto" aria-label="delete node" onClick={() => setDeleteFor(n)}><Trash2 size={14} /></Button>
-                </div>
-              </Card>
-            );
+                <Badge tone={statusTone(node.status) as never} dot>{node.status}</Badge>
+              </div>
+              <div className="mt-3 grid grid-cols-3 gap-2 text-[11px] text-content-3">
+                <span>cores <b className="text-content">{installed.length}</b></span>
+                <span>memory <b className="text-content">{typeof resources.memory_used === "number" ? formatBytes(resources.memory_used, digits) : "—"}</b></span>
+                <span>CPU <b className="text-content">{typeof resources.cpu_percent === "number" ? `${resources.cpu_percent.toFixed(0)}%` : "—"}</b></span>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {installed.map((core) => <Badge key={core.core_id} tone={core.state === "running" ? "ok" : core.state === "error" ? "danger" : "muted"}>
+                  {core.core_id} · {core.state} · {core.core_version ?? "unknown"}
+                </Badge>)}
+              </div>
+              <div className="mt-3 flex items-center gap-1 border-t border-border pt-3">
+                <Button variant="ghost" size="sm" onClick={() => heartbeat.mutate(node.id)} loading={heartbeat.isPending}><Activity size={13} /> verify health</Button>
+                <Button variant="ghost" size="sm" onClick={() => setCoreFor(node)}><HardDrive size={13} /> core lifecycle</Button>
+                <Button variant="ghost" size="icon" className="ms-auto" aria-label="delete node" onClick={() => setDeleteFor(node)}><Trash2 size={14} /></Button>
+              </div>
+            </Card>;
           })}
         </div>
       )}
 
-      {dialog && <NodeDialog node={dialog.node} onClose={() => setDialog(null)} />}
-      <ConfirmDialog open={!!deleteFor} onClose={() => setDeleteFor(null)}
-        onConfirm={() => deleteFor && del.mutate(deleteFor.id)}
-        title={`delete node — ${deleteFor?.name ?? ""}`}
-        body="The node loses its config feed; running services on it stop syncing."
-        danger loading={del.isPending} />
+      {registerOpen && <RegisterNodeDialog onClose={() => setRegisterOpen(false)} />}
+      {coreFor && <NodeCoreDialog node={coreFor} onClose={() => setCoreFor(null)} />}
+      <ConfirmDialog open={Boolean(deleteFor)} onClose={() => setDeleteFor(null)}
+        onConfirm={() => deleteFor && remove.mutate(deleteFor.id)} danger loading={remove.isPending}
+        title={`revoke and delete — ${deleteFor?.name ?? ""}`}
+        body="The panel first sends a signed revoke to the agent. If the node is offline, deletion fails closed so an orphan authority is not silently left behind." />
     </div>
   );
 }
 
-function NodeDialog({ node, onClose }: { node?: Node; onClose: () => void }) {
+function RegisterNodeDialog({ onClose }: { onClose: () => void }) {
   const t = useT();
   const qc = useQueryClient();
-  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState({ name: "", address: "", port: 62050, registration_token: "", certificate_fingerprint: "", usage_coefficient: 1 });
   const [error, setError] = useState("");
-  const [f, setF] = useState({
-    name: node?.name ?? "", address: node?.address ?? "",
-    port: node?.port ?? 62050, api_port: node?.api_port ?? 62051,
-    usage_coefficient: node?.usage_coefficient ?? 1,
-    add_as_new_host: node?.add_as_new_host ?? false,
+  const register = useMutation({
+    mutationFn: () => api.post("/zagros/nodes/register", form),
+    onSuccess: () => { toast.ok("node registered; bootstrap token consumed"); qc.invalidateQueries({ queryKey: ["zagros", "native-nodes"] }); onClose(); },
+    onError: (e) => setError(e instanceof ApiError ? e.message : t("common.error")),
   });
-  return (
-    <Dialog open onClose={onClose} title={node ? `edit — ${node.name}` : "add node"}
-      subtitle={!node ? "after creation the panel shows the certificate — paste it into the node's config" : undefined}
-      footer={<>
-        <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
-        <Button loading={busy} disabled={!f.name.trim() || !f.address.trim()} onClick={async () => {
-          setBusy(true); setError("");
-          try {
-            if (node) await api.put(`/node/${node.id}`, f);
-            else await api.post("/node", f);
-            toast.ok(t("common.saved"));
-            qc.invalidateQueries({ queryKey: ["nodes"] });
-            onClose();
-          } catch (e) { setError(e instanceof ApiError ? e.message : t("common.error")); } finally { setBusy(false); }
-        }}>{t("common.save")}</Button>
-      </>}>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="name" required><Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
-        <Field label="address" required hint="hostname or IP the panel dials">
-          <Input value={f.address} onChange={(e) => setF({ ...f, address: e.target.value })} dir="ltr" />
-        </Field>
-        <Field label="service port"><Input type="number" value={f.port} onChange={(e) => setF({ ...f, port: Number(e.target.value) })} dir="ltr" /></Field>
-        <Field label="API port"><Input type="number" value={f.api_port} onChange={(e) => setF({ ...f, api_port: Number(e.target.value) })} dir="ltr" /></Field>
-        <Field label="usage coefficient" hint="traffic multiplier for accounting">
-          <Input type="number" step="0.1" min="0" value={f.usage_coefficient} onChange={(e) => setF({ ...f, usage_coefficient: Number(e.target.value) })} />
-        </Field>
-      </div>
-      {error && <p role="alert" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
-    </Dialog>
-  );
+  return <Dialog open onClose={onClose} title="register native Zagros Node"
+    subtitle="The remote agent must already be running with TLS. Registration consumes its one-time token."
+    footer={<><Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button><Button onClick={() => register.mutate()} loading={register.isPending} disabled={!form.name || !form.address || form.registration_token.length < 16 || form.certificate_fingerprint.replace(/:/g, "").length !== 64}>{t("common.save")}</Button></>}>
+    <div className="grid gap-4 sm:grid-cols-2">
+      <Field label="name" required><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+      <Field label="address" required hint="DNS name/IP covered by the node certificate"><Input dir="ltr" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} /></Field>
+      <Field label="HTTPS port"><Input type="number" min={1} max={65535} value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} /></Field>
+      <Field label="usage coefficient"><Input type="number" min="0.1" step="0.1" value={form.usage_coefficient} onChange={(e) => setForm({ ...form, usage_coefficient: Number(e.target.value) })} /></Field>
+      <Field label="one-time registration token" required><Input type="password" autoComplete="off" value={form.registration_token} onChange={(e) => setForm({ ...form, registration_token: e.target.value })} /></Field>
+      <Field label="TLS SHA-256 fingerprint" required><Input dir="ltr" value={form.certificate_fingerprint} onChange={(e) => setForm({ ...form, certificate_fingerprint: e.target.value })} /></Field>
+    </div>
+    {error && <p role="alert" className="mt-3 rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
+  </Dialog>;
+}
+
+function NodeCoreDialog({ node, onClose }: { node: NativeNode; onClose: () => void }) {
+  const t = useT();
+  const qc = useQueryClient();
+  const installed = node.cores?.installed ?? {};
+  const choices = useMemo(() => Array.from(new Set([...Object.keys(installed), ...(node.cores?.available ?? [])])).sort(), [installed, node.cores?.available]);
+  const [coreId, setCoreId] = useState(choices[0] ?? "");
+  const [action, setAction] = useState("start");
+  const [logs, setLogs] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  const lifecycle = useMutation({
+    mutationFn: () => api.post(`/zagros/nodes/${node.id}/cores/${encodeURIComponent(coreId)}/lifecycle`, { action, settings: {}, purge: false, force: false }),
+    onSuccess: async () => { toast.ok(`${action} completed on ${node.name}`); await api.post(`/zagros/nodes/${node.id}/heartbeat`); qc.invalidateQueries({ queryKey: ["zagros", "native-nodes"] }); },
+    onError: (e) => setError(e instanceof ApiError ? e.message : t("common.error")),
+  });
+  const loadLogs = async () => {
+    try {
+      const result = await api.get<{ lines: string[] }>(`/zagros/nodes/${node.id}/cores/${encodeURIComponent(coreId)}/logs?tail=200`);
+      setLogs(result.lines);
+    } catch (e) { setError(e instanceof ApiError ? e.message : t("common.error")); }
+  };
+  return <Dialog open onClose={onClose} wide title={`core lifecycle — ${node.name}`}
+    footer={<><Button variant="ghost" onClick={onClose}>{t("common.close")}</Button><Button onClick={() => lifecycle.mutate()} loading={lifecycle.isPending} disabled={!coreId}>{action}</Button></>}>
+    <div className="grid gap-4 sm:grid-cols-2">
+      <Field label="core"><Select value={coreId} onChange={(e) => setCoreId(e.target.value)}>{choices.map((id) => <option key={id} value={id}>{id}</option>)}</Select></Field>
+      <Field label="allowlisted action"><Select value={action} onChange={(e) => setAction(e.target.value)}>{["install", "start", "stop", "restart", "uninstall"].map((value) => <option key={value}>{value}</option>)}</Select></Field>
+    </div>
+    <Button className="mt-3" variant="secondary" size="sm" onClick={loadLogs}><ScrollText size={13} /> load signed log tail</Button>
+    {logs.length > 0 && <pre className="mt-3 max-h-72 overflow-auto rounded-xl bg-surface p-3 text-[10px]" dir="ltr">{logs.join("\n")}</pre>}
+    {error && <p role="alert" className="mt-3 rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
+  </Dialog>;
 }

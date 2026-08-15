@@ -27,7 +27,12 @@ interface WizardField {
 }
 interface WizardSecurity { id: string; label: string; fields: WizardField[] }
 interface WizardTransport { id: string; label: string; securities: WizardSecurity[] }
-interface WizardProtocol { id: string; label: string; default_port: number; fixed_port?: boolean; transports: WizardTransport[] }
+interface WizardProtocol {
+  id: string; label: string; default_port: number; fixed_port?: boolean;
+  availability?: "supported" | "unsupported" | "environment_limited" | "not_installed" | "not_applicable";
+  reason?: string | null;
+  transports: WizardTransport[];
+}
 interface WizardSchema { core_id: string; protocols: WizardProtocol[] }
 
 interface InboundRow { tag: string; protocol: string; listen?: string; port: number | string; [k: string]: unknown }
@@ -306,6 +311,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
   const CERT_KEYS = new Set(["certificate", "certificate_key", "certificate_path", "certificate_key_path"]);
 
   const pickProto = (p: WizardProtocol) => {
+    if (p.availability && p.availability !== "supported") return;
     setProto(p); setTransport(null); setSecurity(null); setFields({}); setTouched(new Set());
     setCertRef(""); setCertMode("auto");
     if (p.fixed_port) {
@@ -450,13 +456,16 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
 
   const renderChoice = (
     <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-      {(step === 0 ? schema.data?.protocols ?? [] : step === 1 ? effProto?.transports ?? [] : effTransport?.securities ?? []).map((o: { id: string; label: string; default_port?: number }) => {
+      {(step === 0 ? schema.data?.protocols ?? [] : step === 1 ? effProto?.transports ?? [] : effTransport?.securities ?? []).map((o: { id: string; label: string; default_port?: number; availability?: string; reason?: string | null }) => {
         const active =
           step === 0 ? effProto?.id === o.id : step === 1 ? effTransport?.id === o.id : effSecurity?.id === o.id;
+        const unavailable = step === 0 && o.availability && o.availability !== "supported";
         return (
-          <button key={o.id} onClick={() => (step === 0 ? pickProto(o as WizardProtocol) : step === 1 ? pickTransport(o as WizardTransport) : pickSecurity(o as WizardSecurity))}
-            className={`rounded-xl border p-3 text-start transition-colors ${active ? "border-brand bg-brand-soft" : "border-border hover:border-border-strong"}`}>
+          <button key={o.id} disabled={Boolean(unavailable)} title={o.reason ?? undefined}
+            onClick={() => (step === 0 ? pickProto(o as WizardProtocol) : step === 1 ? pickTransport(o as WizardTransport) : pickSecurity(o as WizardSecurity))}
+            className={`rounded-xl border p-3 text-start transition-colors ${unavailable ? "cursor-not-allowed border-border opacity-60" : active ? "border-brand bg-brand-soft" : "border-border hover:border-border-strong"}`}>
             <p className="text-[13px] font-semibold">{o.label}</p>
+            {unavailable && <p className="mt-1 text-[10.5px] text-warn">{o.availability?.replace(/_/g, " ")} — {o.reason}</p>}
             {/* alpha.7.5 items 2+7: NO port line on initial protocol cards —
                 neither a fabricated number nor a misleading placeholder. The
                 real port is the suggested editable value in the review

@@ -166,6 +166,65 @@ def test_parse_real_vpncmd_fixtures() -> None:
     assert live.outgoing_bytes == 24_059
 
 
+def test_start_reconciles_numbered_routed_tap_after_daemon_restart(
+    monkeypatch,
+) -> None:
+    """A recreated TAP is not usable until its host IP/UP state is restored."""
+    driver, _backend = _driver()
+    driver._policy_source = {  # noqa: SLF001 - persisted in-process route intent
+        "interface": "tap_zge2e",
+        "subnet": "192.168.87.0/24",
+        "gateway": "192.168.87.254",
+    }
+    restored: list[str] = []
+
+    def disable() -> None:
+        restored.append("disable")
+        driver._policy_source = None  # noqa: SLF001
+
+    def ensure() -> dict[str, str]:
+        restored.append("ensure")
+        driver._policy_source = {  # noqa: SLF001
+            "interface": "tap_zge2e",
+            "subnet": "192.168.87.0/24",
+            "gateway": "192.168.87.254",
+        }
+        return dict(driver._policy_source)  # noqa: SLF001
+
+    monkeypatch.setattr(driver, "disable_policy_source", disable)
+    monkeypatch.setattr(driver, "ensure_policy_source", ensure)
+
+    asyncio.run(driver.start())
+
+    assert restored == ["disable", "ensure"]
+
+
+def test_disable_policy_source_deletes_stale_panel_owned_tap(monkeypatch) -> None:
+    import shutil
+    import subprocess
+
+    driver, backend = _driver({"policy_tap_device": "zge2e"})
+    driver._policy_source = {  # noqa: SLF001
+        "interface": "tap_zge2e",
+        "subnet": "192.168.87.0/24",
+        "gateway": "192.168.87.254",
+    }
+    disabled: list[str] = []
+    backend.routed_tap_disable = lambda *, device: disabled.append(device)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(shutil, "which", lambda name: "/sbin/ip" if name == "ip" else None)
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda argv, **_kwargs: commands.append(list(argv)) or type("P", (), {"returncode": 0})(),
+    )
+
+    driver.disable_policy_source()
+
+    assert disabled == ["zge2e"]
+    assert commands == [["/sbin/ip", "link", "delete", "dev", "tap_zge2e"]]
+    assert driver.policy_source() is None
+
+
 def test_softether_start_waits_for_real_daemon_warmup(monkeypatch) -> None:
     backend = FakeSEBackend()
     probes = 0
@@ -248,15 +307,17 @@ def test_usage_deltas_from_native_counters() -> None:
 
         first = await driver.get_usage()
         by_id = {r.account_id: r for r in first}
-        assert by_id["1.alice"].uplink_bytes == 1_073_741_824
-        assert by_id["1.alice"].downlink_bytes == 2_147_483_648
+        # SoftEther counters are server-oriented: outgoing = client upload,
+        # incoming = client download.
+        assert by_id["1.alice"].uplink_bytes == 2_147_483_648
+        assert by_id["1.alice"].downlink_bytes == 1_073_741_824
         assert by_id["2.bob"].uplink_bytes == 100
 
-        backend.stats["1.alice"] = (1_073_742_824, 2_147_483_648)   # +1000 up
+        backend.stats["1.alice"] = (1_073_742_824, 2_147_483_648)  # +1000 download
         second = await driver.get_usage()
         by_id = {r.account_id: r for r in second}
-        assert by_id["1.alice"].uplink_bytes == 1000
-        assert by_id["1.alice"].downlink_bytes == 0
+        assert by_id["1.alice"].uplink_bytes == 0
+        assert by_id["1.alice"].downlink_bytes == 1000
 
     asyncio.run(run())
 
@@ -280,7 +341,7 @@ def test_softether_accounting_delta_test() -> None:
         backend.session_stats["SID-1.alice-live"] = (5_000_000, 50_000_000)
 
         first = (await driver.get_usage())[0]
-        assert (first.uplink_bytes, first.downlink_bytes) == (5_000_000, 50_000_000)
+        assert (first.uplink_bytes, first.downlink_bytes) == (50_000_000, 5_000_000)
 
         # SoftEther's delayed UserGet refresh catches up while the session is
         # STILL connected. Those same 55 MB must not be emitted twice.
@@ -291,7 +352,7 @@ def test_softether_accounting_delta_test() -> None:
         # Five more MB while the same PPP session remains connected.
         backend.session_stats["SID-1.alice-live"] = (5_500_000, 54_500_000)
         second = (await driver.get_usage())[0]
-        assert (second.uplink_bytes, second.downlink_bytes) == (500_000, 4_500_000)
+        assert (second.uplink_bytes, second.downlink_bytes) == (4_500_000, 500_000)
 
         # Disconnect commits the live totals into UserGet. Effective totals
         # stay identical, therefore this poll must not double count them.
@@ -445,6 +506,54 @@ def test_vpncmd_protocol_guard_backs_off_then_retries(monkeypatch) -> None:
     assert "completed successfully" in backend._cmd("UserList")
     assert len(runs) == 2
     assert sleeps == [10.0]
+
+
+def test_vpncmd_transports_all_credentials_over_stdin_not_argv(monkeypatch) -> None:
+    """Admin passwords and secret-bearing commands must never be visible in
+    /proc/<pid>/cmdline or process listings."""
+    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
+
+    admin_secret = "dummy-admin-secret"
+    psk_secret = "dummy-ipsec-secret"
+    backend = LocalSoftEtherBackend({
+        "admin_password": admin_secret,
+        "server": "localhost",
+        "hub": "TEST_HUB",
+    })
+    monkeypatch.setattr(backend, "vpncmd_binary", lambda: "/vpncmd")
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(
+            args[0], 0, stdout="The command completed successfully.\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    command = f"IPsecEnable /PSK:{psk_secret} /DEFAULTHUB:TEST_HUB"
+    backend._cmd(command, csv=True, hub=False)
+
+    assert len(calls) == 1
+    argv = calls[0][0][0]
+    stdin_script = calls[0][1]["input"]
+    assert argv == ["/vpncmd", "localhost", "/SERVER", "/CSV"]
+    assert "/PASSWORD" not in " ".join(argv)
+    assert "/CMD" not in argv
+    assert admin_secret not in " ".join(argv)
+    assert psk_secret not in " ".join(argv)
+    assert stdin_script == f"{admin_secret}\n{command}\nexit\n"
+
+
+def test_vpncmd_rejects_newline_protocol_injection(monkeypatch) -> None:
+    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
+
+    backend = LocalSoftEtherBackend({"admin_password": "bad\npassword"})
+    monkeypatch.setattr(backend, "vpncmd_binary", lambda: "/vpncmd")
+    with pytest.raises(CoreError, match="password contains a newline"):
+        backend._cmd("ServerInfoGet")
+
+    backend.password = "safe"
+    with pytest.raises(CoreError, match="command contains a newline"):
+        backend._cmd("ServerInfoGet\nServerStatusGet")
 
 
 def test_persistent_runtime_resolves_after_container_recreation(tmp_path, monkeypatch) -> None:

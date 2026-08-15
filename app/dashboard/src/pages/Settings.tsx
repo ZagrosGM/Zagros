@@ -12,6 +12,27 @@ import { useT } from "../lib/i18n";
 import { applyUiState, useUI } from "../stores/ui";
 import type { CertificateInfo, PanelInfo, PanelNetworkSettings } from "../lib/types";
 
+interface NetworkApplyAccepted { accepted: boolean; public_url: string; operation_id: string; status: string }
+interface NetworkApplyStatus { status: string; message?: string; rolled_back?: boolean; public_url?: string }
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Cross-origin readiness probe. Image loading reveals no API data, sends no
+ * credentials, and still requires DNS + a browser-trusted TLS certificate. */
+function probeNewOrigin(base: string, operationId: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const timer = window.setTimeout(() => {
+      image.src = "";
+      reject(new Error("new origin health probe timed out"));
+    }, 4000);
+    image.onload = () => { window.clearTimeout(timer); resolve(); };
+    image.onerror = () => { window.clearTimeout(timer); reject(new Error("not ready")); };
+    image.referrerPolicy = "no-referrer";
+    image.src = `${base.replace(/\/$/, "")}/api/zagros/network-transition/${operationId}.svg?t=${Date.now()}`;
+  });
+}
+
 export default function Settings() {
   const t = useT();
   const digits = useDigits();
@@ -22,6 +43,7 @@ export default function Settings() {
   const certsQ = useQuery({ queryKey: ["zagros", "certificates"], queryFn: () => api.get<{ certificates: CertificateInfo[] }>("/zagros/certificates") });
   const [network, setNetwork] = useState<PanelNetworkSettings | null>(null);
   const [networkTest, setNetworkTest] = useState<Record<string, unknown> | null>(null);
+  const [networkTransition, setNetworkTransition] = useState("");
   useEffect(() => { if (networkQ.data) setNetwork(networkQ.data); }, [networkQ.data]);
   const testNetwork = useMutation({
     mutationFn: () => api.post<Record<string, unknown>>("/zagros/settings/panel-network/test", network),
@@ -34,9 +56,40 @@ export default function Settings() {
     onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
   });
   const applyNetwork = useMutation({
-    mutationFn: () => api.post<{ accepted: boolean; public_url: string }>("/zagros/settings/panel-network/apply", network),
-    onSuccess: (data) => toast.ok(`host apply queued — ${data.public_url}`),
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
+    mutationFn: () => api.post<NetworkApplyAccepted>("/zagros/settings/panel-network/apply", network),
+    onSuccess: async (data) => {
+      setNetworkTransition(`Applying host settings; waiting for ${data.public_url}…`);
+      const deadline = Date.now() + 210_000;
+      while (Date.now() < deadline) {
+        // While the old origin is alive it can surface an explicit rollback.
+        try {
+          const status = await api.get<NetworkApplyStatus>(
+            `/zagros/settings/panel-network/apply-status?operation_id=${encodeURIComponent(data.operation_id)}`,
+          );
+          if (status.status === "failed") {
+            const message = status.message || "host apply failed";
+            setNetworkTransition(status.rolled_back ? `${message} (rolled back)` : message);
+            toast.error(message);
+            return;
+          }
+        } catch { /* expected while the old listener is being recreated */ }
+
+        try {
+          await probeNewOrigin(data.public_url, data.operation_id);
+          setNetworkTransition("New URL is healthy and its TLS connection was accepted by the browser. Redirecting…");
+          const destination = `${data.public_url.replace(/\/$/, "")}${window.location.pathname}${window.location.search}${window.location.hash}`;
+          window.location.assign(destination);
+          return;
+        } catch { /* not healthy yet */ }
+        await sleep(1000);
+      }
+      setNetworkTransition("Timed out waiting for the new URL. The browser was not redirected; check apply status and rollback health.");
+      toast.error("new panel URL did not become browser-reachable");
+    },
+    onError: (e) => {
+      setNetworkTransition("");
+      toast.error(e instanceof ApiError ? e.message : t("common.error"));
+    },
   });
 
   return (
@@ -81,6 +134,7 @@ export default function Settings() {
                 <Button variant="secondary" onClick={() => saveNetwork.mutate()} loading={saveNetwork.isPending}><Save size={14} />save desired state</Button>
                 <Button onClick={() => applyNetwork.mutate()} loading={applyNetwork.isPending}>apply with rollback</Button>
               </div>
+              {networkTransition && <p role="status" className="rounded-xl border border-brand/30 bg-brand-soft px-3 py-2 text-xs text-content-2 sm:col-span-2 lg:col-span-3">{networkTransition}</p>}
               {networkTest && <pre className="max-h-48 overflow-auto rounded-xl bg-surface p-3 text-[10px] text-content-2 sm:col-span-2 lg:col-span-3" dir="ltr">{JSON.stringify(networkTest, null, 2)}</pre>}
             </div>
           )}

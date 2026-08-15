@@ -880,10 +880,9 @@ class WireGuardDriver(BaseCoreDriver):
         any_running = running_count > 0
         health = HealthStatus.UNKNOWN
         message = self._last_sync_error
-        version: str | None = None
+        version = await self.version()
         metrics = None
         if any_running:
-            version = await asyncio.to_thread(self._backend.version)
             metrics = await asyncio.to_thread(self._backend.metrics)
             sessions = await self.get_online_devices()
             metrics.active_sessions = len(sessions)
@@ -913,7 +912,8 @@ class WireGuardDriver(BaseCoreDriver):
             core_id=self.metadata.id,
             state=state,
             health=health,
-            core_version=version,
+            core_version=version.version,
+            version_reason=version.reason,
             metrics=metrics,
             message=message,
         )

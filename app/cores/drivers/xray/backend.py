@@ -11,6 +11,9 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import os
+import re
+import subprocess
 from typing import Any, Protocol, runtime_checkable
 
 from app.cores.exceptions import CoreError
@@ -149,7 +152,26 @@ class LegacyXrayBackend:
         return bool(self._x().core.started)
 
     def version(self) -> str | None:
-        return self._x().core.version
+        # Running legacy wrapper may already have the parsed value. A stopped
+        # core is still versionable from its installed binary.
+        try:
+            value = self._x().core.version
+            if value:
+                return str(value)
+        except Exception:  # fall through to the binary probe
+            pass
+        executable = self.executable_path()
+        if not executable or not os.path.isfile(executable):
+            return None
+        try:
+            proc = subprocess.run(
+                [executable, "version"], capture_output=True, text=True,
+                timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        output = (proc.stdout or "") + (proc.stderr or "")
+        match = re.search(r"^Xray\s+([^\s]+)", output, re.MULTILINE)
+        return match.group(1) if match else None
 
     def metrics(self) -> CoreMetrics:
         metrics = CoreMetrics()
@@ -316,6 +338,21 @@ class LegacyXrayBackend:
                 f"xray rejected the studio document (nothing was applied): {exc}"
             ) from exc
 
+        # XRayConfig validates the legacy JSON shape, not the codecs compiled
+        # into the installed Xray binary. In particular, ``protocol: ssh``
+        # passed that Python check but the 26.x process exited on stdin. Compile
+        # the exact candidate before writing XRAY_JSON or replacing the live
+        # singleton so a rejected Advanced edit truly touches nothing.
+        runtime_validate = getattr(mod.core, "_validate_config", None)
+        if callable(runtime_validate):
+            try:
+                mod.core._ensure_binary()  # noqa: SLF001 - same legacy bridge
+                runtime_validate(candidate)
+            except Exception as exc:  # noqa: BLE001 - normalize runtime rejection
+                raise CoreError(
+                    f"xray runtime rejected the studio document (nothing was applied): {exc}"
+                ) from exc
+
         os.makedirs(os.path.dirname(os.path.abspath(XRAY_JSON)), exist_ok=True)
         tmp_path = f"{XRAY_JSON}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as fh:
@@ -345,7 +382,18 @@ class LegacyXrayBackend:
     def set_routing_rules(self, rules: list[dict[str, Any]]) -> None:
         mod = self._x()
         routing = dict(mod.config.get("routing") or {})
-        routing["rules"] = rules
+        # XRayConfig injects the API control-plane rule at runtime. Replacing
+        # the whole list with admin rules deleted that rule; API_INBOUND then
+        # followed the ordinary default outbound back to its own dokodemo
+        # address, producing an exponential Xray→Xray self-connection loop and
+        # exhausting every ephemeral TCP port. Preserve only the exact
+        # control-plane rule and replace the panel-managed data-plane rules.
+        control = [
+            dict(rule) for rule in (routing.get("rules") or [])
+            if ("API_INBOUND" in (rule.get("inboundTag") or [])
+                and rule.get("outboundTag") == "API")
+        ]
+        routing["rules"] = control + rules
         routing.setdefault("domainStrategy", "IPIfNonMatch")
         mod.config["routing"] = routing
         self._persist_and_maybe_restart()

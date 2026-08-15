@@ -46,7 +46,7 @@ export default function Subscriptions() {
   const defaultPort = scheme === "https" ? 443 : 80;
   const port = form?.public_port && form.public_port !== defaultPort ? `:${form.public_port}` : "";
   const prefix = host ? `${scheme}://${host}${port}` : (form?.subscription_url_prefix || info.data?.panel_base_url || (info.data?.domain ? `https://${info.data.domain}` : ""));
-  const example = `${prefix || "https://panel.example.com"}/zagros/${form?.subscription_path ?? "sub"}/<token>`;
+  const example = `${prefix || "https://panel.example.com"}/${form?.subscription_path ?? "sub"}/<token>`;
 
   return (
     <div className="space-y-4 animate-fade-up">
@@ -66,6 +66,14 @@ export default function Subscriptions() {
                 <Field label="custom subdomain"><Input value={form.custom_subdomain ?? ""} onChange={(e) => setForm({ ...form, custom_subdomain: e.target.value || null })} dir="ltr" placeholder="sub" /></Field>
                 <Field label="scheme"><Select value={form.public_scheme ?? "https"} onChange={(e) => setForm({ ...form, public_scheme: e.target.value as "http" | "https" })}><option value="http">HTTP</option><option value="https">HTTPS</option></Select></Field>
                 <Field label="public port"><Input type="number" min={1} max={65535} value={form.public_port ?? ""} onChange={(e) => setForm({ ...form, public_port: e.target.value ? Number(e.target.value) : null })} dir="ltr" placeholder={form.public_scheme === "http" ? "80" : "443"} /></Field>
+                <Field label="listener ownership" hint="shared = panel port; dedicated = Zagros opens this port; external proxy = Nginx/Caddy owns it">
+                  <Select value={form.listener_mode ?? "shared"} onChange={(e) => setForm({ ...form, listener_mode: e.target.value as PortalSettings["listener_mode"] })}>
+                    <option value="shared">shared panel listener</option>
+                    <option value="dedicated">dedicated Zagros listener</option>
+                    <option value="external_proxy">external reverse proxy</option>
+                  </Select>
+                </Field>
+                {form.listener_mode === "dedicated" && <Field label="listen address"><Input value={form.listen_address ?? "0.0.0.0"} onChange={(e) => setForm({ ...form, listen_address: e.target.value })} dir="ltr" /></Field>}
               </div>
               <label className="flex items-center gap-2.5 text-sm text-content-2"><Switch checked={Boolean(form.force_https)} onChange={(v) => setForm({ ...form, force_https: v })} label="force HTTPS" />Force HTTPS</label>
               <Field label="TLS certificate" hint="optional when an external reverse proxy terminates TLS">

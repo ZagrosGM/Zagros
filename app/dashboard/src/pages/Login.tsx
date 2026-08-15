@@ -36,7 +36,7 @@ export default function Login() {
         className="card w-full max-w-sm p-8"
       >
         <div className="mb-8 flex flex-col items-center gap-3 text-center">
-          <img src="./zagros.svg" alt="" className="h-14 w-14 rounded-2xl shadow-pop" />
+          <img src="./statics/zagros.svg" alt="" className="h-14 w-14 rounded-2xl shadow-pop" />
           <div>
             <h1 className="text-lg font-bold tracking-tight">{t("login.title")}</h1>
             <p className="mt-1 text-xs text-content-3">{t("login.subtitle")}</p>

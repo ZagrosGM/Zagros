@@ -423,6 +423,23 @@ def test_boot_rehydrates_from_store_and_distrusts_running() -> None:
     asyncio.run(main())
 
 
+def test_boot_recovers_interrupted_stopping_state_and_restarts_enabled_core() -> None:
+    async def main() -> None:
+        mgr, store, _ = _make_manager()
+        await mgr.install_core("fakebox")
+        store.data["fakebox"]["state"] = CoreState.STOPPING.value
+
+        mgr2, _, _ = _make_manager()
+        mgr2._store = store
+        await mgr2.boot()
+        assert mgr2._states["fakebox"] == CoreState.STOPPED
+        await mgr2.start_enabled()
+        assert mgr2._states["fakebox"] == CoreState.RUNNING
+        assert mgr2.get("fakebox").starts == 1
+
+    asyncio.run(main())
+
+
 def test_client_config_never_leaks_secrets() -> None:
     async def main() -> None:
         mgr, _, _ = _make_manager()

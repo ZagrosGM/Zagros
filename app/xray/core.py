@@ -139,6 +139,38 @@ class XRayCore:
         })
         self.version = self.get_version()
 
+    def _validate_config(self, config: XRayConfig) -> None:
+        """Make Xray compile the exact stdin document before live mutation.
+
+        File-mode ``xray -test`` is not equivalent to the legacy stdin path:
+        field evidence showed a candidate containing the nonexistent ``ssh``
+        outbound codec pass a file check and then exit immediately on stdin.
+        The process wrapper previously reported that dead child as started.
+        """
+        cmd = [self.executable_path, "run", "-test", "-config", "stdin:"]
+        result = subprocess.run(
+            cmd,
+            env=self._env,
+            input=config.to_json(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode == 0:
+            return
+        lines = [line.strip() for line in (result.stdout or "").splitlines()
+                 if line.strip()]
+        for line in lines[-20:]:
+            self._logs_buffer.append(line)
+        detail = lines[-1] if lines else "candidate configuration rejected"
+        detail = re.sub(
+            r'(?i)(password|passphrase|privatekey|secret|token)(["=: ]+)[^, }]+',
+            r'\1\2[REDACTED]', detail,
+        )
+        raise RuntimeError(f"Xray configuration preflight failed: {detail[:700]}")
+
     def start(self, config: XRayConfig):
         if self.started is True:
             raise RuntimeError("Xray is started already")
@@ -146,6 +178,7 @@ class XRayCore:
 
         if config.get('log', {}).get('logLevel') in ('none', 'error'):
             config['log']['logLevel'] = 'warning'
+        self._validate_config(config)
 
         cmd = [
             self.executable_path,
@@ -192,6 +225,8 @@ class XRayCore:
         try:
             self.restarting = True
             logger.warning("Restarting Xray core...")
+            self._ensure_binary()
+            self._validate_config(config)  # keep the current process alive on rejection
             self.stop()
             self.start(config)
         finally:

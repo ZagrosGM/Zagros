@@ -8,6 +8,7 @@ URL and rolls back on failure.  No Docker socket is exposed to the web process.
 """
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import os
@@ -76,6 +77,109 @@ class PanelNetworkSettings(BaseModel):
         return f"{self.scheme}://{host}{suffix}"
 
 
+class PortConflict(BaseModel):
+    port: int
+    address: str
+    owner: str
+    process: str | None = None
+    core_id: str | None = None
+    protocol: str | None = None
+
+    def message(self) -> str:
+        return (
+            f"Port {self.port} is already owned by {self.owner}. "
+            "Choose another panel port or explicitly move the conflicting listener."
+        )
+
+
+def _addresses_overlap(desired: str, listening: str) -> bool:
+    wildcards = {"0.0.0.0", "::", "*"}
+    if desired in wildcards or listening in wildcards:
+        return True
+    try:
+        return ipaddress.ip_address(desired) == ipaddress.ip_address(listening)
+    except ValueError:
+        return desired == listening
+
+
+def _live_tcp_listeners(port: int) -> list[tuple[str, int | None, str | None]]:
+    """Kernel listener inventory: (address, pid, process name)."""
+    import psutil
+
+    listeners: list[tuple[str, int | None, str | None]] = []
+    try:
+        connections = psutil.net_connections(kind="tcp")
+    except (psutil.AccessDenied, OSError) as exc:
+        raise RuntimeError(
+            "cannot inspect host TCP listeners; panel port apply fails closed"
+        ) from exc
+    for connection in connections:
+        if connection.status != psutil.CONN_LISTEN or not connection.laddr:
+            continue
+        if int(connection.laddr.port) != int(port):
+            continue
+        process = None
+        if connection.pid is not None:
+            try:
+                process = psutil.Process(connection.pid).name()
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                process = None
+        listeners.append((str(connection.laddr.ip), connection.pid, process))
+    return listeners
+
+
+async def detect_port_conflicts(runtime, settings: PanelNetworkSettings,
+                                *, current_panel_port: int) -> list[PortConflict]:
+    """Resolve live socket ownership and core-declared protocol ownership.
+
+    Merely parsing a port number is insufficient in host-network mode.  Claims
+    explain *what* a vpnserver socket represents while the kernel inventory
+    proves it is live.  The current Python listener is the only socket exempted
+    when re-applying the same panel port.
+    """
+    claims = []
+    manager = getattr(runtime, "core_manager", None)
+    if manager is not None:
+        for core_id in manager.list_cores():
+            try:
+                claims.extend(await manager.get(core_id).listener_claims())
+            except Exception:
+                continue
+    live = await asyncio.to_thread(_live_tcp_listeners, settings.port)
+    result: list[PortConflict] = []
+    seen: set[tuple[str, str]] = set()
+    for address, pid, process in live:
+        if (settings.port == int(current_panel_port)
+                and pid == os.getpid()):
+            continue
+        if not _addresses_overlap(settings.bind_address, address):
+            continue
+        claim = next((item for item in claims
+                      if item.transport == "tcp" and item.port == settings.port
+                      and _addresses_overlap(settings.bind_address, item.address)), None)
+        if claim is not None:
+            owner = claim.label
+            core_id = claim.core_id
+            protocol = claim.protocol
+        elif (process or "").lower() == "vpnserver":
+            owner = "SoftEther SSTP" if settings.port == 443 else "SoftEther VPN Server"
+            core_id = "softether"
+            protocol = "sstp" if settings.port == 443 else None
+        else:
+            owner = process or "an unidentified host listener"
+            core_id = None
+            protocol = None
+        key = (address, owner)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(PortConflict(
+            port=settings.port, address=address, owner=owner,
+            process=process, core_id=core_id, protocol=protocol,
+        ))
+    return result
+
+
 class HostNetworkRequest:
     def __init__(self, root: str = "/var/lib/zagros/host-actions") -> None:
         self.root = Path(root)
@@ -83,14 +187,17 @@ class HostNetworkRequest:
     def agent_ready(self) -> bool:
         return (self.root / ".agent-ready").is_file()
 
-    def request(self, settings: PanelNetworkSettings) -> dict:
+    def request(self, settings: PanelNetworkSettings,
+                operation_id: str | None = None) -> dict:
         if not self.agent_ready():
             raise RuntimeError(
                 "Zagros host network agent is not installed; desired state can be saved/tested, "
                 "but Apply is disabled because the panel container cannot safely restart itself")
         self.root.mkdir(parents=True, exist_ok=True)
         os.chmod(self.root, 0o700)
-        operation = secrets.token_hex(16)
+        operation = operation_id or secrets.token_hex(16)
+        if not re.fullmatch(r"[0-9a-f]{32,128}", operation):
+            raise RuntimeError("invalid panel network operation id")
         payload = {
             "version": 1,
             "operation_id": operation,

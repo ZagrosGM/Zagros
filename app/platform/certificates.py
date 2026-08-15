@@ -80,6 +80,47 @@ def _cn(name: x509.Name) -> str:
     return attrs[0].value if attrs else name.rfc4514_string()
 
 
+def certificate_covers(path: str | Path, hostname: str) -> bool:
+    """Check DNS/IP SAN identity (with constrained left-most DNS wildcards)."""
+    import ipaddress
+
+    cert = _parse_cert(Path(path))
+    dns_names: list[str] = []
+    ip_names: list[str] = []
+    try:
+        extension = cert.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName).value
+        dns_names = extension.get_values_for_type(x509.DNSName)
+        ip_names = [str(value) for value in
+                    extension.get_values_for_type(x509.IPAddress)]
+    except x509.ExtensionNotFound:
+        pass
+    try:
+        wanted_ip = str(ipaddress.ip_address(hostname))
+    except ValueError:
+        wanted_ip = ""
+    if wanted_ip:
+        # RFC 6125: an IP literal must match an iPAddress SAN, never CN text.
+        return any(str(ipaddress.ip_address(value)) == wanted_ip
+                   for value in ip_names)
+
+    wanted = hostname.rstrip(".").encode("idna").decode("ascii").lower()
+    if not dns_names:
+        dns_names = [value.value for value in
+                     cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)]
+    for raw_pattern in dns_names:
+        pattern = raw_pattern.rstrip(".").encode("idna").decode("ascii").lower()
+        if pattern == wanted:
+            return True
+        if pattern.startswith("*."):
+            suffix = pattern[1:]
+            # Wildcard spans one label only and is valid only in the left-most
+            # position (no partial-label or multi-level wildcard matching).
+            if wanted.endswith(suffix) and wanted.count(".") == pattern.count("."):
+                return True
+    return False
+
+
 def _info_from(path: Path, cert: x509.Certificate, name: str | None = None) -> CertificateInfo:
     now = datetime.now(timezone.utc)
     not_after = cert.not_valid_after_utc

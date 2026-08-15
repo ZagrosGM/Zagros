@@ -6,17 +6,15 @@ Real capabilities used:
     + chpasswd). Locking applies instantly — no sshd restart (HOT_RELOAD).
   * **Suspend** = ``usermod --lock`` + killing the user's sshd session
     processes (``pkill`` on sshd children of that uid) — immediate cut.
-  * **Online detection** = sshd session processes from ``ps`` (``sshd:
-    user@notty`` = tunnel, ``sshd: user@pts/N`` = interactive).
-  * **Chain ingress**: cores with a native ssh outbound (Xray ≥ 1.8.x has
-    one) can tunnel INTO this server with a dedicated chain account.
+  * **Online detection** = sshd session processes from ``ps`` (legacy
+    ``sshd: user@notty`` and OpenSSH 10 ``sshd-session: user`` titles).
+  * **Chain ingress**: a dedicated account can terminate a real managed
+    OpenSSH application-proxy chain; no nonexistent Xray SSH codec is claimed.
 
-  * USAGE_ACCOUNTING — decrypted SFTP/SCP stream accounting reports real
-    upload+download bytes through an OpenSSH ForceCommand proxy and a
-    SO_PASSCRED-authenticated local collector. Dynamic forwarding uplink is
-    additionally counted by the per-UID iptables owner chain when the kernel
-    supports xt_owner. Each source degrades independently and never fabricates
-    zeros as successful accounting.
+  * USAGE_ACCOUNTING — generic forwarding is counted bidirectionally from
+    accepted SSH transport socket counters and the dropped-UID sshd-session
+    PID. A decrypted SFTP/SCP stream collector is a non-overlapping fallback.
+    Each source degrades independently and never fabricates successful totals.
 
 Honestly NOT claimed (documented, no simulation):
   * SERVICE_CONTROL — sshd belongs to systemd; the driver manages accounts,
@@ -143,6 +141,7 @@ class SSHTunnelDriver(BaseCoreDriver):
         self._acct_error: str | None = None
         self._tunnel_acct_error: str | None = None
         self._sftp_acct_error: str | None = None
+        self._legacy_tunnel_acct = False
 
     # ------------------------------------------------------------------ #
     # listeners (xray-style multi-inbound over the ONE sshd listener set)   #
@@ -222,15 +221,37 @@ class SSHTunnelDriver(BaseCoreDriver):
         elif self.settings.get("sftp", True):
             self._sftp_acct_error = "backend has no SFTP accounting collector"
 
-        unavailable = await asyncio.to_thread(
-            getattr(self._backend, "acct_available",
-                    lambda: "backend has no forwarding accounting support"))
-        self._tunnel_acct_error = unavailable
-        if unavailable is None:
+        start_transport = getattr(self._backend, "transport_acct_start", None)
+        self._legacy_tunnel_acct = False
+        self._tunnel_acct_error = None
+        if callable(start_transport):
             try:
-                await asyncio.to_thread(self._backend.acct_ensure)
+                await asyncio.to_thread(
+                    start_transport,
+                    {int(listener["port"]) for listener in self._listeners},
+                )
+                teardown_legacy = getattr(self._backend, "acct_teardown", None)
+                if callable(teardown_legacy):
+                    await asyncio.to_thread(teardown_legacy)
             except Exception as exc:  # noqa: BLE001 — honest degrade
-                self._tunnel_acct_error = f"SSH forwarding accounting setup failed: {exc}"
+                self._tunnel_acct_error = (
+                    f"SSH bidirectional transport accounting failed: {exc}")
+        else:
+            self._tunnel_acct_error = (
+                "backend has no bidirectional SSH transport accounting")
+
+        # Compatibility fallback: an older/external backend may still provide
+        # real owner-match uplink. Keep it, but never label it bidirectional.
+        if self._tunnel_acct_error:
+            unavailable = await asyncio.to_thread(
+                getattr(self._backend, "acct_available",
+                        lambda: "backend has no forwarding accounting support"))
+            if unavailable is None:
+                try:
+                    await asyncio.to_thread(self._backend.acct_ensure)
+                    self._legacy_tunnel_acct = True
+                except Exception as exc:  # noqa: BLE001 — honest degrade
+                    self._tunnel_acct_error += f" | uplink fallback failed: {exc}"
 
         errors = [e for e in (self._tunnel_acct_error,
                               self._sftp_acct_error) if e]
@@ -244,12 +265,16 @@ class SSHTunnelDriver(BaseCoreDriver):
         # sshd itself stays system-owned (stopping it could lock out the
         # operator), but the panel-owned accounting receiver must release its
         # socket/thread when this core is stopped or reloaded.
+        stop_transport = getattr(self._backend, "transport_acct_stop", None)
+        if callable(stop_transport):
+            await asyncio.to_thread(stop_transport)
         stop_sftp = getattr(self._backend, "sftp_acct_stop", None)
         if callable(stop_sftp):
             await asyncio.to_thread(stop_sftp)
 
     async def status(self) -> CoreStatus:
         running = await asyncio.to_thread(self._backend.sshd_running)
+        version = await self.version()
         sessions = await self.get_online_devices() if running else []
         metrics = None
         if running:
@@ -264,6 +289,8 @@ class SSHTunnelDriver(BaseCoreDriver):
             state=CoreState.RUNNING if running else CoreState.STOPPED,
             health=(HealthStatus.DEGRADED if (running and accounting_message)
                     else HealthStatus.HEALTHY if running else HealthStatus.UNHEALTHY),
+            core_version=version.version,
+            version_reason=version.reason,
             metrics=metrics,
             message=(accounting_message or None if running
                      else "sshd is not running (system service)."),
@@ -537,7 +564,16 @@ class SSHTunnelDriver(BaseCoreDriver):
                 return
         else:
             name = self._unix_name(account)
+        # UID lookup belongs to the optional host-transport accounting seam,
+        # not the baseline SSHBackend account contract. Backends without that
+        # collector must still be able to delete an account cleanly.
+        uid_lookup = getattr(self._backend, "uid_of", None)
+        uid = (await asyncio.to_thread(uid_lookup, name)
+               if callable(uid_lookup) else None)
         await self._lock_and_kill(name)
+        forget_transport = getattr(self._backend, "transport_acct_forget", None)
+        if uid is not None and callable(forget_transport):
+            await asyncio.to_thread(forget_transport, uid)
         await asyncio.to_thread(self._backend.delete_user, name)
 
     async def suspend_account(self, account_id: str) -> None:
@@ -616,10 +652,9 @@ class SSHTunnelDriver(BaseCoreDriver):
         return lookup(self._unix_name(account))
 
     def supports(self, capability: Capability) -> bool:
-        # environment-gated capability (alpha.7.4): the registry metadata
-        # means "this engine CAN account"; a deployment without the backend
-        # chain (no iptables/NET_ADMIN) must not claim it — the status
-        # message carries the diagnosis, quota treats absence honestly.
+        # Environment-gated capability: the registry means this engine CAN
+        # account, while status reports whether transport/SFTP collectors are
+        # actually available on this host.
         if capability is Capability.USAGE_ACCOUNTING and self._acct_error:
             return False
         return super().supports(capability)
@@ -644,14 +679,23 @@ class SSHTunnelDriver(BaseCoreDriver):
                 "ssh accounting: %d account(s) have no resolvable UID "
                 "(host account deleted out-of-band?) — their usage cannot "
                 "be attributed this tick", unresolved)
-        tunnel_counters: dict[int, int] = {}
-        if not self._tunnel_acct_error:
+        tunnel_counters: dict[int, tuple[int, int]] = {}
+        transport_authoritative = not self._tunnel_acct_error
+        if transport_authoritative:
+            read_transport = getattr(self._backend, "transport_acct_read", None)
+            if callable(read_transport):
+                tunnel_counters = await asyncio.to_thread(read_transport)
+        elif self._legacy_tunnel_acct:
             await asyncio.to_thread(self._backend.acct_sync_users, set(uid_map))
-            tunnel_counters = await asyncio.to_thread(self._backend.acct_read)
+            uplink = await asyncio.to_thread(self._backend.acct_read)
+            tunnel_counters = {uid: (value, 0) for uid, value in uplink.items()}
 
         sftp_counters: dict[int, tuple[int, int]] = {}
+        # The encrypted transport already includes every SFTP/SCP byte. Use
+        # the application collector only as a fallback, never double count it.
         read_sftp = getattr(self._backend, "sftp_acct_read", None)
-        if not self._sftp_acct_error and callable(read_sftp):
+        if (not transport_authoritative and not self._sftp_acct_error
+                and callable(read_sftp)):
             sftp_counters = await asyncio.to_thread(read_sftp)
 
         records: list[UsageRecord] = []
@@ -659,11 +703,12 @@ class SSHTunnelDriver(BaseCoreDriver):
             if account_ids is not None and account_id not in account_ids:
                 continue
             sftp_up, sftp_down = sftp_counters.get(uid, (0, 0))
-            # owner-match OUTPUT sees user-created forwarding sockets, i.e.
-            # payload sent toward the tunnel destination (uplink). The
-            # decrypted SFTP proxy supplies exact upload+download counters.
-            cumulative_up = tunnel_counters.get(uid, 0) + sftp_up
-            cumulative_down = sftp_down
+            tunnel_up, tunnel_down = tunnel_counters.get(uid, (0, 0))
+            # The accepted encrypted transport is authoritative whenever the
+            # socket collector is available. SFTP counters are fallback-only,
+            # so these additions never count one transfer twice.
+            cumulative_up = tunnel_up + sftp_up
+            cumulative_down = tunnel_down + sftp_down
             up, down = self._usage.observe(
                 account_id, cumulative_up, cumulative_down)
             records.append(UsageRecord(

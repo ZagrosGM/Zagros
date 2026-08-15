@@ -843,7 +843,7 @@ class SingBoxDriver(BaseCoreDriver):
     async def status(self) -> CoreStatus:
         running = await asyncio.to_thread(self._backend.is_running)
         metrics = await asyncio.to_thread(self._backend.metrics) if running else None
-        version = await asyncio.to_thread(self._backend.version)
+        version = await self.version()
         return CoreStatus(
             core_id=self.metadata.id,
             state=CoreState.RUNNING if running else CoreState.STOPPED,
@@ -852,7 +852,8 @@ class SingBoxDriver(BaseCoreDriver):
                 else HealthStatus.HEALTHY if running
                 else HealthStatus.UNKNOWN
             ),
-            core_version=version,
+            core_version=version.version,
+            version_reason=version.reason,
             metrics=metrics,
             message=self._stats_error,
         )

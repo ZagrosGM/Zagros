@@ -171,11 +171,13 @@ def _tr(id_: str, label: str, securities: list[Security]) -> Transport:
 
 def _proto(
     id_: str, label: str, default_port: int, transports: list[Transport],
-    *, fixed_port: bool = False,
+    *, fixed_port: bool = False, availability: str = "supported",
+    reason: str | None = None,
 ) -> Protocol:
     return {
         "id": id_, "label": label, "default_port": default_port,
         "fixed_port": fixed_port, "transports": transports,
+        "availability": availability, "reason": reason,
     }
 
 
@@ -496,9 +498,10 @@ def _ssh_blueprint() -> list[Protocol]:
 def _softether_blueprint() -> list[Protocol]:
     """Capabilities of the supported SoftEther **stable** server line.
 
-    Each offered cell maps to a real vpncmd operation. PPTP is deliberately
-    absent (SoftEther has never implemented it). EtherIP is also absent from
-    the simple wizard because enabling the server bit alone is insufficient:
+    Each selectable cell maps to a real vpncmd operation. PPTP remains visible
+    as an explicit unsupported capability (the installed stable runtime has no
+    PptpGet/PptpEnable command), never as a fake selectable inbound. EtherIP is
+    absent from the simple wizard because enabling the server bit alone is insufficient:
     every router needs an EtherIpClientAdd identity mapping. It remains an
     Advanced/runtime capability, not a fake one-click inbound.
     """
@@ -530,6 +533,14 @@ def _softether_blueprint() -> list[Protocol]:
         _proto("ovpn", "OpenVPN compatibility", 1194, [
             _tr("udp", "UDP", [_none()]),
         ]),
+        _proto(
+            "pptp", "PPTP", 1723, [], fixed_port=True,
+            availability="unsupported",
+            reason=(
+                "Unavailable because this SoftEther runtime does not expose "
+                "PPTP (vpncmd PptpGet/PptpEnable are not commands)."
+            ),
+        ),
     ]
 
 

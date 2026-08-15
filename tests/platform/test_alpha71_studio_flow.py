@@ -462,6 +462,12 @@ class _FakeXrayModule:
             started = True
             restarts: list = []
 
+            def _ensure_binary(self):
+                return None
+
+            def _validate_config(self, config):
+                return None
+
             def restart(self, config):
                 self.restarts.append(config)
 
@@ -521,6 +527,29 @@ def test_apply_config_document_invalid_doc_touches_nothing(tmp_path, monkeypatch
     assert b._mod.core.restarts == []
     assert b._mod.hosts.cleared is False
     assert b._mod.config.inbounds_by_protocol == {}
+
+
+def test_apply_config_document_runtime_codec_rejection_touches_nothing(
+        tmp_path, monkeypatch):
+    import config as _host_cfg
+
+    target = tmp_path / "xray_config.json"
+    monkeypatch.setattr(_host_cfg, "XRAY_JSON", str(target), raising=False)
+    b = _backend_with_mod()
+    before = dict(b._mod.config)
+
+    def reject(_candidate):
+        raise RuntimeError("unknown config id: ssh")
+
+    b._mod.core._validate_config = reject
+    bad = _valid_doc()
+    bad["outbounds"].append({"tag": "invalid-ssh", "protocol": "ssh"})
+    with pytest.raises(CoreError, match="runtime rejected.*nothing was applied"):
+        b.apply_config_document(bad)
+    assert not target.exists()
+    assert dict(b._mod.config) == before
+    assert b._mod.core.restarts == []
+    assert b._mod.hosts.cleared is False
 
 
 # --------------------------------------------------------------------- #

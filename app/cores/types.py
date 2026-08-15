@@ -67,6 +67,19 @@ class Capability(str, Enum):
     KEY_ROTATION = "key_rotation"              # native credential/key rotation per account
 
 
+class FeatureAvailability(str, Enum):
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    ENVIRONMENT_LIMITED = "environment_limited"
+    NOT_INSTALLED = "not_installed"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class CoreFeatureCapability(BaseModel):
+    state: FeatureAvailability
+    detail: str | None = None
+
+
 class CoreMetadata(BaseModel):
     """Static, class-level description of a core type (its driver)."""
 
@@ -77,6 +90,9 @@ class CoreMetadata(BaseModel):
     capabilities: set[Capability]
     config_schema: dict[str, Any] = Field(default_factory=dict)   # JSON Schema
     default_settings: dict[str, Any] = Field(default_factory=dict)
+    # Cross-core product matrix. Keys are stable feature ids; values preserve
+    # supported/unsupported/environment/not-installed/not-applicable.
+    feature_capabilities: dict[str, CoreFeatureCapability] = Field(default_factory=dict)
     driver_version: str = "1.0.0"
     homepage: str | None = None
     #: "owner/repo" when this core's binary is fetched from GitHub releases
@@ -108,12 +124,24 @@ class CoreMetrics(BaseModel):
     active_sessions: int = 0
 
 
+class CoreVersionInfo(BaseModel):
+    """Result of the standard adapter version probe."""
+
+    version: str | None = None
+    reason: str | None = None
+
+    @property
+    def display(self) -> str:
+        return self.version or "unknown"
+
+
 class CoreStatus(BaseModel):
     core_id: str
     state: CoreState
     health: HealthStatus = HealthStatus.UNKNOWN
     enabled: bool = True
     core_version: str | None = None          # version of the underlying binary
+    version_reason: str | None = None        # why version is unknown
     pid: int | None = None
     uptime_seconds: float | None = None
     message: str | None = None
@@ -164,6 +192,21 @@ class DeviceSession(BaseModel):
     connected_at: datetime | None = None
     last_activity: datetime | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ListenerClaim(BaseModel):
+    """A host-network socket a core intentionally owns.
+
+    Host settings use this adapter contract to explain conflicts before a
+    destructive restart instead of guessing from process names alone.
+    """
+
+    core_id: str
+    protocol: str
+    transport: str = "tcp"
+    address: str = "0.0.0.0"
+    port: int = Field(ge=1, le=65535)
+    label: str
 
 
 class ChainEndpoint(BaseModel):

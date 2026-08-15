@@ -189,6 +189,14 @@ class TestCores:
         assert meta["installed"] is False
         assert "vless" in meta["protocols"]
 
+    def test_capability_matrix_is_runtime_refined(self, stack):
+        payload = stack["client"].get(
+            "/api/zagros/cores/capability-matrix").json()
+        assert set(payload["all"]) == {
+            "xray", "sing-box", "openvpn", "wireguard", "ssh", "softether"}
+        assert payload["cores"]["wireguard"]["inbound"]["state"] == "not_installed"
+        assert payload["cores"]["softether"]["outbound"]["state"] == "unsupported"
+
     def test_full_lifecycle_over_http(self, stack):
         client, fake = stack["client"], stack["plain"]
         r = client.post(f"/api/zagros/cores/{fake}/install",
@@ -527,6 +535,29 @@ class TestOutboundsAlpha7:
         assert r.status_code == 404
         r = stack["client"].get("/api/zagros/cores/ghost/versions")
         assert r.status_code == 404
+
+
+class TestSubscriptionCanonicalURL:
+    def test_copy_url_uses_sql_subscription_origin_port_and_path(self, stack):
+        client, runtime = stack["client"], stack["rt"]
+        runtime.users.upsert_user(username="admapi-sub-user")
+        saved = client.put("/api/zagros/settings/portal", json={
+            "public_domain": "example.test",
+            "custom_subdomain": "sub",
+            "public_scheme": "https",
+            "public_port": 9443,
+            "subscription_path": "clients",
+            "listener_mode": "external_proxy",
+        })
+        assert saved.status_code == 200, saved.text
+        response = client.get(
+            "/api/zagros/users/by-username/admapi-sub-user/subscription-url")
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["url"].startswith(
+            "https://sub.example.test:9443/clients/")
+        assert "/zagros/" not in payload["url"]
+        assert payload["listener_mode"] == "external_proxy"
 
 
 class TestInventory:

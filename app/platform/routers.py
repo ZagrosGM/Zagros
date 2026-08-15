@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 import base64 as _base64
 
@@ -154,6 +154,36 @@ async def client_config(body: ConfigBody, runtime=Depends(get_runtime)):
 
 
 # ---------------------------------------------------------------------- #
+# Public transition readiness (cross-origin image probe, no credentials)
+# ---------------------------------------------------------------------- #
+
+@zagros_router.get("/api/zagros/network-transition/{operation_id}.svg",
+                   include_in_schema=False)
+async def panel_network_transition_probe(operation_id: str):
+    """Return an image only after host apply and new-origin health succeeded.
+
+    A page loaded from the old origin cannot read the new origin's authenticated
+    API because of same-origin policy. Image loading is intentionally
+    credential-free and still enforces browser DNS/TLS verification; non-success
+    states return a non-image 503 so ``img.onerror`` keeps polling.
+    """
+    import re
+
+    from app.platform.network_settings import HostNetworkRequest
+
+    if not re.fullmatch(r"[0-9a-f]{32,128}", operation_id):
+        return PlainTextResponse("not ready", status_code=503)
+    result = HostNetworkRequest().status(operation_id)
+    if result.get("status") != "success":
+        return PlainTextResponse("not ready", status_code=503,
+                                 headers={"Cache-Control": "no-store"})
+    svg = ("<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'>"
+           "<rect width='1' height='1' fill='#16a34a'/></svg>")
+    return Response(svg, media_type="image/svg+xml",
+                    headers={"Cache-Control": "no-store"})
+
+
+# ---------------------------------------------------------------------- #
 # Subscription portal (/zagros/sub/{token})
 # ---------------------------------------------------------------------- #
 
@@ -233,6 +263,21 @@ async def subscription_portal(token: str, request: Request,
                               user_agent: str | None = Header(default=None)):
     """Legacy alias of the canonical /sub/<token> — already-issued links
     keep working forever (no redirect, identical payload)."""
+    return await _verify_and_serve(token, request, runtime,
+                                   accept_language, user_agent)
+
+
+@zagros_router.get("/{sub_path}/{token}", response_class=HTMLResponse)
+async def subscription_portal_configured_path(
+    sub_path: str, token: str, request: Request,
+    runtime=Depends(get_runtime),
+    accept_language: str | None = Header(default=None),
+    user_agent: str | None = Header(default=None),
+):
+    """Canonical configurable root path, e.g. /clients/<token>."""
+    settings = await runtime.portal_settings.get_portal_settings()
+    if sub_path != settings.subscription_path:
+        raise HTTPException(404, "subscription not found")
     return await _verify_and_serve(token, request, runtime,
                                    accept_language, user_agent)
 
@@ -399,10 +444,9 @@ async def issue_subscription_token(user_id: int, runtime=Depends(get_runtime)):
     payload = runtime.tokens.verify(token, expected_type="sub")
     await runtime.kv.set_value(f"portal.sub_jti.{user_id}", payload["jti"])
     settings = (await runtime.portal_settings.get_portal_settings()).normalize()
-    # New links honor the configured path. /sub/<token> and
+    # New links honor the configured canonical root path. /sub/<token> and
     # /zagros/sub/<token> remain permanent aliases for every older token.
-    path = (f"/sub/{token}" if settings.subscription_path == "sub"
-            else f"/zagros/{settings.subscription_path}/{token}")
+    path = settings.canonical_path(token)
     prefix = (settings.public_base_url() or "").rstrip("/")
     return {"token": token, "path": path,
             "url": f"{prefix}{path}" if prefix else None}
@@ -417,6 +461,32 @@ async def issue_subscription_token_by_username(username: str, runtime=Depends(ge
     if row is None:
         raise HTTPException(404, f"user '{username}' not found")
     return await issue_subscription_token(row.id, runtime)
+
+
+@zagros_admin_router.get("/users/by-username/{username}/subscription-url")
+async def canonical_subscription_url_by_username(
+    username: str, runtime=Depends(get_runtime),
+):
+    """Build a copy/QR URL from the SQL portal settings source of truth.
+
+    Legacy user serializers still expose their historical config.py-derived
+    field for API compatibility. The dashboard must not absolutize that field
+    against ``window.location.origin`` because doing so silently discards the
+    dedicated subscription domain/port.
+    """
+    import asyncio as _asyncio
+
+    from app.utils.jwt import create_subscription_token
+
+    row = await _asyncio.to_thread(runtime.users.get_user_by_username, username)
+    if row is None:
+        raise HTTPException(404, f"user '{username}' not found")
+    settings = (await runtime.portal_settings.get_portal_settings()).normalize()
+    token = create_subscription_token(username)
+    path = settings.canonical_path(token)
+    base = (settings.public_base_url() or "").rstrip("/")
+    return {"path": path, "url": f"{base}{path}" if base else None,
+            "listener_mode": settings.listener_mode}
 
 
 # ---------------------------------------------------------------------- #
@@ -756,17 +826,34 @@ def _validate_portal_certificate(runtime, settings: PortalSettings) -> None:
         raise ValueError(f"TLS certificate '{ident}' does not exist")
     if found.expired or not found.has_key:
         raise ValueError(f"TLS certificate '{ident}' is expired or has no private key")
+    hostname = settings.public_base_url()
+    if hostname:
+        from urllib.parse import urlsplit
+        hostname = urlsplit(hostname).hostname
+    if hostname and not certificates.certificate_covers(found.path, hostname):
+        raise ValueError(
+            f"TLS certificate '{ident}' does not cover subscription hostname '{hostname}'")
 
 
 @zagros_admin_router.put("/settings/portal", response_model=PortalSettings)
-async def put_portal_settings(settings: PortalSettings,
+async def put_portal_settings(settings: PortalSettings, request: Request,
                               runtime=Depends(get_runtime)):
+    previous = await runtime.portal_settings.get_portal_settings()
     try:
         settings = settings.normalize()
         _validate_portal_certificate(runtime, settings)
-        return await runtime.portal_settings.save_portal_settings(settings)
+        # Listener first, persistence second: an unbindable domain/port/TLS
+        # configuration can never replace last-known-good desired state.
+        await runtime.subscription_listener.apply(settings, runtime, request.app)
+        try:
+            return await runtime.portal_settings.save_portal_settings(settings)
+        except Exception:
+            await runtime.subscription_listener.apply(previous, runtime, request.app)
+            raise
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @zagros_admin_router.post("/settings/portal/test")
@@ -776,11 +863,14 @@ async def portal_settings_test(settings: PortalSettings,
     try:
         settings = settings.normalize()
         _validate_portal_certificate(runtime, settings)
+        if settings.listener_mode == "dedicated":
+            await runtime.subscription_listener._preflight(runtime, settings)  # noqa: SLF001
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
     base = settings.public_base_url() or "https://panel.example.com"
-    path = ("/sub/<token>" if settings.subscription_path == "sub"
-            else f"/zagros/{settings.subscription_path}/<token>")
+    path = settings.canonical_path()
     subscription = base.rstrip("/") + path
     qr_base = (settings.qr_base_url or base).rstrip("/")
     warnings: list[str] = []
@@ -797,6 +887,8 @@ async def portal_settings_test(settings: PortalSettings,
         "openvpn_host": qr_base,
         "wireguard_host": qr_base,
         "force_https": settings.force_https,
+        "listener_mode": settings.listener_mode,
+        "listener": runtime.subscription_listener.public_status(),
         "warnings": warnings,
     }
 

@@ -74,13 +74,21 @@ function absolutizeSub(path: string | null | undefined): string | null {
   return `${window.location.origin}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
+interface CanonicalSubscriptionURL {
+  path: string;
+  url?: string | null;
+  listener_mode: "shared" | "dedicated" | "external_proxy";
+}
+
 /** Per-row one-click subscription link copy with a tooltip (α7.1, item 7):
  *  visible without opening the overflow menu, disabled when the user has no
  *  link instead of failing late. */
 function CopySubButton({ u, copySub }: { u: User; copySub: (u: User) => void }) {
   const t = useT();
   const [done, setDone] = useState(false);
-  const hasLink = absolutizeSub(u.subscription_url ?? u.sub_url) !== null;
+  // The canonical URL is resolved lazily from SQL portal settings; the legacy
+  // row field may point at the panel origin and is not an availability gate.
+  const hasLink = Boolean(u.username);
   return (
     <Tooltip label={done ? t("common.copied") : t("users.copySub")}>
       <button
@@ -180,9 +188,16 @@ export default function Users() {
   // α7.2 (item 16): copyText falls back to execCommand on plain-HTTP panels
   // where navigator.clipboard does not exist at all; report the real result.
   const copySub = async (u: User) => {
-    const link = absolutizeSub(u.subscription_url ?? u.sub_url);
-    if (!link) return toast.error("no subscription link");
-    (await copyText(link)) ? toast.ok(t("common.copied")) : toast.error(t("common.error"));
+    try {
+      const canonical = await api.get<CanonicalSubscriptionURL>(
+        `/zagros/users/by-username/${encodeURIComponent(u.username)}/subscription-url`,
+      );
+      const link = canonical.url || absolutizeSub(canonical.path);
+      if (!link) return toast.error("subscription public base URL is not configured");
+      (await copyText(link)) ? toast.ok(t("common.copied")) : toast.error(t("common.error"));
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : t("common.error"));
+    }
   };
 
   const allChecked = users.length > 0 && users.every((u) => selected.has(u.username));
@@ -449,10 +464,19 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
   const [genLen, setGenLen] = useState(8);
   const [genBusy, setGenBusy] = useState(false);
 
+  const canonicalSubQ = useQuery({
+    queryKey: ["zagros", "subscription-url", user?.username],
+    queryFn: () => api.get<CanonicalSubscriptionURL>(
+      `/zagros/users/by-username/${encodeURIComponent(user!.username)}/subscription-url`,
+    ),
+    enabled: mode === "edit" && Boolean(user?.username),
+  });
   const chosen = Object.keys(form.inbounds);
   const hasCoreAccess = Object.values(form.coreAccess).some((tags) => tags.length > 0);
   const hasAnyAccess = chosen.length > 0 || hasCoreAccess;
-  const subUrl = absolutizeSub(user?.subscription_url ?? user?.sub_url);
+  const subUrl = canonicalSubQ.data
+    ? (canonicalSubQ.data.url || absolutizeSub(canonicalSubQ.data.path))
+    : null;
 
   // α7.2 (item 11): on CREATE everything is pre-selected once the catalog
   // arrives (without clobbering a template pre-fill or admin edits).

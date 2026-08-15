@@ -5,11 +5,11 @@
   * :func:`parse_user_list` / :func:`parse_session_list` — `/CSV` output of
     UserList / SessionList (header-driven, column-order safe).
 
-Direction note (documented assumption): SoftEther reports statistics from
-the *server's* point of view — "Incoming" = bytes received FROM the client
-(the user's uplink), "Outgoing" = sent TO the client (the user's downlink).
-Quota totals are direction-independent; the up/down split follows this
-convention consistently across the panel.
+Direction note (real routed-client evidence): SoftEther's SessionGet/UserGet
+labels follow the hub/Internet side, not the English direction one might infer
+from the client socket. ``Outgoing`` advances for client upload and
+``Incoming`` advances for client download. The driver exposes those as client
+uplink/downlink respectively; known independent payload tests pin this mapping.
 """
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ class UserStatistics:
     """Cumulative traffic of one hub user (all time, per UserGet)."""
 
     username: str
-    incoming_bytes: int                 # client → server  (user uplink)
-    outgoing_bytes: int                 # server → client  (user downlink)
+    incoming_bytes: int                 # Internet/hub → client (user downlink)
+    outgoing_bytes: int                 # client → Internet/hub (user uplink)
     num_logins: int = 0
     expires_at: str | None = None
 

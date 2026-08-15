@@ -630,7 +630,10 @@ def test_ssh_local_backend_authorize_key(tmp_path, monkeypatch):
     backend.authorize_key("bob", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBobKey")
     key_file = Path(keys_dir) / "bob"
     assert key_file.exists()
-    assert key_file.stat().st_mode & 0o777 == 0o600
+    # OpenSSH reads absolute AuthorizedKeysFile after setuid(account); root 0600
+    # is unreadable. Public keys are non-secret and root-owned 0644 prevents
+    # the tunnel user from modifying Panel authority.
+    assert key_file.stat().st_mode & 0o777 == 0o644
     assert "ssh-ed25519" in key_file.read_text()
     # idempotent
     backend.authorize_key("bob", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBobKey")

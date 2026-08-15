@@ -36,6 +36,8 @@ alice      4209    125 sshd: alice [priv] [net]
 alice      4210    125 sshd: alice@notty
 alice      4300     40 sshd: alice@pts/0
 bob        4400   1000 sshd: bob@notty
+dave       4500      7 sshd-session: dave
+root       4499      7 sshd-session: dave [priv]
 carol     5000  80000 -bash
 """
 
@@ -52,11 +54,24 @@ class FakeSSHBackend:
         # alpha.7.4 accounting simulation (kernel chain): uid per zg-* user,
         # cumulative byte counters, last-converged rule set
         self.counters: dict[int, int] = {}
+        self.down_counters: dict[int, int] = {}
         self.sftp_counters: dict[int, tuple[int, int]] = {}
         self.synced_uids: set[int] = set()
-        self._acct_reason = acct_reason        # non-None = forwarding accounting unavailable
+        self._acct_reason = acct_reason        # non-None = fallback unavailable
+        self._transport_reason = acct_reason
+        self.transport_ports: set[int] = set()
 
     # accounting surface mirrors LocalSystemSSHBackend
+    def transport_acct_start(self, ports):
+        if self._transport_reason:
+            raise CoreError(self._transport_reason)
+        self.transport_ports = set(ports)
+    def transport_acct_stop(self): pass
+    def transport_acct_read(self):
+        return {uid: (self.counters.get(uid, 0), self.down_counters.get(uid, 0))
+                for uid in self.counters.keys() | self.down_counters.keys()}
+    def transport_acct_forget(self, uid):
+        self.counters.pop(uid, None); self.down_counters.pop(uid, None)
     def sftp_acct_start(self): return "/tmp/fake-ssh-accounting.sock"
     def sftp_acct_stop(self): pass
     def sftp_acct_read(self): return dict(self.sftp_counters)
@@ -64,6 +79,9 @@ class FakeSSHBackend:
     def acct_ensure(self): pass
     def acct_sync_users(self, uids): self.synced_uids = set(uids)
     def acct_read(self): return dict(self.counters)
+    def acct_read_bidirectional(self):
+        return {uid: (self.counters.get(uid, 0), self.down_counters.get(uid, 0))
+                for uid in self.counters.keys() | self.down_counters.keys()}
     def acct_teardown(self): pass
     def uid_of(self, username):
         if username not in self.users:
@@ -111,12 +129,13 @@ def _account(user: int, name: str, enabled: bool = True, password: str = "s3cret
 
 def test_parse_ps_real_shape() -> None:
     sessions = parse_ps_sshd(PS_SAMPLE)
-    assert len(sessions) == 3                     # notty alice + pts alice + notty bob
+    assert len(sessions) == 4  # legacy sshd + OpenSSH 10 sshd-session title
     by = {(s.user, s.terminal): s for s in sessions}
     assert by[("alice", "notty")].pid == 4210
     assert by[("alice", "notty")].elapsed_seconds == 125
     assert by[("alice", "pts/0")].pid == 4300
     assert by[("bob", "notty")].elapsed_seconds == 1000
+    assert by[("dave", "notty")].pid == 4500
     assert all(s.user != "root" for s in sessions)  # priv-stage rows skipped
 
 
@@ -239,9 +258,9 @@ def test_chain_account_and_usage_degrade_honesty() -> None:
     asyncio.run(run())
 
 
-def test_usage_accounting_combines_forwarding_and_sftp_directions() -> None:
-    """Kernel forwarding uplink + decrypted SFTP up/down become restart-safe
-    per-tick deltas; deleted accounts are forgotten."""
+def test_usage_accounting_uses_transport_bidirectionally_without_sftp_double_count() -> None:
+    """Encrypted transport up/down are authoritative, restart-safe deltas;
+    SFTP fallback counters must not double-count the same session."""
     async def run():
         driver, backend = _driver()
         await driver.start()
@@ -254,19 +273,22 @@ def test_usage_accounting_combines_forwarding_and_sftp_directions() -> None:
         # tick 1: kernel counters appear → full counter counts as the delta
         backend.counters[uid_a] = 1000
         backend.counters[uid_b] = 500
+        backend.down_counters[uid_a] = 400
+        backend.down_counters[uid_b] = 125
         backend.sftp_counters[uid_a] = (200, 700)
         backend.sftp_counters[uid_b] = (100, 300)
         r1 = {r.account_id: (r.uplink_bytes, r.downlink_bytes)
               for r in await driver.get_usage()}
-        assert r1 == {"1.alice": (1200, 700), "2.bob": (600, 300)}
-        assert backend.synced_uids == {uid_a, uid_b}      # rules converged
+        assert r1 == {"1.alice": (1000, 400), "2.bob": (500, 125)}
+        assert backend.transport_ports == {2022}  # listener collector active
 
         # tick 2: grow one counter → only the growth is billed (no double count)
         backend.counters[uid_a] = 1400
+        backend.down_counters[uid_a] = 900
         backend.sftp_counters[uid_a] = (350, 900)
         r2 = {r.account_id: (r.uplink_bytes, r.downlink_bytes)
               for r in await driver.get_usage()}
-        assert r2 == {"1.alice": (550, 200), "2.bob": (0, 0)}
+        assert r2 == {"1.alice": (400, 500), "2.bob": (0, 0)}
 
         # counter reset (fresh chain) never produces a negative bill
         backend.counters[uid_a] = 50
@@ -279,7 +301,8 @@ def test_usage_accounting_combines_forwarding_and_sftp_directions() -> None:
         r4 = {r.account_id: (r.uplink_bytes, r.downlink_bytes)
               for r in await driver.get_usage()}
         assert "2.bob" not in r4
-        assert backend.synced_uids == {uid_a}
+        assert uid_b not in backend.counters
+        assert uid_b not in backend.down_counters
     asyncio.run(run())
 
     asyncio.run(run())

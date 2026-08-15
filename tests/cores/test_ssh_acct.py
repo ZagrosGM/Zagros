@@ -31,7 +31,9 @@ sys.path.insert(0, str(ROOT))
 
 import pytest  # noqa: E402
 
-from app.cores.drivers.ssh.sshtool import ACCT_CHAIN  # noqa: E402
+from app.cores.drivers.ssh.sshtool import (  # noqa: E402
+    ACCT_CHAIN, ACCT_INPUT_CHAIN, ACCT_MARK_CHAIN, forwarding_mark,
+)
 
 FAKE_IPTABLES = r'''#!/usr/bin/env python3
 """Stateful iptables stand-in (see test module docstring).
@@ -51,7 +53,8 @@ def _load(fh):
     fh.seek(0)
     raw = fh.read()
     if not raw.strip():
-        return {"chains": {"OUTPUT": []}, "counters": {}}
+        return {"chains": {"OUTPUT": [], "INPUT": []},
+                "mangle_chains": {"OUTPUT": []}, "counters": {}}
     return json.loads(raw)
 
 
@@ -65,7 +68,8 @@ def main(argv):
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
     if not os.path.exists(STATE):
         with open(STATE, "w") as fh:
-            json.dump({"chains": {"OUTPUT": []}, "counters": {}}, fh)
+            json.dump({"chains": {"OUTPUT": [], "INPUT": []},
+                       "mangle_chains": {"OUTPUT": []}, "counters": {}}, fh)
     with open(STATE, "r+") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         st = _load(fh)
@@ -78,7 +82,12 @@ def main(argv):
 
 
 def _apply(st, args):  # noqa: C901 — small table-driven dispatcher
-    chains = st.setdefault("chains", {"OUTPUT": []})
+    table = "filter"
+    if args[:1] == ["-t"]:
+        table, args = args[1], args[2:]
+    chains = (st.setdefault("mangle_chains", {"OUTPUT": []})
+              if table == "mangle"
+              else st.setdefault("chains", {"OUTPUT": [], "INPUT": []}))
     counters = st.setdefault("counters", {})
     if not args:
         return 2, ""
@@ -134,10 +143,14 @@ def _apply(st, args):  # noqa: C901 — small table-driven dispatcher
         for rule in chains[cname]:
             toks = rule.split()
             uid = toks[toks.index("--uid-owner") + 1] if "--uid-owner" in toks else ""
-            byts = counters.get(f"{cname}|{uid}", 0)
+            mark = toks[toks.index("--mark") + 1].split("/", 1)[0] if "--mark" in toks else ""
+            counter_key = uid or mark
+            byts = counters.get(f"{cname}|{counter_key}", 0)
+            suffix = (f" owner UID match {uid}" if uid
+                      else f" connmark match {mark}")
             lines.append(
                 f"   17 {byts} RETURN all -- * * 0.0.0.0/0 0.0.0.0/0"
-                f" owner UID match {uid}")
+                f"{suffix}")
         return 0, "\n".join(lines) + "\n"
     return 2, f"fake-iptables: unsupported {args!r}\n"
 
@@ -167,8 +180,25 @@ def _uid_rules(state: Path, uid: int) -> list[str]:
     return [r for r in st["chains"].get(ACCT_CHAIN, []) if needle in r]
 
 
+def _rule_count(state: Path, table: str, chain: str, needle: str) -> int:
+    st = json.loads(state.read_text())
+    rows = st["mangle_chains" if table == "mangle" else "chains"].get(chain, [])
+    return sum(1 for row in rows if needle in row)
+
+
 def _seed(state: Path, chains: dict[str, list[str]]) -> None:
-    st = {"chains": {"OUTPUT": [f"-j {ACCT_CHAIN}"], **chains}, "counters": {}}
+    st = {
+        "chains": {
+            "OUTPUT": [f"-j {ACCT_CHAIN}"],
+            "INPUT": [f"-j {ACCT_INPUT_CHAIN}"],
+            **chains,
+        },
+        "mangle_chains": {
+            "OUTPUT": [f"-j {ACCT_MARK_CHAIN}"],
+            ACCT_MARK_CHAIN: [],
+        },
+        "counters": {},
+    }
     state.write_text(json.dumps(st))
 
 
@@ -180,6 +210,12 @@ def test_repeated_sync_leaves_exactly_one_rule_per_uid(tmp_path, monkeypatch):
     assert len(_uid_rules(state, 1000)) == 1
     assert len(_uid_rules(state, 1001)) == 1
     assert len(_uid_rules(state, 1002)) == 1
+    for uid in (1000, 1001, 1002):
+        mark = f"0x{forwarding_mark(uid):08x}"
+        assert _rule_count(state, "mangle", ACCT_MARK_CHAIN,
+                           f"--uid-owner {uid}") == 1
+        assert _rule_count(state, "filter", ACCT_INPUT_CHAIN,
+                           f"--mark {mark}/0xffffffff") == 1
 
 
 def test_sync_drains_past_duplicate_and_stale_damage(tmp_path, monkeypatch):
@@ -216,9 +252,14 @@ def test_acct_read_reports_kernel_counters(tmp_path, monkeypatch):
     backend, state = _backend(tmp_path, monkeypatch)
     backend.acct_sync_users({1042})
     st = json.loads(state.read_text())
+    mark = f"0x{forwarding_mark(1042):08x}"
     st["counters"][f"{ACCT_CHAIN}|1042"] = 987654321
+    st["counters"][f"{ACCT_INPUT_CHAIN}|{mark}"] = 456789123
     state.write_text(json.dumps(st))
     assert backend.acct_read() == {1042: 987654321}
+    assert backend.acct_read_bidirectional() == {
+        1042: (987654321, 456789123),
+    }
 
 
 if __name__ == "__main__":

@@ -143,6 +143,11 @@ class NodeModel(Base):
     status: Mapped[str] = mapped_column(String(20), default="unhealthy")
     usage_coefficient: Mapped[float] = mapped_column(Float, default=1.0)
     settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    agent_type: Mapped[str] = mapped_column(String(32), default="legacy_xray")
+    agent_identity: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    certificate_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # AES-GCM sealed signing key returned once during native registration.
+    agent_credentials_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_seen: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
 

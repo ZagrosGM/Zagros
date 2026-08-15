@@ -25,23 +25,21 @@ platform) with the surfaces the unified dashboard needs:
 from __future__ import annotations
 
 import asyncio
+import secrets
 import shlex
 import socket
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
+from app.cores.capabilities import outbound_capability, validate_selectable
 from app.cores.exceptions import CoreNotFoundError
 from app.cores.outbounds.manager import OutboundManager
-from app.cores.outbounds.model import (
-    SOFTETHER_CLIENT_KINDS,
-    SOFTETHER_CLIENT_LIMITATION,
-    Outbound,
-    OutboundKind,
-)
+from app.cores.outbounds.model import Outbound, OutboundKind
 from app.cores.routing.model import RoutingRule
 from app.platform import certificates
 from app.platform.routers import get_runtime, zagros_admin_router
@@ -51,6 +49,8 @@ _STARTED_MONO = time.monotonic()
 _RULES_KEY = "admin.routing.rules.v1"
 _OUTBOUNDS_KEY = "admin.outbounds.v1"
 _PANEL_NETWORK_KEY = "admin.panel.network.v1"
+_PANEL_NETWORK_APPLIED_KEY = "admin.panel.network.applied.v1"
+_PANEL_NETWORK_PENDING_KEY = "admin.panel.network.pending.v1"
 
 
 # --------------------------------------------------------------------- #
@@ -182,6 +182,7 @@ async def _core_view(runtime, core_id: str, status_by_id: dict) -> dict:
         "binary_path": binary_path,
         "health": None,
         "core_version": None,
+        "version_reason": "status/version probe unavailable",
         "message": None,
         "pid": None,
         "uptime_seconds": None,
@@ -191,6 +192,7 @@ async def _core_view(runtime, core_id: str, status_by_id: dict) -> dict:
         view.update({
             "health": status.health.value if isinstance(status.health, HealthStatus) else str(status.health),
             "core_version": status.core_version,
+            "version_reason": status.version_reason,
             "message": status.message,
             "pid": status.pid,
             "uptime_seconds": status.uptime_seconds,
@@ -209,6 +211,17 @@ async def cores_list(runtime=Depends(get_runtime)):
         status_by_id = {}
     cores = [await _core_view(runtime, cid, status_by_id) for cid in manager.list_cores()]
     return {"cores": cores}
+
+
+@zagros_admin_router.get("/cores/capability-matrix")
+async def cores_capability_matrix(runtime=Depends(get_runtime)):
+    from app.cores.matrix import FEATURES, capability_matrix
+
+    installed = set(runtime.core_manager.list_cores())
+    return {"features": list(FEATURES),
+            "installed": sorted(installed),
+            "cores": capability_matrix(installed=installed),
+            "all": capability_matrix()}
 
 
 @zagros_admin_router.get("/cores/traffic/totals")
@@ -484,22 +497,19 @@ def _sync_manager(manager: OutboundManager, stored: list[Outbound]) -> None:
         manager.register(outbound)
 
 
-def _validate_outbound_capabilities(outbounds: list[Outbound]) -> None:
-    blocked = [outbound.name for outbound in outbounds
-               if outbound.enabled and outbound.kind in SOFTETHER_CLIENT_KINDS]
-    if blocked:
-        raise HTTPException(
-            422,
-            f"unsupported SoftEther client outbound(s) {blocked}: "
-            f"{SOFTETHER_CLIENT_LIMITATION}",
-        )
+def _validate_outbound_capabilities(outbounds: list[Outbound], runtime=None) -> None:
+    """Validate against the shared product/runtime matrix, never a deny-list."""
+    try:
+        validate_selectable(outbounds, runtime)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 async def _save_outbounds(runtime, outbounds: list[Outbound]) -> list[Outbound]:
     names = [o.name for o in outbounds]
     if len(names) != len(set(names)):
         raise HTTPException(422, "duplicate outbound names are not allowed")
-    _validate_outbound_capabilities(outbounds)
+    _validate_outbound_capabilities(outbounds, runtime)
     await runtime.kv.set_value(
         _OUTBOUNDS_KEY, [o.model_dump(mode="json") for o in outbounds])
     _sync_manager(runtime.outbound_manager, outbounds)
@@ -540,6 +550,8 @@ async def routing_save(body: RoutingSetBody, runtime=Depends(get_runtime)):
             policy_router.validate_rule_set(normalized)
         outbounds = {outbound.name: outbound
                      for outbound in await _load_outbounds(runtime)}
+        if policy_router is not None:
+            policy_router.validate_plan(normalized, outbounds.values())
         for rule in normalized:
             if rule.action.value != "route_to":
                 continue
@@ -580,6 +592,9 @@ async def routing_preview(body: RoutingBody, runtime=Depends(get_runtime)):
     try:
         normalized = runtime.routing_engine.validate(body.rules)
         outbounds = await _load_outbounds(runtime)
+        policy_router = getattr(runtime, "policy_router", None)
+        if policy_router is not None:
+            policy_router.validate_plan(normalized, outbounds, body.core_ids)
         report = await runtime.routing_engine.preview(
             normalized, core_ids=body.core_ids, outbounds=outbounds)
     except Exception as exc:
@@ -590,27 +605,40 @@ async def routing_preview(body: RoutingBody, runtime=Depends(get_runtime)):
 @zagros_admin_router.post("/routing/deploy")
 async def routing_deploy(body: RoutingBody, runtime=Depends(get_runtime)):
     previous = await _load_rules(runtime)
+    # Pure preflight is intentionally outside the mutation/rollback block.
+    # Invalid SSH→TUN (and similar capability mismatches) therefore touches no
+    # process, interface, classifier or persisted document and cannot produce a
+    # misleading secondary rollback failure.
     try:
         normalized = runtime.routing_engine.validate(body.rules)
         outbounds = await _load_outbounds(runtime)
+        policy_router = getattr(runtime, "policy_router", None)
+        if policy_router is not None:
+            policy_router.validate_plan(normalized, outbounds, body.core_ids)
+    except Exception as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    mutated = False
+    try:
         _sync_manager(runtime.outbound_manager, outbounds)
         # A routing transaction owns its dependencies: first prove every
         # outbound interface/table, then atomically replace classifiers and
         # native rules. No separate UI click is required.
+        mutated = True
         await runtime.outbound_manager.deploy(core_ids=body.core_ids)
         report = await runtime.routing_engine.deploy(
             normalized, core_ids=body.core_ids, outbounds=outbounds)
         await runtime.kv.set_value(
             _RULES_KEY, [r.model_dump(mode="json") for r in normalized])
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
+        if not mutated:  # defensive; currently every mutation follows the flag
+            raise _err(exc) from exc
         try:
-            outbounds = await _load_outbounds(runtime)
-            _sync_manager(runtime.outbound_manager, outbounds)
+            stored_outbounds = await _load_outbounds(runtime)
+            _sync_manager(runtime.outbound_manager, stored_outbounds)
             await runtime.outbound_manager.deploy(core_ids=body.core_ids)
             await runtime.routing_engine.deploy(
-                previous, core_ids=body.core_ids, outbounds=outbounds)
+                previous, core_ids=body.core_ids, outbounds=stored_outbounds)
         except Exception as rollback_exc:  # noqa: BLE001
             raise HTTPException(
                 500,
@@ -619,7 +647,6 @@ async def routing_deploy(body: RoutingBody, runtime=Depends(get_runtime)):
         raise _err(exc) from exc
     result = report.model_dump(mode="json")
     result["saved"] = True
-    policy_router = getattr(runtime, "policy_router", None)
     result["policy_domains"] = (policy_router.domain_views() if policy_router else [])
     return result
 
@@ -641,8 +668,16 @@ async def routing_runtime(runtime=Depends(get_runtime)):
 
 @zagros_admin_router.get("/outbounds")
 async def outbounds_list(runtime=Depends(get_runtime)):
+    from app.cores.capabilities import outbound_capabilities
+
     outbounds = await _load_outbounds(runtime)
-    return {"outbounds": [o.model_dump(mode="json") for o in outbounds]}
+    return {
+        "outbounds": [o.model_dump(mode="json") for o in outbounds],
+        "capabilities": {
+            kind.value: capability.public()
+            for kind, capability in outbound_capabilities(runtime).items()
+        },
+    }
 
 
 class OutboundsSetBody(BaseModel):
@@ -715,9 +750,11 @@ async def _udp_outbound_preflight(server: str, port: int) -> tuple[float, str]:
 
 async def _test_outbound(runtime, outbound: Outbound) -> dict[str, Any]:
     """Protocol-aware endpoint test; never TCP-probe a UDP-only profile."""
-    if outbound.kind in SOFTETHER_CLIENT_KINDS:
+    capability = outbound_capability(outbound.kind, runtime)
+    if not capability.selectable:
         return {"ok": False, "latency_ms": None,
-                "error": SOFTETHER_CLIENT_LIMITATION}
+                "availability": capability.state.value,
+                "error": capability.reason or "outbound runtime is unavailable"}
     if outbound.kind is OutboundKind.CORE:
         core_id = str(outbound.settings.get("core_id", ""))
         manager = runtime.core_manager
@@ -795,7 +832,7 @@ async def outbounds_schema(runtime=Depends(get_runtime)):
     from a hardcoded template (transports + security matrices included)."""
     from app.cores.outbounds.profile_schema import outbound_schemas
 
-    return {"schemas": outbound_schemas()}
+    return {"schemas": outbound_schemas(runtime)}
 
 
 class ShareURLBody(BaseModel):
@@ -903,7 +940,7 @@ async def outbounds_deploy(body: OutboundDeployBody, runtime=Depends(get_runtime
     names = [outbound.name for outbound in body.outbounds]
     if len(names) != len(set(names)):
         raise HTTPException(422, "duplicate outbound names are not allowed")
-    _validate_outbound_capabilities(body.outbounds)
+    _validate_outbound_capabilities(body.outbounds, runtime)
     try:
         # Deploy-before-persist: a bad profile/interface/table cannot replace
         # the last known-good desired state. The manager receives a temporary
@@ -1195,6 +1232,287 @@ async def certificates_remove(ident: str, runtime=Depends(get_runtime)):
 
 
 # --------------------------------------------------------------------- #
+# native Zagros multi-core nodes (separate from legacy Xray-only nodes)
+# --------------------------------------------------------------------- #
+
+class NativeNodeRegisterBody(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    address: str = Field(min_length=1, max_length=256)
+    port: int = Field(default=62050, ge=1, le=65535)
+    registration_token: SecretStr
+    certificate_fingerprint: str = Field(min_length=64, max_length=128)
+    usage_coefficient: float = Field(default=1.0, gt=0)
+
+
+class NativeNodeLifecycleBody(BaseModel):
+    action: str
+    settings: dict[str, Any] = Field(default_factory=dict)
+    purge: bool = False
+    force: bool = False
+
+
+def _native_node_view(row) -> dict[str, Any]:
+    settings = dict(row.settings_json or {})
+    settings.pop("certificate_pem", None)
+    return {
+        "id": row.id, "name": row.name, "address": row.address,
+        "port": row.port, "status": row.status,
+        "usage_coefficient": row.usage_coefficient,
+        "agent_type": row.agent_type,
+        "agent_identity": row.agent_identity,
+        "certificate_fingerprint": row.certificate_fingerprint,
+        "last_seen": row.last_seen,
+        "health": settings.get("health"),
+        "cores": settings.get("cores"),
+    }
+
+
+def _native_node_client(runtime, row):
+    import base64
+
+    from app.nodes.client import ZagrosNodeClient
+
+    if row.agent_type != "zagros_native" or not row.agent_identity \
+            or not row.agent_credentials_enc:
+        raise ValueError("node is not a registered native Zagros agent")
+    credentials = runtime.cipher.decrypt_json(
+        row.agent_credentials_enc, aad=f"node-agent:{row.agent_identity}")
+    key = base64.b64decode(credentials["signing_key"])
+    cert = str((row.settings_json or {}).get("certificate_pem") or "")
+    if len(key) != 32 or not cert:
+        raise ValueError("node credentials are incomplete")
+    return ZagrosNodeClient(
+        row.address, row.port, row.agent_identity, key, cert)
+
+
+def _native_node_row(runtime, node_id: int):
+    from app.persistence.models import NodeModel
+
+    with runtime.session_factory() as session:
+        row = session.get(NodeModel, node_id)
+        if row is None or row.agent_type != "zagros_native":
+            return None
+        session.expunge(row)
+        return row
+
+
+@zagros_admin_router.get("/nodes")
+async def native_nodes_list(runtime=Depends(get_runtime)):
+    from sqlalchemy import select
+    from app.persistence.models import NodeModel
+
+    def load():
+        with runtime.session_factory() as session:
+            rows = session.execute(select(NodeModel).where(
+                NodeModel.agent_type == "zagros_native")).scalars().all()
+            return [_native_node_view(row) for row in rows]
+    return {"nodes": await asyncio.to_thread(load)}
+
+
+@zagros_admin_router.post("/nodes/register")
+async def native_node_register(body: NativeNodeRegisterBody,
+                               runtime=Depends(get_runtime)):
+    import base64
+    import hashlib
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+    from app.nodes.client import (
+        NodeClientError, ZagrosNodeClient, fetch_pinned_certificate)
+    from app.persistence.models import NodeModel
+
+    def duplicate_name() -> bool:
+        with runtime.session_factory() as session:
+            return session.scalar(select(NodeModel.id).where(
+                NodeModel.name == body.name)) is not None
+    if await asyncio.to_thread(duplicate_name):
+        raise HTTPException(409, f"node '{body.name}' already exists")
+
+    try:
+        certificate_pem, fingerprint = await asyncio.to_thread(
+            fetch_pinned_certificate, body.address, body.port,
+            body.certificate_fingerprint)
+        client = ZagrosNodeClient(
+            body.address, body.port, None, None, certificate_pem)
+        panel_id = "panel-" + hashlib.sha256(runtime.cipher._key).hexdigest()[:24]
+        registration = await asyncio.to_thread(
+            client.register, panel_id, body.registration_token.get_secret_value())
+        node_identity = str(registration["node_id"])
+        signing_key = base64.b64decode(registration["signing_key"])
+        if len(signing_key) != 32:
+            raise NodeClientError("agent returned an invalid signing key")
+    except (NodeClientError, KeyError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    encrypted = runtime.cipher.encrypt_json(
+        {"signing_key": base64.b64encode(signing_key).decode("ascii")},
+        aad=f"node-agent:{node_identity}")
+
+    def persist():
+        with runtime.session_factory() as session:
+            if session.scalar(select(NodeModel).where(NodeModel.name == body.name)):
+                raise ValueError(f"node '{body.name}' already exists")
+            if session.scalar(select(NodeModel).where(
+                    NodeModel.agent_identity == node_identity)):
+                raise ValueError("this node identity is already registered")
+            row = NodeModel(
+                name=body.name, address=body.address, port=body.port,
+                status="connected", usage_coefficient=body.usage_coefficient,
+                agent_type="zagros_native", agent_identity=node_identity,
+                certificate_fingerprint=fingerprint,
+                agent_credentials_enc=encrypted,
+                settings_json={"certificate_pem": certificate_pem},
+                last_seen=datetime.now(timezone.utc),
+            )
+            session.add(row); session.commit(); session.refresh(row)
+            return _native_node_view(row)
+    try:
+        return await asyncio.to_thread(persist)
+    except Exception as exc:
+        # Registration was consumed but persistence failed (duplicate race,
+        # database outage, constraint failure). Revoke the newly issued key so
+        # no orphan panel authority remains. If revocation itself fails, never
+        # claim the operation rolled back cleanly.
+        revoked = False
+        try:
+            registered = ZagrosNodeClient(
+                body.address, body.port, node_identity, signing_key,
+                certificate_pem)
+            await asyncio.to_thread(registered.revoke)
+            revoked = True
+        except Exception:  # noqa: BLE001
+            pass
+        if isinstance(exc, ValueError):
+            raise HTTPException(409, str(exc)) from exc
+        detail = ("node registration persistence failed; remote authority revoked"
+                  if revoked else
+                  "node registration persistence failed and remote revocation could not be confirmed; isolate the node")
+        raise HTTPException(500, detail) from exc
+
+
+@zagros_admin_router.post("/nodes/{node_id}/heartbeat")
+async def native_node_heartbeat(node_id: int, runtime=Depends(get_runtime)):
+    from datetime import datetime, timezone
+    from app.persistence.models import NodeModel
+
+    row = await asyncio.to_thread(_native_node_row, runtime, node_id)
+    if row is None:
+        raise HTTPException(404, "native node not found")
+    try:
+        client = _native_node_client(runtime, row)
+        heartbeat, health, cores = await asyncio.gather(
+            asyncio.to_thread(client.heartbeat),
+            asyncio.to_thread(client.health),
+            asyncio.to_thread(client.cores),
+        )
+    except Exception as exc:
+        def failed():
+            with runtime.session_factory() as session:
+                current = session.get(NodeModel, node_id)
+                if current:
+                    current.status = "error"
+                    current.settings_json = {
+                        **(current.settings_json or {}),
+                        "last_error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                    }
+                    session.commit()
+        await asyncio.to_thread(failed)
+        raise HTTPException(502, str(exc)) from exc
+
+    def persist():
+        with runtime.session_factory() as session:
+            current = session.get(NodeModel, node_id)
+            current.status = "connected"
+            current.last_seen = datetime.now(timezone.utc)
+            current.settings_json = {
+                **(current.settings_json or {}),
+                "health": health, "cores": cores,
+            }
+            session.commit(); session.refresh(current)
+            return _native_node_view(current)
+    view = await asyncio.to_thread(persist)
+    view["heartbeat"] = heartbeat
+    return view
+
+
+@zagros_admin_router.post("/nodes/{node_id}/cores/{core_id}/lifecycle")
+async def native_node_core_lifecycle(node_id: int, core_id: str,
+                                     body: NativeNodeLifecycleBody,
+                                     runtime=Depends(get_runtime)):
+    allowed = {"install", "uninstall", "start", "stop", "restart"}
+    if body.action not in allowed:
+        raise HTTPException(422, f"action must be one of {sorted(allowed)}")
+    row = await asyncio.to_thread(_native_node_row, runtime, node_id)
+    if row is None:
+        raise HTTPException(404, "native node not found")
+    try:
+        return await asyncio.to_thread(
+            _native_node_client(runtime, row).lifecycle,
+            core_id, body.action, settings=body.settings,
+            purge=body.purge, force=body.force)
+    except Exception as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@zagros_admin_router.get("/nodes/{node_id}/cores/{core_id}/logs")
+async def native_node_core_logs(node_id: int, core_id: str, tail: int = 200,
+                                runtime=Depends(get_runtime)):
+    row = await asyncio.to_thread(_native_node_row, runtime, node_id)
+    if row is None:
+        raise HTTPException(404, "native node not found")
+    try:
+        return await asyncio.to_thread(
+            _native_node_client(runtime, row).core_logs,
+            core_id, max(1, min(tail, 2000)))
+    except Exception as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+class NativeNodeInboundBody(BaseModel):
+    document: dict[str, Any]
+
+
+@zagros_admin_router.put("/nodes/{node_id}/cores/{core_id}/inbounds")
+async def native_node_core_inbounds(node_id: int, core_id: str,
+                                    body: NativeNodeInboundBody,
+                                    runtime=Depends(get_runtime)):
+    row = await asyncio.to_thread(_native_node_row, runtime, node_id)
+    if row is None:
+        raise HTTPException(404, "native node not found")
+    try:
+        return await asyncio.to_thread(
+            _native_node_client(runtime, row).apply_inbounds,
+            core_id, body.document)
+    except Exception as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@zagros_admin_router.delete("/nodes/{node_id}")
+async def native_node_delete(node_id: int, force: bool = False,
+                             runtime=Depends(get_runtime)):
+    from app.persistence.models import NodeModel
+
+    row = await asyncio.to_thread(_native_node_row, runtime, node_id)
+    if row is None:
+        raise HTTPException(404, "native node not found")
+    remote_revoked = False
+    try:
+        await asyncio.to_thread(_native_node_client(runtime, row).revoke)
+        remote_revoked = True
+    except Exception as exc:
+        if not force:
+            raise HTTPException(
+                502, f"node key revocation failed; use force only after isolating the node: {exc}") from exc
+    def remove():
+        with runtime.session_factory() as session:
+            current = session.get(NodeModel, node_id)
+            if current:
+                session.delete(current); session.commit()
+    await asyncio.to_thread(remove)
+    return {"deleted": node_id, "remote_revoked": remote_revoked}
+
+
+# --------------------------------------------------------------------- #
 # users: multi-core online states (item 14)
 # --------------------------------------------------------------------- #
 
@@ -1271,20 +1589,45 @@ async def users_online_states(runtime=Depends(get_runtime)):
 # panel network settings — validated DB desired state + host-agent apply
 # --------------------------------------------------------------------- #
 
+def _panel_network_runtime_settings(runtime):
+    """Actual process/.env network state, independent of staged DB desired state."""
+    import config
+    from app.platform.network_settings import PanelNetworkSettings
+
+    scheme = "https" if config.TLS_MODE == "on" else "http"
+    certificate_id = None
+    configured_cert = str(getattr(config, "UVICORN_SSL_CERTFILE", "") or "")
+    if scheme == "https" and configured_cert:
+        try:
+            wanted = Path(configured_cert).resolve()
+            found = next((item for item in certificates.scan(
+                _data_dir(runtime), managed_only=True)
+                if Path(item.path).resolve() == wanted), None)
+            certificate_id = found.id if found else None
+        except OSError:
+            certificate_id = None
+    values = {
+        "domain": config.DOMAIN or None,
+        "port": int(config.UVICORN_PORT),
+        "scheme": scheme,
+        "bind_address": config.UVICORN_HOST,
+        "trusted_proxies": [],
+        "tls_certificate_id": certificate_id,
+    }
+    if scheme == "https" and not certificate_id:
+        # Read-only representation of a historical/external TLS path. A future
+        # Apply refuses it as a rollback baseline until the cert is imported.
+        return PanelNetworkSettings.model_construct(**values)
+    return PanelNetworkSettings.model_validate(values)
+
+
 async def _panel_network_settings(runtime):
     from app.platform.network_settings import PanelNetworkSettings
 
     raw = await runtime.kv.get_value(_PANEL_NETWORK_KEY)
     if raw:
         return PanelNetworkSettings.model_validate(raw)
-    import config
-    return PanelNetworkSettings(
-        domain=config.DOMAIN or None,
-        port=int(config.UVICORN_PORT),
-        scheme="https" if config.TLS_MODE == "on" else "http",
-        bind_address=config.UVICORN_HOST,
-        trusted_proxies=[],
-    )
+    return _panel_network_runtime_settings(runtime)
 
 
 def _validate_network_certificate(runtime, settings) -> None:
@@ -1298,10 +1641,48 @@ def _validate_network_certificate(runtime, settings) -> None:
         raise ValueError(f"TLS certificate '{ident}' does not exist")
     if found.expired or not found.has_key:
         raise ValueError(f"TLS certificate '{ident}' is expired or has no private key")
+    hostname = settings.domain
+    if hostname and not certificates.certificate_covers(found.path, hostname):
+        raise ValueError(
+            f"TLS certificate '{ident}' does not cover panel hostname '{hostname}'")
+
+
+async def _validate_panel_port_ownership(runtime, settings) -> list[dict[str, Any]]:
+    import config
+    from app.platform.network_settings import detect_port_conflicts
+
+    conflicts = await detect_port_conflicts(
+        runtime, settings, current_panel_port=int(config.UVICORN_PORT))
+    if conflicts:
+        raise HTTPException(409, conflicts[0].message())
+    return [item.model_dump(mode="json") for item in conflicts]
+
+
+async def _reconcile_panel_network_transaction(runtime) -> dict[str, Any] | None:
+    """Commit/rollback DB desired state from the root agent's final result."""
+    from app.platform.network_settings import HostNetworkRequest
+
+    pending = await runtime.kv.get_value(_PANEL_NETWORK_PENDING_KEY)
+    if not isinstance(pending, dict) or not pending.get("operation_id"):
+        return None
+    result = HostNetworkRequest().status(str(pending["operation_id"]))
+    status = result.get("status")
+    if status == "success":
+        # Candidate was staged before the recreate so the new process sees a
+        # coherent source of truth. Success finalizes it as rollback baseline.
+        await runtime.kv.set_value(
+            _PANEL_NETWORK_APPLIED_KEY, dict(pending.get("candidate") or {}))
+        await runtime.kv.set_value(_PANEL_NETWORK_PENDING_KEY, None)
+    elif status == "failed":
+        await runtime.kv.set_value(
+            _PANEL_NETWORK_KEY, dict(pending.get("previous") or {}))
+        await runtime.kv.set_value(_PANEL_NETWORK_PENDING_KEY, None)
+    return result
 
 
 @zagros_admin_router.get("/settings/panel-network")
 async def panel_network_get(runtime=Depends(get_runtime)):
+    await _reconcile_panel_network_transaction(runtime)
     return (await _panel_network_settings(runtime)).model_dump(mode="json")
 
 
@@ -1314,6 +1695,7 @@ async def panel_network_test(body: dict[str, Any], runtime=Depends(get_runtime))
         _validate_network_certificate(runtime, settings)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    await _validate_panel_port_ownership(runtime, settings)
     return {
         "ok": True,
         "public_url": settings.public_url(),
@@ -1329,6 +1711,9 @@ async def panel_network_test(body: dict[str, Any], runtime=Depends(get_runtime))
 async def panel_network_save(body: dict[str, Any], runtime=Depends(get_runtime)):
     from app.platform.network_settings import PanelNetworkSettings
 
+    await _reconcile_panel_network_transaction(runtime)
+    if await runtime.kv.get_value(_PANEL_NETWORK_PENDING_KEY):
+        raise HTTPException(409, "a panel network Apply transaction is still pending")
     try:
         settings = PanelNetworkSettings.model_validate(body)
         _validate_network_certificate(runtime, settings)
@@ -1338,20 +1723,60 @@ async def panel_network_save(body: dict[str, Any], runtime=Depends(get_runtime))
     return {"ok": True, "settings": settings.model_dump(mode="json")}
 
 
-@zagros_admin_router.post("/settings/panel-network/apply")
-async def panel_network_apply(body: dict[str, Any], runtime=Depends(get_runtime)):
+async def _panel_network_apply_locked(body: dict[str, Any], runtime):
     from app.platform.network_settings import HostNetworkRequest, PanelNetworkSettings
 
+    await _reconcile_panel_network_transaction(runtime)
+    if await runtime.kv.get_value(_PANEL_NETWORK_PENDING_KEY):
+        raise HTTPException(409, "a panel network Apply transaction is still pending")
     try:
         settings = PanelNetworkSettings.model_validate(body)
         _validate_network_certificate(runtime, settings)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    await runtime.kv.set_value(_PANEL_NETWORK_KEY, settings.model_dump(mode="json"))
+    await _validate_panel_port_ownership(runtime, settings)
+    requester = HostNetworkRequest()
+    if not requester.agent_ready():
+        raise HTTPException(
+            503,
+            "Zagros host network agent is not installed; Apply cannot mutate desired state")
+    applied = await runtime.kv.get_value(_PANEL_NETWORK_APPLIED_KEY)
+    previous_model = (PanelNetworkSettings.model_validate(applied)
+                      if applied else _panel_network_runtime_settings(runtime))
+    if previous_model.scheme == "https" and not previous_model.tls_certificate_id:
+        raise HTTPException(
+            409,
+            "current HTTPS certificate is not in the managed certificate store; "
+            "import/select it before Apply so rollback is possible")
+    previous = previous_model.model_dump(mode="json")
+    candidate = settings.model_dump(mode="json")
+    # Stage the DB transaction before publishing the atomic host request: a
+    # watcher can never recreate the panel into a candidate the new process
+    # cannot read. Request failure restores synchronously; host failure is
+    # reconciled from its signed-by-filesystem result on status/settings read.
+    operation = secrets.token_hex(16)
+    await runtime.kv.set_value(_PANEL_NETWORK_PENDING_KEY, {
+        "operation_id": operation, "previous": previous,
+        "candidate": candidate,
+    })
+    await runtime.kv.set_value(_PANEL_NETWORK_KEY, candidate)
     try:
-        return HostNetworkRequest().request(settings)
+        accepted = requester.request(settings, operation_id=operation)
     except RuntimeError as exc:
+        await runtime.kv.set_value(_PANEL_NETWORK_KEY, previous)
+        await runtime.kv.set_value(_PANEL_NETWORK_PENDING_KEY, None)
         raise HTTPException(503, str(exc)) from exc
+    return accepted
+
+
+@zagros_admin_router.post("/settings/panel-network/apply")
+async def panel_network_apply(body: dict[str, Any], runtime=Depends(get_runtime)):
+    lock = getattr(runtime, "_panel_network_apply_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        runtime._panel_network_apply_lock = lock
+    async with lock:
+        return await _panel_network_apply_locked(body, runtime)
 
 
 @zagros_admin_router.get("/settings/panel-network/apply-status")
@@ -1359,6 +1784,10 @@ async def panel_network_apply_status(operation_id: str | None = None,
                                      runtime=Depends(get_runtime)):
     from app.platform.network_settings import HostNetworkRequest
 
+    reconciled = await _reconcile_panel_network_transaction(runtime)
+    if reconciled is not None and (
+            not operation_id or reconciled.get("operation_id") == operation_id):
+        return reconciled
     return HostNetworkRequest().status(operation_id)
 
 

@@ -446,7 +446,7 @@ class LocalSingBoxBackend:
             out = subprocess.check_output(
                 [self.executable, "version"], text=True, timeout=10
             )
-            match = re.search(r"sing-box version ([\d.]+)", out)
+            match = re.search(r"sing-box version v?([\d.]+)", out)
             return match.group(1) if match else None
         except (subprocess.SubprocessError, FileNotFoundError):
             return None

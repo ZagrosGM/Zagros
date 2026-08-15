@@ -9,7 +9,7 @@ stack (fastapi/apscheduler/xray singletons) into their interpreter.
 import asyncio
 import logging
 
-__version__ = "1.0.0-alpha.8.2"  # Zagros begins a new version line after the rebrand
+__version__ = "1.0.0-alpha.8.3"  # Zagros begins a new version line after the rebrand
 
 
 _building = False
@@ -153,6 +153,16 @@ def _build_app_inner():
             runtime = getattr(app.state, "zagros", None)
             if runtime is not None:
                 await runtime.boot_cores()
+                # Converge the optional dedicated subscription listener from
+                # SQL desired state. It shares this ASGI app with lifespan off,
+                # so schedulers/cores are never started twice.
+                try:
+                    portal_settings = await runtime.portal_settings.get_portal_settings()
+                    await runtime.subscription_listener.apply(
+                        portal_settings, runtime, app)
+                except Exception as _exc:  # panel must stay reachable for repair
+                    logging.getLogger("uvicorn.error").error(
+                        "dedicated subscription listener failed: %s", _exc)
                 # hand persisted usage baselines back to driver trackers so a
                 # panel restart never re-reports whole counters (exactly-once)
                 try:
@@ -167,6 +177,11 @@ def _build_app_inner():
         async def zagros_stop_managed_cores():
             runtime = getattr(app.state, "zagros", None)
             if runtime is not None:
+                try:
+                    await runtime.subscription_listener.stop()
+                except Exception as _exc:  # noqa: BLE001
+                    logging.getLogger("uvicorn.error").warning(
+                        "subscription listener cleanup failed: %s", _exc)
                 # Policy outbounds own additional TUN/WireGuard interfaces,
                 # ip rules and nftables state. Tear those down before service
                 # inbounds so a replacement image cannot inherit stale marks.

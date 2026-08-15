@@ -295,6 +295,28 @@ _KIND_SCHEMAS: dict[OutboundKind, dict] = {
 }
 
 
-def outbound_schemas() -> dict[str, dict]:
-    """{kind: JSON-Schema} for every outbound kind (JSON-serializable)."""
-    return {kind.value: schema for kind, schema in _KIND_SCHEMAS.items()}
+def outbound_schemas(runtime=None) -> dict[str, dict]:
+    """Return per-kind schemas enriched by the shared runtime capability matrix.
+
+    ``x-supported`` is no longer a UI-only deny-list.  It is derived from the
+    same contract used by API validation and the policy planner, including the
+    distinction between unsupported, environment-limited and not-installed.
+    """
+    import copy
+
+    from app.cores.capabilities import outbound_capabilities
+
+    capabilities = outbound_capabilities(runtime)
+    result: dict[str, dict] = {}
+    for kind, source in _KIND_SCHEMAS.items():
+        schema = copy.deepcopy(source)
+        capability = capabilities[kind]
+        schema["x-supported"] = capability.selectable
+        schema["x-availability"] = capability.state.value
+        schema["x-capability"] = capability.public()
+        if capability.reason:
+            schema["x-disabled-reason"] = capability.reason
+        elif capability.selectable:
+            schema.pop("x-disabled-reason", None)
+        result[kind.value] = schema
+    return result

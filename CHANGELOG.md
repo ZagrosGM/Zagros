@@ -10,7 +10,7 @@ multi-core platform line.
 
 ---
 
-## [1.0.0-alpha.8.5] — Unreleased — Isolated SoftEther source routing
+## [1.0.0-alpha.8.5] — 2026-08-17 — Isolated SoftEther source routing
 
 ### Fixed
 

@@ -1553,7 +1553,7 @@ class SingBoxDriver(BaseCoreDriver):
             )
         tag, ib, meta = triples[0]
         display = self._protocol_display(account.protocol)
-        outbound = self._compose_outbound(account, tag, ib, meta)
+        outbound = self._compose_outbound(account, tag, ib, meta, node)
         return ClientConfig(
             core_id=self.metadata.id,
             protocol=account.protocol,

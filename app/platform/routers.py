@@ -143,10 +143,14 @@ async def client_connect(core_id: str,
 
 
 @zagros_router.post("/client/v1/config")
-async def client_config(body: ConfigBody, runtime=Depends(get_runtime)):
+async def client_config(body: ConfigBody, request: Request,
+                        runtime=Depends(get_runtime)):
     try:
+        settings = await runtime.portal_settings.get_portal_settings()
+        context = runtime.portal._delivery_context(  # noqa: SLF001
+            settings, request.url.hostname)
         envelope = await runtime.client_api.deliver_config(
-            body.connect_token, body.client_public_key
+            body.connect_token, body.client_public_key, context
         )
     except ClientApiError as exc:
         raise _client_error(exc) from exc

@@ -190,7 +190,9 @@ class PolicyRoutingManager:
         self._domains: dict[str, PolicyDomain] = {}
         self._outbounds: dict[str, Outbound] = {}
         self._rules: list[RoutingRule] = []
-        self._softether_routed = False
+        # Source ids, not one process-wide boolean: every isolated Virtual Hub
+        # owns a different TAP/subnet and can be converged independently.
+        self._softether_routed: set[str] = set()
         self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ #
@@ -211,7 +213,10 @@ class PolicyRoutingManager:
 
     @classmethod
     def _interface_for(cls, name: str, mode: str) -> str:
-        prefix = {"openvpn": "zgo", "wireguard": "zgw", "proxy": "zgp", "ssh": "zgs"}[mode]
+        prefix = {
+            "openvpn": "zgo", "wireguard": "zgw", "proxy": "zgp",
+            "xray_proxy": "zgx", "ssh": "zgs",
+        }[mode]
         return prefix + cls._hash(name)[:10]
 
     @classmethod
@@ -226,13 +231,14 @@ class PolicyRoutingManager:
         return port
 
     @staticmethod
-    def _mode(kind: OutboundKind) -> str | None:
+    def _mode(kind: OutboundKind,
+              settings: dict[str, Any] | None = None) -> str | None:
         """Select a host dataplane from the shared capability contract.
 
-        SSH is deliberately an application-only OpenSSH SOCKS domain.  Xray
-        has no ``ssh`` outbound codec (including current 26.x releases), while
-        OpenSSH ``-D`` is a real TCP application proxy but not a TUN and cannot
-        carry UDP/kernel-forwarded service traffic.
+        ``policy_core=xray`` is an explicit execution choice for protocols
+        Xray implements natively.  A small sing-box TUN adapter feeds a private
+        Xray SOCKS inbound, so service packets genuinely traverse the Xray
+        outbound process instead of relabelling a sing-box-only gateway.
         """
         if kind is OutboundKind.SSH:
             return "ssh"
@@ -243,6 +249,19 @@ class PolicyRoutingManager:
             return "openvpn"
         if kind is OutboundKind.WIREGUARD:
             return "wireguard"
+        requested = str((settings or {}).get("policy_core") or "").strip().lower()
+        if requested == "xray":
+            supported = {
+                OutboundKind.SOCKS, OutboundKind.HTTP, OutboundKind.VLESS,
+                OutboundKind.VMESS, OutboundKind.TROJAN,
+                OutboundKind.SHADOWSOCKS,
+            }
+            if kind not in supported:
+                raise CoreError(
+                    f"policy_core=xray cannot execute '{kind.value}'; choose sing-box")
+            return "xray_proxy"
+        if requested not in ("", "sing-box"):
+            raise CoreError("policy_core must be 'xray' or 'sing-box'")
         return "proxy"
 
     def validate_plan(self, rules: list[RoutingRule],
@@ -386,7 +405,8 @@ class PolicyRoutingManager:
                 raise CoreError("cross-core policy routing requires Linux iproute2")
             self._root.mkdir(parents=True, exist_ok=True)
             os.chmod(self._root, 0o700)
-            wanted_obs = [o for o in outbounds if o.enabled and self._mode(o.kind)]
+            wanted_obs = [o for o in outbounds
+                          if o.enabled and self._mode(o.kind, o.settings)]
             identities = (self._identity_provider([o.name for o in wanted_obs])
                           if self._identity_provider else {})
             used: set[int] = {int(pair[0]) for pair in identities.values()}
@@ -399,7 +419,7 @@ class PolicyRoutingManager:
                     table_id = self._table_for(outbound.name, used)
                     fwmark = table_id
                 used.add(table_id)
-                mode = self._mode(outbound.kind)
+                mode = self._mode(outbound.kind, outbound.settings)
                 assert mode is not None
                 digest = self._hash(outbound.name)
                 runtime_dir = str(self._root / digest[:20])
@@ -505,6 +525,8 @@ class PolicyRoutingManager:
                 self._start_wireguard(domain, outbound)
             elif domain.mode == "ssh":
                 self._start_ssh(domain, outbound)
+            elif domain.mode == "xray_proxy":
+                self._start_xray_proxy(domain, outbound)
             else:
                 self._start_proxy(domain, outbound)
             if domain.mode != "ssh":
@@ -817,6 +839,99 @@ class PolicyRoutingManager:
             raise CoreError(f"outbound '{outbound.name}' cannot back a policy TUN: {reason}")
         return native
 
+    def _xray_binary(self) -> str:
+        try:
+            driver = self._cores.get("xray")
+            backend = getattr(driver, "_backend", None)
+            getter = getattr(backend, "executable_path", None)
+            candidate = str(getter() if callable(getter) else "")
+            if candidate and os.path.isfile(candidate):
+                return candidate
+        except Exception:  # noqa: BLE001
+            pass
+        candidate = shutil.which("xray")
+        if not candidate:
+            raise CoreError("Xray policy domains need an installed xray binary")
+        return candidate
+
+    def _xray_outbound(self, outbound: Outbound) -> dict[str, Any]:
+        try:
+            driver = self._cores.get("xray")
+            native, gap = driver._outbound_to_native(outbound)  # noqa: SLF001
+        except Exception as exc:  # noqa: BLE001
+            raise CoreError(
+                f"cannot translate outbound '{outbound.name}' for Xray policy runtime: {exc}") from exc
+        if gap is not None or native is None:
+            reason = gap.reason if gap is not None else "not representable"
+            raise CoreError(
+                f"outbound '{outbound.name}' cannot run through Xray: {reason}")
+        return native
+
+    def _start_xray_proxy(self, domain: PolicyDomain, outbound: Outbound) -> None:
+        """Run the selected upstream in Xray behind a private TUN adapter."""
+        xray = self._xray_binary()
+        singbox = self._singbox_binary()
+        native = self._xray_outbound(outbound)
+        runtime = Path(domain.runtime_dir)
+        xray_config = {
+            "log": {"loglevel": "warning"},
+            "inbounds": [{
+                "tag": "policy-socks", "listen": "127.0.0.1",
+                "port": domain.proxy_port, "protocol": "socks",
+                "settings": {"auth": "noauth", "udp": True},
+            }],
+            "outbounds": [native, {"protocol": "freedom", "tag": "policy-direct"}],
+        }
+        xray_path = runtime / "xray.json"
+        self._atomic_text(xray_path, json.dumps(xray_config, indent=2) + "\n")
+        self._run(xray, "run", "-test", "-c", str(xray_path), timeout=30)
+        xray_log = open(runtime / "xray.log", "a", encoding="utf-8")  # noqa: SIM115
+        domain.process = self._runner.popen(
+            [xray, "run", "-c", str(xray_path)], stdout=xray_log)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if self._runner.tcp_ready("127.0.0.1", domain.proxy_port):
+                break
+            if domain.process.poll() is not None:
+                raise CoreError(f"outbound '{domain.name}' Xray process exited")
+            self._sleep(0.2)
+        else:
+            raise CoreError(
+                f"outbound '{domain.name}' Xray SOCKS ingress did not listen")
+
+        digest = int(self._hash(outbound.name)[:6], 16)
+        third = 16 + ((digest >> 8) % 200)
+        fourth = (digest & 0x3F) & ~0x03
+        address = f"172.31.{third}.{fourth + 1}/30"
+        adapter_config = {
+            "log": {"level": "warn", "timestamp": True},
+            "inbounds": [
+                {
+                    "type": "tun", "tag": "policy-in",
+                    "interface_name": domain.interface,
+                    "address": [address], "mtu": 1400,
+                    "auto_route": False, "strict_route": False, "stack": "gvisor",
+                },
+                {
+                    "type": "redirect", "tag": "policy-redirect",
+                    "listen": "127.0.0.1", "listen_port": domain.redirect_port,
+                },
+            ],
+            "outbounds": [{
+                "type": "socks", "tag": "xray-egress",
+                "server": "127.0.0.1", "server_port": domain.proxy_port,
+                "version": "5",
+            }],
+            "route": {"final": "xray-egress", "auto_detect_interface": True},
+        }
+        adapter_path = runtime / "xray-tun-adapter.json"
+        self._atomic_text(adapter_path, json.dumps(adapter_config, indent=2) + "\n")
+        self._run(singbox, "check", "-c", str(adapter_path), timeout=30)
+        adapter_log = open(
+            runtime / "xray-tun-adapter.log", "a", encoding="utf-8")  # noqa: SIM115
+        domain.gateway_process = self._runner.popen(
+            [singbox, "run", "-c", str(adapter_path)], stdout=adapter_log)
+
     def _start_proxy(self, domain: PolicyDomain, outbound: Outbound) -> None:
         binary = self._singbox_binary()
         native = self._singbox_outbound(outbound)
@@ -979,23 +1094,47 @@ class PolicyRoutingManager:
                             source_subnet=str(network),
                         ))
             elif core_id == "softether":
-                tags = (driver.settings.get("feature_tags") or {}).values()
-                policy_source = getattr(driver, "policy_source", lambda: None)()
-                for tag in tags:
-                    if policy_source:
-                        sources.append(TrafficSource(
-                            core_id=core_id, inbound_tag=str(tag),
-                            source_subnet=str(policy_source["subnet"]),
-                            note=(
-                                "SoftEther protocols share one routed hub subnet; "
-                                "priority decides when their tag rules overlap"
-                            ),
-                        ))
-                    else:
-                        sources.append(TrafficSource(
-                            core_id=core_id, inbound_tag=str(tag),
-                            note="SoftEther SecureNAT hides client source addresses; routed TAP mode is required",
-                        ))
+                spec_provider = getattr(driver, "routing_source_specs", None)
+                active_provider = getattr(driver, "policy_sources", None)
+                if callable(spec_provider):
+                    specs = spec_provider()
+                    active = {
+                        str(item["id"]): item
+                        for item in (active_provider() if callable(active_provider) else [])
+                    }
+                else:  # compatibility with a pre-isolated-hub test double
+                    tags = list((driver.settings.get("feature_tags") or {}).values())
+                    source = getattr(driver, "policy_source", lambda: None)()
+                    specs = [{
+                        "id": "primary", "hub": driver.settings.get("hub", "DEFAULT"),
+                        "tags": tags, "subnet": (source or {}).get("subnet"),
+                        "legacy": True,
+                    }]
+                    active = {"primary": source} if source else {}
+                for spec in specs:
+                    policy_source = active.get(str(spec["id"]))
+                    shared = len(spec.get("tags") or []) > 1
+                    for tag in spec.get("tags") or []:
+                        if policy_source:
+                            sources.append(TrafficSource(
+                                core_id=core_id, inbound_tag=str(tag),
+                                source_subnet=str(policy_source["subnet"]),
+                                note=(
+                                    "SoftEther transports in this Virtual Hub share one routed subnet"
+                                    if shared else
+                                    "SoftEther inbound has a dedicated managed Virtual Hub/TAP identity"
+                                ),
+                            ))
+                        else:
+                            sources.append(TrafficSource(
+                                core_id=core_id, inbound_tag=str(tag),
+                                note=(
+                                    "SoftEther SecureNAT hides client source addresses; routed TAP mode is required"
+                                    if spec.get("legacy") else
+                                    "SoftEther source is not routed yet; deploy a matching rule "
+                                    "to materialize its managed TAP"
+                                ),
+                            ))
             elif core_id == "ssh":
                 try:
                     uids = sorted({entry.pw_uid for entry in pwd.getpwall()
@@ -1036,57 +1175,69 @@ class PolicyRoutingManager:
         return None
 
     def validate_rule_set(self, rules: list[RoutingRule]) -> None:
-        """Reject per-transport SoftEther policies the current hub cannot express.
+        """Reject a transport-only selector on a shared Virtual Hub.
 
-        L2TP/SSTP/native sessions terminate in one Virtual Hub and routed TAP,
-        so their packets share one source subnet. Distinct egress decisions
-        would look configurable in the UI but first-match would route all of
-        them identically. Fail before persistence instead of lying.
+        Destination/protocol/priority overlap is representable in nftables and
+        remains deterministic.  What is not representable is selecting only
+        one of several transport labels that all terminate in the same hub/TAP.
+        A managed isolated hub has one tag and therefore an honest source
+        identity independent of the production hub.
         """
         try:
             driver = self._cores.get("softether")
         except Exception:  # noqa: BLE001
             return
-        tags = set(str(value) for value in
-                   (driver.settings.get("feature_tags") or {}).values())
-        decisions: dict[tuple[str, str | None], list[str]] = {}
-        for rule in rules:
-            if not rule.enabled:
+        provider = getattr(driver, "routing_source_specs", None)
+        if callable(provider):
+            specs = provider()
+        else:
+            tags = sorted(set(str(value) for value in
+                              (driver.settings.get("feature_tags") or {}).values()))
+            specs = [{"hub": driver.settings.get("hub", "DEFAULT"), "tags": tags}]
+        for spec in specs:
+            tags = set(str(value) for value in spec.get("tags") or [])
+            if len(tags) <= 1:
                 continue
-            selected = (tags if not rule.matcher.inbounds
-                        else tags.intersection(rule.matcher.inbounds))
-            if not selected:
-                continue
-            signature = (rule.action.value, rule.outbound)
-            decisions.setdefault(signature, []).append(rule.name)
-        if len(decisions) > 1:
-            detail = "; ".join(
-                f"{action}->{outbound or '-'}: {','.join(names)}"
-                for (action, outbound), names in decisions.items())
-            raise CoreError(
-                "SoftEther transport tags share one Virtual Hub/TAP source subnet; "
-                f"different per-transport decisions are not representable ({detail}). "
-                "Use one shared SoftEther egress rule or deploy separate SoftEther instances."
-            )
+            for rule in rules:
+                if not rule.enabled or not rule.matcher.inbounds:
+                    continue
+                selected = tags.intersection(rule.matcher.inbounds)
+                if selected and selected != tags:
+                    raise CoreError(
+                        f"SoftEther hub '{spec.get('hub')}' shares one TAP/subnet for "
+                        f"tags {sorted(tags)}; rule '{rule.name}' selects only "
+                        f"{sorted(selected)}. Select every tag in that hub or create "
+                        "a managed isolated Virtual Hub."
+                    )
 
     def _converge_softether_source(self, rules: list[RoutingRule]) -> None:
         try:
             driver = self._cores.get("softether")
         except Exception:  # noqa: BLE001
             return
-        tags = set(str(value) for value in
-                   (driver.settings.get("feature_tags") or {}).values())
-        needed = any(
-            rule.enabled
-            and (not rule.matcher.inbounds or tags.intersection(rule.matcher.inbounds))
-            for rule in rules
-        )
-        if needed and not self._softether_routed:
-            driver.ensure_policy_source()
-            self._softether_routed = True
-        elif not needed and self._softether_routed:
-            driver.disable_policy_source()
-            self._softether_routed = False
+        provider = getattr(driver, "routing_source_specs", None)
+        if callable(provider):
+            specs = provider()
+        else:
+            tags = sorted(set(str(value) for value in
+                              (driver.settings.get("feature_tags") or {}).values()))
+            specs = [{"id": "primary", "tags": tags}]
+        needed: set[str] = set()
+        for spec in specs:
+            tags = set(str(value) for value in spec.get("tags") or [])
+            if any(
+                rule.enabled
+                and (not rule.matcher.inbounds
+                     or bool(tags.intersection(rule.matcher.inbounds)))
+                for rule in rules
+            ):
+                needed.add(str(spec["id"]))
+        for source_id in sorted(needed - self._softether_routed):
+            driver.ensure_policy_source(source_id)
+            self._softether_routed.add(source_id)
+        for source_id in sorted(self._softether_routed - needed):
+            driver.disable_policy_source(source_id)
+            self._softether_routed.discard(source_id)
 
     def preview_rules(self, rules: list[RoutingRule]) -> PolicyRuleReport:
         report = PolicyRuleReport()
@@ -1230,31 +1381,52 @@ class PolicyRoutingManager:
         return "\n".join(body) + "\n"
 
     def apply_rules(self, rules: list[RoutingRule]) -> PolicyRuleReport:
-        """Atomically replace classifiers after every referenced domain is ready."""
+        """Atomically replace classifiers and roll back hub source lifecycle.
+
+        nft applies a script transactionally, but TAP/SecureNAT convergence is
+        an external vpncmd transaction.  If rule rendering or nft replacement
+        fails, restore exactly the previously active hub source ids instead of
+        leaving a disposable hub bridged with no matching classifier.
+        """
         with self._lock:
             self.validate_rule_set(rules)
-            self._converge_softether_source(rules)
-            report = self.preview_rules(rules)
-            script = self._nft_script(rules, report)
-            exists = self._run(
-                "nft", "list", "table", "inet", _POLICY_TABLE,
-                check=False,
-            ).returncode == 0
-            if exists:
-                script = f"delete table inet {_POLICY_TABLE}\n" + script
-            self._run("nft", "-f", "-", input_text=script)
+            previous_sources = set(self._softether_routed)
+            try:
+                self._converge_softether_source(rules)
+                report = self.preview_rules(rules)
+                script = self._nft_script(rules, report)
+                exists = self._run(
+                    "nft", "list", "table", "inet", _POLICY_TABLE,
+                    check=False,
+                ).returncode == 0
+                if exists:
+                    script = f"delete table inet {_POLICY_TABLE}\n" + script
+                self._run("nft", "-f", "-", input_text=script)
+            except Exception:
+                try:
+                    driver = self._cores.get("softether")
+                    for source_id in sorted(self._softether_routed - previous_sources):
+                        driver.disable_policy_source(source_id)
+                    for source_id in sorted(previous_sources - self._softether_routed):
+                        driver.ensure_policy_source(source_id)
+                    self._softether_routed = previous_sources
+                except Exception:  # noqa: BLE001 - preserve deployment failure
+                    logger.exception("SoftEther source rollback failed after routing error")
+                raise
             self._rules = list(rules)
             return report
 
     def stop(self) -> None:
         with self._lock:
             self._run("nft", "delete", "table", "inet", _POLICY_TABLE, check=False)
-            if self._softether_routed:
+            for source_id in sorted(self._softether_routed):
                 try:
-                    self._cores.get("softether").disable_policy_source()
+                    self._cores.get("softether").disable_policy_source(source_id)
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("SoftEther routed TAP cleanup failed: %s", exc)
-                self._softether_routed = False
+                    logger.warning(
+                        "SoftEther routed TAP cleanup failed for %s: %s",
+                        source_id, exc)
+            self._softether_routed.clear()
             for domain in list(self._domains.values()):
                 self._stop_domain(domain)
             self._domains.clear()

@@ -68,6 +68,17 @@ def _server_fields() -> dict:
     }
 
 
+def _policy_core_field() -> dict:
+    return {
+        "policy_core": _select(
+            "policy_core", "service-source execution core", group="basic",
+            options=["sing-box", "xray"], default="sing-box",
+            hint=("kernel/TUN sources use the selected real core process; "
+                  "Xray support is limited to Xray-native protocols"),
+        )
+    }
+
+
 def _transport_fields(networks=_NETWORKS) -> dict:
     fields = {
         "network": _select("network", "transport", group="transport",
@@ -127,6 +138,7 @@ def _proxy_schema(*, id_field: str, id_title: str, flow: bool = True,
                   extra: dict | None = None, description: str = ""):
     props = {
         **_server_fields(),
+        **_policy_core_field(),
         id_field: _str(id_field, id_title, group="auth", secret=True),
         **_transport_fields(networks),
         **_security_fields(securities),
@@ -150,14 +162,14 @@ _KIND_SCHEMAS: dict[OutboundKind, dict] = {
                          hint="empty = the core's internal resolver")},
         description="DNS handler outbound"),
     OutboundKind.SOCKS: _schema(
-        {**_server_fields(),
+        {**_server_fields(), **_policy_core_field(),
          "version": _select("version", "socks version", group="basic",
                             options=["5", "4a", "4"], default="5"),
          "username": _str("username", "username (optional)", group="auth"),
          "password": _str("password", "password (optional)", group="auth", secret=True)},
         required=("server", "server_port")),
     OutboundKind.HTTP: _schema(
-        {**_server_fields(),
+        {**_server_fields(), **_policy_core_field(),
          "username": _str("username", "username (optional)", group="auth"),
          "password": _str("password", "password (optional)", group="auth", secret=True)},
         required=("server", "server_port")),
@@ -178,7 +190,7 @@ _KIND_SCHEMAS: dict[OutboundKind, dict] = {
         securities=["tls"],
         description="Trojan upstream (TLS mandatory)"),
     OutboundKind.SHADOWSOCKS: _schema(
-        {**_server_fields(),
+        {**_server_fields(), **_policy_core_field(),
          "method": _select("method", "cipher", group="auth",
                            options=["2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm",
                                     "2022-blake3-chacha20-poly1305",

@@ -48,12 +48,15 @@ _SECRET_UUID = "11111111-aaaa-bbbb-cccc-222222222222"
 # ---------------------------------------------------------------------- #
 
 class _FakeDriver:
+    last_node = None
+
     class _Meta:
         id = "fakebox"
         name = "FakeBox"
     metadata = _Meta()
 
     async def build_client_config(self, account, node=None) -> ClientConfig:
+        type(self).last_node = node
         return ClientConfig(
             core_id="fakebox", protocol="vless", engine="sing-box",
             payload={"outbounds": [{"type": "vless", "server": "h.example.com",
@@ -284,6 +287,21 @@ def test_full_connect_flow_with_sealed_delivery() -> None:
     assert config["core_id"] == "fakebox" and config["protocol"] == "vless"
     assert config["payload"]["outbounds"][0]["uuid"] == _SECRET_UUID
     assert any(e[0] == "config.delivered" for e in events)
+
+
+def test_sealed_delivery_forwards_public_host_context_to_driver() -> None:
+    from app.cores.delivery import DeliveryContext
+
+    service, _, _ = _service()
+    offer = asyncio.run(service.request_connect(7, "fakebox"))
+    client_priv, client_pub = generate_keypair()
+    import base64
+    client_pub_b64 = base64.urlsafe_b64encode(client_pub).decode().rstrip("=")
+    context = DeliveryContext(public_host="vpn.example.test")
+    envelope = asyncio.run(service.deliver_config(
+        offer.connect_token, client_pub_b64, context))
+    assert json.loads(open_envelope(envelope, client_priv))["config"]["core_id"] == "fakebox"
+    assert _FakeDriver.last_node == context
 
 
 def test_connect_token_is_one_time() -> None:

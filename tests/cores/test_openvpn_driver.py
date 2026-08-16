@@ -424,6 +424,8 @@ def test_client_profile_sealed_and_complete() -> None:
     cfg = asyncio.run(main())
     profile = cfg.payload["profile"]
     assert cfg.engine == "openvpn" and cfg.payload["format"] == "ovpn"
+    assert cfg.payload["username"] == "1.alice"
+    assert cfg.payload["password"] == "s3cret"
     assert "remote 127.0.0.1 1194" in profile
     assert "auth-user-pass" in profile
     # Username/password-only client auth is explicit for OpenVPN Connect;

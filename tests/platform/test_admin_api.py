@@ -9,6 +9,7 @@ real-binary E2E suite).
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import importlib.util
 import os
@@ -286,6 +287,122 @@ class TestCores:
 # --------------------------------------------------------------------- #
 
 class TestRouting:
+    def test_managed_softether_hub_api_is_secret_free_and_routing_only(self, stack):
+        from types import SimpleNamespace
+
+        from app.cores.types import CoreState
+
+        client, rt = stack["client"], stack["rt"]
+
+        class Backend:
+            def __init__(self):
+                self.live = {"DEFAULT"}
+
+            def hub_list(self):
+                return sorted(self.live)
+
+        class Driver:
+            metadata = SimpleNamespace(name="SoftEther VPN")
+
+            def __init__(self):
+                self.settings = {
+                    "hub": "DEFAULT", "feature_tags": {}, "feature_softether": True,
+                    "native_port": 5555, "policy_hubs": [],
+                }
+                self._backend = Backend()
+
+            def routing_source_specs(self):
+                specs = [{"id": "hub:DEFAULT", "hub": "DEFAULT", "tags": [],
+                          "subnet": "192.168.30.0/24", "managed_by_zagros": False}]
+                for item in self.settings["policy_hubs"]:
+                    specs.append({
+                        "id": f"hub:{item['hub']}", "hub": item["hub"],
+                        "tags": [item["inbound_tag"]], "tap_device": item["tap_device"],
+                        "subnet": item["subnet"], "gateway": item["gateway"],
+                        "username": item["username"], "managed_by_zagros": True,
+                    })
+                return specs
+
+            def policy_sources(self):
+                return []
+
+            def create_policy_hub(self, **kwargs):
+                password = kwargs.pop("user_password")
+                assert password == "managed-unit-password"
+                item = {**kwargs, "managed_by_zagros": True}
+                self.settings["policy_hubs"].append(item)
+                self._backend.live.add(item["hub"])
+                assert password not in repr(self.settings)
+                return item
+
+            def delete_policy_hub(self, hub):
+                self.settings["policy_hubs"] = [
+                    item for item in self.settings["policy_hubs"] if item["hub"] != hub]
+                self._backend.live.discard(hub)
+
+            def ensure_policy_source(self, source_id):
+                raise AssertionError(f"no rule should activate {source_id}")
+
+            def disable_policy_source(self, source_id):
+                raise AssertionError(f"no active source should disable {source_id}")
+
+        from tests.cores.policy_fakes import FakeRunner
+
+        driver = Driver()
+        original_runner = rt.policy_router._runner  # noqa: SLF001
+        rt.policy_router._runner = FakeRunner()  # noqa: SLF001
+        rt.core_manager.attach("softether", driver, state=CoreState.RUNNING)
+        try:
+            asyncio.run(rt.kv.set_value("admin.routing.rules.v1", []))
+            response = client.post("/api/zagros/cores/softether/policy-hubs", json={
+                "hub": "ZAGROS-E2E-unit", "inbound_tag": "softether-e2e-unit",
+                "tap_device": "zge2eunit", "subnet": "192.168.87.0/24",
+                "gateway": "192.168.87.254", "username": "e2e-user",
+                "user_password": "managed-unit-password",
+            })
+            assert response.status_code == 200, response.text
+            assert "managed-unit-password" not in response.text
+            assert response.json()["credential_stored"] is False
+
+            hubs = client.get("/api/zagros/cores/softether/policy-hubs")
+            assert hubs.status_code == 200, hubs.text
+            assert hubs.json()["hubs"][0]["hub"] == "ZAGROS-E2E-unit"
+            assert "password" not in hubs.text.lower()
+
+            routing = client.get("/api/zagros/routing/sources")
+            assert routing.status_code == 200, routing.text
+            soft = next(group for group in routing.json()["groups"]
+                        if group["core_id"] == "softether")
+            managed = next(item for item in soft["inbounds"]
+                           if item["tag"] == "softether-e2e-unit")
+            assert managed["routing_only"] is True
+            ordinary = client.get("/api/zagros/inbounds").json()
+            assert "softether-e2e-unit" not in repr(ordinary)
+
+            asyncio.run(rt.kv.set_value("admin.routing.rules.v1", [{
+                "name": "still-referenced", "priority": 10, "enabled": True,
+                "matcher": {"inbounds": ["softether-e2e-unit"]},
+                "action": "allow", "outbound": None,
+            }]))
+            blocked = client.delete(
+                "/api/zagros/cores/softether/policy-hubs/ZAGROS-E2E-unit")
+            assert blocked.status_code == 409
+            assert driver._backend.live == {"DEFAULT", "ZAGROS-E2E-unit"}
+            asyncio.run(rt.kv.set_value("admin.routing.rules.v1", []))
+
+            deleted = client.delete(
+                "/api/zagros/cores/softether/policy-hubs/ZAGROS-E2E-unit")
+            assert deleted.status_code == 200, deleted.text
+            assert driver._backend.live == {"DEFAULT"}
+            assert driver.settings["policy_hubs"] == []
+        finally:
+            rt.core_manager._drivers.pop("softether", None)  # noqa: SLF001
+            rt.core_manager._states.pop("softether", None)  # noqa: SLF001
+            rt.core_manager._enabled.pop("softether", None)  # noqa: SLF001
+            rt.policy_router._runner = original_runner  # noqa: SLF001
+            rt.policy_router._softether_routed.clear()  # noqa: SLF001
+            asyncio.run(rt.core_state.remove("softether"))
+
     def test_save_validate_and_preview(self, stack):
         client, routing_id, plain_id = stack["client"], stack["routing"], stack["plain"]
         for cid in (routing_id, plain_id):

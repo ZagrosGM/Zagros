@@ -343,6 +343,20 @@ def test_build_client_config_payload_and_redaction() -> None:
     asyncio.run(main())
 
 
+def test_build_client_config_uses_delivery_context_public_host() -> None:
+    async def main():
+        from app.cores.delivery import DeliveryContext
+
+        driver, _backend, _stats = _driver(settings={"advertise_host": ""})
+        cfg = await driver.build_client_config(
+            _vless(settings={"id": "b831381d-6324-4d53-ad4f-8cda48b30811"}),
+            DeliveryContext(public_host="vpn.example.test"),
+        )
+        assert cfg.payload["outbounds"][0]["server"] == "vpn.example.test"
+
+    asyncio.run(main())
+
+
 def test_lifecycle_status_AND_logs() -> None:
     async def main():
         driver, backend, _s = _driver()

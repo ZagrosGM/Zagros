@@ -783,6 +783,13 @@ class SSHTunnelDriver(BaseCoreDriver):
         self._ensure_supported(account.protocol)
         self._ensure_credentials(account)
         s = self.settings
+        from app.cores.delivery import resolve_delivery_host
+
+        configured_host = s.get("advertise_host")
+        host = (str(configured_host or "").strip() if context is None else
+                resolve_delivery_host(configured_host, context))
+        if not host:
+            raise CoreError("no public endpoint is configured for SSH delivery")
         username = self._unix_name(account)
         password = self._account_password(account)
         sections: list[DeliverySection] = []
@@ -797,8 +804,7 @@ class SSHTunnelDriver(BaseCoreDriver):
                         kind=ArtifactKind.FIELDS,
                         label="Connection",
                         fields=(
-                            DeliveryField(key="host", label="Host",
-                                          value=str(s["advertise_host"])),
+                            DeliveryField(key="host", label="Host", value=host),
                             DeliveryField(key="port", label="Port",
                                           value=str(listener["port"])),
                             DeliveryField(key="username", label="Username",
@@ -825,6 +831,13 @@ class SSHTunnelDriver(BaseCoreDriver):
         self._ensure_supported(account.protocol)
         self._ensure_credentials(account)
         s = self.settings
+        from app.cores.delivery import resolve_delivery_host
+
+        configured_host = s.get("advertise_host")
+        host = (str(configured_host or "").strip() if node is None else
+                resolve_delivery_host(configured_host, node))
+        if not host:
+            raise CoreError("no public endpoint is configured for SSH delivery")
         listeners = self._granted_listeners(account)
         if not listeners:
             raise CoreError(
@@ -836,7 +849,7 @@ class SSHTunnelDriver(BaseCoreDriver):
             engine="ssh",
             payload={
                 "format": "ssh",
-                "host": s["advertise_host"],
+                "host": host,
                 "port": int(listeners[0]["port"]),
                 "username": self._unix_name(account),
                 "password": self._account_password(account),

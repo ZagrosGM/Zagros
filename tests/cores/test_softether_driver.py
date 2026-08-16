@@ -178,11 +178,13 @@ def test_start_reconciles_numbered_routed_tap_after_daemon_restart(
     }
     restored: list[str] = []
 
-    def disable() -> None:
+    def disable(source_id: str | None = None) -> None:
+        assert source_id == "hub:DEFAULT"
         restored.append("disable")
         driver._policy_source = None  # noqa: SLF001
 
-    def ensure() -> dict[str, str]:
+    def ensure(source_id: str | None = None) -> dict[str, str]:
+        assert source_id == "hub:DEFAULT"
         restored.append("ensure")
         driver._policy_source = {  # noqa: SLF001
             "interface": "tap_zge2e",
@@ -210,7 +212,8 @@ def test_disable_policy_source_deletes_stale_panel_owned_tap(monkeypatch) -> Non
         "gateway": "192.168.87.254",
     }
     disabled: list[str] = []
-    backend.routed_tap_disable = lambda *, device: disabled.append(device)
+    backend.routed_tap_disable = lambda *, device, hub_name=None: disabled.append(
+        f"{hub_name}:{device}")
     commands: list[list[str]] = []
     monkeypatch.setattr(shutil, "which", lambda name: "/sbin/ip" if name == "ip" else None)
     monkeypatch.setattr(
@@ -220,9 +223,124 @@ def test_disable_policy_source_deletes_stale_panel_owned_tap(monkeypatch) -> Non
 
     driver.disable_policy_source()
 
-    assert disabled == ["zge2e"]
+    assert disabled == ["DEFAULT:zge2e"]
     assert commands == [["/sbin/ip", "link", "delete", "dev", "tap_zge2e"]]
     assert driver.policy_source() is None
+
+
+def test_managed_policy_hub_lifecycle_is_isolated_and_secret_free() -> None:
+    class LifecycleBackend(FakeSEBackend):
+        def __init__(self):
+            super().__init__()
+            self.hubs = {"DEFAULT"}
+            self.hub_users: dict[str, set[str]] = {"DEFAULT": {"production-user"}}
+            self.deleted: list[str] = []
+
+        def hub_create(self, hub_name, password):
+            assert password and password not in repr(self.hubs)
+            if hub_name in self.hubs:
+                raise CoreError("already exists")
+            self.hubs.add(hub_name)
+            self.hub_users[hub_name] = set()
+
+        def hub_delete(self, hub_name):
+            self.hubs.discard(hub_name)
+            self.hub_users.pop(hub_name, None)
+            self.deleted.append(hub_name)
+
+        def hub_user_create(self, hub_name, username, password):
+            assert password == "unit-user-password"
+            self.hub_users[hub_name].add(username)
+
+        def hub_user_delete(self, hub_name, username):
+            self.hub_users.get(hub_name, set()).discard(username)
+
+    backend = LifecycleBackend()
+    driver, _ = _driver(backend=backend)
+    created = driver.create_policy_hub(
+        hub="ZAGROS-E2E-unit", inbound_tag="softether-e2e-unit",
+        tap_device="zge2eunit", subnet="192.168.87.0/24",
+        gateway="192.168.87.254", username="e2e-user",
+        user_password="unit-user-password",
+    )
+
+    assert backend.hubs == {"DEFAULT", "ZAGROS-E2E-unit"}
+    assert backend.hub_users["DEFAULT"] == {"production-user"}
+    assert backend.hub_users["ZAGROS-E2E-unit"] == {"e2e-user"}
+    assert created["managed_by_zagros"] is True
+    assert "password" not in created
+    assert "unit-user-password" not in repr(driver.settings)
+    specs = driver.routing_source_specs()
+    managed = next(spec for spec in specs if spec["managed_by_zagros"])
+    assert managed["tags"] == ["softether-e2e-unit"]
+    assert managed["subnet"] == "192.168.87.0/24"
+
+    driver.delete_policy_hub("ZAGROS-E2E-unit")
+    assert backend.hubs == {"DEFAULT"}
+    assert backend.hub_users["DEFAULT"] == {"production-user"}
+    assert driver.settings["policy_hubs"] == []
+    assert backend.deleted == ["ZAGROS-E2E-unit"]
+
+
+def test_managed_policy_hub_overlap_fails_before_vpncmd_mutation() -> None:
+    class NoMutationBackend(FakeSEBackend):
+        def hub_create(self, *_args):
+            raise AssertionError("overlap must fail before HubCreate")
+
+        def hub_user_create(self, *_args):
+            raise AssertionError("overlap must fail before UserCreate")
+
+        def hub_delete(self, *_args):
+            raise AssertionError("overlap must fail before HubDelete")
+
+    driver, _ = _driver(backend=NoMutationBackend())
+    with pytest.raises(CoreError, match="subnets must not overlap"):
+        driver.create_policy_hub(
+            hub="ZAGROS-E2E-overlap", inbound_tag="softether-e2e-overlap",
+            tap_device="zge2eov", subnet="192.168.30.0/25",
+            gateway="192.168.30.126", username="e2e-user",
+            user_password="unit-user-password",
+        )
+
+
+def test_managed_policy_hub_uses_its_own_hub_tap_and_cleanup(monkeypatch) -> None:
+    import shutil
+    import subprocess
+
+    driver, backend = _driver({
+        "policy_hubs": [{
+            "hub": "ZAGROS-E2E-unit", "inbound_tag": "softether-e2e-unit",
+            "tap_device": "zge2eunit", "subnet": "192.168.87.0/24",
+            "gateway": "192.168.87.254", "username": "e2e-user",
+            "managed_by_zagros": True,
+        }],
+    })
+    calls: list[tuple[str, str]] = []
+    backend.routed_tap_ensure = lambda *, device, subnet, gateway, hub_name: (
+        calls.append(("ensure", f"{hub_name}:{device}:{subnet}:{gateway}"))
+        or f"tap_{device}")
+    backend.routed_tap_disable = lambda *, device, hub_name: calls.append(
+        ("disable", f"{hub_name}:{device}"))
+    commands: list[list[str]] = []
+    monkeypatch.setattr(shutil, "which", lambda name: "/sbin/ip" if name == "ip" else None)
+
+    def command(argv, **_kwargs):
+        commands.append(list(argv))
+        return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(subprocess, "run", command)
+    source = driver.ensure_policy_source("hub:ZAGROS-E2E-unit")
+    assert source["hub"] == "ZAGROS-E2E-unit"
+    assert source["subnet"] == "192.168.87.0/24"
+    assert calls[0] == (
+        "ensure", "ZAGROS-E2E-unit:zge2eunit:192.168.87.0/24:192.168.87.254")
+    assert ["/sbin/ip", "address", "replace", "192.168.87.254/24",
+            "dev", "tap_zge2eunit"] in commands
+
+    driver.disable_policy_source("hub:ZAGROS-E2E-unit")
+    assert calls[-1] == ("disable", "ZAGROS-E2E-unit:zge2eunit")
+    assert ["/sbin/ip", "link", "delete", "dev", "tap_zge2eunit"] in commands
+    assert driver.policy_sources() == []
 
 
 def test_softether_start_waits_for_real_daemon_warmup(monkeypatch) -> None:
@@ -543,6 +661,55 @@ def test_vpncmd_transports_all_credentials_over_stdin_not_argv(monkeypatch) -> N
     assert stdin_script == f"{admin_secret}\n{command}\nexit\n"
 
 
+def test_vpncmd_managed_hub_uses_server_auth_then_hub_switch(monkeypatch) -> None:
+    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
+
+    admin_secret = "server-admin-secret"
+    backend = LocalSoftEtherBackend({
+        "admin_password": admin_secret, "server": "localhost", "hub": "DEFAULT",
+        "protocol_backoff_seconds": 0,
+    })
+    monkeypatch.setattr(backend, "vpncmd_binary", lambda: "/vpncmd")
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(
+            args[0], 0, stdout="The command completed successfully.\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    backend._cmd("UserList", hub_name="ZAGROS-E2E-unit")
+    argv = calls[0][0][0]
+    stdin_script = calls[0][1]["input"]
+    assert argv == ["/vpncmd", "localhost", "/SERVER"]
+    assert not any(item.startswith("/HUB:") for item in argv)
+    assert stdin_script == (
+        f"{admin_secret}\nHub ZAGROS-E2E-unit\nUserList\nexit\n")
+
+
+def test_vpncmd_managed_hub_csv_strips_selection_preamble(monkeypatch) -> None:
+    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
+
+    backend = LocalSoftEtherBackend({
+        "admin_password": "server-admin", "protocol_backoff_seconds": 0,
+    })
+    monkeypatch.setattr(backend, "vpncmd_binary", lambda: "/vpncmd")
+    raw = (
+        'The Virtual Hub "ZAGROS-E2E-unit" has been selected.\n'
+        'Session Name,User Name,Source Host Name\n'
+        'SID-test,e2e-user,192.0.2.4\n'
+    )
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout=raw, stderr=""),
+    )
+    result = backend._cmd(
+        "SessionList", csv=True, hub_name="ZAGROS-E2E-unit")
+    assert result.startswith("Session Name,User Name")
+    assert "has been selected" not in result
+
+
 def test_vpncmd_rejects_newline_protocol_injection(monkeypatch) -> None:
     from app.cores.drivers.softether.backend import LocalSoftEtherBackend
 
@@ -780,8 +947,8 @@ Default Gateway | 192.168.30.1
 DNS Server 1 | 1.1.1.1
 """
 
-    def command(value, *, csv=False, hub=True):
-        calls.append((value, hub))
+    def command(value, *, csv=False, hub=True, hub_name=None):
+        calls.append((value, bool(hub_name) if hub_name is not None else hub))
         if value in ("SecureNatEnable", "DhcpEnable"):
             raise CoreError(f"{value}: already enabled")
         return pool
@@ -804,6 +971,42 @@ def test_vpncmd_errors_redact_psk_and_password() -> None:
         f"IPsecEnable /PSK:{secret} /PASSWORD:{secret} /L2TP:yes")
     assert secret not in rendered
     assert rendered.count("<redacted>") == 2
+
+
+def test_hub_list_parses_csv_without_switching_primary_context(monkeypatch) -> None:
+    backend = _se_backend()
+    raw = (
+        '"Virtual Hub Name","Status","Type"\n'
+        '"DEFAULT","Online","Standalone"\n'
+        '"ZAGROS-E2E-unit","Online","Standalone"\n'
+    )
+    seen: list[tuple[str, bool]] = []
+
+    def command(value, *, csv=False, hub=True, hub_name=None):
+        seen.append((value, hub))
+        return raw
+
+    monkeypatch.setattr(backend, "_cmd", command)
+    assert backend.hub_list() == ["DEFAULT", "ZAGROS-E2E-unit"]
+    assert seen == [("HubList", False)]
+
+
+def test_vpncmd_error_line_redacts_managed_hub_password(monkeypatch) -> None:
+    backend = _se_backend()
+    secret = "ManagedHubSecret9"
+    monkeypatch.setattr(backend, "vpncmd_binary", lambda: "/vpncmd")
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0,
+            stdout=(f"Error occurred: HubCreate ZAGROS-E2E-unit "
+                    f"/PASSWORD:{secret}\n"), stderr=""),
+    )
+    with pytest.raises(CoreError) as caught:
+        backend._cmd(
+            f"HubCreate ZAGROS-E2E-unit /PASSWORD:{secret}", hub=False)
+    assert secret not in str(caught.value)
+    assert "<redacted>" in str(caught.value)
 
 
 def test_build_deps_per_manager_and_absence_error() -> None:

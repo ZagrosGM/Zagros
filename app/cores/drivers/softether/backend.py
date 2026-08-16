@@ -53,12 +53,19 @@ class SoftEtherBackend(Protocol):
     def ipsec_get(self) -> IPsecServices: ...
     def ipsec_services_set(self, *, l2tp: bool, l2tp_raw: bool, etherip: bool,
                            psk: str, default_hub: str) -> None: ...
-    def secure_nat_ensure(self) -> None:
-        """Ensure this backend's Virtual Hub has SecureNAT + DHCP enabled."""
+    def secure_nat_ensure(self, *, hub_name: str | None = None) -> None:
+        """Ensure a Virtual Hub has SecureNAT + DHCP enabled."""
         ...
     def routed_tap_ensure(self, *, device: str, subnet: str,
-                          gateway: str) -> str: ...
-    def routed_tap_disable(self, *, device: str) -> None: ...
+                          gateway: str, hub_name: str | None = None) -> str: ...
+    def routed_tap_disable(self, *, device: str,
+                           hub_name: str | None = None) -> None: ...
+    def hub_list(self) -> list[str]: ...
+    def hub_create(self, hub_name: str, password: str) -> None: ...
+    def hub_delete(self, hub_name: str) -> None: ...
+    def hub_user_create(self, hub_name: str, username: str,
+                        password: str) -> None: ...
+    def hub_user_delete(self, hub_name: str, username: str) -> None: ...
     def recover_fresh_server_password(self) -> bool:
         """Restore a persisted admin password onto a fresh blank server."""
         ...
@@ -131,12 +138,45 @@ class LocalSoftEtherBackend:
                 return candidate
         return None
 
+    @staticmethod
+    def _validate_hub_name(value: str) -> str:
+        name = str(value or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,31}", name):
+            raise CoreError(
+                "SoftEther hub name must be 1-31 ASCII letters, digits, '_' or '-'"
+            )
+        return name
+
+    @staticmethod
+    def _validate_user_name(value: str) -> str:
+        name = str(value or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.@-]{1,64}", name):
+            raise CoreError(
+                "SoftEther user name must be 1-64 safe ASCII characters"
+            )
+        return name
+
+    @staticmethod
+    def _validate_secret_arg(value: str, *, label: str) -> str:
+        secret = str(value or "")
+        # vpncmd's interactive command parser cannot losslessly represent a
+        # quote/newline inside /PASSWORD.  Refuse rather than execute a partial
+        # command.  Spaces are quoted and all command text is redacted before
+        # it can enter an error/log record.
+        if not secret or len(secret) > 128 or any(ch in secret for ch in ('"', "\r", "\n")):
+            raise CoreError(f"SoftEther {label} is empty, too long, or not safely encodable")
+        return f'"{secret}"' if any(ch.isspace() for ch in secret) else secret
+
     def _cmd(self, command: str, *, csv: bool = False,
-             hub: bool = True) -> str:
+             hub: bool = True, hub_name: str | None = None) -> str:
         """Run a hub-scoped or entire-server vpncmd command.
 
         IPsec/SSTP/OpenVPN/listener switches require server-admin context and
-        must omit /HUB; user/session operations intentionally keep it.
+        must omit ``/HUB``.  Normal account operations use the configured hub;
+        managed isolated policy hubs pass ``hub_name`` explicitly.  The latter
+        is essential for disposable verification: changing ``self.hub`` would
+        redirect production account operations to the test hub and made the
+        previous harness fall back to ``DEFAULT``.
         """
         safe = self._safe_command(command)
         executable = self.vpncmd_binary()
@@ -147,8 +187,21 @@ class LocalSoftEtherBackend:
                 "reports that no package/cache source is available."
             )
         argv = [executable, self.server, "/SERVER"]
+        selected_hub: str | None = None
+        switch_hub_after_server_auth = False
         if hub:
-            argv.append(f"/HUB:{self.hub}")
+            selected_hub = self._validate_hub_name(hub_name or self.hub)
+            if hub_name is None:
+                # Existing primary-hub behavior: authenticate directly to the
+                # configured hub (backward compatible with deployed servers).
+                argv.append(f"/HUB:{selected_hub}")
+            else:
+                # A newly created isolated hub has its own random admin secret.
+                # Do not persist that secret and do not pretend the server-admin
+                # password is the hub password. Authenticate at server scope,
+                # then select the hub with vpncmd's `Hub` command; server admin
+                # authority can manage every hub safely this way.
+                switch_hub_after_server_auth = True
         if csv:
             argv.append("/CSV")
         # Never place authentication material OR a secret-bearing vpncmd
@@ -162,7 +215,9 @@ class LocalSoftEtherBackend:
             raise CoreError("SoftEther administrator password contains a newline.")
         if any(ch in command for ch in ("\r", "\n")):
             raise CoreError("vpncmd command contains a newline.")
-        stdin_script = f"{self.password}\n{command}\nexit\n"
+        hub_switch = (f"Hub {selected_hub}\n"
+                      if switch_hub_after_server_auth else "")
+        stdin_script = f"{self.password}\n{hub_switch}{command}\nexit\n"
         proc = None
         out = ""
         # SoftEther's built-in DoS guard can transiently reject localhost
@@ -195,13 +250,23 @@ class LocalSoftEtherBackend:
         if proc.returncode != 0:
             raise CoreError(f"vpncmd '{safe}' failed (rc={proc.returncode}): {safe_out.strip()[-1200:]}")
         error_line = next(
-            (line.strip() for line in out.splitlines()
+            (line.strip() for line in safe_out.splitlines()
              if line.strip().startswith("Error") or "error occurred" in line.lower()),
             None,
         )
         if error_line:
             raise CoreError(f"vpncmd '{safe}' failed: {error_line}")
-        return proc.stdout or ""
+        result = proc.stdout or ""
+        if csv and switch_hub_after_server_auth:
+            # `Hub <name>` emits one human-readable selection line even under
+            # /CSV.  The setool parsers correctly expect the following CSV
+            # header as row zero; strip only the non-CSV preamble.
+            lines = result.splitlines()
+            first_csv = next((index for index, line in enumerate(lines)
+                              if "," in line), None)
+            if first_csv is not None:
+                result = "\n".join(lines[first_csv:]) + "\n"
+        return result
 
     # ------------------------------------------------------------------ #
     # IPsec server functions (L2TP/IPsec, raw L2TP, EtherIP)
@@ -249,9 +314,95 @@ class LocalSoftEtherBackend:
             hub=False,
         )
 
+    def hub_list(self) -> list[str]:
+        """Return live Virtual Hub names without changing the configured hub."""
+        import csv
+        import io
+
+        rows = csv.reader(io.StringIO(self._cmd("HubList", csv=True, hub=False)))
+        names: list[str] = []
+        for row in rows:
+            if not row:
+                continue
+            first = str(row[0]).strip()
+            if not first or first.lower() in {
+                "virtual hub name", "hub name", "the command completed successfully.",
+            }:
+                continue
+            # /CSV rows have at least the hub name and state/type columns.
+            if len(row) >= 2 and re.fullmatch(r"[A-Za-z0-9_-]{1,31}", first):
+                names.append(first)
+        return sorted(set(names))
+
+    def _lifecycle_quiet(self) -> None:
+        """Respect SoftEther's localhost management DoS window.
+
+        Hub/bridge/user creation is necessarily a short sequence of vpncmd
+        RPCs.  The server can otherwise accept HubCreate, then let the next
+        UserCreate hang until the client timeout.  A bounded quiet window makes
+        that sequence deterministic instead of retrying a half-created hub.
+        """
+        if self.protocol_backoff > 0:
+            time.sleep(min(self.protocol_backoff, 10.0))
+
+    def hub_create(self, hub_name: str, password: str) -> None:
+        hub_name = self._validate_hub_name(hub_name)
+        if hub_name in self.hub_list():
+            raise CoreError(f"SoftEther hub '{hub_name}' already exists")
+        password_arg = self._validate_secret_arg(password, label="hub password")
+        self._cmd(
+            f"HubCreate {hub_name} /PASSWORD:{password_arg}", hub=False)
+        self._lifecycle_quiet()
+        if hub_name not in self.hub_list():
+            raise CoreError(f"SoftEther created no observable hub '{hub_name}'")
+
+    def hub_delete(self, hub_name: str) -> None:
+        hub_name = self._validate_hub_name(hub_name)
+        if hub_name not in self.hub_list():
+            return
+        self._cmd(f"HubDelete {hub_name}", hub=False)
+        self._lifecycle_quiet()
+        if hub_name in self.hub_list():
+            raise CoreError(f"SoftEther hub '{hub_name}' still exists after deletion")
+
+    def hub_user_create(self, hub_name: str, username: str,
+                        password: str) -> None:
+        hub_name = self._validate_hub_name(hub_name)
+        username = self._validate_user_name(username)
+        password_arg = self._validate_secret_arg(password, label="user password")
+        self._cmd(
+            f'UserCreate {username} /GROUP: /REALNAME:"Zagros managed policy source" '
+            "/NOTE:zagros-managed-policy-hub",
+            hub_name=hub_name,
+        )
+        self._lifecycle_quiet()
+        try:
+            self._cmd(
+                f"UserPasswordSet {username} /PASSWORD:{password_arg}",
+                hub_name=hub_name,
+            )
+            self._lifecycle_quiet()
+        except Exception:
+            try:
+                self._cmd(f"UserDelete {username}", hub_name=hub_name)
+            except Exception:  # noqa: BLE001 - preserve credential failure
+                pass
+            raise
+
+    def hub_user_delete(self, hub_name: str, username: str) -> None:
+        hub_name = self._validate_hub_name(hub_name)
+        username = self._validate_user_name(username)
+        try:
+            self._cmd(f"UserDelete {username}", hub_name=hub_name)
+            self._lifecycle_quiet()
+        except CoreError as exc:
+            if not any(marker in str(exc).lower() for marker in
+                       ("not found", "not exist", "no such")):
+                raise
+
     def routed_tap_ensure(
         self, *, device: str = "zgsoft", subnet: str = "192.168.30.0/24",
-        gateway: str = "192.168.30.254",
+        gateway: str = "192.168.30.254", hub_name: str | None = None,
     ) -> str:
         """Expose hub client packets to Linux instead of userspace NAT.
 
@@ -263,6 +414,7 @@ class LocalSoftEtherBackend:
         import ipaddress
         import re
 
+        target_hub = self._validate_hub_name(hub_name or self.hub)
         network = ipaddress.ip_network(subnet, strict=False)
         gateway_ip = ipaddress.ip_address(gateway)
         if network.version != 4 or gateway_ip not in network:
@@ -275,14 +427,14 @@ class LocalSoftEtherBackend:
         # Server-wide bridge. Existing is success; any other failure is real.
         try:
             self._cmd(
-                f"BridgeCreate {self.hub} /DEVICE:{device} /TAP:yes", hub=False)
+                f"BridgeCreate {target_hub} /DEVICE:{device} /TAP:yes", hub=False)
         except CoreError as exc:
             if not any(word in str(exc).lower() for word in
                        ("already", "exist", "duplicate")):
                 raise
         for command in ("SecureNatEnable", "DhcpEnable", "NatDisable"):
             try:
-                self._cmd(command, hub=True)
+                self._cmd(command, hub_name=target_hub)
             except CoreError as exc:
                 if not any(word in str(exc).lower() for word in
                            ("already", "enabled", "disabled")):
@@ -291,46 +443,50 @@ class LocalSoftEtherBackend:
             f"DhcpSet /START:{start} /END:{end} /MASK:{mask} "
             f"/EXPIRE:7200 /GW:{gateway} /DNS:1.1.1.1 /DNS2:8.8.8.8 "
             "/DOMAIN:none /LOG:no",
-            hub=True,
+            hub_name=target_hub,
         )
         return f"tap_{device}"
 
-    def routed_tap_disable(self, *, device: str = "zgsoft") -> None:
-        """Return to self-contained SecureNAT and remove the policy bridge."""
+    def routed_tap_disable(self, *, device: str = "zgsoft",
+                           hub_name: str | None = None) -> None:
+        """Return one hub to SecureNAT and remove only its policy bridge."""
+        target_hub = self._validate_hub_name(hub_name or self.hub)
         try:
-            self._cmd("NatEnable", hub=True)
+            self._cmd("NatEnable", hub_name=target_hub)
         except CoreError as exc:
             if not any(word in str(exc).lower() for word in ("already", "enabled")):
                 raise
         try:
-            self._cmd(f"BridgeDelete {self.hub} /DEVICE:{device}", hub=False)
+            self._cmd(
+                f"BridgeDelete {target_hub} /DEVICE:{device}", hub=False)
         except CoreError as exc:
             if not any(word in str(exc).lower() for word in
                        ("not found", "not exist", "none")):
                 raise
 
-    def secure_nat_ensure(self) -> None:
+    def secure_nat_ensure(self, *, hub_name: str | None = None) -> None:
         """Enable the hub's self-contained NAT and DHCP service idempotently.
 
         This is the production-safe default for a VPS with no LAN bridge. A
         successful L2TP/CHAP session otherwise reaches PPP and dies with
         "Could not determine local IP address" because no DHCP lease exists.
         """
+        target_hub = self._validate_hub_name(hub_name or self.hub)
         for command in ("SecureNatEnable", "DhcpEnable"):
             try:
-                self._cmd(command, hub=True)
+                self._cmd(command, hub_name=target_hub)
             except CoreError as exc:
                 text = str(exc).lower()
                 if not any(marker in text for marker in
                            ("already", "enabled", "exist")):
                     raise CoreError(
-                        f"SoftEther hub '{self.hub}' cannot enable Virtual "
+                        f"SoftEther hub '{target_hub}' cannot enable Virtual "
                         f"NAT/DHCP via {command}: {exc}"
                     ) from exc
         # Read back real pool facts. The output includes START/END/MASK/GW/DNS
         # addresses; fewer than four valid IPv4 values means clients still
         # cannot receive a usable lease and the apply must fail honestly.
-        status = self._cmd("DhcpGet", hub=True)
+        status = self._cmd("DhcpGet", hub_name=target_hub)
         import ipaddress
         import re
 
@@ -344,7 +500,7 @@ class LocalSoftEtherBackend:
             valid.append(candidate)
         if len(set(valid)) < 4:
             raise CoreError(
-                f"SoftEther SecureNAT is enabled on hub '{self.hub}', but "
+                f"SoftEther SecureNAT is enabled on hub '{target_hub}', but "
                 "DhcpGet did not report a complete lease pool (start/end/"
                 "mask/gateway). Configure DhcpSet or disable secure_nat and "
                 "provide a real external DHCP/local bridge."

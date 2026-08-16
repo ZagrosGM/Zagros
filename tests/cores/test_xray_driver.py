@@ -244,6 +244,18 @@ def test_online_devices_and_filtering() -> None:
     asyncio.run(main())
 
 
+def test_shadowsocks_client_fragment_has_no_invalid_tls_or_transport_fields() -> None:
+    driver, _backend = _driver()
+    outbound = driver._compose_outbound(  # noqa: SLF001
+        "shadowsocks", {"method": "aes-256-gcm", "password": "secret"},
+        "Shadowsocks TCP", {"port": 1080, "network": "tcp", "tls": "none"},
+        {"address": ["vpn.example.test"]},
+    )
+    assert outbound["type"] == "shadowsocks"
+    assert outbound["server"] == "vpn.example.test"
+    assert "tls" not in outbound and "transport" not in outbound
+
+
 def test_build_client_config_payload_shape_and_redaction() -> None:
     async def main():
         driver, _ = _driver()

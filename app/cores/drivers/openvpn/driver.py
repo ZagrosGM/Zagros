@@ -979,17 +979,29 @@ want_pass="${creds#*:}"
     # client config + delivery (one profile per granted listener)          #
     # ------------------------------------------------------------------ #
     def render_client_profile(self, account: UserAccount,
-                              listener: dict[str, Any]) -> str:
+                              listener: dict[str, Any],
+                              context: "DeliveryContext | None" = None) -> str:
         self._ensure_supported(account.protocol)
         self._ensure_credentials(account)
         if self._pki is None:
             raise CoreError("PKI not initialized yet — start the core first.")
         s = self.settings
+        from app.cores.delivery import resolve_delivery_host
+
+        configured_host = listener.get("advertise_host") or s.get("advertise_host")
+        host = (str(configured_host or "").strip() if context is None else
+                resolve_delivery_host(
+                    configured_host, context, listener.get("listen"),
+                    allow_loopback=bool(s.get("allow_loopback_advertise", False)),
+                ))
+        if not host:
+            raise CoreError(
+                f"no public endpoint is configured for OpenVPN inbound '{listener['tag']}'")
         return "\n".join([
             "client",
             "dev tun",
             f"proto {listener['proto']}",
-            f"remote {s['advertise_host']} {listener['port']}",
+            f"remote {host} {listener['port']}",
             "resolv-retry infinite",
             "nobind",
             "persist-key", "persist-tun",
@@ -1076,7 +1088,7 @@ want_pass="${creds#*:}"
         sections: list[DeliverySection] = []
         advertise_host = str(self.settings.get("advertise_host") or "")
         for listener in self._granted_listeners(account):
-            profile = self.render_client_profile(account, listener)
+            profile = self.render_client_profile(account, listener, context)
             cipher_line = (
                 f"{listener.get('cipher') or 'AES-256-GCM'}:"
                 f"{listener.get('cipher_fallback') or 'AES-128-GCM'}"
@@ -1139,11 +1151,19 @@ want_pass="${creds#*:}"
             raise CoreError(
                 f"openvpn account '{account.account_id}' has no granted inbound."
             )
-        profile = self.render_client_profile(account, listeners[0])
+        profile = self.render_client_profile(account, listeners[0], node)
+        static = str(self.settings.get("auth_mode") or "management") == "static"
+        username = (str(self.settings.get("static_user") or "")
+                    if static else account.account_id)
+        password = (str(self.settings.get("static_pass") or "")
+                    if static else str(account.settings["password"]))
         return ClientConfig(
             core_id=self.metadata.id,
             protocol="ovpn",
             engine="openvpn",
-            payload={"format": "ovpn", "profile": profile, "auth": "user-pass"},
+            payload={
+                "format": "ovpn", "profile": profile, "auth": "user-pass",
+                "username": username, "password": password,
+            },
             display_name=f"OpenVPN · {listeners[0]['tag']}",
         )

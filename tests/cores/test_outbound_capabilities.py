@@ -43,6 +43,67 @@ def test_policy_mode_uses_real_ssh_application_proxy_not_singbox_tun() -> None:
     assert PolicyRoutingManager._mode(OutboundKind.WIREGUARD) == "wireguard"
     assert PolicyRoutingManager._mode(OutboundKind.OPENVPN) == "openvpn"
     assert PolicyRoutingManager._mode(OutboundKind.VLESS) == "proxy"
+    assert PolicyRoutingManager._mode(
+        OutboundKind.SHADOWSOCKS, {"policy_core": "xray"}) == "xray_proxy"
+
+
+def test_xray_policy_runtime_is_explicit_real_process_chain(tmp_path, monkeypatch) -> None:
+    class CoreManager:
+        def __init__(self):
+            self.xray = XrayDriver(backend=FakeXrayBackend())
+
+        def list_cores(self):
+            return ["xray"]
+
+        def get(self, core_id):
+            if core_id == "xray":
+                return self.xray
+            raise KeyError(core_id)
+
+    monkeypatch.setattr(
+        "app.cores.routing.policy.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in {"ip", "xray", "sing-box"} else None,
+    )
+    runner = FakeRunner()
+    manager = PolicyRoutingManager(
+        CoreManager(), runtime_root=str(tmp_path), runner=runner,
+        sleep=lambda _: None,
+    )
+    outbound = Outbound(
+        name="ss-through-xray", kind=OutboundKind.SHADOWSOCKS,
+        settings={
+            "server": "198.51.100.8", "server_port": 8388,
+            "method": "aes-256-gcm", "password": "do-not-leak",
+            "policy_core": "xray",
+        },
+    )
+    assert PolicyRoutingManager._mode(
+        outbound.kind, outbound.settings) == "xray_proxy"
+    domain = manager.prepare([outbound])[outbound.name]
+    assert domain.mode == "xray_proxy" and domain.ready
+    runtime = tmp_path / PolicyRoutingManager._hash(outbound.name)[:20]
+    xray_doc = __import__("json").loads((runtime / "xray.json").read_text())
+    adapter_doc = __import__("json").loads(
+        (runtime / "xray-tun-adapter.json").read_text())
+    assert xray_doc["outbounds"][0]["protocol"] == "shadowsocks"
+    assert adapter_doc["outbounds"][0]["type"] == "socks"
+    assert adapter_doc["outbounds"][0]["server_port"] == domain.proxy_port
+    redirect = next(item for item in adapter_doc["inbounds"]
+                    if item["type"] == "redirect")
+    assert redirect["listen_port"] == domain.redirect_port
+    argv_text = "\n".join(" ".join(call) for call, _input in runner.calls)
+    assert "/usr/bin/xray run -c" in argv_text
+    assert "/usr/bin/sing-box run -c" in argv_text
+    assert "do-not-leak" not in argv_text
+    manager.stop()
+    assert not runtime.exists()
+
+    with pytest.raises(ValueError, match="no Xray policy runtime"):
+        Outbound(
+            name="hy2-bad-xray", kind=OutboundKind.HYSTERIA2,
+            settings={"server": "example.test", "server_port": 443,
+                      "password": "x", "policy_core": "xray"},
+        )
 
 
 def test_invalid_ssh_tun_rule_fails_in_pure_preflight_without_runner_calls(tmp_path) -> None:

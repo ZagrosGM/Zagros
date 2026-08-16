@@ -1284,7 +1284,7 @@ class WireGuardDriver(BaseCoreDriver):
         self, account: UserAccount, node: Any | None = None
     ) -> ClientConfig:
         listener = self._select_listener(account)
-        profile = self.render_client_profile(account, listener=listener)
+        profile = self.render_client_profile(account, node, listener=listener)
         return ClientConfig(
             core_id=self.metadata.id,
             protocol="wireguard",

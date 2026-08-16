@@ -206,7 +206,24 @@ class SoftEtherDriver(BaseCoreDriver):
                 "policy_routing_scope": {
                     "type": "string", "enum": ["shared_hub"],
                     "default": "shared_hub",
-                    "description": "all SoftEther transports in this instance share one hub/TAP routing decision"},
+                    "description": "all transports in the primary hub share one TAP routing decision"},
+                "policy_hubs": {
+                    "type": "array", "default": [],
+                    "description": "Zagros-managed isolated Virtual Hubs with independent routed TAP source identity",
+                    "items": {
+                        "type": "object",
+                        "required": ["hub", "inbound_tag", "tap_device", "subnet", "gateway", "username"],
+                        "properties": {
+                            "hub": {"type": "string"},
+                            "inbound_tag": {"type": "string"},
+                            "tap_device": {"type": "string"},
+                            "subnet": {"type": "string"},
+                            "gateway": {"type": "string"},
+                            "username": {"type": "string"},
+                            "managed_by_zagros": {"type": "boolean", "const": True},
+                        },
+                    },
+                },
                 "advertise_host": {"type": "string"},
             },
         },
@@ -225,6 +242,7 @@ class SoftEtherDriver(BaseCoreDriver):
             "policy_subnet": "192.168.30.0/24",
             "policy_gateway": "192.168.30.254",
             "policy_routing_scope": "shared_hub",
+            "policy_hubs": [],
             "feature_tags": {},
             "feature_softether": False,
             "feature_l2tp": False,
@@ -254,7 +272,10 @@ class SoftEtherDriver(BaseCoreDriver):
         self._accounts: dict[str, UserAccount] = {}
         self._usage = _SoftEtherUsageTracker()
         self._suspended_expire_restore: dict[str, str | None] = {}
+        # Primary-hub compatibility alias plus independent managed-hub source
+        # state.  Credentials never live here or in persisted core settings.
         self._policy_source: dict[str, str] | None = None
+        self._policy_sources: dict[str, dict[str, str]] = {}
 
     async def listener_claims(self) -> list[ListenerClaim]:
         """Describe configured TCP listeners for host-level collision checks."""
@@ -285,78 +306,253 @@ class SoftEtherDriver(BaseCoreDriver):
                     ))
         return claims
 
-    def ensure_policy_source(self) -> dict[str, str]:
-        """Switch SecureNAT to DHCP+routed TAP and configure its Linux gateway.
+    @staticmethod
+    def _policy_source_id(hub: str) -> str:
+        return f"hub:{hub}"
 
-        SoftEther's default Virtual NAT creates root-owned host sockets, so
-        netfilter never sees a client's source subnet. A TAP local bridge is
-        required for real per-service policy routing; this method is invoked
-        only when an enabled rule targets a SoftEther inbound.
+    def routing_source_specs(self) -> list[dict[str, Any]]:
+        """Validated primary + managed Virtual Hub source identities.
+
+        The primary hub may expose several transport tags but has one L2
+        identity.  Every managed hub owns a different tag, TAP and subnet, so
+        netfilter can make an honest independent routing decision.
         """
         import ipaddress
+        import re
+
+        primary_hub = str(self.settings.get("hub") or "DEFAULT")
+        specs: list[dict[str, Any]] = [{
+            "id": self._policy_source_id(primary_hub),
+            "hub": primary_hub,
+            "tags": sorted(set(str(value) for value in
+                               (self.settings.get("feature_tags") or {}).values()
+                               if str(value))),
+            "tap_device": str(self.settings.get("policy_tap_device") or "zgsoft"),
+            "subnet": str(ipaddress.ip_network(
+                str(self.settings.get("policy_subnet") or "192.168.30.0/24"),
+                strict=False)),
+            "gateway": str(self.settings.get("policy_gateway") or "192.168.30.254"),
+            "managed_by_zagros": False,
+        }]
+        for raw in self.settings.get("policy_hubs") or []:
+            if not isinstance(raw, dict) or raw.get("managed_by_zagros") is not True:
+                raise CoreError("SoftEther policy_hubs entries must be Zagros-managed objects")
+            hub = str(raw.get("hub") or "").strip()
+            tag = str(raw.get("inbound_tag") or "").strip()
+            device = str(raw.get("tap_device") or "").strip()
+            username = str(raw.get("username") or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,31}", hub) or hub == primary_hub:
+                raise CoreError("managed SoftEther hub name is invalid or aliases the primary hub")
+            if not re.fullmatch(r"[A-Za-z0-9_.:@-]{1,128}", tag):
+                raise CoreError("managed SoftEther inbound tag is invalid")
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{1,10}", device):
+                raise CoreError("managed SoftEther TAP device id must be 1-10 safe characters")
+            if not re.fullmatch(r"[A-Za-z0-9_.@-]{1,64}", username):
+                raise CoreError("managed SoftEther user name is invalid")
+            network = ipaddress.ip_network(str(raw.get("subnet") or ""), strict=False)
+            gateway = ipaddress.ip_address(str(raw.get("gateway") or ""))
+            if network.version != 4 or gateway not in network:
+                raise CoreError("managed SoftEther gateway must be inside its IPv4 subnet")
+            specs.append({
+                "id": self._policy_source_id(hub), "hub": hub, "tags": [tag],
+                "tap_device": device, "subnet": str(network),
+                "gateway": str(gateway), "username": username,
+                "managed_by_zagros": True,
+            })
+
+        hubs = [spec["hub"] for spec in specs]
+        devices = [spec["tap_device"] for spec in specs]
+        tags = [tag for spec in specs for tag in spec["tags"]]
+        if len(hubs) != len(set(hubs)):
+            raise CoreError("SoftEther policy hub names must be unique")
+        if len(devices) != len(set(devices)):
+            raise CoreError("SoftEther policy TAP device ids must be unique")
+        if len(tags) != len(set(tags)):
+            raise CoreError("SoftEther routing inbound tags must be unique across hubs")
+        networks = [ipaddress.ip_network(spec["subnet"]) for spec in specs]
+        for index, network in enumerate(networks):
+            if any(network.overlaps(other) for other in networks[index + 1:]):
+                raise CoreError("SoftEther policy hub subnets must not overlap")
+        for spec, network in zip(specs, networks):
+            if ipaddress.ip_address(spec["gateway"]) not in network:
+                raise CoreError(f"SoftEther policy gateway is outside {network}")
+        return specs
+
+    def _routing_source_spec(self, source_id: str | None = None) -> dict[str, Any]:
+        specs = self.routing_source_specs()
+        wanted = source_id or specs[0]["id"]
+        try:
+            return next(spec for spec in specs if spec["id"] == wanted)
+        except StopIteration:
+            raise CoreError(f"unknown SoftEther routing source '{wanted}'") from None
+
+    def create_policy_hub(
+        self, *, hub: str, inbound_tag: str, tap_device: str, subnet: str,
+        gateway: str, username: str, user_password: str,
+    ) -> dict[str, Any]:
+        """Create one isolated hub/user and persist only non-secret metadata.
+
+        The hub password is generated in-process and never returned or stored.
+        A failed user provision rolls back the newly created hub.
+        """
+        existing = list(self.settings.get("policy_hubs") or [])
+        candidate = {
+            "hub": hub, "inbound_tag": inbound_tag, "tap_device": tap_device,
+            "subnet": subnet, "gateway": gateway, "username": username,
+            "managed_by_zagros": True,
+        }
+        old = self.settings.get("policy_hubs")
+        self.settings["policy_hubs"] = [*existing, candidate]
+        try:
+            self.routing_source_specs()  # fail before vpncmd mutation
+        finally:
+            self.settings["policy_hubs"] = old if old is not None else []
+
+        create_hub = getattr(self._backend, "hub_create", None)
+        create_user = getattr(self._backend, "hub_user_create", None)
+        delete_hub = getattr(self._backend, "hub_delete", None)
+        if not all(callable(fn) for fn in (create_hub, create_user, delete_hub)):
+            raise CoreError("SoftEther backend has no managed Virtual Hub lifecycle")
+        hub_password = secrets.token_urlsafe(24)
+        create_hub(hub, hub_password)
+        try:
+            create_user(hub, username, user_password)
+        except Exception:
+            try:
+                delete_hub(hub)
+            except Exception:  # noqa: BLE001 - preserve provisioning failure
+                logger.exception("failed to roll back managed SoftEther hub %s", hub)
+            raise
+        self.settings["policy_hubs"] = [*existing, candidate]
+        return dict(candidate)
+
+    def delete_policy_hub(self, hub: str) -> None:
+        primary = str(self.settings.get("hub") or "DEFAULT")
+        if hub == primary:
+            raise CoreError("the primary production SoftEther hub cannot be deleted")
+        entries = list(self.settings.get("policy_hubs") or [])
+        entry = next((item for item in entries
+                      if isinstance(item, dict) and item.get("hub") == hub
+                      and item.get("managed_by_zagros") is True), None)
+        if entry is None:
+            raise CoreError(f"SoftEther hub '{hub}' is not managed by Zagros")
+        source_id = self._policy_source_id(hub)
+        if source_id in self._policy_sources:
+            self.disable_policy_source(source_id)
+        delete_user = getattr(self._backend, "hub_user_delete", None)
+        delete_hub = getattr(self._backend, "hub_delete", None)
+        if not callable(delete_hub):
+            raise CoreError("SoftEther backend has no managed Virtual Hub cleanup")
+        if callable(delete_user):
+            delete_user(hub, str(entry.get("username") or ""))
+        delete_hub(hub)
+        self.settings["policy_hubs"] = [item for item in entries if item is not entry]
+
+    def ensure_policy_source(self, source_id: str | None = None) -> dict[str, str]:
+        """Switch one hub to DHCP+routed TAP and configure its Linux gateway."""
         import shutil
         import subprocess
         import time
 
+        spec = self._routing_source_spec(source_id)
+        source_id = str(spec["id"])
+        existing = self._policy_sources.get(source_id)
+        if existing:
+            return dict(existing)
         ensure = getattr(self._backend, "routed_tap_ensure", None)
         if not callable(ensure):
             raise CoreError("SoftEther backend has no routed TAP capability")
-        device = str(self.settings.get("policy_tap_device") or "zgsoft")
-        subnet = str(self.settings.get("policy_subnet") or "192.168.30.0/24")
-        gateway = str(self.settings.get("policy_gateway") or "192.168.30.254")
-        network = ipaddress.ip_network(subnet, strict=False)
-        prefix = network.prefixlen
-        interface = ensure(device=device, subnet=str(network), gateway=gateway)
+        interface = ensure(
+            device=str(spec["tap_device"]), subnet=str(spec["subnet"]),
+            gateway=str(spec["gateway"]), hub_name=str(spec["hub"]),
+        )
         ip = shutil.which("ip")
         if not ip:
-            raise CoreError("SoftEther routed TAP needs iproute2")
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline:
-            if subprocess.run([ip, "link", "show", "dev", interface],
-                              stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL).returncode == 0:
-                break
-            time.sleep(0.25)
-        else:
-            raise CoreError(
-                f"SoftEther BridgeCreate succeeded but Linux interface '{interface}' did not appear")
-        for argv in (
-            [ip, "address", "replace", f"{gateway}/{prefix}", "dev", interface],
-            [ip, "link", "set", "dev", interface, "up"],
-        ):
-            result = subprocess.run(argv, text=True, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE)
-            if result.returncode:
-                raise CoreError(result.stderr.strip() or f"cannot configure {interface}")
-        self._policy_source = {
-            "interface": interface, "subnet": str(network), "gateway": gateway,
+            try:
+                self._backend.routed_tap_disable(
+                    device=str(spec["tap_device"]), hub_name=str(spec["hub"]))
+            finally:
+                raise CoreError("SoftEther routed TAP needs iproute2")
+        network = __import__("ipaddress").ip_network(str(spec["subnet"]), strict=False)
+        try:
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if subprocess.run([ip, "link", "show", "dev", interface],
+                                  stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL).returncode == 0:
+                    break
+                time.sleep(0.25)
+            else:
+                raise CoreError(
+                    f"SoftEther BridgeCreate succeeded but Linux interface '{interface}' did not appear")
+            for argv in (
+                [ip, "address", "replace", f"{spec['gateway']}/{network.prefixlen}",
+                 "dev", interface],
+                [ip, "link", "set", "dev", interface, "up"],
+            ):
+                result = subprocess.run(argv, text=True, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE)
+                if result.returncode:
+                    raise CoreError(result.stderr.strip() or f"cannot configure {interface}")
+        except Exception:
+            try:
+                self._backend.routed_tap_disable(
+                    device=str(spec["tap_device"]), hub_name=str(spec["hub"]))
+            finally:
+                subprocess.run([ip, "link", "delete", "dev", interface],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            raise
+        source = {
+            "id": source_id, "hub": str(spec["hub"]), "interface": interface,
+            "subnet": str(spec["subnet"]), "gateway": str(spec["gateway"]),
+            "tap_device": str(spec["tap_device"]),
         }
-        return dict(self._policy_source)
+        self._policy_sources[source_id] = source
+        if source_id == self.routing_source_specs()[0]["id"]:
+            self._policy_source = source
+        return dict(source)
 
-    def disable_policy_source(self) -> None:
+    def disable_policy_source(self, source_id: str | None = None) -> None:
         import shutil
         import subprocess
 
-        device = str(self.settings.get("policy_tap_device") or "zgsoft")
+        primary_id = self.routing_source_specs()[0]["id"]
+        source_id = source_id or primary_id
+        source = self._policy_sources.get(source_id)
+        if source is None and source_id == primary_id and self._policy_source:
+            source = dict(self._policy_source)
+        spec = self._routing_source_spec(source_id)
+        if source is None:
+            # Idempotent cleanup still resolves the configured identity so a
+            # stale TAP from a daemon crash can be removed safely.
+            source = {
+                "hub": str(spec["hub"]), "tap_device": str(spec["tap_device"]),
+                "interface": f"tap_{spec['tap_device']}",
+            }
+        else:
+            # Backward-compatible in-memory state from alpha.8.4 did not carry
+            # hub/device fields; enrich it from validated persisted settings.
+            source.setdefault("hub", str(spec["hub"]))
+            source.setdefault("tap_device", str(spec["tap_device"]))
         disable = getattr(self._backend, "routed_tap_disable", None)
         if callable(disable):
-            disable(device=device)
-        source = self._policy_source or {}
-        interface = source.get("interface") or f"tap_{device}"
+            disable(device=str(source["tap_device"]), hub_name=str(source["hub"]))
+        interface = str(source.get("interface") or f"tap_{source['tap_device']}")
         ip = shutil.which("ip")
         if ip:
-            # BridgeDelete normally closes SoftEther's TAP fd and removes the
-            # interface. If vpnserver was recreated, however, a stale kernel
-            # TAP can survive without a BridgeList row; the next BridgeCreate
-            # reports a duplicate and an unbridged, DHCP-dead device is reused.
-            # This exact interface name is Panel-owned, so remove the stale
-            # link rather than merely setting it DOWN.
             subprocess.run([ip, "link", "delete", "dev", interface],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self._policy_source = None
+        self._policy_sources.pop(source_id, None)
+        if source_id == primary_id:
+            self._policy_source = None
 
     def policy_source(self) -> dict[str, str] | None:
-        return dict(self._policy_source) if self._policy_source else None
+        primary_id = self.routing_source_specs()[0]["id"]
+        source = self._policy_sources.get(primary_id) or self._policy_source
+        return dict(source) if source else None
+
+    def policy_sources(self) -> list[dict[str, str]]:
+        return [dict(source) for source in self._policy_sources.values()]
 
     # ------------------------------------------------------------------ #
     # Config Studio bridge — every offered entry maps to a REAL stable-line
@@ -597,13 +793,18 @@ class SoftEtherDriver(BaseCoreDriver):
             connect successfully while every routed packet black-holes until
             the whole Panel is restarted.
             """
+            active_ids = list(self._policy_sources)
             if self._policy_source is not None:
+                primary_id = self.routing_source_specs()[0]["id"]
+                if primary_id not in active_ids:
+                    active_ids.append(primary_id)
+            for source_id in active_ids:
                 # A persisted BridgeCreate row can recreate a TAP that looks
                 # UP but no longer forwards frames after the daemon replaced
-                # its bridge object. Rebuild the bridge transactionally; merely
-                # re-adding the Linux address leaves client ARP/DHCP black-holed.
-                await asyncio.to_thread(self.disable_policy_source)
-                await asyncio.to_thread(self.ensure_policy_source)
+                # its bridge object. Rebuild every hub bridge transactionally;
+                # merely re-adding Linux addresses leaves client ARP/DHCP dead.
+                await asyncio.to_thread(self.disable_policy_source, source_id)
+                await asyncio.to_thread(self.ensure_policy_source, source_id)
 
         if await asyncio.to_thread(self._backend.reachable):
             await restore_policy_source()

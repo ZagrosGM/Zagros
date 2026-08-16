@@ -352,6 +352,69 @@ class CoreManager:
                 settings=driver.settings,
             )
 
+    async def persist_settings(self, core_id: str) -> None:
+        """Persist a driver's validated live settings under its lifecycle lock.
+
+        Managed SoftEther Virtual Hub metadata is changed by a live vpncmd
+        transaction rather than Config Studio.  Keeping persistence behind the
+        manager prevents API code from reaching into SQL rows or racing a core
+        restart.  Drivers remain responsible for never placing credentials in
+        ``settings``.
+        """
+        async with self._locks[core_id]:
+            driver = self.get(core_id)
+            await self._store.save_state(
+                core_id,
+                state=self._states[core_id],
+                enabled=self._enabled.get(core_id, False),
+                settings=driver.settings,
+            )
+
+    async def create_softether_policy_hub(self, **kwargs) -> dict[str, Any]:
+        """Create + persist an isolated SoftEther hub as one manager operation."""
+        core_id = "softether"
+        async with self._locks[core_id]:
+            driver = self.get(core_id)
+            create = getattr(driver, "create_policy_hub", None)
+            delete = getattr(driver, "delete_policy_hub", None)
+            if not callable(create) or not callable(delete):
+                raise CapabilityNotSupportedError(core_id, "managed_policy_hubs")
+            created = await asyncio.to_thread(create, **kwargs)
+            try:
+                await self._store.save_state(
+                    core_id, state=self._states[core_id],
+                    enabled=self._enabled.get(core_id, False),
+                    settings=driver.settings,
+                )
+            except Exception:
+                # No unpersisted live hub may survive a database failure.
+                try:
+                    await asyncio.to_thread(delete, str(created["hub"]))
+                except Exception:  # noqa: BLE001 - preserve persistence error
+                    logger.exception(
+                        "failed to roll back unpersisted SoftEther policy hub %s",
+                        created.get("hub"))
+                raise
+            return created
+
+    async def delete_softether_policy_hub(self, hub: str) -> None:
+        """Delete a Zagros-owned hub and persist the reduced metadata set."""
+        core_id = "softether"
+        async with self._locks[core_id]:
+            driver = self.get(core_id)
+            delete = getattr(driver, "delete_policy_hub", None)
+            if not callable(delete):
+                raise CapabilityNotSupportedError(core_id, "managed_policy_hubs")
+            await asyncio.to_thread(delete, hub)
+            # Remote deletion is authoritative. Retry of this same admin call is
+            # idempotent at vpncmd level, while stale DB metadata would recreate
+            # a false inbound after reboot, so persistence failure is surfaced.
+            await self._store.save_state(
+                core_id, state=self._states[core_id],
+                enabled=self._enabled.get(core_id, False),
+                settings=driver.settings,
+            )
+
     async def start_core(self, core_id: str) -> CoreStatus:
         async with self._locks[core_id]:
             driver = self.get(core_id)

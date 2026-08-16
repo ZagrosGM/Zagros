@@ -86,6 +86,21 @@ class CoreUninstallBody(BaseModel):
     force: bool = False
 
 
+class SoftEtherPolicyHubBody(BaseModel):
+    """Credential-safe request for one isolated SoftEther routing source."""
+
+    hub: str = Field(min_length=1, max_length=31, pattern=r"^[A-Za-z0-9_-]+$")
+    inbound_tag: str = Field(min_length=1, max_length=128,
+                             pattern=r"^[A-Za-z0-9_.:@-]+$")
+    tap_device: str = Field(min_length=1, max_length=10,
+                            pattern=r"^[A-Za-z0-9_.-]+$")
+    subnet: str = Field(min_length=9, max_length=32)
+    gateway: str = Field(min_length=7, max_length=15)
+    username: str = Field(min_length=1, max_length=64,
+                          pattern=r"^[A-Za-z0-9_.@-]+$")
+    user_password: SecretStr = Field(min_length=12, max_length=128)
+
+
 def _err(exc: Exception, status: int = 400) -> HTTPException:
     return HTTPException(status, str(exc))
 
@@ -281,6 +296,70 @@ async def cores_detail(core_id: str, runtime=Depends(get_runtime)):
         status = None
     return await _core_view(runtime, core_id,
                             {core_id: status} if status else {})
+
+
+@zagros_admin_router.get("/cores/softether/policy-hubs")
+async def softether_policy_hubs(runtime=Depends(get_runtime)):
+    """List only Zagros-managed isolated hub metadata; never credentials."""
+    try:
+        driver = runtime.core_manager.get("softether")
+        specs = [spec for spec in driver.routing_source_specs()
+                 if spec.get("managed_by_zagros") is True]
+        live = set(await asyncio.to_thread(driver._backend.hub_list))  # noqa: SLF001
+        active = {item["id"] for item in driver.policy_sources()}
+    except Exception as exc:
+        raise _err(exc) from exc
+    return {"hubs": [{
+        "hub": spec["hub"], "inbound_tag": spec["tags"][0],
+        "tap_device": spec["tap_device"], "subnet": spec["subnet"],
+        "gateway": spec["gateway"], "username": spec["username"],
+        "live": spec["hub"] in live, "routed": spec["id"] in active,
+    } for spec in specs]}
+
+
+@zagros_admin_router.post("/cores/softether/policy-hubs")
+async def softether_policy_hub_create(
+    body: SoftEtherPolicyHubBody, runtime=Depends(get_runtime),
+):
+    """Create an independent Virtual Hub/user; response never echoes secrets."""
+    try:
+        created = await runtime.core_manager.create_softether_policy_hub(
+            hub=body.hub, inbound_tag=body.inbound_tag,
+            tap_device=body.tap_device, subnet=body.subnet,
+            gateway=body.gateway, username=body.username,
+            user_password=body.user_password.get_secret_value(),
+        )
+    except Exception as exc:
+        raise _err(exc, 422) from exc
+    return {"ok": True, "hub": created["hub"],
+            "inbound_tag": created["inbound_tag"], "credential_stored": False}
+
+
+@zagros_admin_router.delete("/cores/softether/policy-hubs/{hub}")
+async def softether_policy_hub_delete(hub: str, runtime=Depends(get_runtime)):
+    """Delete only a tracked managed hub after all routing references vanish."""
+    try:
+        driver = runtime.core_manager.get("softether")
+        spec = next((item for item in driver.routing_source_specs()
+                     if item.get("managed_by_zagros") is True
+                     and item.get("hub") == hub), None)
+        if spec is None:
+            raise HTTPException(404, f"SoftEther hub '{hub}' is not Zagros-managed")
+        tag = str(spec["tags"][0])
+        rules = await _load_rules(runtime)
+        references = [rule.name for rule in rules if tag in rule.matcher.inbounds]
+        if references:
+            raise HTTPException(
+                409, f"remove routing rules that reference '{tag}' first: {references}")
+        # Converge current persisted rules so the managed bridge/TAP is removed
+        # before HubDelete.  This also atomically rewrites nft without the tag.
+        runtime.policy_router.apply_rules(rules)
+        await runtime.core_manager.delete_softether_policy_hub(hub)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _err(exc, 422) from exc
+    return {"ok": True, "hub": hub, "deleted": True}
 
 
 async def _manager_call(runtime, core_id: str, method: str, *args, **kwargs):
@@ -531,6 +610,38 @@ async def unified_inbound_catalog(runtime=Depends(get_runtime)):
     return {"groups": [g.as_dict() for g in groups]}
 
 
+@zagros_admin_router.get("/routing/sources")
+async def routing_sources(runtime=Depends(get_runtime)):
+    """Inbound inventory for rules, including routing-only managed hubs.
+
+    Managed hub tags must be selectable in Routing but must not appear as user
+    grant/subscription inbounds, so the general ``/inbounds`` catalog remains
+    unchanged.
+    """
+    from app.platform.inbounds import catalog as _catalog
+
+    groups = [group.as_dict() for group in await _catalog(runtime)]
+    try:
+        driver = runtime.core_manager.get("softether")
+        managed = [spec for spec in driver.routing_source_specs()
+                   if spec.get("managed_by_zagros") is True]
+    except Exception:  # noqa: BLE001 - absent SoftEther means no extra group
+        managed = []
+    if managed:
+        group = next((item for item in groups if item["core_id"] == "softether"), None)
+        if group is None:
+            group = {"core_id": "softether", "name": "SoftEther VPN",
+                     "enabled": True, "inbounds": []}
+            groups.append(group)
+        native_port = int(driver.settings.get("native_port") or 5555)
+        for spec in managed:
+            group["inbounds"].append({
+                "tag": spec["tags"][0], "protocol": "softether-managed-hub",
+                "port": native_port, "routing_only": True,
+            })
+    return {"groups": groups}
+
+
 @zagros_admin_router.get("/routing/targets")
 async def routing_targets(runtime=Depends(get_runtime)):
     """Capability-aware target inventory for the graphical rule builder.
@@ -591,7 +702,7 @@ async def routing_save(body: RoutingSetBody, runtime=Depends(get_runtime)):
                 raise ValueError(
                     f"rule '{rule.name}' references missing outbound '{rule.outbound}'")
             policy_router = getattr(runtime, "policy_router", None)
-            mode = (policy_router._mode(outbound.kind)  # noqa: SLF001
+            mode = (policy_router._mode(outbound.kind, outbound.settings)  # noqa: SLF001
                     if policy_router is not None else None)
             policy_cores = {"xray", "sing-box", "openvpn", "wireguard", "softether", "ssh"}
             policy_required = bool(

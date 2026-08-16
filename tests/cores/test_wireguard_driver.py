@@ -483,6 +483,11 @@ def test_client_profile_and_qr_rendering() -> None:
 
         config = await driver.build_client_config(account)
         assert config.payload["format"] == "ini"
+        from app.cores.delivery import DeliveryContext
+        driver.settings["advertise_host"] = ""
+        contextual = await driver.build_client_config(
+            account, DeliveryContext(public_host="vpn.example.test"))
+        assert "Endpoint = vpn.example.test:51820" in contextual.payload["profile"]
         # secrets never leak into the redacted repr
         assert "CLIENTPRIV" not in repr(config) and "CLIENTPRIV" not in str(config)
 

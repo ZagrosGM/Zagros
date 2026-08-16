@@ -223,7 +223,8 @@ class ClientApiService:
                             ttl_seconds=self.connect_ttl)
 
     async def deliver_config(self, connect_token: str,
-                             client_eph_public_b64: str) -> SealedEnvelope:
+                             client_eph_public_b64: str,
+                             delivery_context=None) -> SealedEnvelope:
         """Consume the one-time token and seal the connection payload.
 
         The app generates an ephemeral X25519 keypair, sends the public key
@@ -254,7 +255,10 @@ class ClientApiService:
         if record.core_id not in accounts:
             raise ClientApiError(f"core '{record.core_id}' is not available")
         driver, account = accounts[record.core_id]
-        config = await driver.build_client_config(account)
+        if delivery_context is None:
+            config = await driver.build_client_config(account)
+        else:
+            config = await driver.build_client_config(account, delivery_context)
         document = json.dumps({
             "v": 1,
             "issued_at": now.isoformat(),

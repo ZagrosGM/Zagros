@@ -80,7 +80,17 @@ class Outbound(BaseModel):
         if self.kind is OutboundKind.CORE:
             if not self.settings.get("core_id"):
                 raise ValueError(f"Outbound '{self.name}': kind=core requires settings.core_id.")
-        elif self.kind in (
+        policy_core = str(self.settings.get("policy_core") or "").strip().lower()
+        if policy_core not in ("", "sing-box", "xray"):
+            raise ValueError(
+                f"Outbound '{self.name}': settings.policy_core must be xray or sing-box")
+        if policy_core == "xray" and self.kind not in {
+            OutboundKind.SOCKS, OutboundKind.HTTP, OutboundKind.VLESS,
+            OutboundKind.VMESS, OutboundKind.TROJAN, OutboundKind.SHADOWSOCKS,
+        }:
+            raise ValueError(
+                f"Outbound '{self.name}': kind={self.kind.value} has no Xray policy runtime")
+        if self.kind in (
             OutboundKind.SOCKS, OutboundKind.HTTP, OutboundKind.VLESS,
             OutboundKind.VMESS, OutboundKind.TROJAN, OutboundKind.SHADOWSOCKS,
             OutboundKind.WIREGUARD, OutboundKind.HYSTERIA2, OutboundKind.TUIC,

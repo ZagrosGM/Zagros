@@ -985,6 +985,11 @@ class XrayDriver(BaseCoreDriver):
         else:  # shadowsocks
             outbound["method"] = settings.get("method")
             outbound["password"] = settings["password"]
+            # sing-box Shadowsocks outbounds are the cipher transport itself;
+            # unlike VLESS/VMess/Trojan they have no tls or transport fields.
+            # Emitting `tls: {enabled:false}` made the sealed Client API config
+            # fail `sing-box check` even though the legacy ss:// link worked.
+            return outbound
 
         if tls_level in ("tls", "reality"):
             outbound["tls"] = {

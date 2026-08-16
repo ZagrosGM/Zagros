@@ -10,7 +10,38 @@ multi-core platform line.
 
 ---
 
-## [1.0.0-alpha.8.4] — Unreleased — Outbound routing and capability hardening
+## [1.0.0-alpha.8.5] — Unreleased — Isolated SoftEther source routing
+
+### Fixed
+
+* Added a production-managed SoftEther Virtual Hub lifecycle with server-admin
+  hub selection, per-hub user/TAP/subnet identity, encrypted-credential-free
+  persistence, routing-only source inventory, reference-safe deletion, and
+  symmetric rollback/cleanup.
+* Policy routing now converges multiple SoftEther hubs independently. The
+  primary hub's transport tags remain one shared L2 identity, while a managed
+  isolated hub can carry its own deterministic source rule without touching
+  `DEFAULT`.
+* Added an explicit `policy_core=xray` runtime. Kernel/TUN sources enter a
+  private sing-box adapter and then a real Xray SOCKS/outbound process, so an
+  Xray target is no longer a relabelled sing-box-only policy gateway.
+* Restored transparent redirect ingress for SSH-source traffic targeting the
+  Xray policy runtime and transactional rollback when nft deployment fails.
+* Sealed Client API delivery now forwards public-host context to sing-box,
+  WireGuard, OpenVPN, and SSH config builders. Shadowsocks fragments no longer
+  contain invalid TLS/transport keys, and sealed OpenVPN configs include their
+  one-time protected username/password fields.
+* Managed-hub CSV parsing strips vpncmd's server-scope Hub-selection preamble,
+  allowing real per-user session/accounting evidence without changing hub
+  authentication or exposing credentials.
+
+### Verification target
+
+* Real disposable hub, dedicated user, dedicated routed TAP/subnet, complete
+  6×6 capability-aware matrix, restart/reinstall persistence, browser E2E,
+  security/dependency gates, and complete cleanup before release authorization.
+
+## [1.0.0-alpha.8.4] — 2026-08-16 — Outbound routing and capability hardening
 
 ### Fixed
 

@@ -24,5 +24,6 @@ def test_routing_page_has_contextual_targets_without_obsolete_global_warnings() 
     assert "Application-only outbounds are excluded" not in routing
     assert 'priority {rule.priority}' in routing
     assert '"/zagros/routing/targets"' in routing
+    assert '"/zagros/routing/sources"' in routing
     assert "nativeApplicationContext" in routing
     assert "datalist={inboundHints} preserveCase" in routing

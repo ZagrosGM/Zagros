@@ -43,6 +43,42 @@ class SSHSource:
     settings = {"listeners": [{"tag": "ssh"}]}
 
 
+class IsolatedSoftEtherSource(SoftEtherSource):
+    settings = {
+        "hub": "DEFAULT",
+        "feature_tags": {"l2tp": "l2tp-main", "sstp": "sstp-main"},
+    }
+
+    def __init__(self):
+        self.active: dict[str, dict[str, str]] = {}
+        self.ensure_calls: list[str] = []
+        self.disable_calls: list[str] = []
+
+    def routing_source_specs(self):
+        return [
+            {"id": "hub:DEFAULT", "hub": "DEFAULT",
+             "tags": ["l2tp-main", "sstp-main"],
+             "subnet": "192.168.30.0/24"},
+            {"id": "hub:ZAGROS-E2E-unit", "hub": "ZAGROS-E2E-unit",
+             "tags": ["softether-e2e-unit"],
+             "subnet": "192.168.88.0/24", "managed_by_zagros": True},
+        ]
+
+    def policy_sources(self):
+        return list(self.active.values())
+
+    def ensure_policy_source(self, source_id):
+        self.ensure_calls.append(source_id)
+        subnet = ("192.168.88.0/24" if source_id == "hub:ZAGROS-E2E-unit"
+                  else "192.168.30.0/24")
+        self.active[source_id] = {"id": source_id, "subnet": subnet}
+        return dict(self.active[source_id])
+
+    def disable_policy_source(self, source_id):
+        self.disable_calls.append(source_id)
+        self.active.pop(source_id, None)
+
+
 class SourceManager:
     def __init__(self):
         self.drivers = {
@@ -115,6 +151,64 @@ def test_softether_securenat_is_reported_not_falsely_applied(
     assert "soft-to-wg" not in report.applied.get("softether", [])
 
 
+def test_managed_softether_hub_has_independent_source_and_symmetric_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = FakeRunner()
+    monkeypatch.setattr("app.cores.routing.policy.shutil.which",
+                        lambda name: f"/usr/bin/{name}")
+    cores = SourceManager()
+    isolated = IsolatedSoftEtherSource()
+    cores.drivers["softether"] = isolated
+    manager = PolicyRoutingManager(
+        cores, runtime_root=str(tmp_path), runner=runner, sleep=lambda _: None,
+    )
+    domain = manager.prepare([_wg()])["egress-wg"]
+    rule = _rule("isolated-soft-to-wg", "softether-e2e-unit", 10)
+    report = manager.apply_rules([rule])
+
+    assert isolated.ensure_calls == ["hub:ZAGROS-E2E-unit"]
+    assert report.applied["softether"] == ["isolated-soft-to-wg"]
+    nft = runner.nft_scripts[-1]
+    assert "ip saddr 192.168.88.0/24" in nft
+    assert "ip saddr 192.168.30.0/24" not in nft
+    assert f"meta mark set {domain.fwmark} return" in nft
+
+    manager.apply_rules([])
+    assert isolated.disable_calls == ["hub:ZAGROS-E2E-unit"]
+    assert "192.168.88.0/24" not in runner.nft_scripts[-1]
+
+
+def test_managed_softether_source_rolls_back_when_nft_apply_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingNftRunner(FakeRunner):
+        def run(self, argv, *, check=True, input_text=None, timeout=30):
+            if list(argv)[:2] == ["nft", "-f"]:
+                raise RuntimeError("synthetic nft transaction failure")
+            return super().run(
+                argv, check=check, input_text=input_text, timeout=timeout)
+
+    runner = FailingNftRunner()
+    monkeypatch.setattr("app.cores.routing.policy.shutil.which",
+                        lambda name: f"/usr/bin/{name}")
+    cores = SourceManager()
+    isolated = IsolatedSoftEtherSource()
+    cores.drivers["softether"] = isolated
+    manager = PolicyRoutingManager(
+        cores, runtime_root=str(tmp_path), runner=runner, sleep=lambda _: None,
+    )
+    manager.prepare([_wg()])
+    with pytest.raises(RuntimeError, match="nft transaction failure"):
+        manager.apply_rules([
+            _rule("isolated-soft-to-wg", "softether-e2e-unit", 10),
+        ])
+    assert isolated.ensure_calls == ["hub:ZAGROS-E2E-unit"]
+    assert isolated.disable_calls == ["hub:ZAGROS-E2E-unit"]
+    assert isolated.active == {}
+    assert manager._softether_routed == set()  # noqa: SLF001
+
+
 def test_disabled_rule_is_not_emitted_but_remains_a_model_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -180,5 +274,5 @@ def test_softether_distinct_transport_decisions_fail_before_apply(
         matcher=RuleMatcher(inbounds=["sstp-main"]),
         action=RuleAction.ALLOW,
     )
-    with pytest.raises(Exception, match="share one Virtual Hub/TAP"):
+    with pytest.raises(Exception, match="shares one TAP/subnet"):
         manager.apply_rules([first, second])

@@ -40,8 +40,8 @@ export default function Routing() {
     staleTime: 30000,
   });
   const inboundCatalog = useQuery({
-    queryKey: ["zagros", "inbounds-catalog"],
-    queryFn: () => api.get<{ groups: InboundCatalogGroup[] }>("/zagros/inbounds"),
+    queryKey: ["zagros", "routing-sources"],
+    queryFn: () => api.get<{ groups: InboundCatalogGroup[] }>("/zagros/routing/sources"),
     staleTime: 30000,
   });
 

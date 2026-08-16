@@ -69,6 +69,28 @@ def test_dedicated_listener_serves_subscription_path_but_not_admin_surface() -> 
     asyncio.run(run())
 
 
+def test_dedicated_listener_preflight_accepts_its_managed_current_socket() -> None:
+    async def run() -> None:
+        port = _free_port()
+        manager = SubscriptionListenerManager()
+        app = FastAPI()
+        settings = PortalSettings(
+            public_domain="sub.example.test", public_scheme="http",
+            public_port=port, listener_mode="dedicated",
+            listen_address="127.0.0.1",
+        )
+        try:
+            await manager.apply(settings, _Runtime(), app)
+            assert manager.running is True
+            # This is the path used by the non-mutating portal configuration
+            # test endpoint.  The listener must not conflict with itself.
+            await manager._preflight(_Runtime(), settings)  # noqa: SLF001
+        finally:
+            await manager.stop()
+
+    asyncio.run(run())
+
+
 def test_dedicated_listener_port_conflict_fails_before_start() -> None:
     async def run() -> None:
         blocker = socket.socket()

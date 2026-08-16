@@ -68,13 +68,19 @@ const normalize = (raw: Record<string, unknown>): HostRow => ({
   use_sni_as_host: Boolean(raw.use_sni_as_host),
 });
 
-/** server-side shape: empty strings become null/omitted semantics */
+/**
+ * Canonical API shape.  The legacy Xray ProxyHost model uses non-null enums
+ * for security/ALPN/fingerprint; sending null made an ordinary non-TLS host
+ * fail Pydantic validation before it reached the database.  Optional address
+ * decorations still use null, but enum-backed fields always carry their
+ * explicit empty/default values.
+ */
 const denormalize = (row: HostRow): Record<string, unknown> => ({
   ...row,
   port: row.port ?? null,
   sni: row.sni || null, host: row.host || null, path: row.path || null,
-  security: row.security === "inbound_default" ? null : row.security,
-  alpn: row.alpn || null, fingerprint: row.fingerprint || null,
+  security: row.security || "inbound_default",
+  alpn: row.alpn || "", fingerprint: row.fingerprint || "",
   fragment_setting: row.fragment_setting || null,
   noise_setting: row.noise_setting || null,
 });

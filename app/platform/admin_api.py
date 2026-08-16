@@ -531,6 +531,37 @@ async def unified_inbound_catalog(runtime=Depends(get_runtime)):
     return {"groups": [g.as_dict() for g in groups]}
 
 
+@zagros_admin_router.get("/routing/targets")
+async def routing_targets(runtime=Depends(get_runtime)):
+    """Capability-aware target inventory for the graphical rule builder.
+
+    A single ``tun`` filter hid valid SSH application routing.  Return both
+    implemented contexts so clients can select with the rule's source/network:
+    service/kernel sources require ``policy_tun``; native Xray/sing-box rules
+    explicitly limited to TCP may use ``native_application_tcp``.
+    """
+    targets = []
+    for outbound in await _load_outbounds(runtime):
+        capability = outbound_capability(outbound.kind, runtime)
+        if not outbound.enabled or capability.state.value != "supported":
+            continue
+        contexts: list[str] = []
+        if capability.tun:
+            contexts.append("policy_tun")
+        if capability.application_proxy and "tcp" in capability.transports:
+            contexts.append("native_application_tcp")
+        if not contexts:
+            continue
+        targets.append({
+            "name": outbound.name,
+            "kind": outbound.kind.value,
+            "contexts": contexts,
+            "transports": sorted(capability.transports),
+            "reason": capability.reason,
+        })
+    return {"targets": targets}
+
+
 @zagros_admin_router.get("/routing/rules")
 async def routing_list(runtime=Depends(get_runtime)):
     rules = await _load_rules(runtime)
@@ -1860,9 +1891,16 @@ class HostsPutBody(BaseModel):
 _HOST_SECURITIES = {"inbound_default", "none", "tls"}
 
 
-def _normalize_security(value: str | None) -> str | None:
+def _normalize_security(value: str | None) -> str:
+    """Return the explicit non-null state required by legacy ProxyHost.
+
+    Older dashboard builds sent ``null`` for ``inbound_default`` and empty TLS
+    hints.  HostEntryBody accepts that compatibility input, but the Xray model
+    is backed by non-null enums; normalize at the API boundary so old and new
+    clients persist one canonical wire shape.
+    """
     if value is None or not value.strip():
-        return None  # inbound default
+        return "inbound_default"
     value = value.strip().lower()
     if value not in _HOST_SECURITIES:
         raise HTTPException(422, f"invalid security '{value}' — "
@@ -1874,6 +1912,10 @@ def _validate_entry(e: HostEntryBody, *, for_xray: bool) -> None:
     if e.port is not None and not (1 <= e.port <= 65535):
         raise HTTPException(422, f"invalid port {e.port}")
     e.security = _normalize_security(e.security)
+    # ALPN and fingerprint are enum-backed empty strings on Xray.  Never pass
+    # a nullable compatibility value into ProxyHost validation.
+    e.alpn = e.alpn or ""
+    e.fingerprint = e.fingerprint or ""
     if for_xray:
         # the legacy columns are single-value enums — validate membership
         from app.models.proxy import ProxyHostALPN, ProxyHostFingerprint
@@ -1900,9 +1942,9 @@ def _entry_wire(e) -> dict[str, Any]:
         "sni": get("sni"),
         "host": get("host") if get("host") is not None else get("host_header"),
         "path": get("path"),
-        "security": get("security"),
-        "alpn": get("alpn"),
-        "fingerprint": get("fingerprint"),
+        "security": get("security") or "inbound_default",
+        "alpn": get("alpn") or "",
+        "fingerprint": get("fingerprint") or "",
         "allowinsecure": get("allowinsecure"),
         "is_disabled": bool(get("is_disabled", False)),
         "mux_enable": bool(get("mux_enable", False)),

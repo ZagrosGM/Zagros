@@ -256,7 +256,9 @@ _KIND_SCHEMAS: dict[OutboundKind, dict] = {
                               hint="when present, it wins over the individual fields"),
          "cipher": _str("cipher", "cipher (e.g. AES-256-GCM)", group="transport"),
          "auth": _str("auth", "digest auth (e.g. SHA256)", group="transport")},
-        description="OpenVPN upstream — upload a profile or fill the pieces"),
+        description=("OpenVPN upstream — upload a profile or fill the pieces; "
+                     "this is also the supported client for a SoftEther "
+                     "OpenVPN-compatibility listener")),
     OutboundKind.SSH: _schema(
         {**_server_fields(),
          "username": _str("username", "username", group="auth"),

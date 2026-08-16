@@ -159,3 +159,7 @@ def test_softether_schema_comes_from_same_capability_contract() -> None:
         assert schemas[kind]["x-availability"] == "unsupported"
         assert schemas[kind]["x-capability"]["tun"] is False
         assert schemas[kind]["x-disabled-reason"] == outbound_capability(kind).reason
+    # SoftEther's standards-compatible OpenVPN listener needs no fake
+    # SoftEther-specific kind: the production OpenVPN client/TUN is real.
+    assert schemas["openvpn"]["x-supported"] is True
+    assert "SoftEther OpenVPN-compatibility" in schemas["openvpn"]["description"]

@@ -11,7 +11,7 @@ import { Dialog } from "../components/overlays";
 import { Badge, Button, Card, CardHeader, EmptyState, Field, Input, Select, Switch, cn } from "../components/ui";
 import { api, ApiError } from "../lib/api";
 import { useT } from "../lib/i18n";
-import type { OutboundsResponse, RoutePreview, RoutingRule } from "../lib/types";
+import type { InboundCatalogGroup, RoutePreview, RoutingRule, RoutingTarget } from "../lib/types";
 
 const ACTIONS = ["allow", "block", "route_to", "redirect", "dns", "fake_dns", "dns_override"] as const;
 const GEO_DEFAULT = ["ir", "cn", "ru", "us", "de", "ae", "tr", "private"];
@@ -34,9 +34,14 @@ export default function Routing() {
     queryKey: ["zagros", "routing"],
     queryFn: () => api.get<{ rules: RoutingRule[] }>("/zagros/routing/rules"),
   });
-  const outbounds = useQuery({
-    queryKey: ["zagros", "outbounds"],
-    queryFn: () => api.get<OutboundsResponse>("/zagros/outbounds"),
+  const targets = useQuery({
+    queryKey: ["zagros", "routing-targets"],
+    queryFn: () => api.get<{ targets: RoutingTarget[] }>("/zagros/routing/targets"),
+    staleTime: 30000,
+  });
+  const inboundCatalog = useQuery({
+    queryKey: ["zagros", "inbounds-catalog"],
+    queryFn: () => api.get<{ groups: InboundCatalogGroup[] }>("/zagros/inbounds"),
     staleTime: 30000,
   });
 
@@ -71,15 +76,16 @@ export default function Routing() {
     markDirty(arrayMove(rules, from, to).map((r, i) => ({ ...r, priority: (i + 1) * 10 })));
   };
 
-  const outboundNames = useMemo(() => (outbounds.data?.outbounds ?? [])
-    .filter((o) => {
-      const capability = outbounds.data?.capabilities?.[o.kind];
-      return o.enabled && capability?.state === "supported" && capability.tun;
-    })
-    .map((o) => o.name), [outbounds.data]);
-  const nonTunOutbounds = useMemo(() => (outbounds.data?.outbounds ?? [])
-    .filter((o) => o.enabled && outbounds.data?.capabilities?.[o.kind]?.tun === false)
-    .map((o) => ({ name: o.name, reason: outbounds.data?.capabilities?.[o.kind]?.reason })), [outbounds.data]);
+  // Preserve the full server capability contract for the dialog.  A target
+  // is filtered only after its selected source inbounds + network are known:
+  // TUN targets work for every policy source, while application proxies such
+  // as SSH are valid only for native Xray/sing-box TCP rules.
+  const routingTargets = useMemo(() => (targets.data?.targets ?? []).map((target) => ({
+    name: target.name,
+    tun: target.contexts.includes("policy_tun"),
+    applicationProxy: target.contexts.includes("native_application_tcp"),
+    transports: target.transports,
+  })), [targets.data]);
 
   return (
     <div className="space-y-4 animate-fade-up">
@@ -103,17 +109,8 @@ export default function Routing() {
       </div>
 
       <p className="text-xs text-content-3">
-        Rules are evaluated by priority, first match wins. Drag cards to reorder — priorities renumber automatically (10, 20, 30…).
+        Rules are evaluated by priority, first match wins. Drag cards to reorder — priorities renumber automatically (10, 20, 30…). Target compatibility is evaluated from the selected source inbounds and network.
       </p>
-      <p className="rounded-xl border border-warn/30 bg-warn-soft px-3 py-2 text-[11px] text-warn">
-        SoftEther architecture: L2TP, SSTP and native sessions in one SoftEther instance share a single Virtual Hub/TAP source subnet. They must use one shared egress decision; different per-transport outbounds are rejected before Save/Deploy. Separate decisions require separate SoftEther instances/hubs.
-      </p>
-      {nonTunOutbounds.length > 0 && (
-        <div className="rounded-xl border border-warn/30 bg-warn-soft px-3 py-2 text-[11px] text-warn">
-          Application-only outbounds are excluded from policy TUN targets: {nonTunOutbounds.map((o) => o.name).join(", ")}.
-          {nonTunOutbounds.some((o) => o.reason) && <span> {nonTunOutbounds.find((o) => o.reason)?.reason}</span>}
-        </div>
-      )}
 
       {load.isLoading ? null : rules.length === 0 ? (
         <Card>
@@ -171,7 +168,8 @@ export default function Routing() {
       {editIdx !== null && (
         <RuleDialog
           rule={editIdx >= 0 ? rules[editIdx] : emptyRule((rules.length + 1) * 10)}
-          outbounds={outboundNames}
+          targets={routingTargets}
+          inboundGroups={inboundCatalog.data?.groups ?? []}
           existingNames={rules.filter((_, i) => i !== editIdx).map((r) => r.name)}
           onClose={() => setEditIdx(null)}
           onSave={(r) => {
@@ -198,7 +196,7 @@ function RuleCard({ rule, onEdit, onToggle, onDelete }: {
         className="cursor-grab touch-none rounded-lg p-1.5 text-content-3 hover:bg-surface-2 hover:text-content active:cursor-grabbing">
         <GripVertical size={15} />
       </button>
-      <Badge tone="muted" >#{rule.priority}</Badge>
+      <Badge tone="muted">priority {rule.priority}</Badge>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-semibold">{rule.name || "(unnamed)"}</span>
@@ -235,13 +233,15 @@ function MatcherSummary({ rule }: { rule: RoutingRule }) {
 }
 
 // List editor for chip-style values (domains, geoips…)
-function ChipField({ label, values, onChange, placeholder, datalist }: {
-  label: string; values: string[]; onChange: (v: string[]) => void; placeholder?: string; datalist?: string[];
+function ChipField({ label, values, onChange, placeholder, datalist, preserveCase = false }: {
+  label: string; values: string[]; onChange: (v: string[]) => void; placeholder?: string;
+  datalist?: string[]; preserveCase?: boolean;
 }) {
   const [text, setText] = useState("");
   const id = `dl-${label.replace(/\W+/g, "-")}`;
   const add = () => {
-    const v = text.trim().toLowerCase();
+    const clean = text.trim();
+    const v = preserveCase ? clean : clean.toLowerCase();
     if (v && !values.includes(v)) onChange([...values, v]);
     setText("");
   };
@@ -270,8 +270,16 @@ function ChipField({ label, values, onChange, placeholder, datalist }: {
   );
 }
 
-function RuleDialog({ rule, outbounds, existingNames, onClose, onSave }: {
-  rule: RoutingRule; outbounds: string[]; existingNames: string[];
+interface RoutingTargetOption {
+  name: string;
+  tun: boolean;
+  applicationProxy: boolean;
+  transports: string[];
+}
+
+function RuleDialog({ rule, targets, inboundGroups, existingNames, onClose, onSave }: {
+  rule: RoutingRule; targets: RoutingTargetOption[]; inboundGroups: InboundCatalogGroup[];
+  existingNames: string[];
   onClose: () => void; onSave: (r: RoutingRule) => void;
 }) {
   const t = useT();
@@ -282,6 +290,24 @@ function RuleDialog({ rule, outbounds, existingNames, onClose, onSave }: {
   const setMatcher = (patch: Partial<RoutingRule["matcher"]>) =>
     setR({ ...r, matcher: { ...m, ...patch } });
 
+  const inboundCore = useMemo(() => new Map(
+    inboundGroups.flatMap((group) => group.inbounds.map((inbound) => [inbound.tag, group.core_id] as const)),
+  ), [inboundGroups]);
+  const inboundHints = useMemo(() => [...inboundCore.keys()].sort(), [inboundCore]);
+  const selectedInbounds = m.inbounds ?? [];
+  const nativeApplicationContext = selectedInbounds.length > 0
+    && selectedInbounds.every((tag) => {
+      const core = inboundCore.get(tag);
+      return core === "xray" || core === "sing-box";
+    })
+    && (m.networks ?? []).length === 1
+    && m.networks?.[0] === "tcp";
+  const outbounds = targets.filter((target) => target.tun || (
+    target.applicationProxy
+    && nativeApplicationContext
+    && target.transports.includes("tcp")
+  )).map((target) => target.name);
+
   const needsOutbound = r.action === "route_to";
   const needsRedirect = r.action === "redirect";
   const needsDns = r.action === "dns" || r.action === "dns_override" || r.action === "fake_dns";
@@ -290,6 +316,8 @@ function RuleDialog({ rule, outbounds, existingNames, onClose, onSave }: {
     if (!r.name.trim()) return "name is required";
     if (existingNames.includes(r.name.trim())) return `a rule named "${r.name.trim()}" already exists`;
     if (needsOutbound && !r.outbound) return "route_to needs a target outbound";
+    if (needsOutbound && r.outbound && !outbounds.includes(r.outbound))
+      return `outbound "${r.outbound}" is not compatible with the selected source/network`;
     if (needsRedirect && !r.redirect_to) return "redirect needs a target address";
     if (needsDns && !r.dns_server) return "dns action needs a dns server";
     return "";
@@ -319,7 +347,7 @@ function RuleDialog({ rule, outbounds, existingNames, onClose, onSave }: {
         <div className="sm:col-span-2 grid gap-4 rounded-xl border border-border p-3.5">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-content-3">IF — matchers (all must match)</p>
           <ChipField label="inbound tags" values={m.inbounds ?? []} onChange={(v) => setMatcher({ inbounds: v })}
-            placeholder="reality-in" />
+            datalist={inboundHints} preserveCase placeholder="reality-in" />
           <ChipField label="domains / geosites" values={m.domains ?? []} onChange={(v) => setMatcher({ domains: v })}
             placeholder="geosite:category-ir / example.com" />
           <div className="grid gap-4 sm:grid-cols-2">

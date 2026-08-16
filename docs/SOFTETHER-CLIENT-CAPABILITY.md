@@ -1,4 +1,4 @@
-# SoftEther client/outbound capability decision (alpha.8.3)
+# SoftEther client/outbound capability decision (alpha.8.4)
 
 ## Decision
 
@@ -16,18 +16,22 @@ OpenVPN compatibility does not create a SoftEther client outbound.
 
 The labels grouped under “SoftEther client” need different Linux providers:
 
-- native SoftEther requires a separately installed `vpnclient`, Virtual NIC
-  lifecycle, route/table ownership, secure account/certificate storage, and
-  concurrent connection isolation;
-- L2TP/IPsec requires an IPsec + L2TP client stack and transactional XFRM/PPP
-  cleanup; SoftEther VPN Client is not a generic L2TP client;
-- SSTP requires an SSTP client provider and PPP lifecycle;
-- raw L2TP has no supported Zagros Linux client adapter;
-- PPTP is not exposed by the installed SoftEther server and no fake vpncmd
-  command is accepted;
-- OpenVPN-compatible SoftEther servers are already reachable through Zagros'
-  real `openvpn` outbound kind. Duplicating that dataplane under a fake
-  SoftEther label would be misleading.
+| UI family | Required client/process | TCP | UDP | Generic TUN | Zagros alpha.8.4 result |
+|---|---|---:|---:|---:|---|
+| Native SoftEther | `vpnclient` service + Virtual NIC/TAP lifecycle | yes | yes | possible only after adapter work | unsupported by design |
+| L2TP/IPsec | strongSwan/XFRM + xl2tpd/pppd | yes | outer UDP/IPsec | PPP IP interface | unsupported by design |
+| Raw L2TP | dedicated raw-L2TP client stack | yes | outer UDP | PPP IP interface | unsupported by design |
+| SSTP | SSTP client + pppd | yes | no | PPP IP interface | unsupported by design |
+| PPTP | PPTP client + GRE/pppd | yes | GRE, not UDP | PPP IP interface | unsupported by design |
+| OpenVPN compatibility | standard OpenVPN client | yes | yes | yes | use supported `openvpn` outbound |
+
+Native SoftEther additionally requires separately installed `vpnclient`,
+Virtual NIC lifecycle, route/table ownership, secure account/certificate
+storage, and concurrent connection isolation. SoftEther VPN Client is not a
+generic L2TP client. The installed SoftEther server exposes no PPTP command,
+and no fake vpncmd command is accepted. OpenVPN-compatible SoftEther servers
+are already reachable through Zagros' real `openvpn` outbound kind; duplicating
+that dataplane under a fake SoftEther label would be misleading.
 
 ## Requirements before support can change
 

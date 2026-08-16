@@ -10,7 +10,38 @@ multi-core platform line.
 
 ---
 
-## [1.0.0-alpha.8.3] — Unreleased — Capability, listener, subscription and node architecture
+## [1.0.0-alpha.8.4] — Unreleased — Outbound routing and capability hardening
+
+### Fixed
+
+* Routing target discovery is now context-aware instead of applying one global
+  TUN filter. Managed SSH outbounds are offered for native Xray/sing-box rules
+  explicitly limited to TCP, while service/kernel sources and UDP-capable rules
+  continue to reject SSH because OpenSSH dynamic forwarding has no generic TUN.
+* Xray Host Settings canonicalize non-TLS enum fields before legacy
+  `ProxyHost` validation. `security=none`, empty ALPN, and empty fingerprint now
+  survive Save, reload, None → TLS → None toggles, and older nullable payloads.
+* SSH core health now follows the live host-accounting heartbeat in both
+  directions. A successful `zagros install-host-agent` clears a cached warning
+  on the next status refresh without restarting the core or Panel; a later
+  missing, invalid, unreadable, or stale snapshot reports its exact cause.
+* `zagros install-host-agent` verifies that the collector service produced a
+  fresh, versioned accounting snapshot before reporting production success.
+* The Routing page no longer renders global yellow architecture banners.
+  Capability constraints remain enforced at target selection and API preflight,
+  and rule priority is labelled explicitly instead of appearing as an
+  unexplained `#N` warning.
+
+### Capability decision
+
+* SoftEther client-labelled L2TP/IPsec, raw L2TP, SSTP, PPTP, and native
+  outbounds remain unsupported by design: the installed core owns vpnserver,
+  not the required client daemons/TAP lifecycle. SoftEther OpenVPN-compatible
+  endpoints use the fully supported standard OpenVPN outbound. Per-protocol
+  runtime, TCP/UDP, TUN, credential, and lifecycle requirements are documented
+  and remain driven by the shared capability contract rather than a UI label.
+
+## [1.0.0-alpha.8.3] — 2026-08-16 — Capability, listener, subscription and node architecture
 
 ### Fixed
 

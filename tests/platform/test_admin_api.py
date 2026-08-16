@@ -318,6 +318,28 @@ class TestRouting:
         plain_gaps = results[plain_id]["unsupported"]
         assert plain_gaps and "no routing support" in plain_gaps[0]["reason"]
 
+    def test_target_inventory_keeps_ssh_for_native_tcp_not_policy_tun(self, stack):
+        client = stack["client"]
+        original = client.get("/api/zagros/outbounds").json()["outbounds"]
+        ssh = {"name": "ssh-app", "kind": "ssh", "settings": {
+            "server": "ssh.example.test", "server_port": 22,
+            "username": "alice", "password": "dummy-test-value",
+        }, "enabled": True}
+        r = client.put("/api/zagros/outbounds",
+                       json={"outbounds": [*original, ssh]})
+        assert r.status_code == 200, r.text
+        targets = client.get("/api/zagros/routing/targets")
+        assert targets.status_code == 200, targets.text
+        target = next(row for row in targets.json()["targets"]
+                      if row["name"] == "ssh-app")
+        assert target["kind"] == "ssh"
+        assert target["contexts"] == ["native_application_tcp"]
+        assert target["transports"] == ["tcp"]
+        assert "policy_tun" not in target["contexts"]
+        restored = client.put("/api/zagros/outbounds",
+                              json={"outbounds": original})
+        assert restored.status_code == 200, restored.text
+
     def test_rejects_duplicate_and_empty_matcher(self, stack):
         client = stack["client"]
         r = client.put("/api/zagros/routing/rules",

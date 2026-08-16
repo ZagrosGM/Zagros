@@ -272,8 +272,44 @@ class SSHTunnelDriver(BaseCoreDriver):
         if callable(stop_sftp):
             await asyncio.to_thread(stop_sftp)
 
+    async def _refresh_transport_accounting_status(self) -> None:
+        """Reconcile host-agent health without requiring an SSH-core restart.
+
+        ``start()`` used to cache the first missing/stale snapshot forever, so
+        a successful later ``zagros install-host-agent`` kept the UI yellow
+        until the whole core or Panel restarted.  The cores endpoint already
+        performs a live status probe; use that probe to transition both ways:
+        stale/missing → degraded, and a fresh host heartbeat → healthy.
+        """
+        available = getattr(self._backend, "transport_acct_available", None)
+        start_transport = getattr(self._backend, "transport_acct_start", None)
+        if not callable(available) or not callable(start_transport):
+            return
+        reason = await asyncio.to_thread(available)
+        if reason is not None:
+            self._tunnel_acct_error = (
+                f"SSH bidirectional transport accounting failed: {reason}")
+            return
+        if self._tunnel_acct_error is None:
+            return
+        try:
+            await asyncio.to_thread(
+                start_transport,
+                {int(listener["port"]) for listener in self._listeners},
+            )
+            teardown_legacy = getattr(self._backend, "acct_teardown", None)
+            if callable(teardown_legacy):
+                await asyncio.to_thread(teardown_legacy)
+            self._legacy_tunnel_acct = False
+            self._tunnel_acct_error = None
+        except Exception as exc:  # noqa: BLE001 — status remains honest
+            self._tunnel_acct_error = (
+                f"SSH bidirectional transport accounting failed: {exc}")
+
     async def status(self) -> CoreStatus:
         running = await asyncio.to_thread(self._backend.sshd_running)
+        if running:
+            await self._refresh_transport_accounting_status()
         version = await self.version()
         sessions = await self.get_online_devices() if running else []
         metrics = None

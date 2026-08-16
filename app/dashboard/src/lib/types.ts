@@ -213,6 +213,14 @@ export interface OutboundsResponse {
   capabilities: Record<string, OutboundCapability>;
 }
 
+export interface RoutingTarget {
+  name: string;
+  kind: Outbound["kind"];
+  contexts: ("policy_tun" | "native_application_tcp")[];
+  transports: string[];
+  reason?: string | null;
+}
+
 // alpha.7: schema-driven outbound forms (/zagros/outbounds/schema)
 export interface OutboundField {
   type?: string;

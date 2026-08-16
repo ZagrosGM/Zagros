@@ -124,6 +124,46 @@ def test_put_validates_port_and_security(client):
     assert r.status_code == 422
 
 
+def test_xray_null_compatibility_input_normalizes_to_explicit_enum_defaults() -> None:
+    """Old SPA payloads used null for non-TLS enum fields; the API boundary
+    must canonicalize them before constructing legacy ProxyHost."""
+    from app.models.proxy import ProxyHost
+    from app.platform.admin_api import HostEntryBody, _validate_entry
+
+    entry = HostEntryBody(
+        remark="plain", address="edge.example.test",
+        security=None, alpn=None, fingerprint=None,
+    )
+    _validate_entry(entry, for_xray=True)
+    assert entry.security == "inbound_default"
+    assert entry.alpn == ""
+    assert entry.fingerprint == ""
+    model = ProxyHost(**entry.model_dump())
+    assert model.security.value == "inbound_default"
+    assert model.alpn.value == ""
+    assert model.fingerprint.value == ""
+
+
+def test_xray_non_tls_and_tls_host_states_validate_and_roundtrip() -> None:
+    from app.models.proxy import ProxyHost
+    from app.platform.admin_api import HostEntryBody, _validate_entry
+
+    for security, alpn, fingerprint in (
+        ("none", "", ""),
+        ("tls", "h2,http/1.1", "chrome"),
+        ("none", "", ""),  # TLS → none regression
+    ):
+        entry = HostEntryBody(
+            remark="toggle", address="edge.example.test",
+            security=security, alpn=alpn, fingerprint=fingerprint,
+        )
+        _validate_entry(entry, for_xray=True)
+        model = ProxyHost(**entry.model_dump())
+        assert model.security.value == security
+        assert model.alpn.value == alpn
+        assert model.fingerprint.value == fingerprint
+
+
 def test_put_full_item13_field_set(client):
     c, _ = client
     entry = {"remark": "R", "address": "a.example.com", "port": 443,

@@ -16,3 +16,13 @@ def test_dashboard_uses_relative_nested_assets_not_root_two_segment_paths() -> N
     assert 'href="./statics/zagros.svg"' in index
     assert (ROOT / "app/dashboard/public/statics/zagros.svg").is_file()
     assert not (ROOT / "app/dashboard/public/zagros.svg").exists()
+
+
+def test_routing_page_has_contextual_targets_without_obsolete_global_warnings() -> None:
+    routing = (ROOT / "app/dashboard/src/pages/Routing.tsx").read_text()
+    assert "SoftEther architecture: L2TP" not in routing
+    assert "Application-only outbounds are excluded" not in routing
+    assert 'priority {rule.priority}' in routing
+    assert '"/zagros/routing/targets"' in routing
+    assert "nativeApplicationContext" in routing
+    assert "datalist={inboundHints} preserveCase" in routing

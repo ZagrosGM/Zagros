@@ -62,6 +62,7 @@ class FakeSSHBackend:
         self.transport_ports: set[int] = set()
 
     # accounting surface mirrors LocalSystemSSHBackend
+    def transport_acct_available(self): return self._transport_reason
     def transport_acct_start(self, ports):
         if self._transport_reason:
             raise CoreError(self._transport_reason)
@@ -229,6 +230,40 @@ def test_sshd_down_surfaces_honestly() -> None:
         status = await driver.status()
         from app.cores.types import HealthStatus
         assert status.health == HealthStatus.UNHEALTHY
+
+    asyncio.run(run())
+
+
+def test_host_agent_health_recovers_and_degrades_without_core_restart() -> None:
+    async def run():
+        from app.cores.types import HealthStatus
+
+        backend = FakeSSHBackend(
+            acct_reason="host SSH accounting snapshot is missing")
+        driver, _ = _driver(backend)
+        await driver.start()
+        first = await driver.status()
+        assert first.health is HealthStatus.DEGRADED
+        assert "snapshot is missing" in (first.message or "")
+
+        # A successful, idempotent install-host-agent creates a fresh snapshot.
+        # The next ordinary status refresh must adopt it; no core/Panel restart.
+        backend._transport_reason = None
+        healthy = await driver.status()
+        assert healthy.health is HealthStatus.HEALTHY
+        assert healthy.message is None
+        assert backend.transport_ports == {2022}
+
+        # Loss of heartbeat is also live, not cached green forever.
+        backend._transport_reason = "host SSH accounting snapshot is stale (7.0s old)"
+        stale = await driver.status()
+        assert stale.health is HealthStatus.DEGRADED
+        assert "7.0s old" in (stale.message or "")
+
+        backend._transport_reason = None
+        recovered = await driver.status()
+        assert recovered.health is HealthStatus.HEALTHY
+        assert recovered.message is None
 
     asyncio.run(run())
 

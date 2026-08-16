@@ -108,8 +108,17 @@ class SubscriptionListenerManager:
             bind_address=settings.listen_address,
             tls_certificate_id=settings.tls_certificate_id,
         )
+        # ``/settings/portal/test`` preflights the currently running desired
+        # state too.  Exempt only this manager's live same-socket listener;
+        # initial starts and changed sockets must still fail closed on every
+        # kernel listener, including another Python process.
+        current_listener_port = -1
+        if (self.running and self._settings is not None
+                and self._settings.listen_address == settings.listen_address
+                and self._settings.public_port == settings.public_port):
+            current_listener_port = int(settings.public_port)
         conflicts = await detect_port_conflicts(
-            runtime, panel_shape, current_panel_port=-1)
+            runtime, panel_shape, current_panel_port=current_listener_port)
         if conflicts:
             raise RuntimeError(conflicts[0].message())
 

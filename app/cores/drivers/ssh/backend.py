@@ -215,8 +215,24 @@ class LocalSystemSSHBackend:
         if self._host_transport_payload() is not None:
             return None
         if os.path.exists("/.dockerenv"):
-            return ("host SSH accounting collector is not active or its "
-                    "snapshot is stale; run 'zagros install-host-agent'")
+            try:
+                age = max(0.0, time.time() - os.path.getmtime(
+                    self._host_transport_state_path))
+                raw = json.loads(open(
+                    self._host_transport_state_path, encoding="utf-8").read())
+            except FileNotFoundError:
+                return ("host SSH accounting snapshot is missing; run "
+                        "'zagros install-host-agent' and verify "
+                        "zagros-ssh-accounting.service")
+            except PermissionError:
+                return ("Panel cannot read the host SSH accounting snapshot; "
+                        "verify /var/lib/zagros/cores/ssh permissions")
+            except (OSError, ValueError, TypeError) as exc:
+                return f"host SSH accounting snapshot is invalid: {type(exc).__name__}"
+            if raw.get("version") != 1 or not isinstance(raw.get("totals"), dict):
+                return "host SSH accounting snapshot has an unsupported format"
+            return (f"host SSH accounting snapshot is stale ({age:.1f}s old); "
+                    "verify zagros-ssh-accounting.service")
         binary = shutil.which("ss")
         if not binary:
             return "iproute2 ss is required for SSH transport accounting"

@@ -75,6 +75,36 @@ def test_fresh_host_agent_snapshot_is_used_inside_container(tmp_path) -> None:
     assert stat.S_IMODE((tmp_path / "accounting-listeners.json").stat().st_mode) == 0o600
 
 
+def test_host_snapshot_health_reasons_distinguish_missing_stale_and_fresh(
+    tmp_path, monkeypatch,
+) -> None:
+    import json
+    import os
+    import time
+
+    backend = LocalSystemSSHBackend({"work_dir": str(tmp_path)})
+    # Pin container mode independent of the developer test host.
+    real_exists = os.path.exists
+    monkeypatch.setattr(
+        "app.cores.drivers.ssh.backend.os.path.exists",
+        lambda path: True if path == "/.dockerenv" else real_exists(path),
+    )
+    reason = backend.transport_acct_available()
+    assert reason and "snapshot is missing" in reason
+
+    state = tmp_path / "host-transport-usage.json"
+    state.write_text(json.dumps({
+        "version": 1, "updated_at": int(time.time()), "totals": {}, "live": {},
+    }))
+    old = time.time() - 30
+    os.utime(state, (old, old))
+    reason = backend.transport_acct_available()
+    assert reason and "snapshot is stale" in reason and "old" in reason
+
+    os.utime(state, None)
+    assert backend.transport_acct_available() is None
+
+
 def test_transport_forget_removes_deleted_uid_and_private_state(tmp_path) -> None:
     backend = LocalSystemSSHBackend({"work_dir": str(tmp_path)})
     backend._transport_totals = {1001: (10, 20), 1002: (30, 40)}

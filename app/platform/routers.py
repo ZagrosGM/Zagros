@@ -510,15 +510,29 @@ async def studio_raw(core_id: str, runtime=Depends(get_runtime)):
 
 
 @zagros_admin_router.get("/cores/{core_id}/wizard-schema")
-async def core_wizard_schema(core_id: str):
-    """Dynamic inbound-wizard blueprint (protocols × transports × securities
-    × fields) for THIS engine — the dashboard stepper renders it verbatim."""
+async def core_wizard_schema(core_id: str, runtime=Depends(get_runtime)):
+    """Dynamic inbound-wizard blueprint for this engine and live runtime.
+
+    SoftEther availability is refined from the installed binary's read-only
+    ``vpncmd Help`` inventory.  The endpoint therefore cannot claim PPTP (or
+    any other server transport) merely because a static UI label exists.
+    """
+    import asyncio as _asyncio
+
     from app.studio.wizard import blueprint_for
 
     try:
-        return blueprint_for(core_id)
+        blueprint = blueprint_for(core_id)
     except KeyError:
         raise HTTPException(404, f"no inbound-wizard blueprint for core '{core_id}'") from None
+    if blueprint["core_id"] == "softether":
+        from app.cores.drivers.softether.capabilities import (
+            apply_softether_wizard_capabilities,
+        )
+
+        blueprint = await _asyncio.to_thread(
+            apply_softether_wizard_capabilities, blueprint, runtime)
+    return blueprint
 
 
 @zagros_admin_router.get("/cores/{core_id}/suggest-port")

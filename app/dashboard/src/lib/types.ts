@@ -200,10 +200,18 @@ export type SupportState = "supported" | "unsupported" | "environment_limited" |
 export interface OutboundCapability {
   state: SupportState;
   selectable: boolean;
+  direction: "outbound";
+  dataplane: "native_action" | "application_proxy" | "application_tcp" | "policy_tun" | "kernel_tun" | "dynamic_core" | "none";
   transports: string[];
+  traffic_networks: ("tcp" | "udp")[];
+  routing_contexts: ("policy_tun" | "native_application_tcp")[];
+  routing_source_cores: string[];
   application_proxy: boolean;
+  application_level: boolean;
   tun: boolean;
   kernel_routing: boolean;
+  accounting: boolean;
+  accounting_reason?: string | null;
   native_core_translation: string[];
   host_runtime?: string | null;
   reason?: string | null;
@@ -216,8 +224,16 @@ export interface OutboundsResponse {
 export interface RoutingTarget {
   name: string;
   kind: Outbound["kind"];
+  state: SupportState;
+  selectable: boolean;
+  direction: "outbound";
+  dataplane: OutboundCapability["dataplane"];
   contexts: ("policy_tun" | "native_application_tcp")[];
   transports: string[];
+  traffic_networks: ("tcp" | "udp")[];
+  source_cores: string[];
+  application_level: boolean;
+  tun: boolean;
   reason?: string | null;
 }
 

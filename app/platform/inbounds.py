@@ -167,12 +167,33 @@ def _legacy_xray_group() -> CatalogGroup | None:
 
 
 async def catalog(runtime) -> list[CatalogGroup]:
-    """All selectable inbounds across installed & enabled cores."""
+    """All selectable inbounds across installed & enabled cores.
+
+    Built-in Xray has two live views during a Studio apply: the legacy
+    ``inbounds_by_protocol`` cache and the persisted Studio document that the
+    Xray driver has already materialized.  Merge them by tag.  Treating the
+    legacy cache as exclusive made a real, listening Studio-created Xray
+    inbound invisible to Routing source resolution, which in turn classified
+    its SSH target conservatively as a policy-TUN request.
+    """
     manager = runtime.core_manager
     groups: list[CatalogGroup] = []
     legacy = _legacy_xray_group()
+    try:
+        studio_xray = await _studio_inbounds(runtime, "xray")
+    except Exception as exc:  # noqa: BLE001 - legacy remains usable
+        logger.warning("studio read failed for built-in xray: %s", exc)
+        studio_xray = []
     if legacy is not None:
+        merged = {item.tag: item for item in legacy.inbounds}
+        merged.update({item.tag: item for item in studio_xray})
+        legacy.inbounds = list(merged.values())
         groups.append(legacy)
+    elif studio_xray:
+        groups.append(CatalogGroup(
+            core_id="xray", name="Xray (built-in)", enabled=True,
+            inbounds=studio_xray,
+        ))
     for core_id in manager.list_cores():
         if not manager.is_enabled(core_id):
             continue

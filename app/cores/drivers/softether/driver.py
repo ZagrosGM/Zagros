@@ -448,6 +448,60 @@ class SoftEtherDriver(BaseCoreDriver):
         delete_hub(hub)
         self.settings["policy_hubs"] = [item for item in entries if item is not entry]
 
+    @staticmethod
+    def _policy_forwarding_rules(
+        interface: str, subnet: str,
+    ) -> tuple[list[str], list[str]]:
+        """Exact, panel-owned FORWARD rules for one routed Hub/TAP.
+
+        Docker commonly leaves the host FORWARD policy at DROP. nftables
+        classification can set the correct policy mark while the packet is
+        still discarded later by that policy; the symptom is a working VPN
+        login, DHCP lease and gateway ping with every Internet TCP SYN
+        black-holed. Scope both rules to this TAP and subnet so cleanup cannot
+        affect another hub or a production firewall rule.
+        """
+        return (
+            ["-i", interface, "-s", subnet, "-j", "ACCEPT"],
+            ["-o", interface, "-d", subnet, "-m", "conntrack",
+             "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"],
+        )
+
+    @classmethod
+    def _set_policy_forwarding(
+        cls, interface: str, subnet: str, *, enabled: bool,
+    ) -> None:
+        import shutil
+        import subprocess
+
+        iptables = shutil.which("iptables")
+        if not iptables:
+            raise CoreError("SoftEther routed TAP needs iptables forwarding support")
+        for rule in cls._policy_forwarding_rules(interface, subnet):
+            check = subprocess.run(
+                [iptables, "-C", "FORWARD", *rule],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ).returncode
+            if enabled and check != 0:
+                result = subprocess.run(
+                    [iptables, "-I", "FORWARD", "1", *rule],
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                if result.returncode:
+                    raise CoreError(
+                        result.stderr.strip()
+                        or f"cannot enable forwarding for {interface}"
+                    )
+            elif not enabled:
+                # Delete every duplicate left by a killed pre-fix process.
+                for _ in range(8):
+                    result = subprocess.run(
+                        [iptables, "-D", "FORWARD", *rule],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    if result.returncode:
+                        break
+
     def ensure_policy_source(self, source_id: str | None = None) -> dict[str, str]:
         """Switch one hub to DHCP+routed TAP and configure its Linux gateway."""
         import shutil
@@ -494,7 +548,12 @@ class SoftEtherDriver(BaseCoreDriver):
                                         stderr=subprocess.PIPE)
                 if result.returncode:
                     raise CoreError(result.stderr.strip() or f"cannot configure {interface}")
+            self._set_policy_forwarding(interface, str(network), enabled=True)
         except Exception:
+            try:
+                self._set_policy_forwarding(interface, str(network), enabled=False)
+            except Exception:  # noqa: BLE001 - continue symmetric TAP rollback
+                logger.exception("failed to roll back SoftEther forwarding rules")
             try:
                 self._backend.routed_tap_disable(
                     device=str(spec["tap_device"]), hub_name=str(spec["hub"]))
@@ -534,10 +593,19 @@ class SoftEtherDriver(BaseCoreDriver):
             # hub/device fields; enrich it from validated persisted settings.
             source.setdefault("hub", str(spec["hub"]))
             source.setdefault("tap_device", str(spec["tap_device"]))
+        interface = str(source.get("interface") or f"tap_{source['tap_device']}")
+        try:
+            self._set_policy_forwarding(
+                interface, str(spec["subnet"]), enabled=False)
+        except CoreError:
+            # A minimal uninstall environment may have already removed
+            # iptables. TAP/Hub cleanup must continue, while normal runtime
+            # absence was rejected during ensure.
+            logger.warning(
+                "could not remove SoftEther forwarding rules for %s", interface)
         disable = getattr(self._backend, "routed_tap_disable", None)
         if callable(disable):
             disable(device=str(source["tap_device"]), hub_name=str(source["hub"]))
-        interface = str(source.get("interface") or f"tap_{source['tap_device']}")
         ip = shutil.which("ip")
         if ip:
             subprocess.run([ip, "link", "delete", "dev", interface],

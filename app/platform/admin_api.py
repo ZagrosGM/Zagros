@@ -230,13 +230,19 @@ async def cores_list(runtime=Depends(get_runtime)):
 
 @zagros_admin_router.get("/cores/capability-matrix")
 async def cores_capability_matrix(runtime=Depends(get_runtime)):
-    from app.cores.matrix import FEATURES, capability_matrix
+    from app.cores.drivers.softether.capabilities import (
+        softether_transport_capabilities,
+    )
+    from app.cores.matrix import FEATURES, capability_matrix, routing_pair_matrix
 
     installed = set(runtime.core_manager.list_cores())
+    softether = await asyncio.to_thread(softether_transport_capabilities, runtime)
     return {"features": list(FEATURES),
             "installed": sorted(installed),
             "cores": capability_matrix(installed=installed),
-            "all": capability_matrix()}
+            "all": capability_matrix(),
+            "routing": routing_pair_matrix(installed=installed),
+            "softether_transports": softether}
 
 
 @zagros_admin_router.get("/cores/traffic/totals")
@@ -642,6 +648,28 @@ async def routing_sources(runtime=Depends(get_runtime)):
     return {"groups": groups}
 
 
+async def _routing_source_core_map(runtime) -> dict[str, str]:
+    """Resolve every live routing-source tag to its owning core."""
+    payload = await routing_sources(runtime)
+    mapping: dict[str, str] = {}
+    duplicates: set[str] = set()
+    for group in payload["groups"]:
+        core_id = str(group["core_id"])
+        for inbound in group.get("inbounds", []):
+            tag = str(inbound.get("tag") or "")
+            if not tag:
+                continue
+            if tag in mapping and mapping[tag] != core_id:
+                duplicates.add(tag)
+            mapping[tag] = core_id
+    if duplicates:
+        # An unqualified tag cannot identify a dataplane safely. Refusing it is
+        # preferable to whichever group happened to be returned last.
+        for tag in duplicates:
+            mapping.pop(tag, None)
+    return mapping
+
+
 @zagros_admin_router.get("/routing/targets")
 async def routing_targets(runtime=Depends(get_runtime)):
     """Capability-aware target inventory for the graphical rule builder.
@@ -654,20 +682,28 @@ async def routing_targets(runtime=Depends(get_runtime)):
     targets = []
     for outbound in await _load_outbounds(runtime):
         capability = outbound_capability(outbound.kind, runtime)
-        if not outbound.enabled or capability.state.value != "supported":
+        if not outbound.enabled or capability.state.value in {
+            "unsupported", "not_applicable"
+        }:
             continue
-        contexts: list[str] = []
-        if capability.tun:
-            contexts.append("policy_tun")
-        if capability.application_proxy and "tcp" in capability.transports:
-            contexts.append("native_application_tcp")
+        contexts = sorted(context.value for context in capability.routing_contexts)
         if not contexts:
             continue
         targets.append({
             "name": outbound.name,
             "kind": outbound.kind.value,
+            "state": capability.state.value,
+            "selectable": capability.state.value == "supported",
+            "direction": capability.direction,
+            "dataplane": capability.dataplane.value,
             "contexts": contexts,
+            # ``transports`` remains the outer carrier for compatibility;
+            # payload compatibility comes from traffic_networks.
             "transports": sorted(capability.transports),
+            "traffic_networks": sorted(capability.traffic_networks),
+            "source_cores": sorted(capability.routing_source_cores),
+            "application_level": capability.application_level,
+            "tun": capability.tun,
             "reason": capability.reason,
         })
     return {"targets": targets}
@@ -693,7 +729,10 @@ async def routing_save(body: RoutingSetBody, runtime=Depends(get_runtime)):
         outbounds = {outbound.name: outbound
                      for outbound in await _load_outbounds(runtime)}
         if policy_router is not None:
-            policy_router.validate_plan(normalized, outbounds.values())
+            policy_router.validate_plan(
+                normalized, outbounds.values(),
+                source_core_map=await _routing_source_core_map(runtime),
+            )
         for rule in normalized:
             if rule.action.value != "route_to":
                 continue
@@ -736,7 +775,10 @@ async def routing_preview(body: RoutingBody, runtime=Depends(get_runtime)):
         outbounds = await _load_outbounds(runtime)
         policy_router = getattr(runtime, "policy_router", None)
         if policy_router is not None:
-            policy_router.validate_plan(normalized, outbounds, body.core_ids)
+            policy_router.validate_plan(
+                normalized, outbounds, body.core_ids,
+                source_core_map=await _routing_source_core_map(runtime),
+            )
         report = await runtime.routing_engine.preview(
             normalized, core_ids=body.core_ids, outbounds=outbounds)
     except Exception as exc:
@@ -756,7 +798,10 @@ async def routing_deploy(body: RoutingBody, runtime=Depends(get_runtime)):
         outbounds = await _load_outbounds(runtime)
         policy_router = getattr(runtime, "policy_router", None)
         if policy_router is not None:
-            policy_router.validate_plan(normalized, outbounds, body.core_ids)
+            policy_router.validate_plan(
+                normalized, outbounds, body.core_ids,
+                source_core_map=await _routing_source_core_map(runtime),
+            )
     except Exception as exc:
         raise HTTPException(422, str(exc)) from exc
 

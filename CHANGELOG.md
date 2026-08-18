@@ -10,6 +10,49 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.8.6] — 2026-08-18 — Runtime-verified routing capability matrix
+
+### Fixed
+
+* Built-in Xray routing-source discovery now merges the legacy inbound cache
+  with persisted Studio inbounds by stable tag. A live Studio-created Xray
+  listener can no longer disappear from routing source resolution or be
+  misclassified as an unknown policy-TUN source.
+* Routed SoftEther hubs now own exact, subnet-scoped Linux `FORWARD` accept
+  rules in addition to their TAP/gateway lifecycle. Creation, rollback,
+  deletion and restart convergence are symmetric, so Docker's host
+  `FORWARD DROP` policy no longer black-holes authenticated SoftEther traffic.
+* Routing target capability data now separates outer carrier, payload network,
+  dataplane and valid source cores. UI discovery and API preflight share that
+  contract: SSH is application-TCP only for explicit Xray/sing-box TCP rules,
+  while service/TUN sources reject it before mutation.
+* SSH outbound accounting is explicitly unsupported because one shared
+  dynamic-forward process cannot attribute multiplexed bytes to source users.
+  The capability API publishes that architecture reason; SSH inbound accounts
+  continue to use the persistent host collector without stale host-agent
+  warnings when its snapshot is healthy.
+* SoftEther server and client capabilities are direction-specific and grounded
+  in the live `vpncmd Help` command inventory and binary version. PPTP and the
+  unimplemented native/L2TP/SSTP client dataplanes remain unsupported instead
+  of being fabricated from server-side protocol labels; OpenVPN compatibility
+  maps to the real OpenVPN client implementation.
+
+### Verification
+
+* Real VPS matrix: **26/26 supported source→target cells passed real traffic**
+  across Xray, sing-box, OpenVPN, WireGuard, SSH and a dedicated disposable
+  SoftEther Hub/TAP/user. Every pass reached the expected public egress and
+  increased the selected target's runtime counter.
+* Nine unsupported paths were rejected by the real API with HTTP 422 before
+  mutation. OpenVPN→SoftEther passed TLS, authentication, `PUSH_REPLY`, address
+  and route assignment, traffic, manual reconnect, SoftEther restart,
+  automatic reconnect and resumed traffic.
+* SSH host accounting remained monotonic across Panel restart. Browser E2E,
+  863-test Panel pytest, scripts pytest, the 267-assertion CLI harness,
+  TypeScript, Vite, ShellCheck 0.10.0, shell syntax, npm/pip audits, `pip check`
+  and `git diff --check` passed. Disposable VPS state was removed and clean
+  production state survived a fresh container recreation.
+
 ## [1.0.0-alpha.8.5] — 2026-08-17 — Isolated SoftEther source routing
 
 ### Fixed

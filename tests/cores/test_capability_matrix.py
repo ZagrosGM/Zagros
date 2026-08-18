@@ -1,7 +1,7 @@
 """Cross-core capability matrix is complete, typed and honest."""
 from __future__ import annotations
 
-from app.cores.matrix import FEATURES, capability_matrix
+from app.cores.matrix import FEATURES, capability_matrix, routing_pair_matrix
 
 
 def test_matrix_has_every_required_feature_for_six_primary_cores() -> None:
@@ -52,3 +52,23 @@ def test_runtime_matrix_preserves_not_installed_as_distinct_state() -> None:
     # Product limitations do not become misleading package problems.
     assert matrix["softether"]["outbound"]["state"] == "unsupported"
     assert matrix["wireguard"]["tls"]["state"] == "not_applicable"
+
+
+def test_source_target_routing_matrix_preserves_application_vs_tun_boundary() -> None:
+    matrix = routing_pair_matrix()
+    assert set(matrix) == {"xray", "sing-box", "openvpn", "wireguard", "ssh", "softether"}
+    assert all(set(row) == set(matrix) for row in matrix.values())
+    for source in matrix:
+        for target in ("xray", "sing-box", "openvpn", "wireguard"):
+            assert matrix[source][target]["state"] == "supported"
+    assert matrix["xray"]["ssh"]["state"] == "supported"
+    assert matrix["sing-box"]["ssh"]["state"] == "supported"
+    for source in ("openvpn", "wireguard", "ssh", "softether"):
+        assert matrix[source]["ssh"]["state"] == "unsupported"
+    assert all(matrix[source]["softether"]["state"] == "unsupported"
+               for source in matrix)
+
+    runtime = routing_pair_matrix(installed={"xray", "sing-box"})
+    assert runtime["xray"]["ssh"]["state"] == "not_installed"
+    # Unsupported architecture remains unsupported when absent.
+    assert runtime["xray"]["softether"]["state"] == "unsupported"

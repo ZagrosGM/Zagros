@@ -197,6 +197,14 @@ class TestCores:
             "xray", "sing-box", "openvpn", "wireguard", "ssh", "softether"}
         assert payload["cores"]["wireguard"]["inbound"]["state"] == "not_installed"
         assert payload["cores"]["softether"]["outbound"]["state"] == "unsupported"
+        assert set(payload["routing"]) == {
+            "xray", "sing-box", "openvpn", "wireguard", "ssh", "softether"}
+        assert payload["routing"]["xray"]["ssh"]["state"] in {
+            "supported", "not_installed"}
+        assert payload["routing"]["wireguard"]["ssh"]["state"] == "unsupported"
+        assert set(payload["softether_transports"]) == {
+            "native", "l2tp_ipsec", "l2tp_raw", "sstp", "openvpn", "pptp"}
+        assert payload["softether_transports"]["pptp"]["server"]["state"] != "supported"
 
     def test_full_lifecycle_over_http(self, stack):
         client, fake = stack["client"], stack["plain"]
@@ -450,8 +458,16 @@ class TestRouting:
         target = next(row for row in targets.json()["targets"]
                       if row["name"] == "ssh-app")
         assert target["kind"] == "ssh"
+        assert target["state"] == "supported"
+        assert target["selectable"] is True
+        assert target["direction"] == "outbound"
+        assert target["dataplane"] == "application_tcp"
         assert target["contexts"] == ["native_application_tcp"]
         assert target["transports"] == ["tcp"]
+        assert target["traffic_networks"] == ["tcp"]
+        assert target["source_cores"] == ["sing-box", "xray"]
+        assert target["application_level"] is True
+        assert target["tun"] is False
         assert "policy_tun" not in target["contexts"]
         restored = client.put("/api/zagros/outbounds",
                               json={"outbounds": original})

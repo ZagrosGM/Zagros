@@ -82,9 +82,12 @@ export default function Routing() {
   // as SSH are valid only for native Xray/sing-box TCP rules.
   const routingTargets = useMemo(() => (targets.data?.targets ?? []).map((target) => ({
     name: target.name,
-    tun: target.contexts.includes("policy_tun"),
-    applicationProxy: target.contexts.includes("native_application_tcp"),
-    transports: target.transports,
+    state: target.state,
+    dataplane: target.dataplane,
+    contexts: target.contexts,
+    trafficNetworks: target.traffic_networks,
+    sourceCores: target.source_cores,
+    reason: target.reason,
   })), [targets.data]);
 
   return (
@@ -272,9 +275,17 @@ function ChipField({ label, values, onChange, placeholder, datalist, preserveCas
 
 interface RoutingTargetOption {
   name: string;
-  tun: boolean;
-  applicationProxy: boolean;
-  transports: string[];
+  state: RoutingTarget["state"];
+  dataplane: RoutingTarget["dataplane"];
+  contexts: RoutingTarget["contexts"];
+  trafficNetworks: RoutingTarget["traffic_networks"];
+  sourceCores: string[];
+  reason?: string | null;
+}
+
+interface TargetVerdict extends RoutingTargetOption {
+  disabled: boolean;
+  disabledReason?: string;
 }
 
 function RuleDialog({ rule, targets, inboundGroups, existingNames, onClose, onSave }: {
@@ -295,18 +306,38 @@ function RuleDialog({ rule, targets, inboundGroups, existingNames, onClose, onSa
   ), [inboundGroups]);
   const inboundHints = useMemo(() => [...inboundCore.keys()].sort(), [inboundCore]);
   const selectedInbounds = m.inbounds ?? [];
-  const nativeApplicationContext = selectedInbounds.length > 0
-    && selectedInbounds.every((tag) => {
-      const core = inboundCore.get(tag);
-      return core === "xray" || core === "sing-box";
-    })
-    && (m.networks ?? []).length === 1
-    && m.networks?.[0] === "tcp";
-  const outbounds = targets.filter((target) => target.tun || (
-    target.applicationProxy
-    && nativeApplicationContext
-    && target.transports.includes("tcp")
-  )).map((target) => target.name);
+  const allSourceCores = [...new Set(inboundGroups.map((group) => group.core_id))];
+  const selectedSourceCores = selectedInbounds.length
+    ? [...new Set(selectedInbounds.map((tag) => inboundCore.get(tag)).filter((core): core is string => Boolean(core)))]
+    : allSourceCores;
+  const hasUnknownSource = selectedInbounds.some((tag) => !inboundCore.has(tag));
+  const selectedNetworks = new Set(
+    (m.networks?.length ? m.networks : ["tcp,udp"])
+      .flatMap((value) => value.split(","))
+      .map((value) => value.trim())
+      .filter((value): value is "tcp" | "udp" => value === "tcp" || value === "udp"),
+  );
+  const targetVerdicts = targets.flatMap<TargetVerdict>((target) => {
+    if (target.state !== "supported") {
+      return [{ ...target, disabled: true, disabledReason: target.reason ?? target.state.replace(/_/g, " ") }];
+    }
+    if (hasUnknownSource) {
+      return [{ ...target, disabled: true, disabledReason: "choose a known source inbound from the suggestions" }];
+    }
+    const incompatibleCore = selectedSourceCores.find((core) => !target.sourceCores.includes(core));
+    if (incompatibleCore) return []; // not applicable to this source dataplane
+    const unsupportedNetworks = [...selectedNetworks].filter((network) => !target.trafficNetworks.includes(network));
+    if (unsupportedNetworks.length) {
+      // Keep a partly compatible TCP target visible but disabled so operators
+      // discover exactly how SSH becomes selectable. UDP-only is not applicable.
+      if (selectedNetworks.has("tcp") && target.trafficNetworks.includes("tcp")) {
+        return [{ ...target, disabled: true, disabledReason: `set network to tcp (${unsupportedNetworks.join(", ")} is unsupported)` }];
+      }
+      return [];
+    }
+    return [{ ...target, disabled: false }];
+  });
+  const outbounds = targetVerdicts.filter((target) => !target.disabled).map((target) => target.name);
 
   const needsOutbound = r.action === "route_to";
   const needsRedirect = r.action === "redirect";
@@ -378,10 +409,14 @@ function RuleDialog({ rule, targets, inboundGroups, existingNames, onClose, onSa
             </Select>
           </Field>
           {needsOutbound && (
-            <Field label="target outbound" required>
+            <Field label="target outbound" required hint="Targets are evaluated from source core, dataplane and TCP/UDP. SSH becomes selectable only for an Xray/sing-box source explicitly limited to TCP.">
               <Select value={r.outbound ?? ""} onChange={(e) => setR({ ...r, outbound: e.target.value || null })}>
                 <option value="">— choose —</option>
-                {outbounds.map((o) => <option key={o} value={o}>{o}</option>)}
+                {targetVerdicts.map((target) => (
+                  <option key={target.name} value={target.name} disabled={target.disabled}>
+                    {target.name}{target.disabled ? ` — ${target.disabledReason}` : ` — ${target.dataplane.replace(/_/g, " ")}`}
+                  </option>
+                ))}
               </Select>
             </Field>
           )}

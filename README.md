@@ -16,7 +16,7 @@ one driver among many, with no special status anywhere in the codebase.
 
 ## ⚠️ Alpha Warning
 
-**Current release: `1.0.0-alpha.8.2` — this is an ALPHA build.**
+**Current release: `1.0.0-alpha.8.6` — this is an ALPHA build.**
 
 * Suitable for evaluation, testing and feedback — **not recommended for
   production** unless you fully understand the limitations.
@@ -145,7 +145,7 @@ sudo zagros install-core xray       # cores self-install their official binaries
 For release upgrades, refresh the host scripts and image together:
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/main/zagros.sh)" -- update --version v1.0.0-alpha.8.2
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/main/zagros.sh)" -- update --version v1.0.0-alpha.8.6
 ```
 
 Everyday operations — `zagros update` (auto-backup → pull → migrate → health →
@@ -215,7 +215,7 @@ Release images are published to **GitHub Container Registry only**
 (multi-arch: linux/amd64, linux/arm64):
 
 ```bash
-docker pull ghcr.io/zagrosgm/zagros:v1.0.0-alpha.8.2
+docker pull ghcr.io/zagrosgm/zagros:v1.0.0-alpha.8.6
 docker pull ghcr.io/zagrosgm/zagros:latest        # tracks stable releases
 ```
 

@@ -134,3 +134,57 @@ def capability_matrix(
             cells[feature] = cell.model_dump(mode="json")
         result[core_id] = cells
     return result
+
+
+_ROUTING_CORES = ("xray", "sing-box", "openvpn", "wireguard", "ssh", "softether")
+_APPLICATION_SOURCES = {"xray", "sing-box"}
+_TUN_DESTINATIONS = {"xray", "sing-box", "openvpn", "wireguard"}
+
+
+def routing_pair_matrix(
+    *, installed: set[str] | None = None,
+) -> dict[str, dict[str, dict]]:
+    """Canonical source-core → target-core routing compatibility matrix.
+
+    A target core means the runtime that executes the named outbound profile;
+    it is not inferred from a UI protocol label.  SSH is deliberately only a
+    TCP application destination for native Xray/sing-box sources. SoftEther is
+    a routed server source, but no client destination exists.
+    """
+
+    result: dict[str, dict[str, dict]] = {}
+    for source in _ROUTING_CORES:
+        row: dict[str, dict] = {}
+        for target in _ROUTING_CORES:
+            if target in _TUN_DESTINATIONS:
+                state = FeatureAvailability.SUPPORTED
+                detail = (
+                    f"{source} source reaches a {target}-executed named outbound "
+                    "through native application routing or the shared policy TUN"
+                )
+            elif target == "ssh" and source in _APPLICATION_SOURCES:
+                state = FeatureAvailability.SUPPORTED
+                detail = (
+                    f"{source} native TCP rules can use the managed OpenSSH "
+                    "SOCKS application proxy; UDP and generic TUN are excluded"
+                )
+            elif target == "ssh":
+                state = FeatureAvailability.UNSUPPORTED
+                detail = (
+                    f"{source} is not a native application source; SSH dynamic "
+                    "forwarding is not an IP/UDP TUN target"
+                )
+            else:  # target == softether
+                state = FeatureAvailability.UNSUPPORTED
+                detail = (
+                    "SoftEther server is a routing source only; Zagros has no "
+                    "validated vpnclient/client-adapter destination"
+                )
+            if (installed is not None and state is FeatureAvailability.SUPPORTED
+                    and (source not in installed or target not in installed)):
+                missing = sorted({source, target} - installed)
+                state = FeatureAvailability.NOT_INSTALLED
+                detail = f"runtime core(s) not installed: {missing}; implementation: {detail}"
+            row[target] = _cell(state, detail).model_dump(mode="json")
+        result[source] = row
+    return result

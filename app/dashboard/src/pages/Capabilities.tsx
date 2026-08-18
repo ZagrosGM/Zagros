@@ -11,11 +11,25 @@ interface CapabilityCell {
   state: SupportState;
   detail?: string | null;
 }
+interface SoftEtherTransportCell extends CapabilityCell {
+  direction: "inbound" | "outbound";
+  dataplane: string;
+  tcp: boolean;
+  udp: boolean;
+  tun: boolean;
+  provider?: string | null;
+  canonical_outbound_kind?: string | null;
+  runtime_version?: string | null;
+  evidence: string[];
+  reason?: string | null;
+}
 interface CapabilityMatrixResponse {
   features: string[];
   installed: string[];
   cores: Record<string, Record<string, CapabilityCell>>;
   all: Record<string, Record<string, CapabilityCell>>;
+  routing: Record<string, Record<string, CapabilityCell>>;
+  softether_transports: Record<string, { server: SoftEtherTransportCell; client: SoftEtherTransportCell }>;
 }
 
 const stateLabel: Record<SupportState, string> = {
@@ -99,6 +113,69 @@ export default function Capabilities() {
                         </td>
                       );
                     })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {matrix.data && (
+        <Card className="overflow-hidden p-0">
+          <div className="border-b border-border px-4 py-3">
+            <h2 className="text-sm font-semibold">SoftEther transport capabilities</h2>
+            <p className="mt-1 text-xs text-content-3">Server and client are separate directions. Evidence comes from this runtime's vpncmd command inventory.</p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-[980px] w-full border-collapse text-xs">
+              <thead><tr className="border-b border-border bg-surface-2 text-content-2">
+                <th className="px-4 py-3 text-start">Transport</th>
+                <th className="px-4 py-3 text-start">Server / inbound</th>
+                <th className="px-4 py-3 text-start">Client / outbound</th>
+              </tr></thead>
+              <tbody>
+                {Object.entries(matrix.data.softether_transports).map(([transport, directions]) => (
+                  <tr key={transport} className="border-b border-border align-top last:border-0">
+                    <th className="px-4 py-4 text-start capitalize">{featureLabel(transport)}</th>
+                    {[directions.server, directions.client].map((cell) => (
+                      <td key={cell.direction} className="px-4 py-4">
+                        <Badge tone={stateTone[cell.state]} dot>{stateLabel[cell.state]}</Badge>
+                        <p className="mt-2 text-content-2">{featureLabel(cell.dataplane)} · TCP {cell.tcp ? "yes" : "no"} · UDP {cell.udp ? "yes" : "no"} · TUN {cell.tun ? "yes" : "no"}</p>
+                        {cell.provider && <p className="mt-1 text-content-3">provider: {cell.provider}</p>}
+                        {cell.reason && <p className="mt-1 leading-5 text-content-3">{cell.reason}</p>}
+                        {cell.evidence.length > 0 && <p className="mt-1 leading-5 text-content-3">{cell.evidence.join(" · ")}</p>}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {matrix.data && (
+        <Card className="overflow-hidden p-0">
+          <div className="border-b border-border px-4 py-3">
+            <h2 className="text-sm font-semibold">Routing source → target core</h2>
+            <p className="mt-1 text-xs text-content-3">SSH destination cells are TCP application-only; SoftEther destination cells require a client adapter that does not exist.</p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-[980px] w-full border-collapse text-xs">
+              <thead><tr className="border-b border-border bg-surface-2 text-content-2">
+                <th className="px-4 py-3 text-start">Source ↓ / Target →</th>
+                {Object.keys(matrix.data.routing).map((core) => <th key={core} className="px-3 py-3 text-start">{core}</th>)}
+              </tr></thead>
+              <tbody>
+                {Object.entries(matrix.data.routing).map(([source, targets]) => (
+                  <tr key={source} className="border-b border-border align-top last:border-0">
+                    <th className="px-4 py-4 text-start">{source}</th>
+                    {Object.entries(targets).map(([target, cell]) => (
+                      <td key={target} className="px-3 py-4" title={cell.detail ?? undefined}>
+                        <Badge tone={stateTone[cell.state]} dot>{stateLabel[cell.state]}</Badge>
+                      </td>
+                    ))}
                   </tr>
                 ))}
               </tbody>

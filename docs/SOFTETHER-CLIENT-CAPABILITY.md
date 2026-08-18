@@ -1,4 +1,4 @@
-# SoftEther client/outbound capability decision (alpha.8.5)
+# SoftEther client/outbound capability decision (alpha.8.6)
 
 ## Decision
 
@@ -14,9 +14,27 @@ The installed persistent runtime contains `vpnserver`, `vpncmd`, and
 not a packet dataplane. Starting a server, creating a Virtual Hub, or enabling
 OpenVPN compatibility does not create a SoftEther client outbound.
 
+Alpha.8.6 no longer turns that conclusion into an unprobed static sentence.
+The capability API reads the live, read-only `vpncmd Help` inventory and
+publishes server/client directions separately for native SoftEther,
+L2TP/IPsec, raw L2TP, SSTP, OpenVPN compatibility and PPTP. On the release VPS
+the exact stable binary reported **4.44 build 9807**, compiled 2025-04-16 with
+OpenSSL 3.0.9, and exposed **205 server commands**. `IPsecGet/IPsecEnable`,
+`SstpGet/SstpEnable` and `OpenVpnGet/OpenVpnEnable` were present;
+`PptpGet/PptpEnable` were absent. The live `vpn_server.config` had IPsec,
+L2TP, OpenVPN and SSTP keys and no PPTP key; no TCP 1723 listener existed.
+
+This is also an upstream capability fact rather than a Zagros package accident:
+the exact official `v4.44-9807-rtm` Linux x64 release publishes separate
+`softether-vpnserver-*`, `softether-vpnclient-*` and `softether-vpnbridge-*`
+archives. Zagros intentionally installs the server archive. Its final-link
+Makefile has no protocol feature toggle that would compile PPTP back in, and
+the tagged stable source command registry contains the IPsec, OpenVPN and SSTP
+commands above but no PPTP server command.
+
 The labels grouped under “SoftEther client” need different Linux providers:
 
-| UI family | Required client/process | TCP | UDP | Generic TUN | Zagros alpha.8.5 result |
+| UI family | Required client/process | TCP | UDP | Generic TUN | alpha.8.6 result |
 |---|---|---:|---:|---:|---|
 | Native SoftEther | `vpnclient` service + Virtual NIC/TAP lifecycle | yes | yes | possible only after adapter work | unsupported by design |
 | L2TP/IPsec | strongSwan/XFRM + xl2tpd/pppd | yes | outer UDP/IPsec | PPP IP interface | unsupported by design |

@@ -322,11 +322,17 @@ def test_managed_policy_hub_uses_its_own_hub_tap_and_cleanup(monkeypatch) -> Non
     backend.routed_tap_disable = lambda *, device, hub_name: calls.append(
         ("disable", f"{hub_name}:{device}"))
     commands: list[list[str]] = []
-    monkeypatch.setattr(shutil, "which", lambda name: "/sbin/ip" if name == "ip" else None)
+    monkeypatch.setattr(
+        shutil, "which",
+        lambda name: {"ip": "/sbin/ip", "iptables": "/sbin/iptables"}.get(name),
+    )
 
     def command(argv, **_kwargs):
         commands.append(list(argv))
-        return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        missing = argv[0] == "/sbin/iptables" and "-C" in argv
+        return type("P", (), {
+            "returncode": 1 if missing else 0, "stdout": "", "stderr": "",
+        })()
 
     monkeypatch.setattr(subprocess, "run", command)
     source = driver.ensure_policy_source("hub:ZAGROS-E2E-unit")
@@ -336,9 +342,16 @@ def test_managed_policy_hub_uses_its_own_hub_tap_and_cleanup(monkeypatch) -> Non
         "ensure", "ZAGROS-E2E-unit:zge2eunit:192.168.87.0/24:192.168.87.254")
     assert ["/sbin/ip", "address", "replace", "192.168.87.254/24",
             "dev", "tap_zge2eunit"] in commands
+    assert ["/sbin/iptables", "-I", "FORWARD", "1", "-i",
+            "tap_zge2eunit", "-s", "192.168.87.0/24", "-j", "ACCEPT"] in commands
+    assert ["/sbin/iptables", "-I", "FORWARD", "1", "-o",
+            "tap_zge2eunit", "-d", "192.168.87.0/24", "-m", "conntrack",
+            "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"] in commands
 
     driver.disable_policy_source("hub:ZAGROS-E2E-unit")
     assert calls[-1] == ("disable", "ZAGROS-E2E-unit:zge2eunit")
+    assert ["/sbin/iptables", "-D", "FORWARD", "-i", "tap_zge2eunit",
+            "-s", "192.168.87.0/24", "-j", "ACCEPT"] in commands
     assert ["/sbin/ip", "link", "delete", "dev", "tap_zge2eunit"] in commands
     assert driver.policy_sources() == []
 

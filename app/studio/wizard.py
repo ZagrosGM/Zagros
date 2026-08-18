@@ -537,8 +537,9 @@ def _softether_blueprint() -> list[Protocol]:
             "pptp", "PPTP", 1723, [], fixed_port=True,
             availability="unsupported",
             reason=(
-                "Unavailable because this SoftEther runtime does not expose "
-                "PPTP (vpncmd PptpGet/PptpEnable are not commands)."
+                "Unsupported by the SoftEther stable server contract: "
+                "vpncmd PptpGet/PptpEnable are not server commands. The live "
+                "wizard endpoint verifies this against the installed runtime."
             ),
         ),
     ]

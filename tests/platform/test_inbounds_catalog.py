@@ -145,9 +145,18 @@ def test_legacy_xray_group_merges_running_config(runtime, monkeypatch):
     import app as _pkg
     monkeypatch.setattr(_pkg, "xray", fake, raising=False)
 
+    # A Studio-created inbound is already listening after materialization even
+    # when the legacy cache has not been re-indexed. Routing must see both
+    # sources of truth and de-duplicate a shared tag by identity.
+    asyncio.run(runtime.studio_store.save_document("xray", {"inbounds": [
+        {"tag": "Shadowsocks TCP", "protocol": "shadowsocks", "port": 1080},
+        {"tag": "Studio SOCKS", "protocol": "socks", "port": 41081},
+    ]}))
+
     groups = asyncio.run(cat.catalog(runtime))
-    xray_group = next((g for g in groups if g.core_id == "xray"), None)
-    assert xray_group is not None, "built-in xray missing from catalog"
-    tags = {i.tag: (i.protocol, i.port) for i in xray_group.inbounds}
+    xray_groups = [g for g in groups if g.core_id == "xray"]
+    assert len(xray_groups) == 1, "built-in xray must appear exactly once"
+    tags = {i.tag: (i.protocol, i.port) for i in xray_groups[0].inbounds}
     assert tags["VLESS Reality"] == ("vless", 443)
     assert tags["Shadowsocks TCP"] == ("shadowsocks", 1080)
+    assert tags["Studio SOCKS"] == ("socks", 41081)

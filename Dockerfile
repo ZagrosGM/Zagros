@@ -46,9 +46,11 @@ RUN python3 -m pip install --upgrade pip setuptools \
 # Final image
 # --------------------------------------------------------------------------
 FROM python:$PYTHON_VERSION-slim
+ARG ZAGROS_VERSION=1.0.0-alpha.8.6
 LABEL org.opencontainers.image.title="Zagros" \
       org.opencontainers.image.description="Zagros — Enterprise Multi-Core VPN Management Platform" \
       org.opencontainers.image.source="https://github.com/ZagrosGM/Zagros" \
+      org.opencontainers.image.version="${ZAGROS_VERSION}" \
       org.opencontainers.image.licenses="AGPL-3.0"
 
 # Runtime network tooling for the host-managing cores:

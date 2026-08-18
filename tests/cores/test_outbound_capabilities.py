@@ -5,7 +5,13 @@ import asyncio
 
 import pytest
 
-from app.cores.capabilities import SupportState, outbound_capabilities, outbound_capability
+from app.cores.capabilities import (
+    OutboundDataplane,
+    SupportState,
+    outbound_capabilities,
+    outbound_capability,
+    routing_compatibility,
+)
 from app.cores.drivers.xray import XrayDriver
 from app.cores.exceptions import CoreError
 from app.cores.outbounds.model import Outbound, OutboundKind
@@ -20,9 +26,36 @@ def test_capability_matrix_distinguishes_ssh_tun_and_softether_product_limits() 
     ssh = matrix[OutboundKind.SSH]
     assert ssh.state in (SupportState.SUPPORTED, SupportState.NOT_INSTALLED)
     assert ssh.application_proxy is True
+    assert ssh.application_level is True
+    assert ssh.dataplane is OutboundDataplane.APPLICATION_TCP
     assert ssh.tun is False
     assert ssh.native_core_translation == {"xray", "sing-box"}
     assert ssh.transports == {"tcp"}
+    assert ssh.traffic_networks == {"tcp"}
+    assert ssh.routing_source_cores == {"xray", "sing-box"}
+    assert ssh.accounting is False
+    assert "source" in str(ssh.accounting_reason)
+    assert "persistent host collector" in str(ssh.accounting_reason)
+
+    supported, reason = routing_compatibility(
+        ssh, source_cores={"xray"}, networks={"tcp"})
+    assert supported is SupportState.SUPPORTED and reason is None
+    invalid_source, _ = routing_compatibility(
+        ssh, source_cores={"wireguard"}, networks={"tcp"})
+    assert invalid_source is SupportState.NOT_APPLICABLE
+    invalid_network, _ = routing_compatibility(
+        ssh, source_cores={"sing-box"}, networks={"tcp", "udp"})
+    assert invalid_network is SupportState.NOT_APPLICABLE
+
+    wireguard = matrix[OutboundKind.WIREGUARD]
+    assert wireguard.transports == {"udp"}  # outer carrier
+    assert wireguard.traffic_networks == {"tcp", "udp"}  # tunnel payload
+    for kind in (OutboundKind.HYSTERIA2, OutboundKind.TUIC):
+        assert matrix[kind].transports == {"udp"}
+        assert matrix[kind].traffic_networks == {"tcp", "udp"}
+    assert matrix[OutboundKind.TROJAN].transports == {"tcp"}
+    assert matrix[OutboundKind.TROJAN].traffic_networks == {"tcp", "udp"}
+    assert matrix[OutboundKind.HTTP].traffic_networks == {"tcp"}
 
     for kind in (
         OutboundKind.SOFTETHER_L2TP,
@@ -208,6 +241,34 @@ def test_ssh_application_rule_must_be_explicitly_tcp(tmp_path) -> None:
     )
     with pytest.raises(CoreError, match="TCP-only"):
         manager.validate_plan([rule], [outbound], core_ids=["xray"])
+
+
+def test_source_core_map_is_backend_authority_for_ssh_compatibility(tmp_path) -> None:
+    manager = PolicyRoutingManager(
+        EmptyCoreManager(), runtime_root=str(tmp_path), runner=FakeRunner(),
+        sleep=lambda _: None,
+    )
+    outbound = Outbound(
+        name="ssh-egress", kind=OutboundKind.SSH,
+        settings={"server": "ssh.example.test", "server_port": 22,
+                  "username": "alice", "password": "secret"},
+    )
+    rule = RoutingRule(
+        name="native-tcp", matcher=RuleMatcher(
+            inbounds=["same-visible-tag"], networks=["tcp"]),
+        action=RuleAction.ROUTE_TO, outbound=outbound.name,
+    )
+    manager.validate_plan(
+        [rule], [outbound], source_core_map={"same-visible-tag": "xray"})
+    with pytest.raises(CoreError, match="policy TUN"):
+        manager.validate_plan(
+            [rule], [outbound],
+            source_core_map={"same-visible-tag": "wireguard"})
+    # An advanced native tag absent from the graphical catalog remains valid,
+    # but is conservatively treated as an application source in this empty
+    # test runtime rather than bypassing compatibility validation entirely.
+    manager.validate_plan(
+        [rule], [outbound], source_core_map={"another-tag": "xray"})
 
 
 def test_softether_schema_comes_from_same_capability_contract() -> None:

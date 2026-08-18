@@ -40,7 +40,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from app.cores.capabilities import outbound_capability
+from app.cores.capabilities import (
+    SupportState,
+    outbound_capability,
+    outbound_product_capability,
+    routing_compatibility,
+)
 from app.cores.exceptions import CoreError
 from app.cores.outbounds.model import Outbound, OutboundKind
 from app.cores.routing.model import RoutingRule, RuleAction, UnsupportedRule
@@ -264,19 +269,22 @@ class PolicyRoutingManager:
             raise CoreError("policy_core must be 'xray' or 'sing-box'")
         return "proxy"
 
-    def validate_plan(self, rules: list[RoutingRule],
-                      outbounds: Iterable[Outbound],
-                      core_ids: Iterable[str] | None = None) -> None:
-        """Fail before mutation when a selected *service source* needs no TUN.
+    def validate_plan(
+        self,
+        rules: list[RoutingRule],
+        outbounds: Iterable[Outbound],
+        core_ids: Iterable[str] | None = None,
+        source_core_map: dict[str, str] | None = None,
+    ) -> None:
+        """Pure source/dataplane/network compatibility preflight.
 
-        Xray-only deployment of its native SSH outbound is valid. OpenVPN,
-        WireGuard, SSH-inbound and SoftEther source traffic, however, reaches
-        egress through the shared host policy plane and therefore requires a
-        real TUN/kernel domain. This distinction preserves the application
-        proxy while refusing the impossible IP-routing interpretation.
+        ``source_core_map`` is supplied by the API's live inbound catalog.  A
+        fallback keeps hostctl/tests and legacy callers conservative without
+        turning an inbound tag prefix into the primary capability model.
         """
         by_name = {outbound.name: outbound for outbound in outbounds}
         service_cores = {"openvpn", "wireguard", "softether", "ssh"}
+        application_cores = {"xray", "sing-box"}
         targets = (set(core_ids) if core_ids is not None
                    else set(self._cores.list_cores()))
         policy_targets = service_cores.intersection(targets)
@@ -289,33 +297,65 @@ class PolicyRoutingManager:
             if outbound is None:
                 raise CoreError(
                     f"rule '{rule.name}' references missing outbound '{rule.outbound}'")
-            if rule.matcher.inbounds:
-                needs_policy = any(
-                    source.inbound_tag in rule.matcher.inbounds
-                    for source in sources)
-                # Keep pure preflight conservative even before an adapter is
-                # installed when a matcher explicitly names a service family.
-                if not needs_policy:
-                    inferable = policy_targets if core_ids is not None else service_cores
-                    needs_policy = any(
-                        str(tag).split("-", 1)[0] in inferable
-                        for tag in rule.matcher.inbounds)
-            else:
-                needs_policy = bool(policy_targets)
-            capability = outbound_capability(outbound.kind)
-            if needs_policy and not capability.tun:
-                raise CoreError(
-                    f"rule '{rule.name}' cannot use outbound '{outbound.name}' "
-                    f"({outbound.kind.value}) as a policy TUN: "
-                    f"{capability.reason or 'this outbound has no TUN dataplane'}. "
-                    "Limit the rule to native-core TCP application routing or choose a real TUN egress."
+
+            selected_cores: set[str] = set()
+            if rule.matcher.inbounds and source_core_map is not None:
+                selected_cores = {
+                    source_core_map[tag] for tag in rule.matcher.inbounds
+                    if tag in source_core_map
+                }
+                unknown = sorted(set(rule.matcher.inbounds) - set(source_core_map))
+                if unknown:
+                    # Advanced/native configs may carry an inbound that the
+                    # graphical catalog cannot currently enumerate. Preserve
+                    # those rules, but evaluate them conservatively against
+                    # every standard core in the requested deployment.
+                    selected_cores.update(
+                        (application_cores | service_cores).intersection(targets)
+                    )
+                    if not selected_cores:
+                        selected_cores.update(application_cores)
+            elif rule.matcher.inbounds:
+                selected_cores = {
+                    source.core_id for source in sources
+                    if source.inbound_tag in rule.matcher.inbounds
+                }
+                inferable = policy_targets if core_ids is not None else service_cores
+                selected_cores.update(
+                    prefix for tag in rule.matcher.inbounds
+                    for prefix in [str(tag).split("-", 1)[0]]
+                    if prefix in inferable
                 )
-            if outbound.kind is OutboundKind.SSH and not needs_policy:
-                networks = {str(item).lower() for item in rule.matcher.networks}
-                if networks != {"tcp"}:
+                if not selected_cores:
+                    selected_cores = application_cores.intersection(targets)
+                    if not selected_cores:
+                        selected_cores = set(application_cores)
+            else:
+                selected_cores = set(targets) or set(application_cores)
+
+            capability = outbound_product_capability(outbound.kind)
+            state, reason = routing_compatibility(
+                capability,
+                source_cores=selected_cores,
+                networks=rule.matcher.networks,
+            )
+            if state is not SupportState.SUPPORTED:
+                if outbound.kind is OutboundKind.SSH and selected_cores & service_cores:
                     raise CoreError(
-                        f"rule '{rule.name}' targets TCP-only SSH outbound '{outbound.name}'; "
-                        "set the network matcher explicitly to tcp")
+                        f"rule '{rule.name}' cannot use outbound '{outbound.name}' "
+                        f"({outbound.kind.value}) as a policy TUN: "
+                        f"{capability.reason or reason}. Limit the rule to native-core "
+                        "TCP application routing or choose a real TUN egress."
+                    )
+                if (outbound.kind is OutboundKind.SSH
+                        and set(rule.matcher.networks) != {"tcp"}):
+                    raise CoreError(
+                        f"rule '{rule.name}' targets TCP-only SSH outbound "
+                        f"'{outbound.name}'; set the network matcher explicitly to tcp")
+                raise CoreError(
+                    f"rule '{rule.name}' cannot route {sorted(selected_cores)} "
+                    f"through outbound '{outbound.name}': {reason or state.value}"
+                )
 
     @staticmethod
     def _fingerprint(outbound: Outbound) -> str:

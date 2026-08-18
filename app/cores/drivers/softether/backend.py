@@ -138,6 +138,14 @@ class LocalSoftEtherBackend:
                 return candidate
         return None
 
+    def server_command_inventory(self) -> set[str]:
+        """Read the live server's command surface without mutating features."""
+        from app.cores.drivers.softether.capabilities import (
+            parse_server_command_inventory,
+        )
+
+        return parse_server_command_inventory(self._cmd("Help", hub=False))
+
     @staticmethod
     def _validate_hub_name(value: str) -> str:
         name = str(value or "").strip()

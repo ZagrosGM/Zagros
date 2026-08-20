@@ -38,7 +38,7 @@ jobs:
         run: python -m pytest tests -q
 
   docker:
-    name: Docker build → GHCR (amd64 + arm64)
+    name: Docker build → GHCR (amd64)
     needs: [test]
     runs-on: ubuntu-latest
     permissions:
@@ -74,7 +74,9 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          # The pinned PPP client manifest is currently amd64-specific.
+          # Do not claim an arm64 image until matching package manifests exist.
+          platforms: linux/amd64
           push: true
           # deterministic manifest lists; attestation manifests are noise here
           provenance: false

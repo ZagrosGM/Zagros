@@ -1,99 +1,100 @@
-# SoftEther client/outbound capability decision (alpha.8.6)
+# SoftEther client/outbound capability decision (alpha.8.7)
 
 ## Decision
 
-Zagros' current SoftEther core is an **inbound/server implementation**. The
-SoftEther client outbound kinds remain `unsupported` and non-selectable. This
-is a product capability fact, not an installation probe and not a UI deny-list.
+Zagros implements one native SoftEther client provider:
+**`softether_native`**. It uses the official Stable Linux `vpnclient` engine, a
+private Virtual NIC and an isolated Linux routing domain. This is a real packet
+dataplane, not a server-capability label or UI-only flag.
+
+The similarly named L2TP/IPsec, raw L2TP, SSTP and PPTP **SoftEther** families
+are not implemented by native `vpnclient`. They are not fabricated as native
+SoftEther outbounds. In this release, the corresponding independent Linux
+client providers are separately implemented and selected by their canonical
+provider IDs:
+
+- `l2tp_ipsec`
+- `l2tp_raw`
+- `sstp`
+- `pptp`
+
+The independent providers have their own binaries, credentials, PPP lifecycle,
+policy domains, readiness checks, RTT/HTTPS tests and cleanup. They must not be
+reported as SoftEther native dataplanes.
+
+OpenVPN compatibility continues to use the canonical `openvpn` outbound and
+was verified against a real SoftEther compatibility listener.
+
+## Provider verdicts
+
+| Remote SoftEther transport | Native SoftEther provider | Independent Zagros provider | Result |
+|---|---|---|---|
+| Native SoftEther | Official Stable `vpnclient` + `vpncmd` + Virtual NIC | — | **FIXED + REAL TRAFFIC VERIFIED** |
+| OpenVPN compatibility | Not native `vpnclient` | Canonical `openvpn` client/TUN | **FIXED + REAL TRAFFIC VERIFIED** |
+| L2TP/IPsec | Not provided by native `vpnclient` | `l2tp_ipsec` strongSwan/XFRM + xl2tpd/PPP | **INDEPENDENT PROVIDER** |
+| Raw L2TP | Not provided by native `vpnclient` | `l2tp_raw` xl2tpd/PPP | **INDEPENDENT PROVIDER; endpoint-dependent** |
+| SSTP | Not provided by native `vpnclient` | `sstp` sstp-client/PPP | **INDEPENDENT PROVIDER** |
+| PPTP | Unsupported by SoftEther | `pptp` ACCEL-PPP / independent PPP client | **INDEPENDENT LEGACY PROVIDER** |
+
+No SoftEther PPTP listener or SoftEther PPTP client capability is advertised.
+The independent PPTP provider is not a SoftEther feature and is fixed to
+TCP/1723 plus GRE.
+
+## Native dataplane architecture
+
+Every enabled native SoftEther outbound owns deterministic, non-shared
+resources:
+
+1. a copied `vpnclient`/`vpncmd` runtime and private client configuration;
+2. a named network namespace and namespace-local client service;
+3. one client account, Virtual NIC and credential set;
+4. separate control and data veth pairs;
+5. a VRF, fwmark, return mark and routing table;
+6. endpoint-pinned control routing so the native carrier never recurses into
+   its own data path;
+7. exact namespace and root forwarding/NAT rules scoped to owned interfaces,
+   marks and subnets;
+8. a local SOCKS gateway for application-level Xray/sing-box chaining;
+9. authenticated health and exact `AccountStatusGet` transport counters;
+10. symmetric rollback and teardown of process, namespace, interfaces, rules,
+    runtime files and account/NIC state.
+
+The host default route is never replaced. Management SSH remains on the host's
+original route. Namespace reverse-path filtering is changed only inside the
+private namespace through a temporary mount namespace; host-global
+`rp_filter` is not changed.
+
+Stable `vpncmd` password automation is driven through an echo-disabled private
+PTY. Administrator passwords and account passwords are sent only after the
+interactive prompts; secrets never appear in argv, command-runner input,
+exceptions or returned diagnostics.
+
+## Reconnect and DHCP recovery
+
+Stable `vpnclient` can keep its Virtual NIC object while flushing the NIC's
+IPv4 address during account reconnect or service restart. Alpha.8.7 therefore
+owns a namespace-local DHCP supervisor. It restarts a failed or stale `udhcpc`
+discovery cycle, and the lease hook restores the client IPv4 address, MTU,
+tunnel default route and lease facts used by secret-free runtime health.
+
+The remote server endpoint is pinned through the control veth before DHCP can
+install the data default. Forced native transport reset, account reconnect,
+`vpnclient` stop/start, Panel restart and repeated recreation were verified
+with real traffic and exact counter deltas.
+
+## Routing-source identity and UI contract
+
+Routing rules load the backend source inventory and render grouped checkboxes
+containing tag, protocol and source core. Multiple selections persist through
+Save, Deploy, reload and Edit.
+
+The backend independently resolves every selected tag and rejects repeated
+tags, cross-core duplicates, unknown/deleted tags and target/source dataplane
+or TCP/UDP incompatibility before mutation.
 
 ## Evidence
 
-The installed persistent runtime contains `vpnserver`, `vpncmd`, and
-`hamcore.se2`. It does not contain or manage a `vpnclient` daemon. `vpncmd
-/CLIENT` is only a management CLI for an already-running client service; it is
-not a packet dataplane. Starting a server, creating a Virtual Hub, or enabling
-OpenVPN compatibility does not create a SoftEther client outbound.
-
-Alpha.8.6 no longer turns that conclusion into an unprobed static sentence.
-The capability API reads the live, read-only `vpncmd Help` inventory and
-publishes server/client directions separately for native SoftEther,
-L2TP/IPsec, raw L2TP, SSTP, OpenVPN compatibility and PPTP. On the release VPS
-the exact stable binary reported **4.44 build 9807**, compiled 2025-04-16 with
-OpenSSL 3.0.9, and exposed **205 server commands**. `IPsecGet/IPsecEnable`,
-`SstpGet/SstpEnable` and `OpenVpnGet/OpenVpnEnable` were present;
-`PptpGet/PptpEnable` were absent. The live `vpn_server.config` had IPsec,
-L2TP, OpenVPN and SSTP keys and no PPTP key; no TCP 1723 listener existed.
-
-This is also an upstream capability fact rather than a Zagros package accident:
-the exact official `v4.44-9807-rtm` Linux x64 release publishes separate
-`softether-vpnserver-*`, `softether-vpnclient-*` and `softether-vpnbridge-*`
-archives. Zagros intentionally installs the server archive. Its final-link
-Makefile has no protocol feature toggle that would compile PPTP back in, and
-the tagged stable source command registry contains the IPsec, OpenVPN and SSTP
-commands above but no PPTP server command.
-
-The labels grouped under “SoftEther client” need different Linux providers:
-
-| UI family | Required client/process | TCP | UDP | Generic TUN | alpha.8.6 result |
-|---|---|---:|---:|---:|---|
-| Native SoftEther | `vpnclient` service + Virtual NIC/TAP lifecycle | yes | yes | possible only after adapter work | unsupported by design |
-| L2TP/IPsec | strongSwan/XFRM + xl2tpd/pppd | yes | outer UDP/IPsec | PPP IP interface | unsupported by design |
-| Raw L2TP | dedicated raw-L2TP client stack | yes | outer UDP | PPP IP interface | unsupported by design |
-| SSTP | SSTP client + pppd | yes | no | PPP IP interface | unsupported by design |
-| PPTP | PPTP client + GRE/pppd | yes | GRE, not UDP | PPP IP interface | unsupported by design |
-| OpenVPN compatibility | standard OpenVPN client | yes | yes | yes | use supported `openvpn` outbound |
-
-Native SoftEther additionally requires separately installed `vpnclient`,
-Virtual NIC lifecycle, route/table ownership, secure account/certificate
-storage, and concurrent connection isolation. SoftEther VPN Client is not a
-generic L2TP client. The installed SoftEther server exposes no PPTP command,
-and no fake vpncmd command is accepted. OpenVPN-compatible SoftEther servers
-are already reachable through Zagros' real `openvpn` outbound kind; duplicating
-that dataplane under a fake SoftEther label would be misleading.
-
-## Requirements before support can change
-
-A future implementation must provide all of the following before any state is
-changed from `unsupported`:
-
-1. an installed and version-probed client dataplane, not vpncmd alone;
-2. one isolated lifecycle domain per outbound (process, interface, routing
-   table, DNS, credentials, timeout, rollback, and restart recovery);
-3. encrypted credential persistence and no secrets in argv/logs;
-4. deterministic concurrency and collision handling;
-5. real HTTP/HTTPS/DNS egress verification against an expected external IP;
-6. source/destination routing integration and exact cleanup;
-7. accounting and persistence evidence;
-8. API, schema, UI, unit, integration, browser, and real-runtime tests.
-
-Until those criteria are met, API validation rejects enabled SoftEther client
-profiles before persistence, schemas mark them unavailable, UI options remain
-visible but disabled with the shared capability reason, and routing matrix
-cells remain `UNSUPPORTED`.
-
-## Server-source routing is a separate capability
-
-Alpha.8.5 does not turn the server into a client outbound. It adds managed,
-isolated **source** identities for sessions terminating on this server:
-
-1. `POST /api/zagros/cores/softether/policy-hubs` creates a new Virtual Hub and
-   dedicated user through server-admin vpncmd context. Hub/user passwords never
-   enter argv, responses, logs, or persisted core settings.
-2. Each tracked hub owns a unique routing-only inbound tag, TAP id, IPv4 subnet,
-   and gateway. Overlap with the primary hub or another managed hub is rejected
-   before vpncmd mutation.
-3. An enabled rule for that tag materializes only that hub's bridge, DHCP pool,
-   routed TAP, Linux address, nft classifier, and selected outbound domain.
-4. The general user-grant catalog excludes routing-only hubs; the Routing UI
-   receives them from the dedicated source inventory.
-5. Deletion is refused while any persisted rule references the tag. Successful
-   deletion removes user, bridge/TAP, hub metadata, and live Virtual Hub while
-   refusing any request to delete the configured primary hub.
-6. Shared primary-hub transport tags remain indistinguishable at L2 and cannot
-   claim separate decisions. Destination/protocol/priority overlap remains
-   deterministic when every tag in that shared hub is selected.
-
-The release gate requires real client traffic from a uniquely named disposable
-hub through Xray, sing-box, OpenVPN, and WireGuard, followed by proof that the
-hub, user, TAP, routes, firewall state, credentials, and processes were removed
-without changing `DEFAULT`.
+The Phase 1–5 release-cycle evidence contains native SoftEther lifecycle and
+matrix results, independent PPP provider tests, outbound persistence/security
+tests, real RTT evidence and browser checks. No subscription URL or credential
+belongs in source, logs, reports, browser state or process arguments.

@@ -7,7 +7,7 @@ from app.cores.matrix import FEATURES, capability_matrix, routing_pair_matrix
 def test_matrix_has_every_required_feature_for_six_primary_cores() -> None:
     matrix = capability_matrix()
     assert set(matrix) == {
-        "xray", "sing-box", "openvpn", "wireguard", "ssh", "softether"}
+        "xray", "sing-box", "openvpn", "wireguard", "ssh", "softether", "pptp"}
     assert set(FEATURES) == {
         "inbound", "outbound", "routing_source", "routing_destination", "tun",
         "traffic_accounting", "host_settings", "subscription", "tls",
@@ -29,19 +29,21 @@ def test_matrix_locks_reported_ssh_softether_and_version_distinctions() -> None:
     assert matrix["ssh"]["outbound"]["state"] == "supported"
     assert matrix["ssh"]["tun"]["state"] == "unsupported"
     assert matrix["softether"]["inbound"]["state"] == "supported"
-    assert matrix["softether"]["outbound"]["state"] == "unsupported"
-    # SoftEther VPN Server is a real routed-TAP source, not an outbound. The
-    # four source→TUN cells are testable/supported; every →SoftEther cell stays
-    # unsupported until a separately managed vpnclient adapter exists.
+    assert matrix["softether"]["outbound"]["state"] == "supported"
+    # Native vpnclient is now a real dedicated namespace/Virtual-NIC target;
+    # the existing isolated Hub/TAP remains the source dataplane.
     assert matrix["softether"]["routing_source"]["state"] == "supported"
-    assert matrix["softether"]["routing_destination"]["state"] == "unsupported"
-    assert matrix["softether"]["tun"]["state"] == "unsupported"
+    assert matrix["softether"]["routing_destination"]["state"] == "supported"
+    assert matrix["softether"]["tun"]["state"] == "supported"
     assert all(matrix[core]["version_probe"]["state"] == "supported"
                for core in matrix)
     # Native Zagros agent reuses every real CoreManager adapter; legacy Xray
     # transport remains a migration-only path, not the source of this support.
     assert all(matrix[core]["node_support"]["state"] == "supported"
-               for core in matrix)
+               for core in matrix if core != "pptp")
+    assert matrix["pptp"]["node_support"]["state"] == "unsupported"
+    assert matrix["pptp"]["routing_source"]["state"] == "supported"
+    assert matrix["pptp"]["routing_destination"]["state"] == "supported"
     assert "legacy" in matrix["xray"]["node_support"]["detail"]
 
 
@@ -49,26 +51,28 @@ def test_runtime_matrix_preserves_not_installed_as_distinct_state() -> None:
     matrix = capability_matrix(installed={"xray"})
     assert matrix["xray"]["inbound"]["state"] == "supported"
     assert matrix["wireguard"]["inbound"]["state"] == "not_installed"
-    # Product limitations do not become misleading package problems.
-    assert matrix["softether"]["outbound"]["state"] == "unsupported"
+    # Implemented native client support is distinct from runtime installation.
+    assert matrix["softether"]["outbound"]["state"] == "not_installed"
     assert matrix["wireguard"]["tls"]["state"] == "not_applicable"
 
 
 def test_source_target_routing_matrix_preserves_application_vs_tun_boundary() -> None:
     matrix = routing_pair_matrix()
-    assert set(matrix) == {"xray", "sing-box", "openvpn", "wireguard", "ssh", "softether"}
+    assert set(matrix) == {
+        "xray", "sing-box", "openvpn", "wireguard", "ssh", "softether", "pptp"}
     assert all(set(row) == set(matrix) for row in matrix.values())
     for source in matrix:
         for target in ("xray", "sing-box", "openvpn", "wireguard"):
             assert matrix[source][target]["state"] == "supported"
     assert matrix["xray"]["ssh"]["state"] == "supported"
     assert matrix["sing-box"]["ssh"]["state"] == "supported"
-    for source in ("openvpn", "wireguard", "ssh", "softether"):
+    for source in ("openvpn", "wireguard", "ssh", "softether", "pptp"):
         assert matrix[source]["ssh"]["state"] == "unsupported"
-    assert all(matrix[source]["softether"]["state"] == "unsupported"
+    assert all(matrix[source]["softether"]["state"] == "supported"
+               for source in matrix)
+    assert all(matrix[source]["pptp"]["state"] == "supported"
                for source in matrix)
 
     runtime = routing_pair_matrix(installed={"xray", "sing-box"})
     assert runtime["xray"]["ssh"]["state"] == "not_installed"
-    # Unsupported architecture remains unsupported when absent.
-    assert runtime["xray"]["softether"]["state"] == "unsupported"
+    assert runtime["xray"]["softether"]["state"] == "not_installed"

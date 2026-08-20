@@ -23,12 +23,19 @@ interface SoftEtherTransportCell extends CapabilityCell {
   evidence: string[];
   reason?: string | null;
 }
+interface ProviderCapability {
+  provider: string; engine: string; version: string; dataplane: string;
+  state: SupportState; control: string; carrier: string;
+  authentication: string; encryption: string; network: string; ipv6: boolean;
+  security_class: string; label: string; reason?: string | null;
+}
 interface CapabilityMatrixResponse {
   features: string[];
   installed: string[];
   cores: Record<string, Record<string, CapabilityCell>>;
   all: Record<string, Record<string, CapabilityCell>>;
   routing: Record<string, Record<string, CapabilityCell>>;
+  provider_capabilities: Record<string, ProviderCapability>;
   softether_transports: Record<string, { server: SoftEtherTransportCell; client: SoftEtherTransportCell }>;
 }
 
@@ -121,6 +128,33 @@ export default function Capabilities() {
         </Card>
       )}
 
+      {matrix.data && Object.keys(matrix.data.provider_capabilities ?? {}).length > 0 && (
+        <Card className="overflow-hidden p-0">
+          <div className="border-b border-border px-4 py-3">
+            <h2 className="text-sm font-semibold">Independent provider capabilities</h2>
+            <p className="mt-1 text-xs text-content-3">Provider identity is separate from every SoftEther transport.</p>
+          </div>
+          <div className="grid gap-3 p-4 md:grid-cols-2">
+            {Object.values(matrix.data.provider_capabilities).map((provider) => (
+              <div key={provider.provider} className="rounded-xl border border-danger/30 bg-danger-soft/30 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <strong>{provider.provider.toUpperCase()}</strong>
+                  <Badge tone="danger">{provider.label}</Badge>
+                  <Badge tone={stateTone[provider.state]} dot>{stateLabel[provider.state]}</Badge>
+                </div>
+                <p className="mt-2 text-xs text-content-2">
+                  {provider.engine} {provider.version} · {provider.dataplane} · {provider.control} · {provider.carrier}
+                </p>
+                <p className="mt-1 text-xs text-content-3">
+                  {provider.authentication} · {provider.encryption} mandatory · {provider.network} only · IPv6 unsupported
+                </p>
+                {provider.reason && <p className="mt-1 text-xs text-content-3">{provider.reason}</p>}
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
       {matrix.data && (
         <Card className="overflow-hidden p-0">
           <div className="border-b border-border px-4 py-3">
@@ -159,7 +193,7 @@ export default function Capabilities() {
         <Card className="overflow-hidden p-0">
           <div className="border-b border-border px-4 py-3">
             <h2 className="text-sm font-semibold">Routing source → target core</h2>
-            <p className="mt-1 text-xs text-content-3">SSH destination cells are TCP application-only; SoftEther destination cells require a client adapter that does not exist.</p>
+            <p className="mt-1 text-xs text-content-3">SSH destination cells are TCP application-only. SoftEther destination cells use the native vpnclient/Virtual-NIC namespace adapter when its runtime is installed.</p>
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-[980px] w-full border-collapse text-xs">

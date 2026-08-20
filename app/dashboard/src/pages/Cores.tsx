@@ -122,6 +122,9 @@ export default function Cores() {
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <h3 className="truncate text-[15px] font-semibold">{c.id}</h3>
+                        {c.security_class === "legacy_insecure" && (
+                          <Badge tone="danger">Legacy / Insecure</Badge>
+                        )}
                         {c.builtin && (
                           <span className="rounded-md bg-brand-soft px-1.5 py-0.5 text-[10px] font-semibold text-brand" title={t("cores.builtinHint")}>
                             {t("cores.builtin")}
@@ -288,7 +291,10 @@ function InstallDialog({ entry, onClose, onDone }: { entry: CoreRegistryEntry; o
   const [version, setVersion] = useState(""); // "" = latest
   const [customVersion, setCustomVersion] = useState("");
   const [values, setValues] = useState<Record<string, string>>({});
-  const [startNow, setStartNow] = useState(true);
+  const legacyInsecure = entry.security_class === "legacy_insecure";
+  const [legacyRiskAck, setLegacyRiskAck] = useState(false);
+  const [internetExposureAck, setInternetExposureAck] = useState(false);
+  const [startNow, setStartNow] = useState(!legacyInsecure);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -318,12 +324,16 @@ function InstallDialog({ entry, onClose, onDone }: { entry: CoreRegistryEntry; o
           : type === "boolean" ? v === "true" : v;
       }
     }
+    if (legacyInsecure) {
+      settings.legacy_risk_ack = legacyRiskAck;
+      settings.internet_exposure_ack = internetExposureAck;
+    }
     const chosen = customVersion.trim() || version;
     if (chosen) settings.release_version = chosen.replace(/^v/, "");
     try {
-      await api.post(`/zagros/cores/${entry.id}/install`, { settings, enabled: true });
-      toast.ok(`${entry.id} installed`);
-      if (startNow) {
+      const installed = await api.post<{ enabled?: boolean }>(`/zagros/cores/${entry.id}/install`, { settings, enabled: !legacyInsecure });
+      toast.ok(`${entry.id} installed${installed.enabled === false ? " (disabled)" : ""}`);
+      if (startNow && !legacyInsecure) {
         try { await api.post(`/zagros/cores/${entry.id}/start`); toast.ok(`${entry.id} started`); }
         catch (e) { toast.error(`start: ${e instanceof ApiError ? e.message : t("common.error")}`); }
       }
@@ -340,7 +350,9 @@ function InstallDialog({ entry, onClose, onDone }: { entry: CoreRegistryEntry; o
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
-          <Button onClick={install} loading={busy}><HardDriveDownload size={14} /> install</Button>
+          <Button onClick={install} loading={busy}
+            disabled={legacyInsecure && (!legacyRiskAck || !internetExposureAck)}>
+            <HardDriveDownload size={14} /> install</Button>
         </>}
     >
       <Tabs
@@ -353,6 +365,21 @@ function InstallDialog({ entry, onClose, onDone }: { entry: CoreRegistryEntry; o
       />
 
       <div className="mt-4 space-y-3.5">
+        {legacyInsecure && (
+          <div className="space-y-3 rounded-xl border border-danger/40 bg-danger-soft p-3 text-xs text-danger">
+            <p className="font-semibold">Legacy / Insecure</p>
+            <p>PPTP uses MS-CHAPv2 and MPPE128, which have known cryptographic weaknesses. Use it only for legacy clients with no modern VPN option.</p>
+            <label className="flex items-start gap-2">
+              <input type="checkbox" checked={legacyRiskAck} onChange={(e) => setLegacyRiskAck(e.target.checked)} />
+              <span>I accept the Legacy / Insecure risk.</span>
+            </label>
+            <label className="flex items-start gap-2">
+              <input type="checkbox" checked={internetExposureAck} onChange={(e) => setInternetExposureAck(e.target.checked)} />
+              <span>I explicitly allow Internet exposure on TCP/1723 and GRE/47.</span>
+            </label>
+            <p>The provider will be installed disabled and will not start automatically.</p>
+          </div>
+        )}
         {mode === "simple" && (
           <>
             <p className="rounded-xl bg-surface-2 p-3 text-[12px] leading-5 text-content-2">
@@ -416,10 +443,12 @@ function InstallDialog({ entry, onClose, onDone }: { entry: CoreRegistryEntry; o
           </>
         )}
 
-        <label className="flex items-center gap-2.5 pt-1 text-sm text-content-2">
-          <Switch checked={startNow} onChange={setStartNow} label={t("cores.install.startAfter")} />
-          {t("cores.install.startAfter")}
-        </label>
+        {!legacyInsecure && (
+          <label className="flex items-center gap-2.5 pt-1 text-sm text-content-2">
+            <Switch checked={startNow} onChange={setStartNow} label={t("cores.install.startAfter")} />
+            {t("cores.install.startAfter")}
+          </label>
+        )}
         {busy && (
           <div role="status" aria-live="polite" data-install-stage={progress.data?.stage ?? "starting"}
             className="rounded-xl border border-brand/30 bg-brand-soft/30 px-3 py-2.5 text-xs text-content-2">

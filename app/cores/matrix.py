@@ -94,16 +94,29 @@ _PROFILES: dict[str, dict[str, CoreFeatureCapability]] = {
     },
     "softether": {
         "inbound": _cell(S, "vpnserver/vpncmd hub features"),
-        "outbound": _cell(U, "server-only runtime; no vpnclient service/adapter"),
-        "routing_source": _cell(S, "routed TAP source subnet (shared hub decision)"),
-        "routing_destination": _cell(U, "SoftEther server cannot dial a client egress"),
-        "tun": _cell(U, "no supported SoftEther client policy domain"),
+        "outbound": _cell(S, "dedicated native vpnclient account + Virtual NIC per outbound"),
+        "routing_source": _cell(S, "isolated routed Hub/TAP source subnet"),
+        "routing_destination": _cell(S, "native vpnclient namespace/table policy domain"),
+        "tun": _cell(S, "vpnclient TAP Virtual NIC behind an isolated namespace gateway"),
         "traffic_accounting": _cell(S, "vpncmd user/session counters"),
         "host_settings": _cell(S, "core-host delivery expansion"),
         "subscription": _cell(S, "L2TP/SSTP/OpenVPN/native delivery descriptors"),
         "tls": _cell(S, "native SoftEther/SSTP TLS server"),
         "version_probe": _cell(S, "vpncmd version parser"),
         "node_support": _cell(S, "native signed Zagros node agent reuses this CoreManager adapter"),
+    },
+    "pptp": {
+        "inbound": _cell(S, "independent ACCEL-PPP PPTP server — Legacy / Insecure"),
+        "outbound": _cell(S, "independent pptp-linux/pppd policy domain — Legacy / Insecure"),
+        "routing_source": _cell(S, "ACCEL-PPP assigned IPv4 subnet classification in Linux policy plane"),
+        "routing_destination": _cell(S, "namespace-isolated pptp-linux/PPP interface and policy table"),
+        "tun": _cell(S, "independent outbound PPP interface; never a SoftEther mode"),
+        "traffic_accounting": _cell(S, "ACCEL-PPP raw session counters + pppd_compat final ledger"),
+        "host_settings": _cell(S, "existing core-host delivery expansion"),
+        "subscription": _cell(S, "existing sealed delivery descriptors with legacy warning"),
+        "tls": _cell(N, "PPTP uses GRE and MPPE, not TLS"),
+        "version_probe": _cell(S, "pinned accel-pppd --version"),
+        "node_support": _cell(U, "remote PPTP node deployment is not implemented"),
     },
 }
 
@@ -136,9 +149,13 @@ def capability_matrix(
     return result
 
 
-_ROUTING_CORES = ("xray", "sing-box", "openvpn", "wireguard", "ssh", "softether")
+_ROUTING_CORES = (
+    "xray", "sing-box", "openvpn", "wireguard", "ssh", "softether", "pptp",
+)
 _APPLICATION_SOURCES = {"xray", "sing-box"}
-_TUN_DESTINATIONS = {"xray", "sing-box", "openvpn", "wireguard"}
+_TUN_DESTINATIONS = {
+    "xray", "sing-box", "openvpn", "wireguard", "softether", "pptp",
+}
 
 
 def routing_pair_matrix(
@@ -147,9 +164,9 @@ def routing_pair_matrix(
     """Canonical source-core → target-core routing compatibility matrix.
 
     A target core means the runtime that executes the named outbound profile;
-    it is not inferred from a UI protocol label.  SSH is deliberately only a
-    TCP application destination for native Xray/sing-box sources. SoftEther is
-    a routed server source, but no client destination exists.
+    it is not inferred from a UI protocol label. SSH is deliberately only a
+    TCP application destination for native Xray/sing-box sources. SoftEther
+    native is a real namespace-isolated vpnclient/Virtual-NIC destination.
     """
 
     result: dict[str, dict[str, dict]] = {}

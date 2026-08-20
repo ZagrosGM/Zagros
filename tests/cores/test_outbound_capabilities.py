@@ -10,6 +10,7 @@ from app.cores.capabilities import (
     SupportState,
     outbound_capabilities,
     outbound_capability,
+    outbound_product_capability,
     routing_compatibility,
 )
 from app.cores.drivers.xray import XrayDriver
@@ -23,26 +24,33 @@ from tests.cores.test_xray_driver import FakeBackend as FakeXrayBackend
 
 def test_capability_matrix_distinguishes_ssh_tun_and_softether_product_limits() -> None:
     matrix = outbound_capabilities()
-    ssh = matrix[OutboundKind.SSH]
-    assert ssh.state in (SupportState.SUPPORTED, SupportState.NOT_INSTALLED)
+    runtime_ssh = matrix[OutboundKind.SSH]
+    assert runtime_ssh.state in (SupportState.SUPPORTED, SupportState.NOT_INSTALLED)
+    # Product compatibility is independent from package presence on this test
+    # host; runtime inventory is allowed to refine it to NOT_INSTALLED.
+    ssh = outbound_product_capability(OutboundKind.SSH)
+    assert ssh.state is SupportState.SUPPORTED
     assert ssh.application_proxy is True
     assert ssh.application_level is True
-    assert ssh.dataplane is OutboundDataplane.APPLICATION_TCP
-    assert ssh.tun is False
+    assert ssh.dataplane is OutboundDataplane.POLICY_TUN
+    assert ssh.tun is True
+    assert ssh.kernel_routing is True
     assert ssh.native_core_translation == {"xray", "sing-box"}
     assert ssh.transports == {"tcp"}
     assert ssh.traffic_networks == {"tcp"}
-    assert ssh.routing_source_cores == {"xray", "sing-box"}
+    assert ssh.routing_source_cores == {
+        "xray", "sing-box", "openvpn", "wireguard", "ssh", "softether", "pptp",
+    }
     assert ssh.accounting is False
     assert "source" in str(ssh.accounting_reason)
-    assert "persistent host collector" in str(ssh.accounting_reason)
+    assert "diagnostics only" in str(ssh.accounting_reason)
 
     supported, reason = routing_compatibility(
         ssh, source_cores={"xray"}, networks={"tcp"})
     assert supported is SupportState.SUPPORTED and reason is None
-    invalid_source, _ = routing_compatibility(
+    service_source, reason = routing_compatibility(
         ssh, source_cores={"wireguard"}, networks={"tcp"})
-    assert invalid_source is SupportState.NOT_APPLICABLE
+    assert service_source is SupportState.SUPPORTED and reason is None
     invalid_network, _ = routing_compatibility(
         ssh, source_cores={"sing-box"}, networks={"tcp", "udp"})
     assert invalid_network is SupportState.NOT_APPLICABLE
@@ -62,19 +70,28 @@ def test_capability_matrix_distinguishes_ssh_tun_and_softether_product_limits() 
         OutboundKind.SOFTETHER_L2TP_RAW,
         OutboundKind.SOFTETHER_SSTP,
         OutboundKind.SOFTETHER_PPTP,
-        OutboundKind.SOFTETHER_NATIVE,
     ):
         capability = matrix[kind]
         assert capability.state is SupportState.UNSUPPORTED
         assert capability.selectable is False
         assert capability.reason
-    assert "PptpGet" in matrix[OutboundKind.SOFTETHER_PPTP].reason
+    native = matrix[OutboundKind.SOFTETHER_NATIVE]
+    assert native.state in {SupportState.SUPPORTED, SupportState.NOT_INSTALLED}
+    assert native.selectable is True
+    assert native.tun is True
+    assert native.dataplane is OutboundDataplane.POLICY_TUN
+    assert native.routing_source_cores == {
+        "xray", "sing-box", "openvpn", "wireguard", "ssh", "softether", "pptp"}
+    assert native.accounting is True
+    assert "vpnclient" in str(native.host_runtime)
+    assert "PPTP" in matrix[OutboundKind.SOFTETHER_PPTP].reason
 
 
 def test_policy_mode_uses_real_ssh_application_proxy_not_singbox_tun() -> None:
     assert PolicyRoutingManager._mode(OutboundKind.SSH) == "ssh"
     assert PolicyRoutingManager._mode(OutboundKind.WIREGUARD) == "wireguard"
     assert PolicyRoutingManager._mode(OutboundKind.OPENVPN) == "openvpn"
+    assert PolicyRoutingManager._mode(OutboundKind.SOFTETHER_NATIVE) == "softether"
     assert PolicyRoutingManager._mode(OutboundKind.VLESS) == "proxy"
     assert PolicyRoutingManager._mode(
         OutboundKind.SHADOWSOCKS, {"policy_core": "xray"}) == "xray_proxy"
@@ -139,7 +156,7 @@ def test_xray_policy_runtime_is_explicit_real_process_chain(tmp_path, monkeypatc
         )
 
 
-def test_invalid_ssh_tun_rule_fails_in_pure_preflight_without_runner_calls(tmp_path) -> None:
+def test_ssh_policy_tun_accepts_service_tcp_but_rejects_udp_without_mutation(tmp_path) -> None:
     runner = FakeRunner()
     manager = PolicyRoutingManager(
         EmptyCoreManager(), runtime_root=str(tmp_path), runner=runner,
@@ -155,11 +172,12 @@ def test_invalid_ssh_tun_rule_fails_in_pure_preflight_without_runner_calls(tmp_p
         matcher=RuleMatcher(inbounds=["openvpn"], networks=["tcp"]),
         action=RuleAction.ROUTE_TO, outbound=outbound.name,
     )
-    with pytest.raises(CoreError, match="policy TUN"):
-        manager.validate_plan([rule], [outbound])
-    # The same profile is valid when deployment is explicitly native-Xray;
-    # it is only the service-source/IP-TUN interpretation that is impossible.
-    manager.validate_plan([rule], [outbound], core_ids=["xray"])
+    manager.validate_plan([rule], [outbound])
+    udp_rule = rule.model_copy(update={
+        "matcher": RuleMatcher(inbounds=["openvpn"], networks=["tcp", "udp"]),
+    })
+    with pytest.raises(CoreError, match="TCP-only"):
+        manager.validate_plan([udp_rule], [outbound])
     assert runner.calls == []
     assert manager.domain_views() == []
 
@@ -193,10 +211,10 @@ def test_valid_ssh_application_proxy_is_rendered_by_xray_as_local_socks() -> Non
     asyncio.run(run())
 
 
-def test_ssh_domain_uses_private_askpass_and_no_kernel_table(tmp_path, monkeypatch) -> None:
+def test_ssh_domain_uses_private_askpass_and_scoped_policy_tun(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         "app.cores.routing.policy.shutil.which",
-        lambda name: f"/usr/bin/{name}" if name in {"ip", "ssh", "env"} else None,
+        lambda name: f"/usr/bin/{name}" if name in {"ip", "ssh", "env", "sing-box"} else None,
     )
     runner = FakeRunner()
     manager = PolicyRoutingManager(
@@ -210,17 +228,21 @@ def test_ssh_domain_uses_private_askpass_and_no_kernel_table(tmp_path, monkeypat
     )
     domain = manager.prepare([outbound])[outbound.name]
     assert domain.mode == "ssh" and domain.ready
-    assert "TCP application SOCKS" in domain.detail
+    assert "TCP-only fwmark" in domain.detail
     argv = next(call for call, _ in runner.calls if "/usr/bin/ssh" in call)
     assert "do-not-leak" not in " ".join(argv)
-    assert not any(call[:4] == ["ip", "rule", "add", "priority"]
-                   for call, _ in runner.calls)
+    adapter_argv = next(call for call, _ in runner.calls
+                        if call[:2] == ["/usr/bin/sing-box", "run"])
+    assert "ssh-tun-adapter.json" in " ".join(adapter_argv)
+    assert any(call[:4] == ["ip", "rule", "add", "priority"]
+               and str(domain.fwmark) in call for call, _ in runner.calls)
     password_file = tmp_path / PolicyRoutingManager._hash(outbound.name)[:20] / "password"
     assert password_file.read_text() == "do-not-leak\n"
     assert password_file.stat().st_mode & 0o777 == 0o600
     decorated = manager.decorate(outbound)
     assert decorated.settings["_policy_socks_port"] == domain.proxy_port
-    assert "_policy_mark" not in decorated.settings
+    assert decorated.settings["_policy_mark"] == domain.fwmark
+    assert decorated.settings["_policy_interface"] == domain.interface
     manager.stop()
     assert not password_file.parent.exists()
 
@@ -260,15 +282,15 @@ def test_source_core_map_is_backend_authority_for_ssh_compatibility(tmp_path) ->
     )
     manager.validate_plan(
         [rule], [outbound], source_core_map={"same-visible-tag": "xray"})
-    with pytest.raises(CoreError, match="policy TUN"):
-        manager.validate_plan(
-            [rule], [outbound],
-            source_core_map={"same-visible-tag": "wireguard"})
-    # An advanced native tag absent from the graphical catalog remains valid,
-    # but is conservatively treated as an application source in this empty
-    # test runtime rather than bypassing compatibility validation entirely.
+    # Kernel/service sources use the same narrowly scoped TCP policy TUN.
     manager.validate_plan(
-        [rule], [outbound], source_core_map={"another-tag": "xray"})
+        [rule], [outbound],
+        source_core_map={"same-visible-tag": "wireguard"})
+    # Unknown/deleted tags fail closed; the backend never guesses ownership
+    # from a prefix or silently broadens the source set.
+    with pytest.raises(CoreError, match="unknown/deleted inbound"):
+        manager.validate_plan(
+            [rule], [outbound], source_core_map={"another-tag": "xray"})
 
 
 def test_softether_schema_comes_from_same_capability_contract() -> None:
@@ -276,11 +298,17 @@ def test_softether_schema_comes_from_same_capability_contract() -> None:
 
     schemas = outbound_schemas()
     for kind in ("softether_l2tp", "softether_l2tp_raw", "softether_sstp",
-                 "softether_pptp", "softether_native"):
-        assert schemas[kind]["x-supported"] is False
-        assert schemas[kind]["x-availability"] == "unsupported"
-        assert schemas[kind]["x-capability"]["tun"] is False
-        assert schemas[kind]["x-disabled-reason"] == outbound_capability(kind).reason
+                 "softether_pptp"):
+        assert kind not in schemas
+        # Historical rows remain decodable internally, but no public schema
+        # advertises or offers the deprecated provider identity.
+        assert outbound_capability(kind).selectable is False
+    native = schemas["softether_native"]
+    assert native["x-supported"] is True
+    assert native["x-availability"] in {"supported", "not_installed"}
+    assert native["x-capability"]["tun"] is True
+    assert {"server", "server_port", "hub", "username", "password"} <= set(native["required"])
+    assert "Virtual NIC" in native["description"]
     # SoftEther's standards-compatible OpenVPN listener needs no fake
     # SoftEther-specific kind: the production OpenVPN client/TUN is real.
     assert schemas["openvpn"]["x-supported"] is True

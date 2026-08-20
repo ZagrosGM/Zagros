@@ -16,7 +16,7 @@ from app.cores.drivers.ssh.backend import LocalSystemSSHBackend
 def test_ss_snapshot_maps_dropped_uid_and_wire_directions(tmp_path, monkeypatch) -> None:
     backend = LocalSystemSSHBackend({"work_dir": str(tmp_path)})
     backend._transport_ports = {48302}
-    output = """ESTAB 0 0 109.248.161.249:48302 203.0.113.9:40400 users:((\"sshd-session\",pid=22,fd=7),(\"sshd-session\",pid=33,fd=7))
+    output = """ESTAB 0 0 198.51.100.7:48302 203.0.113.9:40400 users:((\"sshd-session\",pid=22,fd=7),(\"sshd-session\",pid=33,fd=7))
 \t bbr bytes_sent:1069481 bytes_acked:1069481 bytes_received:269282 segs_out:102
 """
     monkeypatch.setattr("app.cores.drivers.ssh.backend.shutil.which",

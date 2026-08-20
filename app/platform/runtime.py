@@ -260,10 +260,10 @@ class PlatformRuntime:
         try:
             raw_outbounds = await self.kv.get_value("admin.outbounds.v1") or []
             raw_rules = await self.kv.get_value("admin.routing.rules.v1") or []
-            from app.cores.outbounds.model import Outbound
+            from app.cores.outbounds.repository import OutboundSecretCodec
             from app.cores.routing.model import RoutingRule
 
-            outbounds = [Outbound.model_validate(item) for item in raw_outbounds]
+            outbounds = OutboundSecretCodec(getattr(self, "cipher", None)).decode(raw_outbounds)
             rules = [RoutingRule.model_validate(item) for item in raw_rules]
             for existing in list(self.outbound_manager.list()):
                 self.outbound_manager.unregister(existing.name)

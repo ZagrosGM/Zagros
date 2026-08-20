@@ -154,7 +154,9 @@ export default function CoreAccessPicker({ groups, value, onChange, xrayValue, o
                     <input type="checkbox" readOnly checked={on} tabIndex={-1}
                       className="pointer-events-none h-3.5 w-3.5 accent-brand" />
                     <span className="min-w-0 flex-1 truncate">{inb.tag}</span>
-                    {inb.protocol && <span className="text-[10px] text-content-3">{inb.protocol}</span>}
+                    {inb.protocol && <span className={`text-[10px] ${inb.security_class === "legacy_insecure" ? "text-danger" : "text-content-3"}`}>
+                      {inb.protocol}{inb.security_class === "legacy_insecure" ? " · Legacy / Insecure" : ""}
+                    </span>}
                     {inb.port != null && <span className="font-mono text-[10px] text-content-3">:{inb.port}</span>}
                   </button>
                 );

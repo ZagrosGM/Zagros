@@ -29,4 +29,9 @@ def test_routing_page_has_contextual_targets_without_obsolete_global_warnings() 
     assert "trafficNetworks" in routing
     assert "sourceCores" in routing
     assert "set network to tcp" in routing
-    assert "datalist={inboundHints} preserveCase" in routing
+    assert "InboundTagSelector" in routing
+    assert 'data-testid="inbound-tag-selector"' in routing
+    assert 'type="checkbox"' in routing
+    assert "duplicate tag — rename before use" in routing
+    assert 'data-testid="selected-inbound-tags"' in routing
+    assert "Deleted/unknown selections" in routing

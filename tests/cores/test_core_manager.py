@@ -423,6 +423,20 @@ def test_boot_rehydrates_from_store_and_distrusts_running() -> None:
     asyncio.run(main())
 
 
+def test_start_enabled_never_double_starts_lifespan_owned_builtin() -> None:
+    async def main() -> None:
+        store, bus = InMemoryStore(), EventBus()
+        manager = CoreManager(
+            store=store, bus=bus, builtin_core_ids=frozenset({"fakebox"}))
+        driver = FakeDriver()
+        manager.attach("fakebox", driver, enabled=True, state=CoreState.STOPPED)
+        await manager.start_enabled()
+        assert driver.starts == 0
+        assert manager._states["fakebox"] == CoreState.STOPPED
+
+    asyncio.run(main())
+
+
 def test_boot_recovers_interrupted_stopping_state_and_restarts_enabled_core() -> None:
     async def main() -> None:
         mgr, store, _ = _make_manager()

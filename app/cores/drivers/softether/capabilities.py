@@ -61,11 +61,15 @@ _SERVER_NETWORKS: dict[str, tuple[bool, bool]] = {
 
 _OUTBOUND_KINDS: dict[str, OutboundKind | None] = {
     "native": OutboundKind.SOFTETHER_NATIVE,
-    "l2tp_ipsec": OutboundKind.SOFTETHER_L2TP,
-    "l2tp_raw": OutboundKind.SOFTETHER_L2TP_RAW,
-    "sstp": OutboundKind.SOFTETHER_SSTP,
+    # SoftEther supplies compatible *server listeners* for these protocols;
+    # their client/provider identity is the independent Linux PPP engine.
+    "l2tp_ipsec": OutboundKind.L2TP_IPSEC,
+    "l2tp_raw": OutboundKind.L2TP_RAW,
+    "sstp": OutboundKind.SSTP,
     "openvpn": OutboundKind.OPENVPN,
-    "pptp": OutboundKind.SOFTETHER_PPTP,
+    # Stable SoftEther has no PPTP listener/provider. Independent PPTP remains
+    # represented by the ACCEL-PPP server and pptp-linux outbound contracts.
+    "pptp": None,
 }
 
 _WIZARD_PROTOCOLS = {
@@ -110,10 +114,12 @@ def _probe(runtime: Any | None) -> dict[str, Any]:
         }
     vpncmd = getattr(backend, "vpncmd_binary", lambda: None)()
     vpnserver = getattr(backend, "server_binary", lambda: None)()
+    vpnclient = getattr(backend, "client_binary", lambda: None)()
     version = getattr(backend, "version", lambda: None)()
     evidence = [
         f"vpncmd={vpncmd or 'missing'}",
         f"vpnserver={vpnserver or 'missing'}",
+        f"vpnclient={vpnclient or 'missing'}",
         f"version={version or 'unknown'}",
     ]
     if not vpncmd or not vpnserver:
@@ -205,36 +211,58 @@ def softether_transport_capabilities(runtime: Any | None = None) -> dict[str, di
         )
 
         kind = _OUTBOUND_KINDS[transport]
-        assert kind is not None
-        outbound = outbound_capability(kind, runtime)
-        if transport == "openvpn":
-            client_reason = (
-                "SoftEther OpenVPN compatibility is reached by the standard "
-                "OpenVPN client/TUN; SoftEther vpnserver is the remote server, "
-                "not the local client dataplane."
+        if kind is None:
+            client = SoftEtherDirectionCapability(
+                state=SupportState.NOT_APPLICABLE,
+                direction="outbound",
+                dataplane="none",
+                provider=None,
+                canonical_outbound_kind=None,
+                runtime_version=probe["version"],
+                evidence=[
+                    *probe["evidence"],
+                    "SoftEther advertises no PPTP client or server transport",
+                ],
+                reason=(
+                    "PPTP is an independent ACCEL-PPP/pptp-linux provider and "
+                    "is not a SoftEther capability."
+                ),
             )
         else:
-            client_reason = outbound.reason
-        client = SoftEtherDirectionCapability(
-            state=outbound.state,
-            direction="outbound",
-            dataplane=outbound.dataplane.value,
-            tcp="tcp" in outbound.traffic_networks,
-            udp="udp" in outbound.traffic_networks,
-            tun=outbound.tun,
-            application_level=outbound.application_level,
-            accounting=outbound.accounting,
-            provider=("openvpn client" if transport == "openvpn"
-                      else "no Zagros client provider"),
-            canonical_outbound_kind=kind.value,
-            runtime_version=probe["version"],
-            evidence=(
-                [*probe["evidence"], "canonical outbound kind=openvpn"]
-                if transport == "openvpn" else
-                [*probe["evidence"], "no production client lifecycle adapter"]
-            ),
-            reason=client_reason,
-        )
+            outbound = outbound_capability(kind, runtime)
+            if transport == "native":
+                provider = "vpnclient+vpncmd+Virtual-NIC namespace adapter"
+                client_reason = outbound.reason
+                client_evidence = [
+                    *probe["evidence"],
+                    "dedicated client service/account/NIC per outbound",
+                    "isolated control and data veth pairs + policy table",
+                ]
+            else:
+                provider = outbound.provider
+                client_reason = (
+                    f"SoftEther is only the compatible remote listener; the "
+                    f"canonical client is independent kind={kind.value}."
+                )
+                client_evidence = [
+                    *probe["evidence"],
+                    f"canonical independent outbound kind={kind.value}",
+                ]
+            client = SoftEtherDirectionCapability(
+                state=outbound.state,
+                direction="outbound",
+                dataplane=outbound.dataplane.value,
+                tcp="tcp" in outbound.traffic_networks,
+                udp="udp" in outbound.traffic_networks,
+                tun=outbound.tun,
+                application_level=outbound.application_level,
+                accounting=outbound.accounting,
+                provider=provider,
+                canonical_outbound_kind=kind.value,
+                runtime_version=probe["version"],
+                evidence=client_evidence,
+                reason=client_reason,
+            )
         result[transport] = {
             "server": server.model_dump(mode="json"),
             "client": client.model_dump(mode="json"),

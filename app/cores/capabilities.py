@@ -51,7 +51,9 @@ class RoutingContext(str, Enum):
 
 
 _APPLICATION_SOURCE_CORES = frozenset({"xray", "sing-box"})
-_SERVICE_SOURCE_CORES = frozenset({"openvpn", "wireguard", "ssh", "softether"})
+_SERVICE_SOURCE_CORES = frozenset({
+    "openvpn", "wireguard", "ssh", "softether", "pptp",
+})
 
 
 class OutboundCapability(BaseModel):
@@ -87,6 +89,12 @@ class OutboundCapability(BaseModel):
     accounting_reason: str | None = None
     native_core_translation: set[str] = Field(default_factory=set)
     host_runtime: str | None = None
+    provider: str | None = None
+    protocol: str | None = None
+    authentication: list[str] = Field(default_factory=list)
+    ip_versions: set[str] = Field(default_factory=set)
+    security_class: str = "standard"
+    peer_compatibility: set[str] = Field(default_factory=set)
     reason: str | None = None
 
     @property
@@ -118,41 +126,40 @@ class OutboundCapability(BaseModel):
             "accounting_reason": self.accounting_reason,
             "native_core_translation": sorted(self.native_core_translation),
             "host_runtime": self.host_runtime,
+            "provider": self.provider,
+            "protocol": self.protocol or self.kind.value,
+            "authentication": list(self.authentication),
+            "ip_versions": sorted(self.ip_versions),
+            "security_class": self.security_class,
+            "peer_compatibility": sorted(self.peer_compatibility),
             "reason": self.reason,
         }
 
 
-_SOFTETHER_SERVER_ONLY = (
-    "This Zagros installation contains SoftEther VPN Server and vpncmd server "
-    "management only. vpncmd /CLIENT manages a separately running VPN Client "
-    "service; vpncmd is not a client dataplane and no vpnclient service or "
-    "validated Zagros client adapter is installed."
+_SOFTETHER_NATIVE_ONLY = (
+    "SoftEther vpnclient implements the native SoftEther protocol. It is not a "
+    "generic client for the server's L2TP/IPsec, raw L2TP, SSTP or OpenVPN "
+    "compatibility listeners; those transports require their own client engine."
 )
 
 _SOFTETHER_REASONS = {
     OutboundKind.SOFTETHER_L2TP: (
-        _SOFTETHER_SERVER_ONLY + " SoftEther VPN Client is not a generic "
-        "L2TP/IPsec client; a separately managed L2TP/IPsec client adapter "
-        "would be required."
+        _SOFTETHER_NATIVE_ONLY + " A separately managed strongSwan/XFRM plus "
+        "xl2tpd/PPP lifecycle would be a different outbound provider and is not "
+        "implemented by this native-client adapter."
     ),
     OutboundKind.SOFTETHER_L2TP_RAW: (
-        _SOFTETHER_SERVER_ONLY + " Raw L2TP has no supported Linux client "
-        "adapter in Zagros."
+        _SOFTETHER_NATIVE_ONLY + " Stable Linux vpnclient exposes no raw-L2TP "
+        "account/virtual-NIC mode."
     ),
     OutboundKind.SOFTETHER_SSTP: (
-        _SOFTETHER_SERVER_ONLY + " A separately managed SSTP client runtime "
-        "and transactional routing adapter would be required."
+        _SOFTETHER_NATIVE_ONLY + " A separately managed SSTP/PPP client and "
+        "transactional routing adapter would be required."
     ),
     OutboundKind.SOFTETHER_PPTP: (
         "Unsupported by the SoftEther stable server/client contract used by "
-        "Zagros: there is no PPTP listener/client adapter, and PptpGet / "
-        "PptpEnable are not vpncmd server commands. The live SoftEther "
-        "transport matrix records binary version and command-inventory evidence; "
-        "no PPTP UI/client is fabricated."
-    ),
-    OutboundKind.SOFTETHER_NATIVE: (
-        _SOFTETHER_SERVER_ONLY + " Native SoftEther egress requires the "
-        "separate vpnclient service plus a production routing/lifecycle adapter."
+        "Zagros: there is no PPTP server listener and native vpnclient does not "
+        "turn PPTP into a Virtual NIC account. No PPTP UI/client is fabricated."
     ),
 }
 
@@ -168,6 +175,11 @@ def _base_capability(kind: OutboundKind) -> OutboundCapability:
             routing_source_cores=set(_APPLICATION_SOURCE_CORES),
             application_proxy=True, application_level=True,
             native_core_translation={"xray", "sing-box"},
+            provider="native core action",
+            protocol=kind.value,
+            authentication=[],
+            ip_versions={"ipv4", "ipv6"},
+            security_class="not_applicable",
             reason="native core action; no client runtime is required",
         )
     if kind in (OutboundKind.OPENVPN, OutboundKind.WIREGUARD):
@@ -184,28 +196,44 @@ def _base_capability(kind: OutboundKind) -> OutboundCapability:
             application_proxy=True, tun=True, kernel_routing=True,
             native_core_translation={"xray", "sing-box"},
             host_runtime="openvpn" if kind is OutboundKind.OPENVPN else "wg+ip",
+            provider="OpenVPN client" if kind is OutboundKind.OPENVPN else "Linux WireGuard",
+            protocol="OpenVPN" if kind is OutboundKind.OPENVPN else "WireGuard",
+            authentication=(
+                ["TLS certificate", "optional username/password"]
+                if kind is OutboundKind.OPENVPN else
+                ["NoiseIK public/private key", "optional preshared key"]
+            ),
+            ip_versions={"ipv4"},
+            security_class="standard",
         )
     if kind is OutboundKind.SSH:
         return OutboundCapability(
             kind=kind, state=SupportState.SUPPORTED,
-            dataplane=OutboundDataplane.APPLICATION_TCP,
+            dataplane=OutboundDataplane.POLICY_TUN,
             transports={"tcp"}, traffic_networks={"tcp"},
-            routing_contexts={RoutingContext.NATIVE_APPLICATION_TCP},
-            routing_source_cores=set(_APPLICATION_SOURCE_CORES),
+            routing_contexts={RoutingContext.POLICY_TUN,
+                              RoutingContext.NATIVE_APPLICATION_TCP},
+            routing_source_cores=set(_APPLICATION_SOURCE_CORES | _SERVICE_SOURCE_CORES),
             application_proxy=True, application_level=True,
-            tun=False, kernel_routing=False,
+            tun=True, kernel_routing=True,
             accounting=False,
             accounting_reason=(
-                "One shared dynamic-forward transport cannot attribute its "
-                "multiplexed bytes to source users. Per-user quota/accounting "
-                "remains owned by the Xray or sing-box source; SSH inbound "
-                "accounts use their separate persistent host collector."
+                "The scoped TUN feeds one shared dynamic-forward transport and "
+                "therefore cannot attribute target bytes to source users. "
+                "Authoritative quota/accounting remains owned by each source "
+                "core; target interface counters are diagnostics only."
             ),
             native_core_translation={"xray", "sing-box"},
-            host_runtime="OpenSSH dynamic forwarding",
+            host_runtime="OpenSSH dynamic forwarding + scoped sing-box TUN adapter",
+            provider="OpenSSH client with policy TUN bridge",
+            protocol="SSH dynamic forwarding",
+            authentication=["server host key", "password or private key"],
+            ip_versions={"ipv4"},
+            security_class="standard",
             reason=(
-                "A managed OpenSSH SOCKS process provides real TCP application "
-                "egress to Xray/sing-box. SSH has no UDP or generic TUN dataplane."
+                "A per-outbound TUN/redirect adapter carries only selected TCP "
+                "flows into the authenticated OpenSSH SOCKS process. UDP and "
+                "global transparent interception remain unsupported."
             ),
         )
     if kind in {
@@ -221,6 +249,16 @@ def _base_capability(kind: OutboundKind) -> OutboundCapability:
             transports = {"tcp"}  # TCP/TLS outer carrier; protocol relays UDP
         elif kind in (OutboundKind.HYSTERIA2, OutboundKind.TUIC):
             transports = {"udp"}  # QUIC outer carrier; tunnel relays TCP+UDP
+        authentication = {
+            OutboundKind.SOCKS: ["optional username/password"],
+            OutboundKind.HTTP: ["optional username/password"],
+            OutboundKind.VLESS: ["UUID", "optional TLS/REALITY server identity"],
+            OutboundKind.VMESS: ["UUID"],
+            OutboundKind.TROJAN: ["password", "TLS server certificate"],
+            OutboundKind.SHADOWSOCKS: ["pre-shared password"],
+            OutboundKind.HYSTERIA2: ["password", "TLS server certificate"],
+            OutboundKind.TUIC: ["UUID/password", "TLS server certificate"],
+        }[kind]
         return OutboundCapability(
             kind=kind, state=SupportState.SUPPORTED,
             dataplane=OutboundDataplane.POLICY_TUN,
@@ -231,12 +269,125 @@ def _base_capability(kind: OutboundKind) -> OutboundCapability:
             application_proxy=True, tun=True, kernel_routing=True,
             native_core_translation={"xray", "sing-box"},
             host_runtime="sing-box",
+            provider="Xray or sing-box selected policy runtime",
+            protocol=kind.value,
+            authentication=authentication,
+            ip_versions={"ipv4"},
+            security_class=("compatibility" if kind is OutboundKind.VMESS else "standard"),
+        )
+    if kind in {
+        OutboundKind.L2TP_IPSEC, OutboundKind.L2TP_RAW,
+        OutboundKind.SSTP, OutboundKind.PPTP,
+    }:
+        contracts = {
+            OutboundKind.L2TP_IPSEC: {
+                "provider": "strongSwan+xl2tpd+pppd",
+                "protocol": "L2TP/IPsec",
+                "authentication": ["IKEv1 pre-shared key", "PPP MS-CHAPv2"],
+                "security_class": "compatibility",
+                "host_runtime": "charon+swanctl+xl2tpd+pppd+network-namespace",
+                "peer_compatibility": {"softether"},
+                "reason": (
+                    "An isolated strongSwan IKE/XFRM transport plus xl2tpd/PPP "
+                    "session provides real L2TP/IPsec egress."
+                ),
+            },
+            OutboundKind.L2TP_RAW: {
+                "provider": "xl2tpd+pppd",
+                "protocol": "raw L2TP",
+                "authentication": ["PPP MS-CHAPv2"],
+                "security_class": "legacy_insecure",
+                "host_runtime": "xl2tpd+pppd+network-namespace",
+                "peer_compatibility": {"softether"},
+                "reason": (
+                    "Raw L2TP has no IPsec/TLS confidentiality and is exposed "
+                    "only behind an explicit Legacy/Insecure acknowledgement."
+                ),
+            },
+            OutboundKind.SSTP: {
+                "provider": "sstp-client+pppd",
+                "protocol": "SSTP",
+                "authentication": ["TLS server certificate", "PPP MS-CHAPv2"],
+                "security_class": "compatibility",
+                "host_runtime": "sstpc+pppd+network-namespace",
+                "peer_compatibility": {"softether"},
+                "reason": (
+                    "A real SSTP/PPP client is used with mandatory CA and "
+                    "hostname certificate verification."
+                ),
+            },
+            OutboundKind.PPTP: {
+                "provider": "pptp-linux+pppd",
+                "protocol": "PPTP",
+                "authentication": ["PPP MS-CHAPv2"],
+                "security_class": "legacy_insecure",
+                "host_runtime": "pptp-linux+pppd+network-namespace",
+                "peer_compatibility": {"accel-ppp", "reference-pptp"},
+                "reason": (
+                    "Independent legacy PPTP client using fixed TCP/1723, "
+                    "GRE/47 and mandatory MPPE128; never a SoftEther mode."
+                ),
+            },
+        }
+        contract = contracts[kind]
+        return OutboundCapability(
+            kind=kind, state=SupportState.SUPPORTED,
+            dataplane=OutboundDataplane.POLICY_TUN,
+            transports=({"udp"} if kind in {
+                OutboundKind.L2TP_IPSEC, OutboundKind.L2TP_RAW,
+            } else {"tcp", "gre"} if kind is OutboundKind.PPTP else {"tcp"}),
+            traffic_networks={"tcp", "udp"},
+            routing_contexts={RoutingContext.POLICY_TUN,
+                              RoutingContext.NATIVE_APPLICATION_TCP},
+            routing_source_cores=set(_APPLICATION_SOURCE_CORES | _SERVICE_SOURCE_CORES),
+            application_proxy=True, tun=True, kernel_routing=True,
+            accounting=True,
+            accounting_reason=(
+                "Persistent per-outbound deltas are folded from the owned PPP "
+                "interface generation; source-user quota remains source-core owned."
+            ),
+            native_core_translation={"xray", "sing-box"},
+            ip_versions={"ipv4"},
+            **contract,
+        )
+    if kind is OutboundKind.SOFTETHER_NATIVE:
+        return OutboundCapability(
+            kind=kind, state=SupportState.SUPPORTED,
+            dataplane=OutboundDataplane.POLICY_TUN,
+            transports={"tcp", "udp"},
+            traffic_networks={"tcp", "udp"},
+            routing_contexts={RoutingContext.POLICY_TUN,
+                              RoutingContext.NATIVE_APPLICATION_TCP},
+            routing_source_cores=set(_APPLICATION_SOURCE_CORES | _SERVICE_SOURCE_CORES),
+            application_proxy=True,
+            tun=True,
+            kernel_routing=True,
+            accounting=True,
+            accounting_reason=(
+                "vpncmd AccountStatusGet exposes exact native-session incoming "
+                "and outgoing byte totals for this dedicated client account."
+            ),
+            native_core_translation={"xray", "sing-box"},
+            host_runtime="vpnclient+vpncmd+network-namespace+Virtual-NIC",
+            provider="SoftEther vpnclient",
+            protocol="SoftEther native",
+            authentication=["username/password", "optional pinned server certificate"],
+            ip_versions={"ipv4"},
+            security_class="compatibility",
+            peer_compatibility={"softether"},
+            reason=(
+                "A dedicated vpnclient instance, Virtual NIC, DHCP lease and "
+                "isolated namespace/table provide a real native SoftEther egress."
+            ),
         )
     if kind in _SOFTETHER_REASONS:
         return OutboundCapability(
             kind=kind, state=SupportState.UNSUPPORTED,
             dataplane=OutboundDataplane.NONE,
             host_runtime="separate client provider required",
+            provider="none (deprecated SoftEther-labelled alias)",
+            protocol=kind.value,
+            security_class="unsupported",
             reason=_SOFTETHER_REASONS[kind],
         )
     if kind is OutboundKind.CORE:
@@ -245,6 +396,10 @@ def _base_capability(kind: OutboundKind) -> OutboundCapability:
             dataplane=OutboundDataplane.DYNAMIC_CORE,
             traffic_networks={"tcp", "udp"},
             application_proxy=True, application_level=True,
+            provider="dynamic target core chain endpoint",
+            protocol="dynamic",
+            ip_versions={"ipv4", "ipv6"},
+            security_class="target_dependent",
             reason="resolved dynamically from the target core's chain endpoint",
         )
     return OutboundCapability(
@@ -289,8 +444,56 @@ def outbound_capability(kind: OutboundKind | str, runtime: Any | None = None) ->
         not shutil.which("wg") or not shutil.which("ip")
     ):
         missing = "wireguard-tools and iproute2 are required"
-    elif cap.tun and kind not in (OutboundKind.OPENVPN, OutboundKind.WIREGUARD) \
-            and _runtime_binary(runtime, "sing-box", "sing-box") is None:
+    elif kind in {
+        OutboundKind.L2TP_IPSEC, OutboundKind.L2TP_RAW,
+        OutboundKind.SSTP, OutboundKind.PPTP,
+    }:
+        requirements = {
+            OutboundKind.L2TP_IPSEC: ("pppd", "xl2tpd", "swanctl"),
+            OutboundKind.L2TP_RAW: ("pppd", "xl2tpd"),
+            OutboundKind.SSTP: ("pppd", "sstpc"),
+            OutboundKind.PPTP: ("pppd", "pptp"),
+        }[kind]
+        absent = [binary for binary in requirements if shutil.which(binary) is None]
+        if kind is OutboundKind.L2TP_IPSEC and not any(
+            os.path.isfile(path) for path in (
+                "/usr/lib/ipsec/charon", "/usr/libexec/ipsec/charon",
+            )
+        ):
+            absent.append("charon")
+        if absent:
+            missing = (
+                f"{kind.value} client runtime is not installed: "
+                + ", ".join(sorted(set(absent)))
+            )
+        elif not os.path.exists("/dev/ppp"):
+            missing = "/dev/ppp is required by PPP outbound providers"
+    elif kind is OutboundKind.SOFTETHER_NATIVE:
+        client = None
+        vpncmd = None
+        if runtime is not None:
+            try:
+                backend = getattr(runtime.core_manager.get("softether"), "_backend", None)
+                client = getattr(backend, "client_binary", lambda: None)()
+                vpncmd = getattr(backend, "vpncmd_binary", lambda: None)()
+            except Exception:
+                pass
+        else:
+            client = shutil.which("vpnclient")
+            vpncmd = shutil.which("vpncmd")
+        tools = [name for name in ("ip", "iptables", "busybox")
+                 if not shutil.which(name)]
+        if not client or not vpncmd:
+            missing = (
+                "SoftEther core runtime must include both vpnclient and vpncmd; "
+                "Install/Reinstall the SoftEther core"
+            )
+        elif tools:
+            missing = "SoftEther client namespace requires " + ", ".join(tools)
+    elif cap.tun and kind not in (
+        OutboundKind.OPENVPN, OutboundKind.WIREGUARD,
+        OutboundKind.SOFTETHER_NATIVE,
+    ) and _runtime_binary(runtime, "sing-box", "sing-box") is None:
         missing = "sing-box is not installed; it is the host TUN adapter for this profile"
     elif kind is OutboundKind.SSH and not shutil.which("ssh"):
         missing = "the OpenSSH client is not installed"

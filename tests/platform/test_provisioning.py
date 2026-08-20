@@ -266,6 +266,123 @@ def test_apply_grants_creates_accounts_on_both_cores(runtime, monkeypatch):
 
 
     asyncio.run(_go())
+
+
+def test_softether_user_before_l2tp_reconciles_existing_account_and_replay(
+    runtime, monkeypatch,
+):
+    """Regression for the real error-66 lifecycle report.
+
+    A user first owns the native SoftEther grant while no L2TP inbound exists.
+    After L2TP appears, saving both grants must update the existing live user,
+    create only the genuinely missing L2TP identity, survive duplicate Save and
+    replay, rotate a password, and remove only the revoked L2TP account.
+    """
+    async def _go():
+        from app.cores.drivers.softether.driver import SoftEtherDriver
+        from app.cores.exceptions import CoreError
+        from app.cores.types import CoreState, UserAccount
+        from app.platform import provisioning
+        from tests.cores.fakes import FakeSEBackend
+
+        class StrictSEBackend(FakeSEBackend):
+            def __init__(self):
+                super().__init__()
+                self.create_calls: list[str] = []
+                self.delete_calls: list[str] = []
+
+            def user_create(self, username, note=""):
+                self.create_calls.append(username)
+                if username in self.users:
+                    raise CoreError("UserCreate failed (error code 66)")
+                self.users[username] = ""
+
+            def user_delete(self, username):
+                self.delete_calls.append(username)
+                super().user_delete(username)
+
+        backend = StrictSEBackend()
+        settings = {
+            "ipsec_psk": "unit-psk", "feature_softether": True,
+            "feature_l2tp": False,
+            "feature_tags": {"softether": "native-test"},
+        }
+        first = SoftEtherDriver(settings, backend=backend)
+        runtime.core_manager.attach(
+            "softether", first, enabled=True, state=CoreState.RUNNING)
+        _stub_catalog(monkeypatch, _catalog(
+            ("softether", "softether", ["native-test"]),
+        ))
+        user = LegacyUser("se-lifecycle", user_id=91)
+
+        # User exists before any L2TP inbound.
+        pid = await provisioning.sync_user(
+            runtime, user, grants={"softether": ["native-test"]})
+        native_id = "91.se-lifecycle.softether"
+        l2tp_id = "91.se-lifecycle.l2tp"
+        assert backend.create_calls == [native_id]
+        assert native_id in backend.users and l2tp_id not in backend.users
+
+        # L2TP is created later and the in-memory driver is fresh, matching a
+        # container restart/account-replay gap. The native user must be found,
+        # not created again; only the missing L2TP user is created.
+        settings.update({
+            "feature_l2tp": True,
+            "feature_tags": {"softether": "native-test", "l2tp": "l2tp-new"},
+        })
+        fresh = SoftEtherDriver(settings, backend=backend)
+        runtime.core_manager.attach(
+            "softether", fresh, enabled=True, state=CoreState.RUNNING)
+        _stub_catalog(monkeypatch, _catalog(
+            ("softether", "softether", ["native-test"]),
+            ("softether", "l2tp", ["l2tp-new"]),
+        ))
+        await provisioning.sync_user(runtime, user, grants={
+            "softether": ["native-test", "l2tp-new"]})
+        assert backend.create_calls == [native_id, l2tp_id]
+        rows = [a for a in runtime.users.accounts_of(pid)
+                if a["core_id"] == "softether"]
+        assert {a["protocol"] for a in rows} == {"softether", "l2tp"}
+
+        # Duplicate Save is idempotent.
+        await provisioning.sync_user(runtime, user, grants={
+            "softether": ["native-test", "l2tp-new"]})
+        assert backend.create_calls == [native_id, l2tp_id]
+
+        # Password rotation updates the existing live identity without create.
+        l2tp_row = next(a for a in rows if a["protocol"] == "l2tp")
+        rotated_settings = dict(l2tp_row["settings"])
+        rotated_settings["password"] = "rotated-unit-password"
+        await fresh.update_account(UserAccount(
+            user_id=pid, username=user.username, account_id=l2tp_id,
+            protocol="l2tp", enabled=True, settings=rotated_settings))
+        assert backend.create_calls == [native_id, l2tp_id]
+        assert backend.users[l2tp_id] == "rotated-unit-password"
+
+        # Container recreation/account replay discovers both users and emits
+        # no UserCreate. Persist the rotation first, then replay real SQL rows.
+        runtime.users.upsert_core_account(
+            user_id=pid, core_id="softether", account_id=l2tp_id,
+            protocol="l2tp", enabled=True, settings=rotated_settings)
+        replayed = SoftEtherDriver(settings, backend=backend)
+        runtime.core_manager.attach(
+            "softether", replayed, enabled=True, state=CoreState.RUNNING)
+        deferred = await runtime._restore_core_accounts({"softether"})
+        assert deferred == set()
+        assert backend.create_calls == [native_id, l2tp_id]
+
+        # Removing L2TP revokes only that account; native remains untouched.
+        await provisioning.sync_user(
+            runtime, user, grants={"softether": ["native-test"]})
+        assert l2tp_id in backend.delete_calls
+        assert native_id in backend.users and l2tp_id not in backend.users
+        remaining = [a for a in runtime.users.accounts_of(pid)
+                     if a["core_id"] == "softether"]
+        assert [a["protocol"] for a in remaining] == ["softether"]
+
+    asyncio.run(_go())
+
+
 def test_apply_grants_revokes_unselected_and_names_unknowns(runtime, monkeypatch):
     async def _go():
         from app.platform import provisioning

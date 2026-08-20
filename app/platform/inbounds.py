@@ -30,9 +30,11 @@ class CatalogInbound:
     tag: str
     protocol: str
     port: int | None = None
+    security_class: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {"tag": self.tag, "protocol": self.protocol, "port": self.port}
+        return {"tag": self.tag, "protocol": self.protocol, "port": self.port,
+                "security_class": self.security_class}
 
 
 @dataclass
@@ -93,7 +95,9 @@ def _doc_inbounds(doc: Any) -> list[CatalogInbound]:
             continue
         out.append(CatalogInbound(
             tag=str(tag), protocol=str(protocol),
-            port=item.get("port", item.get("listen_port"))))
+            port=item.get("port", item.get("listen_port")),
+            security_class=(str(item.get("security_class"))
+                            if item.get("security_class") else None)))
     return out
 
 

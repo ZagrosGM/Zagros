@@ -47,6 +47,16 @@ class FakeRunner:
         if inner[:4] == ["ip", "link", "show", "dev"]:
             rc = 0 if inner[4] in interfaces else 1
             return self.completed(argv, rc)
+        if inner[:5] == ["ip", "-j", "address", "show", "dev"]:
+            if inner[5] not in interfaces:
+                return self.completed(argv, 1, "[]")
+            return self.completed(
+                argv, 0,
+                json.dumps([{
+                    "ifname": inner[5], "flags": ["POINTOPOINT", "UP"],
+                    "addr_info": [{"family": "inet", "local": "10.0.0.2"}],
+                }]),
+            )
         if inner[:4] == ["ip", "link", "add", "dev"]:
             interfaces.add(inner[4])
         elif inner[:4] == ["ip", "link", "del", "dev"]:
@@ -73,6 +83,15 @@ class FakeRunner:
             iface = self.routes.get(mark, "missing")
             rc = 0 if iface != "missing" else 2
             return self.completed(argv, rc, f"1.1.1.1 dev {iface}\n")
+        elif argv[:3] == ["ip", "route", "get"]:
+            return self.completed(argv, 0, f"{argv[3]} dev eth0 src 192.0.2.1\n")
+        elif len(argv) >= 6 and argv[:3] == ["ip", "netns", "exec"] \
+                and argv[4:6] == ["ss", "-lnt"]:
+            return self.completed(argv, 0, "LISTEN 0 128 127.0.0.1:9930 0.0.0.0:*\n")
+        elif len(argv) >= 6 and argv[:3] == ["ip", "netns", "exec"] \
+                and argv[4] == "cat" \
+                and argv[-1] == "/proc/sys/net/ipv4/ip_forward":
+            return self.completed(argv, 0, "1\n")
         elif argv[:4] == ["ip", "rule", "del", "priority"]:
             return self.completed(argv, 2)
         elif argv[:4] == ["nft", "list", "table", "inet"]:
@@ -98,6 +117,14 @@ class FakeRunner:
                 for inbound in doc.get("inbounds", []):
                     if inbound.get("type") == "tun":
                         interfaces.add(inbound["interface_name"])
+        if "udhcpc" in argv and "-s" in argv:
+            script = Path(argv[argv.index("-s") + 1])
+            (script.parent / "address").write_text("192.168.30.10\n")
+            (script.parent / "gateway").write_text("192.168.30.1\n")
+        elif argv and argv[-1].endswith("dhcp-watch.sh"):
+            lease = Path(argv[-1]).parent
+            (lease / "address").write_text("192.168.30.10\n")
+            (lease / "gateway").write_text("192.168.30.1\n")
         return FakeProcess()
 
 

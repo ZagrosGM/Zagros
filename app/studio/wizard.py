@@ -172,12 +172,13 @@ def _tr(id_: str, label: str, securities: list[Security]) -> Transport:
 def _proto(
     id_: str, label: str, default_port: int, transports: list[Transport],
     *, fixed_port: bool = False, availability: str = "supported",
-    reason: str | None = None,
+    reason: str | None = None, security_class: str | None = None,
 ) -> Protocol:
     return {
         "id": id_, "label": label, "default_port": default_port,
         "fixed_port": fixed_port, "transports": transports,
         "availability": availability, "reason": reason,
+        "security_class": security_class,
     }
 
 
@@ -495,12 +496,48 @@ def _ssh_blueprint() -> list[Protocol]:
     ])]
 
 
+def _pptp_blueprint() -> list[Protocol]:
+    """Independent ACCEL-PPP provider; never a SoftEther transport."""
+    return [_proto(
+        "pptp", "PPTP — Legacy / Insecure", 1723,
+        [_tr("tcp", "TCP/1723 control + GRE/47 carrier", [_none([
+            _f("subnet", "IPv4 client subnet", required=True,
+               default="10.77.0.0/24", section="general",
+               help="private IPv4 /24 through /29; must not overlap a live route"),
+            _f("dns", "IPv4 DNS servers", default="1.1.1.1, 8.8.8.8",
+               section="general"),
+            _f("authentication", "authentication", "select",
+               options=["MS-CHAPv2"], default="MS-CHAPv2", required=True,
+               section="general"),
+            _f("encryption", "encryption", "select", options=["MPPE128"],
+               default="MPPE128", required=True, section="general"),
+            _f("network", "network", "select", options=["IPv4"],
+               default="IPv4", required=True, section="general"),
+            _f("ipv6", "IPv6 (unsupported)", "bool", default=False,
+               section="general", help="must remain off"),
+            _f("legacy_risk_ack",
+               "I accept that PPTP is Legacy / Insecure", "bool",
+               default=False, required=True, section="general"),
+            _f("internet_exposure_ack",
+               "I explicitly allow Internet exposure on TCP/1723 and GRE/47",
+               "bool", default=False, required=True, section="general"),
+            _f("security_class", "security class", "select",
+               options=["legacy_insecure"], default="legacy_insecure",
+               required=True, section="general"),
+        ])])], fixed_port=True, security_class="legacy_insecure",
+        reason=(
+            "Legacy/insecure protocol with known MS-CHAPv2 weaknesses. "
+            "Use only for clients that cannot use a modern VPN."
+        ),
+    )]
+
+
 def _softether_blueprint() -> list[Protocol]:
     """Capabilities of the supported SoftEther **stable** server line.
 
-    Each selectable cell maps to a real vpncmd operation. PPTP remains visible
-    as an explicit unsupported capability (the installed stable runtime has no
-    PptpGet/PptpEnable command), never as a fake selectable inbound. EtherIP is
+    Each selectable cell maps to a real vpncmd operation. PPTP is absent here:
+    its unsupported SoftEther state remains in the runtime capability matrix,
+    while the independent ``pptp`` provider owns its separate wizard. EtherIP is
     absent from the simple wizard because enabling the server bit alone is insufficient:
     every router needs an EtherIpClientAdd identity mapping. It remains an
     Advanced/runtime capability, not a fake one-click inbound.
@@ -533,15 +570,6 @@ def _softether_blueprint() -> list[Protocol]:
         _proto("ovpn", "OpenVPN compatibility", 1194, [
             _tr("udp", "UDP", [_none()]),
         ]),
-        _proto(
-            "pptp", "PPTP", 1723, [], fixed_port=True,
-            availability="unsupported",
-            reason=(
-                "Unsupported by the SoftEther stable server contract: "
-                "vpncmd PptpGet/PptpEnable are not server commands. The live "
-                "wizard endpoint verifies this against the installed runtime."
-            ),
-        ),
     ]
 
 
@@ -561,6 +589,7 @@ _BLUEPRINTS = {
     "openvpn": _openvpn_blueprint,
     "ssh": _ssh_blueprint,
     "softether": _softether_blueprint,
+    "pptp": _pptp_blueprint,
 }
 
 _ALIASES = {

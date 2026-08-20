@@ -102,6 +102,7 @@ class FakeSEBackend:
         self._reachable = True
 
     def reachable(self): return self._reachable
+    def client_binary(self): return "/persistent/vpnclient"
     def user_create(self, username, note=""): self.users.setdefault(username, "")
     def user_delete(self, username): self.users.pop(username, None)
     def user_password_set(self, username, password): self.users[username] = password
@@ -614,111 +615,230 @@ def _se_backend():
     return LocalSoftEtherBackend({})
 
 
-def test_vpncmd_protocol_guard_backs_off_then_retries(monkeypatch) -> None:
-    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
-
-    backend = LocalSoftEtherBackend({"protocol_backoff_seconds": 10})
-    monkeypatch.setattr(backend, "vpncmd_binary", lambda: "/vpncmd")
-    results = iter([
-        subprocess.CompletedProcess(
-            [], 2, stdout="Error code: 2\nProtocol error occurred.\n", stderr=""),
-        subprocess.CompletedProcess(
-            [], 0, stdout="The command completed successfully.\n", stderr=""),
-    ])
-    runs = []
-    sleeps = []
-
-    def run(*args, **kwargs):
-        runs.append((args, kwargs))
-        return next(results)
-
-    monkeypatch.setattr(subprocess, "run", run)
-    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
-    assert "completed successfully" in backend._cmd("UserList")
-    assert len(runs) == 2
-    assert sleeps == [10.0]
-
-
-def test_vpncmd_transports_all_credentials_over_stdin_not_argv(monkeypatch) -> None:
-    """Admin passwords and secret-bearing commands must never be visible in
-    /proc/<pid>/cmdline or process listings."""
+def test_vpncmd_transports_all_credentials_over_private_pty_not_argv(monkeypatch) -> None:
+    """Admin and profile secrets are never placed in process argv."""
+    import app.cores.routing.softether_client as channel
     from app.cores.drivers.softether.backend import LocalSoftEtherBackend
 
     admin_secret = "dummy-admin-secret"
     psk_secret = "dummy-ipsec-secret"
     backend = LocalSoftEtherBackend({
-        "admin_password": admin_secret,
-        "server": "localhost",
-        "hub": "TEST_HUB",
+        "admin_password": admin_secret, "server": "localhost", "hub": "TEST_HUB",
     })
     monkeypatch.setattr(backend, "vpncmd_binary", lambda: "/vpncmd")
     calls = []
 
-    def run(*args, **kwargs):
-        calls.append((args, kwargs))
-        return subprocess.CompletedProcess(
-            args[0], 0, stdout="The command completed successfully.\n", stderr="")
+    def run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return "The command completed successfully.\n"
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(channel, "run_vpncmd_pty", run)
     command = f"IPsecEnable /PSK:{psk_secret} /DEFAULTHUB:TEST_HUB"
     backend._cmd(command, csv=True, hub=False)
-
-    assert len(calls) == 1
-    argv = calls[0][0][0]
-    stdin_script = calls[0][1]["input"]
+    argv, kwargs = calls[0]
     assert argv == ["/vpncmd", "localhost", "/SERVER", "/CSV"]
-    assert "/PASSWORD" not in " ".join(argv)
-    assert "/CMD" not in argv
     assert admin_secret not in " ".join(argv)
     assert psk_secret not in " ".join(argv)
-    assert stdin_script == f"{admin_secret}\n{command}\nexit\n"
+    assert kwargs["administrator_password"] == admin_secret
+    assert kwargs["commands"] == [command]
+    assert kwargs["prompt"] == "VPN Server"
+
+
+def test_vpncmd_primary_hub_csv_strips_login_preamble(monkeypatch) -> None:
+    """Real vpncmd PTY output has a human banner before the /CSV header.
+
+    Treating that banner as row zero makes UserList parse as empty and turns
+    an idempotent account reconcile into a duplicate UserCreate (error 66).
+    """
+    import app.cores.routing.softether_client as channel
+    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
+
+    backend = LocalSoftEtherBackend({
+        "admin_password": "server-admin", "hub": "DEFAULT",
+    })
+    monkeypatch.setattr(backend, "vpncmd_binary", lambda: "/vpncmd")
+    raw = (
+        "SoftEther VPN Command Line Management Utility\n"
+        "Connected to VPN Server localhost.\n"
+        "VPN Server/DEFAULT> UserList\n"
+        "User Name,Full Name,Group Name,Description,Auth Method,Num Logins\n"
+        "1.alice.softether,alice,-,panel,Password Authentication,0\n"
+        "VPN Server/DEFAULT>\n"
+    )
+    monkeypatch.setattr(channel, "run_vpncmd_pty", lambda *args, **kwargs: raw)
+
+    assert backend.user_list() == ["1.alice.softether"]
+    cleaned = backend._cmd("UserList", csv=True)
+    assert cleaned.startswith("User Name,Full Name")
+    assert "Command Line Management" not in cleaned
+
+
+def test_bulk_account_replay_uses_one_live_inventory_session(monkeypatch) -> None:
+    """Discovery and mutations share one authenticated PTY — no login storm."""
+    import app.cores.routing.softether_client as channel
+    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
+
+    backend = LocalSoftEtherBackend({
+        "admin_password": "server-admin", "hub": "DEFAULT",
+    })
+    monkeypatch.setattr(backend, "vpncmd_binary", lambda: "/vpncmd")
+    calls = []
+    transcript = (
+        "SoftEther VPN Command Line Management Utility\n"
+        "User Name,Full Name,Group Name,Description,Auth Method,Num Logins\n"
+        "1.existing.softether,existing,-,panel,Password Authentication,0\n"
+        "1.stale.softether,stale,-,panel,Password Authentication,0\n"
+        "VPN Server/DEFAULT>\n"
+    )
+
+    def run(argv, **kwargs):
+        followups = list(kwargs["followup_factory"](transcript))
+        calls.append((list(argv), kwargs, followups))
+        return transcript
+
+    monkeypatch.setattr(channel, "run_vpncmd_pty", run)
+    backend.users_reconcile([
+        ("1.existing.softether", "existing", "existing-password", True),
+        ("2.missing.l2tp", "missing", "missing-password", False),
+    ], ["1.stale.softether"])
+
+    assert len(calls) == 1
+    argv, kwargs, commands = calls[0]
+    assert argv == ["/vpncmd", "localhost", "/SERVER", "/HUB:DEFAULT", "/CSV"]
+    assert kwargs["commands"] == ["UserList"]
+    assert kwargs["administrator_password"] == "server-admin"
+    assert set(kwargs["secrets"]) == {"existing-password", "missing-password"}
+    assert commands[0] == "UserDelete 1.stale.softether"
+    assert not any(command.startswith("UserCreate 1.existing.softether")
+                   for command in commands)
+    assert any(command.startswith("UserCreate 2.missing.l2tp ")
+               for command in commands)
+    assert "UserPasswordSet 1.existing.softether /PASSWORD:existing-password" in commands
+    assert "UserExpiresSet 1.existing.softether /EXPIRES:none" in commands
+    assert ('UserExpiresSet 2.missing.l2tp '
+            '/EXPIRES:"2000/01/01 00:00:00"') in commands
+
+
+def test_existing_live_user_reconciles_without_duplicate_usercreate() -> None:
+    """Fresh driver memory + existing SoftEther state is a normal replay/edit.
+
+    Reconciliation must discover the live user, rotate credentials if needed,
+    and remain duplicate-save safe without swallowing real backend failures.
+    """
+    class StrictBackend(FakeSEBackend):
+        def __init__(self):
+            super().__init__()
+            self.create_calls: list[str] = []
+            self.delete_calls: list[str] = []
+
+        def user_create(self, username, note=""):
+            self.create_calls.append(username)
+            if username in self.users:
+                raise CoreError("UserCreate failed (error code 66)")
+            self.users[username] = ""
+
+        def user_delete(self, username):
+            self.delete_calls.append(username)
+            super().user_delete(username)
+
+    async def run():
+        backend = StrictBackend()
+        account = _account(1, "alice", password="first-password")
+
+        # Missing live account: create exactly once.
+        initial, _ = _driver(backend=backend)
+        await initial.create_account(account)
+        assert backend.create_calls == ["1.alice"]
+
+        # Restart/fresh driver memory: live account exists, so replay must not
+        # issue UserCreate. Password rotation still applies normally.
+        restarted, _ = _driver(backend=backend)
+        rotated = _account(1, "alice", password="rotated-password")
+        await restarted.update_account(rotated)
+        assert backend.create_calls == ["1.alice"]
+        assert backend.users["1.alice"] == "rotated-password"
+
+        # Duplicate Save and full account replay stay idempotent.
+        await restarted.update_account(rotated)
+        replayed, _ = _driver(backend=backend)
+        await replayed.sync_accounts([rotated])
+        assert backend.create_calls == ["1.alice"]
+
+        await replayed.delete_account("1.alice")
+        assert backend.delete_calls == ["1.alice"]
+        assert "1.alice" not in backend.users
+
+        # Mid-provision failure is retry-safe: the first UserCreate may have
+        # committed before password setup failed. A retry discovers that live
+        # user and continues without creating a duplicate.
+        partial_backend = StrictBackend()
+        real_password_set = partial_backend.user_password_set
+        attempts = 0
+
+        def fail_password_once(username, password):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise CoreError("injected password-stage failure")
+            real_password_set(username, password)
+
+        partial_backend.user_password_set = fail_password_once
+        partial, _ = _driver(backend=partial_backend)
+        bob = _account(2, "bob")
+        with pytest.raises(CoreError, match="injected password-stage failure"):
+            await partial.create_account(bob)
+        assert partial_backend.create_calls == ["2.bob"]
+        await partial.create_account(bob)
+        assert partial_backend.create_calls == ["2.bob"]
+        assert partial_backend.users["2.bob"] == "s3cret"
+
+        # A genuine lookup failure still propagates; the fix is not an error-66
+        # suppressor and does not blindly retry UserCreate.
+        failed, failed_backend = _driver()
+        failed_backend.user_list = lambda: (_ for _ in ()).throw(
+            CoreError("real vpncmd transport failure"))
+        with pytest.raises(CoreError, match="transport failure"):
+            await failed.create_account(_account(3, "carol"))
+
+    asyncio.run(run())
 
 
 def test_vpncmd_managed_hub_uses_server_auth_then_hub_switch(monkeypatch) -> None:
+    import app.cores.routing.softether_client as channel
     from app.cores.drivers.softether.backend import LocalSoftEtherBackend
 
     admin_secret = "server-admin-secret"
     backend = LocalSoftEtherBackend({
         "admin_password": admin_secret, "server": "localhost", "hub": "DEFAULT",
-        "protocol_backoff_seconds": 0,
     })
     monkeypatch.setattr(backend, "vpncmd_binary", lambda: "/vpncmd")
     calls = []
-
-    def run(*args, **kwargs):
-        calls.append((args, kwargs))
-        return subprocess.CompletedProcess(
-            args[0], 0, stdout="The command completed successfully.\n", stderr="")
-
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(
+        channel, "run_vpncmd_pty",
+        lambda argv, **kwargs: (calls.append((list(argv), kwargs)) or
+                                "The command completed successfully.\n"),
+    )
     backend._cmd("UserList", hub_name="ZAGROS-E2E-unit")
-    argv = calls[0][0][0]
-    stdin_script = calls[0][1]["input"]
+    argv, kwargs = calls[0]
     assert argv == ["/vpncmd", "localhost", "/SERVER"]
     assert not any(item.startswith("/HUB:") for item in argv)
-    assert stdin_script == (
-        f"{admin_secret}\nHub ZAGROS-E2E-unit\nUserList\nexit\n")
+    assert kwargs["administrator_password"] == admin_secret
+    assert kwargs["commands"] == ["Hub ZAGROS-E2E-unit", "UserList"]
 
 
 def test_vpncmd_managed_hub_csv_strips_selection_preamble(monkeypatch) -> None:
+    import app.cores.routing.softether_client as channel
     from app.cores.drivers.softether.backend import LocalSoftEtherBackend
 
-    backend = LocalSoftEtherBackend({
-        "admin_password": "server-admin", "protocol_backoff_seconds": 0,
-    })
+    backend = LocalSoftEtherBackend({"admin_password": "server-admin"})
     monkeypatch.setattr(backend, "vpncmd_binary", lambda: "/vpncmd")
     raw = (
         'The Virtual Hub "ZAGROS-E2E-unit" has been selected.\n'
         'Session Name,User Name,Source Host Name\n'
         'SID-test,e2e-user,192.0.2.4\n'
     )
-    monkeypatch.setattr(
-        subprocess, "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args[0], 0, stdout=raw, stderr=""),
-    )
-    result = backend._cmd(
-        "SessionList", csv=True, hub_name="ZAGROS-E2E-unit")
+    monkeypatch.setattr(channel, "run_vpncmd_pty", lambda *args, **kwargs: raw)
+    result = backend._cmd("SessionList", csv=True, hub_name="ZAGROS-E2E-unit")
     assert result.startswith("Session Name,User Name")
     assert "has been selected" not in result
 
@@ -767,7 +887,7 @@ def test_fresh_server_password_recovery_requires_blank_authority(monkeypatch) ->
     assert backend.recover_fresh_server_password() is True
     assert calls == [
         ("", "ServerInfoGet"),
-        ("", "ServerPasswordSet /PASSWORD:persisted-admin"),
+        ("", "ServerPasswordSet persisted-admin"),
     ]
     assert backend.password == "persisted-admin"
 
@@ -808,7 +928,9 @@ def test_second_install_short_circuits_without_download_or_build(tmp_path) -> No
          mock.patch.object(backend, "_install_from_github",
                            lambda: (_ for _ in ()).throw(AssertionError("must not download"))), \
          mock.patch.object(backend, "server_binary",
-                           lambda: "/usr/local/softether/vpnserver"):
+                           lambda: "/usr/local/softether/vpnserver"), \
+         mock.patch.object(backend, "client_binary",
+                           lambda: "/usr/local/softether/vpnclient"):
         out = backend.install_packages()
     assert "already installed" in out
     assert calls == []
@@ -886,7 +1008,7 @@ def test_install_source_build_last_resort_uses_live_tag() -> None:
         assert "--parallel" in argv and "--target" in argv
         build_dir = argv[2]
         Path(build_dir).mkdir(parents=True, exist_ok=True)
-        for name in ("vpnserver", "vpncmd", "hamcore.se2"):
+        for name in ("vpnserver", "vpnclient", "vpncmd", "hamcore.se2"):
             Path(build_dir, name).write_text("binary")
         return "built"
 
@@ -912,7 +1034,7 @@ def test_install_source_build_last_resort_uses_live_tag() -> None:
     assert out == "built SoftEther v9.9.9-test from source (cmake)"
     assert any(c[:2] == ["cmake", "-S"] for c in calls)
     assert any(c[:2] == ["cmake", "--build"] for c in calls)
-    for name in ("vpnserver", "vpncmd", "hamcore.se2"):
+    for name in ("vpnserver", "vpnclient", "vpncmd", "hamcore.se2"):
         assert Path(root, name).exists()
     assert (Path(root, "vpnserver").stat().st_mode & 0o111) != 0
 
@@ -982,8 +1104,10 @@ def test_vpncmd_errors_redact_psk_and_password() -> None:
     secret = "NeverLog9"
     rendered = backend._safe_command(
         f"IPsecEnable /PSK:{secret} /PASSWORD:{secret} /L2TP:yes")
-    assert secret not in rendered
+    positional = backend._safe_command(f"ServerPasswordSet {secret}")
+    assert secret not in rendered and secret not in positional
     assert rendered.count("<redacted>") == 2
+    assert positional == "ServerPasswordSet <redacted>"
 
 
 def test_hub_list_parses_csv_without_switching_primary_context(monkeypatch) -> None:
@@ -1005,15 +1129,15 @@ def test_hub_list_parses_csv_without_switching_primary_context(monkeypatch) -> N
 
 
 def test_vpncmd_error_line_redacts_managed_hub_password(monkeypatch) -> None:
+    import app.cores.routing.softether_client as channel
+
     backend = _se_backend()
     secret = "ManagedHubSecret9"
     monkeypatch.setattr(backend, "vpncmd_binary", lambda: "/vpncmd")
     monkeypatch.setattr(
-        subprocess, "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(
-            args[0], 0,
-            stdout=(f"Error occurred: HubCreate ZAGROS-E2E-unit "
-                    f"/PASSWORD:{secret}\n"), stderr=""),
+        channel, "run_vpncmd_pty",
+        lambda *args, **kwargs: (_ for _ in ()).throw(CoreError(
+            f"Error occurred: HubCreate ZAGROS-E2E-unit /PASSWORD:{secret}")),
     )
     with pytest.raises(CoreError) as caught:
         backend._cmd(

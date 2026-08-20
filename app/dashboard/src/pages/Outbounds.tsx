@@ -40,6 +40,9 @@ const SECURITY_FIELDS: Record<string, Set<string>> = {
   reality: new Set(["sni", "alpn", "fingerprint", "allow_insecure", "reality_public_key", "reality_short_id", "reality_spider_x"]),
 };
 const URL_BASED = new Set(["vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic"]);
+const LEGACY_SOFTETHER_KINDS = new Set([
+  "softether_l2tp", "softether_l2tp_raw", "softether_sstp", "softether_pptp",
+]);
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{1,63}$/;
 
 export default function Outbounds() {
@@ -81,7 +84,7 @@ export default function Outbounds() {
       const result = await api.post<OutboundTest>("/zagros/outbounds/test", ob);
       setTests((s) => ({ ...s, [ob.name]: { loading: false, result } }));
     } catch (e) {
-      setTests((s) => ({ ...s, [ob.name]: { loading: false, result: { ok: false, latency_ms: null, error: e instanceof ApiError ? e.message : t("common.error") } } }));
+      setTests((s) => ({ ...s, [ob.name]: { loading: false, result: { status: "unhealthy", rtt_ms: null, error: e instanceof ApiError ? e.message : t("common.error") } } }));
     }
   };
   const testAll = async () => { for (const ob of items) await testOne(ob); };
@@ -138,38 +141,48 @@ export default function Outbounds() {
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {items.map((ob, idx) => {
             const ts = tests[ob.name];
+            const legacySoftEther = LEGACY_SOFTETHER_KINDS.has(ob.kind);
             return (
               <Card key={ob.name || idx} className={cn(!ob.enabled && "opacity-60")}>
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <StatusDot tone={ts?.result ? (ts.result.ok ? "ok" : "danger") : "muted"} pulse={ts?.loading} />
+                      <StatusDot tone={ts?.result ? (ts.result.status === "healthy" ? "ok" : "danger") : "muted"} pulse={ts?.loading} />
                       <h3 className="truncate text-sm font-semibold">{ob.name || "(unnamed)"}</h3>
                     </div>
                     <p className="mt-1 truncate font-mono text-[11px] text-content-3" dir="ltr">
                       {UPSTREAM.has(ob.kind) ? `${String(ob.settings?.server ?? "?")}:${String(ob.settings?.server_port ?? "?")}` : ob.kind === "core" ? `core: ${String(ob.settings?.core_id ?? "?")}` : ob.kind}
                     </p>
                   </div>
-                  <Badge tone={ob.kind === "block" || ob.kind === "blackhole" ? "danger" : ob.kind === "direct" ? "ok" : "info"}>{ob.kind}</Badge>
+                  <Badge tone={legacySoftEther ? "danger" : ob.kind === "block" || ob.kind === "blackhole" ? "danger" : ob.kind === "pptp" || ob.kind === "l2tp_raw" ? "warn" : ob.kind === "direct" ? "ok" : "info"}>
+                    {legacySoftEther ? `${ob.kind} · legacy delete-only` : ob.kind}
+                  </Badge>
                 </div>
 
                 <div className="mt-3 flex items-center gap-2 text-[11px] text-content-3">
                   {ts?.loading ? "testing…" : ts?.result ? (
-                    ts.result.ok
-                      ? <span className="inline-flex items-center gap-1 text-ok"><Zap size={11} /> healthy · {ts.result.latency_ms ?? "—"} ms</span>
+                    ts.result.status === "healthy"
+                      ? <span className="inline-flex flex-wrap items-center gap-1 text-ok">
+                          <Zap size={11} /> healthy{ts.result.rtt_ms != null ? ` · RTT ${ts.result.rtt_ms} ms` : ""}
+                        </span>
                       : <span className="truncate text-danger" title={ts.result.error}>{ts.result.error ?? "unreachable"}</span>
                   ) : "not tested"}
                 </div>
 
                 <div className="mt-3.5 flex flex-wrap items-center gap-1 border-t border-border pt-3">
-                  <Button variant="ghost" size="sm" onClick={() => testOne(ob)} disabled={ts?.loading}><Zap size={13} /> {t("common.test")}</Button>
-                  <Button variant="ghost" size="sm" onClick={() => setDialog({ ob, index: idx })}><Pencil size={13} /> {t("common.edit")}</Button>
-                  <Button variant="ghost" size="sm" onClick={() => setDialog({ ob: { ...structuredClone(ob), name: `${ob.name}-copy` }, index: null })}><Copy size={13} /></Button>
+                  {!legacySoftEther && <>
+                    <Button variant="ghost" size="sm" onClick={() => testOne(ob)} disabled={ts?.loading}><Zap size={13} /> {t("common.test")}</Button>
+                    <Button variant="ghost" size="sm" onClick={() => setDialog({ ob, index: idx })}><Pencil size={13} /> {t("common.edit")}</Button>
+                    <Button variant="ghost" size="sm" onClick={() => setDialog({ ob: {
+                      ...structuredClone(ob), name: `${ob.name}-copy`,
+                      secret_state: {}, clear_secret_keys: [], sealed_credentials: null,
+                    }, index: null })}><Copy size={13} /></Button>
+                  </>}
                   {ob.kind === "openvpn" && (
                     <Button variant="ghost" size="sm" onClick={() => exportOvpn(ob.name)} title={t("outbounds.export")}><Download size={13} /></Button>
                   )}
                   <div className="ms-auto flex items-center gap-1">
-                    <Switch checked={ob.enabled} label="enabled" onChange={(v) => markDirty(items.map((x, i) => i === idx ? { ...x, enabled: v } : x))} />
+                    {!legacySoftEther && <Switch checked={ob.enabled} label="enabled" onChange={(v) => markDirty(items.map((x, i) => i === idx ? { ...x, enabled: v } : x))} />}
                     <Button variant="ghost" size="icon" onClick={() => setDeleteFor(ob.name)} aria-label="delete"><Trash2 size={14} /></Button>
                   </div>
                 </div>
@@ -219,7 +232,21 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
   const [importing, setImporting] = useState(false);
   const [importOK, setImportOK] = useState("");
   const s = ob.settings as Record<string, unknown>;
-  const setS = (patch: Record<string, unknown>) => setOb((cur) => ({ ...cur, settings: { ...cur.settings, ...patch } }));
+  const setS = (patch: Record<string, unknown>) => setOb((cur) => ({
+    ...cur,
+    settings: { ...cur.settings, ...patch },
+    clear_secret_keys: (cur.clear_secret_keys ?? []).filter((key) => !(key in patch)),
+  }));
+  const clearStoredSecret = (key: string) => setOb((cur) => {
+    const settings = { ...cur.settings };
+    delete settings[key];
+    return {
+      ...cur,
+      settings,
+      secret_state: { ...(cur.secret_state ?? {}), [key]: false },
+      clear_secret_keys: [...new Set([...(cur.clear_secret_keys ?? []), key])],
+    };
+  });
 
   const schema: OutboundKindSchema | undefined = schemas[ob.kind];
   const props = schema?.properties ?? {};
@@ -254,6 +281,9 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
         kind: parsed.kind,
         name: cur.name || (parsed.name_hint ? parsed.name_hint.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) : cur.name),
         settings: parsed.settings,
+        secret_state: parsed.secret_state ?? {},
+        sealed_credentials: parsed.sealed_credentials,
+        clear_secret_keys: [],
       }));
       setImportOK(`imported as ${parsed.kind} — review the fields below`);
       setImportUrl("");
@@ -278,6 +308,7 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
       try {
         const parsed = await api.post<{
           kind: "wireguard"; settings: Record<string, unknown>; name_hint?: string;
+          secret_state?: Record<string, boolean>; sealed_credentials?: string | null;
         }>("/zagros/utils/parse-wireguard-profile", {
           content: String(reader.result ?? ""),
         });
@@ -286,6 +317,9 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
           kind: "wireguard",
           name: cur.name || parsed.name_hint || file.name.replace(/\.conf$/i, ""),
           settings: parsed.settings,
+          secret_state: parsed.secret_state ?? {},
+          sealed_credentials: parsed.sealed_credentials,
+          clear_secret_keys: [],
         }));
         setImportOK(`imported ${file.name} — review the endpoint and keys below`);
       } catch (e) {
@@ -301,7 +335,10 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
     if (!NAME_RE.test(ob.name)) return "name: 2–64 chars, letters/digits with -_. separators (uppercase is fine)";
     if (isNew && takenNames.has(ob.name)) return `outbound "${ob.name}" already exists`;
     for (const key of required) {
-      if (String(s[key] ?? "").trim() === "") return `${key} is required for kind "${ob.kind}"`;
+      const stored = ob.secret_state?.[key] === true
+        && !(ob.clear_secret_keys ?? []).includes(key);
+      if (String(s[key] ?? "").trim() === "" && !stored)
+        return `${key} is required for kind "${ob.kind}"`;
     }
     if (ob.kind === "core" && !String(s.core_id ?? "")) return "choose the core to chain";
     return "";
@@ -393,7 +430,10 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
           <Input value={ob.name} onChange={(e) => setOb({ ...ob, name: e.target.value })} placeholder="Warp-EU" dir="ltr" />
         </Field>
         <Field label="protocol" required>
-          <Select value={ob.kind} onChange={(e) => setOb({ ...ob, kind: e.target.value as Outbound["kind"], settings: {} })}>
+          <Select value={ob.kind} onChange={(e) => setOb({
+            ...ob, kind: e.target.value as Outbound["kind"], settings: {},
+            secret_state: {}, clear_secret_keys: [], sealed_credentials: null,
+          })}>
             {Object.keys(schemas).map((k) => {
               const supported = schemas[k]?.["x-supported"] !== false;
               const availability = schemas[k]?.["x-availability"] ?? "unsupported";
@@ -406,6 +446,13 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
           <div className="sm:col-span-2 rounded-xl border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn">
             <b>{schema["x-availability"].replace(/_/g, " ")}:</b>{" "}
             {schema["x-disabled-reason"] ?? "This client runtime is not currently available."}
+          </div>
+        )}
+
+        {schema?.["x-security-warning"] && (
+          <div role="alert" className="sm:col-span-2 rounded-xl border border-danger/40 bg-danger-soft px-3 py-2 text-xs text-danger">
+            <b>{schema["x-security-class"]?.replace(/_/g, " ") ?? "security warning"}:</b>{" "}
+            {schema["x-security-warning"]}
           </div>
         )}
 
@@ -444,15 +491,39 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
                           {f.enum.map((o) => <option key={o} value={o}>{o === "" ? "—" : o}</option>)}
                         </Select>
                       ) : widget === "textarea" ? (
-                        <Textarea rows={3} dir="ltr" className="font-mono text-[11px]"
-                          value={String(value ?? "")} onChange={(e) => setS({ [key]: e.target.value })} />
+                        <div className="space-y-1.5">
+                          <Textarea rows={3} dir="ltr" className="font-mono text-[11px]"
+                            placeholder={f["x-secret"] && ob.secret_state?.[key] ? "stored securely — blank keeps it" : ""}
+                            value={String(value ?? "")} onChange={(e) => setS({ [key]: e.target.value })} />
+                          {f["x-secret"] && ob.secret_state?.[key] && !(ob.clear_secret_keys ?? []).includes(key) && (
+                            <button type="button" className="text-[10.5px] text-content-3 underline hover:text-danger"
+                              onClick={() => clearStoredSecret(key)}>
+                              clear stored credential
+                            </button>
+                          )}
+                        </div>
+                      ) : widget === "password" ? (
+                        <div className="space-y-1.5">
+                          <Input
+                            type="password" dir="ltr"
+                            placeholder={ob.secret_state?.[key] ? "stored securely — blank keeps it" : ""}
+                            value={String(value ?? "")}
+                            onChange={(e) => setS({ [key]: e.target.value })}
+                          />
+                          {ob.secret_state?.[key] && !(ob.clear_secret_keys ?? []).includes(key) && (
+                            <button type="button" className="text-[10.5px] text-content-3 underline hover:text-danger"
+                              onClick={() => clearStoredSecret(key)}>
+                              clear stored credential
+                            </button>
+                          )}
+                        </div>
                       ) : (
                         <Input
-                          type={widget === "password" ? "password" : widget === "number" ? "number" : "text"}
+                          type={widget === "number" ? "number" : "text"}
                           min={f.minimum} max={f.maximum}
                           dir="ltr"
                           placeholder={f.default !== undefined ? String(f.default) : ""}
-                          value={widget === "number" ? String(value ?? "") : String(value ?? "")}
+                          value={String(value ?? "")}
                           onChange={(e) => setS({ [key]: widget === "number" ? (e.target.value === "" ? "" : Number(e.target.value)) : e.target.value })}
                         />
                       )}

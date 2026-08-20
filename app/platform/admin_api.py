@@ -25,6 +25,8 @@ platform) with the surfaces the unified dashboard needs:
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import secrets
 import shlex
 import socket
@@ -37,14 +39,26 @@ from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field, SecretStr
 
 from app.cores.capabilities import outbound_capability, validate_selectable
-from app.cores.exceptions import CoreNotFoundError
+from app.cores.exceptions import CoreError, CoreNotFoundError
 from app.cores.outbounds.manager import OutboundManager
-from app.cores.outbounds.model import Outbound, OutboundKind
+from app.cores.outbounds.model import (
+    LEGACY_SOFTETHER_OUTBOUND_KINDS,
+    Outbound,
+    OutboundKind,
+    PPP_CLIENT_KINDS,
+)
+from app.cores.outbounds.repository import (
+    OutboundSecretCodec,
+    OutboundWrite,
+    is_secret_setting,
+    split_settings,
+)
 from app.cores.routing.model import RoutingRule
 from app.platform import certificates
 from app.platform.routers import get_runtime, zagros_admin_router
 
 _STARTED_MONO = time.monotonic()
+_TEST_LOG = logging.getLogger("zagros.admin.outbound_test")
 
 _RULES_KEY = "admin.routing.rules.v1"
 _OUTBOUNDS_KEY = "admin.outbounds.v1"
@@ -131,6 +145,7 @@ async def cores_registry(runtime=Depends(get_runtime)):
             "default_settings": _mask_settings(meta.default_settings),
             "driver_version": meta.driver_version,
             "homepage": meta.homepage,
+            "security_class": meta.security_class,
             "installed": core_id in installed,
         })
     return {"registry": catalog}
@@ -188,6 +203,7 @@ async def _core_view(runtime, core_id: str, status_by_id: dict) -> dict:
         "provides": sorted(meta.provides),
         "requires": sorted(meta.requires),
         "driver_version": meta.driver_version,
+        "security_class": meta.security_class,
         "studio_inbounds_path": meta.studio_inbounds_path,
         "config_schema": meta.config_schema,
         "state": state_value or "installed",
@@ -234,6 +250,7 @@ async def cores_capability_matrix(runtime=Depends(get_runtime)):
         softether_transport_capabilities,
     )
     from app.cores.matrix import FEATURES, capability_matrix, routing_pair_matrix
+    from app.cores.drivers.pptp.capabilities import provider_capability
 
     installed = set(runtime.core_manager.list_cores())
     softether = await asyncio.to_thread(softether_transport_capabilities, runtime)
@@ -242,6 +259,9 @@ async def cores_capability_matrix(runtime=Depends(get_runtime)):
             "cores": capability_matrix(installed=installed),
             "all": capability_matrix(),
             "routing": routing_pair_matrix(installed=installed),
+            "provider_capabilities": {
+                "pptp": provider_capability(installed="pptp" in installed),
+            },
             "softether_transports": softether}
 
 
@@ -401,8 +421,15 @@ async def cores_install(core_id: str, body: CoreInstallBody, runtime=Depends(get
     if core_id not in available_drivers():
         raise HTTPException(404, f"unknown core '{core_id}' — see /cores/registry")
     try:
+        from app.cores.registry import get_driver_class
+
+        # Legacy/insecure providers are always installed disabled. Enabling is
+        # a separate explicit operation after both backend-validated safety
+        # acknowledgements and an inbound exist.
+        security_class = get_driver_class(core_id).metadata.security_class
+        enabled = False if security_class == "legacy_insecure" else body.enabled
         state = await runtime.core_manager.install_core(
-            core_id, body.settings, enabled=body.enabled)
+            core_id, body.settings, enabled=enabled)
         if core_id != "xray":
             # Service cores already have their initial listener at install
             # time. Give each real inbound its own default Host entry once;
@@ -417,7 +444,7 @@ async def cores_install(core_id: str, body: CoreInstallBody, runtime=Depends(get
                     runtime.core_hosts, core_id, [item.tag for item in group.inbounds])
     except Exception as exc:
         raise _err(exc) from exc
-    return {"ok": True, "core": core_id, "state": state.value, "enabled": body.enabled}
+    return {"ok": True, "core": core_id, "state": state.value, "enabled": enabled}
 
 
 @zagros_admin_router.post("/cores/{core_id}/uninstall")
@@ -436,6 +463,22 @@ async def cores_uninstall(core_id: str, body: CoreUninstallBody,
         if states.get(core_id, {}).get("state") == "running":
             await manager.stop_core(core_id)  # in-process: we CAN stop it first
         await manager.uninstall_core(core_id, purge=body.purge, force=True)
+        if body.purge:
+            # Purge only this provider's desired-state artifacts. Historical
+            # unrelated users/cores/rules are never touched.
+            rows = await asyncio.to_thread(
+                runtime.users.accounts_of_core, core_id, decrypt=False)
+            for row in rows:
+                await asyncio.to_thread(
+                    runtime.users.delete_account,
+                    user_id=int(row["user_id"]), core_id=core_id,
+                    account_id=str(row["account_id"]),
+                )
+            await runtime.studio_store.save_document(core_id, {})
+            grouped = await runtime.core_hosts.list_grouped(core_id)
+            if grouped:
+                await runtime.core_hosts.replace_tags(
+                    core_id, {tag: [] for tag in grouped})
     except Exception as exc:
         raise _err(exc) from exc
     return {"ok": True, "core": core_id, "purged": body.purge}
@@ -569,9 +612,36 @@ async def _save_rules(runtime, rules: list[RoutingRule]) -> list[RoutingRule]:
 
 async def _load_outbounds(runtime) -> list[Outbound]:
     raw = await runtime.kv.get_value(_OUTBOUNDS_KEY)
-    if not raw:
-        return []
-    return [Outbound.model_validate(item) for item in raw]
+    return OutboundSecretCodec(runtime.cipher).decode(raw)
+
+
+async def _merge_outbound_writes(
+    runtime, writes: list[OutboundWrite],
+) -> list[Outbound]:
+    """Restore omitted encrypted credentials before strict profile validation."""
+    existing = await _load_outbounds(runtime)
+    try:
+        merged = OutboundSecretCodec(runtime.cipher).merge_writes(writes, existing)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    existing_by_name = {outbound.name: outbound for outbound in existing}
+    for outbound in merged:
+        if outbound.kind not in LEGACY_SOFTETHER_OUTBOUND_KINDS:
+            continue
+        previous = existing_by_name.get(outbound.name)
+        if previous is None:
+            raise HTTPException(
+                422,
+                f"deprecated outbound kind '{outbound.kind.value}' cannot be created; "
+                "use its canonical independent provider",
+            )
+        if outbound != previous:
+            raise HTTPException(
+                422,
+                f"deprecated outbound '{outbound.name}' is historical/read-only; "
+                "it may be retained unchanged or deleted",
+            )
+    return merged
 
 
 def _sync_manager(manager: OutboundManager, stored: list[Outbound]) -> None:
@@ -594,9 +664,17 @@ async def _save_outbounds(runtime, outbounds: list[Outbound]) -> list[Outbound]:
     names = [o.name for o in outbounds]
     if len(names) != len(set(names)):
         raise HTTPException(422, "duplicate outbound names are not allowed")
-    _validate_outbound_capabilities(outbounds, runtime)
+    # Unchanged historical aliases may pass through solely so operators can
+    # save other rows or delete aliases incrementally. `_merge_outbound_writes`
+    # forbids creating or mutating them, and they remain absent from all public
+    # schemas/capabilities. Canonical rows still receive full runtime checks.
+    _validate_outbound_capabilities(
+        [outbound for outbound in outbounds
+         if outbound.kind not in LEGACY_SOFTETHER_OUTBOUND_KINDS],
+        runtime,
+    )
     await runtime.kv.set_value(
-        _OUTBOUNDS_KEY, [o.model_dump(mode="json") for o in outbounds])
+        _OUTBOUNDS_KEY, OutboundSecretCodec(runtime.cipher).encode(outbounds))
     _sync_manager(runtime.outbound_manager, outbounds)
     return outbounds
 
@@ -645,11 +723,35 @@ async def routing_sources(runtime=Depends(get_runtime)):
                 "tag": spec["tags"][0], "protocol": "softether-managed-hub",
                 "port": native_port, "routing_only": True,
             })
+    owners: dict[str, set[str]] = {}
+    for group in groups:
+        for inbound in group.get("inbounds", []):
+            tag = str(inbound.get("tag") or "")
+            if tag:
+                owners.setdefault(tag, set()).add(str(group["core_id"]))
+    for group in groups:
+        core_id = str(group["core_id"])
+        for inbound in group.get("inbounds", []):
+            tag = str(inbound.get("tag") or "")
+            inbound["source_core"] = core_id
+            inbound["source_id"] = f"{core_id}:{tag}"
+            inbound["duplicate_tag"] = len(owners.get(tag, set())) > 1
     return {"groups": groups}
 
 
-async def _routing_source_core_map(runtime) -> dict[str, str]:
-    """Resolve every live routing-source tag to its owning core."""
+async def _routing_source_core_map(
+    runtime, rules: list[RoutingRule] | None = None,
+) -> dict[str, str]:
+    """Resolve live tags and reject ambiguous references before mutation."""
+    if rules:
+        for rule in rules:
+            tags = list(rule.matcher.inbounds)
+            repeated = sorted({tag for tag in tags if tags.count(tag) > 1})
+            if repeated:
+                raise CoreError(
+                    f"routing rule '{rule.name}' contains duplicate inbound "
+                    f"tag(s) {repeated}; select each inbound once"
+                )
     payload = await routing_sources(runtime)
     mapping: dict[str, str] = {}
     duplicates: set[str] = set()
@@ -662,11 +764,19 @@ async def _routing_source_core_map(runtime) -> dict[str, str]:
             if tag in mapping and mapping[tag] != core_id:
                 duplicates.add(tag)
             mapping[tag] = core_id
-    if duplicates:
-        # An unqualified tag cannot identify a dataplane safely. Refusing it is
-        # preferable to whichever group happened to be returned last.
-        for tag in duplicates:
-            mapping.pop(tag, None)
+    for tag in duplicates:
+        mapping.pop(tag, None)
+    if rules:
+        referenced = {
+            tag for rule in rules for tag in rule.matcher.inbounds
+            if tag in duplicates
+        }
+        if referenced:
+            raise CoreError(
+                "routing rule references duplicate inbound tag(s) "
+                f"{sorted(referenced)} owned by multiple cores; rename the "
+                "inbounds before saving/deploying"
+            )
     return mapping
 
 
@@ -693,7 +803,10 @@ async def routing_targets(runtime=Depends(get_runtime)):
             "name": outbound.name,
             "kind": outbound.kind.value,
             "state": capability.state.value,
-            "selectable": capability.state.value == "supported",
+            # NOT_INSTALLED profiles remain configurable; deployment reports
+            # the missing runtime honestly. Only unsupported/not-applicable
+            # provider identities are non-selectable.
+            "selectable": capability.selectable,
             "direction": capability.direction,
             "dataplane": capability.dataplane.value,
             "contexts": contexts,
@@ -731,7 +844,7 @@ async def routing_save(body: RoutingSetBody, runtime=Depends(get_runtime)):
         if policy_router is not None:
             policy_router.validate_plan(
                 normalized, outbounds.values(),
-                source_core_map=await _routing_source_core_map(runtime),
+                source_core_map=await _routing_source_core_map(runtime, normalized),
             )
         for rule in normalized:
             if rule.action.value != "route_to":
@@ -743,7 +856,7 @@ async def routing_save(body: RoutingSetBody, runtime=Depends(get_runtime)):
             policy_router = getattr(runtime, "policy_router", None)
             mode = (policy_router._mode(outbound.kind, outbound.settings)  # noqa: SLF001
                     if policy_router is not None else None)
-            policy_cores = {"xray", "sing-box", "openvpn", "wireguard", "softether", "ssh"}
+            policy_cores = {"xray", "sing-box", "openvpn", "wireguard", "softether", "ssh", "pptp"}
             policy_required = bool(
                 policy_cores.intersection(runtime.core_manager.list_cores()))
             if mode and rule.enabled and policy_required:
@@ -777,7 +890,7 @@ async def routing_preview(body: RoutingBody, runtime=Depends(get_runtime)):
         if policy_router is not None:
             policy_router.validate_plan(
                 normalized, outbounds, body.core_ids,
-                source_core_map=await _routing_source_core_map(runtime),
+                source_core_map=await _routing_source_core_map(runtime, normalized),
             )
         report = await runtime.routing_engine.preview(
             normalized, core_ids=body.core_ids, outbounds=outbounds)
@@ -800,7 +913,7 @@ async def routing_deploy(body: RoutingBody, runtime=Depends(get_runtime)):
         if policy_router is not None:
             policy_router.validate_plan(
                 normalized, outbounds, body.core_ids,
-                source_core_map=await _routing_source_core_map(runtime),
+                source_core_map=await _routing_source_core_map(runtime, normalized),
             )
     except Exception as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -858,23 +971,26 @@ async def outbounds_list(runtime=Depends(get_runtime)):
     from app.cores.capabilities import outbound_capabilities
 
     outbounds = await _load_outbounds(runtime)
+    codec = OutboundSecretCodec(runtime.cipher)
     return {
-        "outbounds": [o.model_dump(mode="json") for o in outbounds],
+        "outbounds": [codec.public_view(o) for o in outbounds],
         "capabilities": {
             kind.value: capability.public()
             for kind, capability in outbound_capabilities(runtime).items()
+            if kind not in LEGACY_SOFTETHER_OUTBOUND_KINDS
         },
     }
 
 
 class OutboundsSetBody(BaseModel):
-    outbounds: list[Outbound] = Field(default_factory=list)
+    outbounds: list[OutboundWrite] = Field(default_factory=list)
 
 
 @zagros_admin_router.put("/outbounds")
 async def outbounds_save(body: OutboundsSetBody, runtime=Depends(get_runtime)):
     try:
-        saved = await _save_outbounds(runtime, body.outbounds)
+        candidates = await _merge_outbound_writes(runtime, body.outbounds)
+        saved = await _save_outbounds(runtime, candidates)
     except HTTPException:
         raise
     except ValueError as exc:
@@ -935,28 +1051,132 @@ async def _udp_outbound_preflight(server: str, port: int) -> tuple[float, str]:
         f"udp {server}:{port} route ready; protocol authentication runs on deploy"
 
 
+def _test_result(
+    *, status: str, rtt_ms: float | None = None, error: str | None = None,
+    availability: str | None = None,
+) -> dict[str, Any]:
+    """The public Test contract: status plus one optional real RTT only."""
+    result: dict[str, Any] = {"status": status, "rtt_ms": rtt_ms}
+    if error:
+        result["error"] = error
+    if availability:
+        result["availability"] = availability
+    return result
+
+
 async def _test_outbound(runtime, outbound: Outbound) -> dict[str, Any]:
     """Protocol-aware endpoint test; never TCP-probe a UDP-only profile."""
     capability = outbound_capability(outbound.kind, runtime)
     if not capability.selectable:
-        return {"ok": False, "latency_ms": None,
-                "availability": capability.state.value,
-                "error": capability.reason or "outbound runtime is unavailable"}
+        return _test_result(
+            status="unhealthy", availability=capability.state.value,
+            error=capability.reason or "outbound runtime is unavailable")
     if outbound.kind is OutboundKind.CORE:
         core_id = str(outbound.settings.get("core_id", ""))
         manager = runtime.core_manager
         if core_id not in manager.list_cores():
-            return {"ok": False, "error": f"target core '{core_id}' is not installed",
-                    "latency_ms": None}
+            return _test_result(
+                status="unhealthy",
+                error=f"target core '{core_id}' is not installed")
         states = await runtime.core_state.load()
         state = states.get(core_id, {}).get("state", "installed")
         running = state == "running"
-        return {"ok": running, "latency_ms": None,
-                "detail": f"target core state: {state}"}
+        return _test_result(status="healthy" if running else "unhealthy")
     if outbound.kind in (OutboundKind.DIRECT, OutboundKind.BLOCK,
                          OutboundKind.BLACKHOLE, OutboundKind.DNS):
-        return {"ok": True, "latency_ms": None,
-                "detail": f"'{outbound.kind.value}' needs no remote endpoint"}
+        return _test_result(status="healthy")
+    if outbound.kind in PPP_CLIENT_KINDS:
+        # A TCP/UDP port probe is not a VPN test.  Establish the real isolated
+        # provider domain together with all currently stored domains, collect
+        # tunnel/interface/session health, then restore the exact persisted set.
+        policy = getattr(runtime, "policy_router", None)
+        if policy is None:
+            return _test_result(
+                status="unhealthy", error="Linux policy router is unavailable")
+        persisted = await _load_outbounds(runtime)
+        candidates = {item.name: item for item in persisted if item.enabled}
+        # Always establish a fresh disposable domain. Reusing an already-ready
+        # persisted profile made Test measure two dictionary reconciliations,
+        # not tunnel setup or network RTT.
+        probe_outbound = outbound.model_copy(
+            update={"name": f"zgtest-{secrets.token_hex(6)}"})
+        candidates[probe_outbound.name] = probe_outbound
+        error: Exception | None = None
+        view: dict[str, Any] | None = None
+        diagnostics: dict[str, Any] | None = None
+        try:
+            domains = await asyncio.to_thread(policy.prepare, candidates.values())
+            domain = domains.get(probe_outbound.name)
+            if domain is None or not domain.ready:
+                raise CoreError("provider returned no ready policy domain")
+            view = next((item for item in policy.domain_views()
+                         if item["outbound"] == probe_outbound.name), None)
+            if not view or not view.get("ready"):
+                raise CoreError("provider tunnel health check did not stay ready")
+            diagnostics = await asyncio.to_thread(
+                policy.measure_ppp, domain, probe_outbound)
+        except Exception as exc:  # noqa: BLE001 - result is returned after rollback
+            error = exc
+        rollback_error: Exception | None = None
+        try:
+            await asyncio.to_thread(
+                policy.prepare, [item for item in persisted if item.enabled])
+        except Exception as exc:  # noqa: BLE001 - report rollback loss explicitly
+            rollback_error = exc
+        if rollback_error is not None:
+            primary = "provider test failed before rollback"
+            if error is not None:
+                primary = f"{type(error).__name__}: {str(error)[:400]}"
+                for key, value in outbound.settings.items():
+                    if is_secret_setting(key) and value not in (None, ""):
+                        primary = primary.replace(str(value), "<redacted>")
+            rollback = f"{type(rollback_error).__name__}: {str(rollback_error)[:400]}"
+            for key, value in outbound.settings.items():
+                if is_secret_setting(key) and value not in (None, ""):
+                    rollback = rollback.replace(str(value), "<redacted>")
+            return _test_result(
+                status="unhealthy",
+                error=(
+                    f"{outbound.kind.value} test failed: {primary}; "
+                    f"rollback failed: {rollback}"
+                ),
+            )
+        if error is not None:
+            message = str(error)
+            for key, value in outbound.settings.items():
+                if is_secret_setting(key) and value not in (None, ""):
+                    message = message.replace(str(value), "<redacted>")
+            return _test_result(
+                status="unhealthy",
+                error=f"{type(error).__name__}: {message[:400]}",
+            )
+        assert diagnostics is not None
+        # Keep credential-free evidence in the server log for operators. The
+        # public response deliberately has one measurement only: the
+        # post-ready tunnel RTT window selected by policy.
+        evidence = {
+            "protocol": outbound.kind.value,
+            "probe_target": diagnostics.get("probe_target"),
+            "probe_url": diagnostics.get("probe_url"),
+            "timestamp": diagnostics.get("measurement_timestamp"),
+            "interface": diagnostics.get("interface"),
+            "namespace": diagnostics.get("namespace"),
+            "route_before": diagnostics.get("route_before"),
+            "route": diagnostics.get("route"),
+            "warmup_samples": diagnostics.get("warmup_samples"),
+            "measurement_window_samples": diagnostics.get("measurement_window_samples"),
+            "selected_rtt_ms": diagnostics.get("selected_rtt_ms"),
+            "tunnel_https_status": (diagnostics.get("tunnel_https") or {}).get("status"),
+            "counter_delta": diagnostics.get("counter_delta"),
+        }
+        # WARNING is intentional: the production image's default log level
+        # suppresses INFO, while this evidence must remain available without
+        # exposing the full internal diagnostics in the public API.
+        _TEST_LOG.warning("outbound-test-evidence %s", json.dumps(evidence, sort_keys=True))
+        return _test_result(
+            status="healthy",
+            rtt_ms=float(diagnostics["selected_rtt_ms"]),
+        )
 
     settings = outbound.settings
     if outbound.kind is OutboundKind.OPENVPN:
@@ -968,23 +1188,26 @@ async def _test_outbound(runtime, outbound: Outbound) -> dict[str, Any]:
         server = str(server).strip()
         port = int(port)
     except (TypeError, ValueError):
-        return {"ok": False, "latency_ms": None,
-                "error": f"invalid server/server_port: {server!r}:{port!r}"}
+        return _test_result(
+            status="unhealthy",
+            error=f"invalid server/server_port: {server!r}:{port!r}")
     if not server or not 1 <= port <= 65535:
-        return {"ok": False, "latency_ms": None,
-                "error": f"invalid server/server_port: {server!r}:{port!r}"}
+        return _test_result(
+            status="unhealthy",
+            error=f"invalid server/server_port: {server!r}:{port!r}")
 
     udp = outbound.kind in {
         OutboundKind.HYSTERIA2, OutboundKind.TUIC, OutboundKind.WIREGUARD,
     } or (outbound.kind is OutboundKind.OPENVPN and transport.startswith("udp"))
     if udp:
         try:
-            latency, detail = await _udp_outbound_preflight(server, port)
+            latency, _detail = await _udp_outbound_preflight(server, port)
         except Exception as exc:  # noqa: BLE001 - preflight failure is the answer
             message = str(exc).strip() or "UDP endpoint preflight failed"
-            return {"ok": False, "latency_ms": None,
-                    "error": f"{type(exc).__name__}: {message}"}
-        return {"ok": True, "latency_ms": latency, "detail": detail}
+            return _test_result(
+                status="unhealthy",
+                error=f"{type(exc).__name__}: {message}")
+        return _test_result(status="healthy", rtt_ms=latency)
 
     started = time.monotonic()
     try:
@@ -992,21 +1215,22 @@ async def _test_outbound(runtime, outbound: Outbound) -> dict[str, Any]:
             asyncio.open_connection(server, port), timeout=6)
     except Exception as exc:  # noqa: BLE001 - dial failure IS the answer
         message = str(exc).strip() or f"TCP connection to {server}:{port} failed"
-        return {"ok": False, "latency_ms": None,
-                "error": f"{type(exc).__name__}: {message}"}
+        return _test_result(
+            status="unhealthy",
+            error=f"{type(exc).__name__}: {message}")
     latency = round((time.monotonic() - started) * 1000, 1)
     writer.close()
     try:
         await writer.wait_closed()
     except Exception:  # noqa: BLE001, S110 - close is best-effort cleanup
         pass
-    return {"ok": True, "latency_ms": latency,
-            "detail": f"tcp {server}:{port} reachable"}
+    return _test_result(status="healthy", rtt_ms=latency)
 
 
 @zagros_admin_router.post("/outbounds/test")
-async def outbounds_test(body: Outbound, runtime=Depends(get_runtime)):
-    return await _test_outbound(runtime, body)
+async def outbounds_test(body: OutboundWrite, runtime=Depends(get_runtime)):
+    outbound = (await _merge_outbound_writes(runtime, [body]))[0]
+    return await _test_outbound(runtime, outbound)
 
 
 # --------------------------------------------------------------------- #
@@ -1036,7 +1260,16 @@ async def parse_share_url_endpoint(body: ShareURLBody, runtime=Depends(get_runti
         parsed = parse_share_url(body.url)
     except ShareURLError as exc:
         raise HTTPException(422, str(exc)) from exc
-    return {**parsed.model_dump(mode="json"), "supported_schemes": SUPPORTED_SCHEMES}
+    payload = parsed.model_dump(mode="json")
+    public, credentials = split_settings(payload.get("settings") or {})
+    sealed = OutboundSecretCodec(runtime.cipher).seal_import_credentials(
+        parsed.kind, credentials)
+    payload["settings"] = public
+    payload["secret_state"] = {
+        key: value not in (None, "") for key, value in sorted(credentials.items())
+    }
+    payload["sealed_credentials"] = sealed
+    return {**payload, "supported_schemes": SUPPORTED_SCHEMES}
 
 
 class WireGuardProfileBody(BaseModel):
@@ -1057,9 +1290,16 @@ async def parse_wireguard_profile_endpoint(
         settings = parse_wireguard_profile(body.content)
     except WireGuardProfileError as exc:
         raise HTTPException(422, str(exc)) from exc
+    public, credentials = split_settings(settings)
     return {
         "kind": OutboundKind.WIREGUARD.value,
-        "settings": settings,
+        "settings": public,
+        "secret_state": {
+            key: value not in (None, "") for key, value in sorted(credentials.items())
+        },
+        "sealed_credentials": OutboundSecretCodec(
+            runtime.cipher).seal_import_credentials(
+                OutboundKind.WIREGUARD, credentials),
         "name_hint": f"wireguard-{settings['server_port']}",
     }
 
@@ -1106,6 +1346,13 @@ async def outbounds_export(name: str, runtime=Depends(get_runtime)):
         raise HTTPException(404, f"outbound '{name}' not found")
     if outbound.kind is not OutboundKind.OPENVPN:
         raise HTTPException(422, "only openvpn outbounds export a .ovpn profile")
+    if any(outbound.settings.get(key) for key in ("ovpn_content", "key_pem")):
+        raise HTTPException(
+            409,
+            "credential-bearing OpenVPN profile export is disabled: API responses "
+            "never return stored private-key/profile material; use the original "
+            "secure credential source",
+        )
     try:
         content = _render_ovpn(name, outbound.settings)
     except ValueError as exc:
@@ -1117,26 +1364,27 @@ async def outbounds_export(name: str, runtime=Depends(get_runtime)):
 
 
 class OutboundDeployBody(BaseModel):
-    outbounds: list[Outbound] = Field(default_factory=list)
+    outbounds: list[OutboundWrite] = Field(default_factory=list)
     core_ids: list[str] | None = None
 
 
 @zagros_admin_router.post("/outbounds/deploy")
 async def outbounds_deploy(body: OutboundDeployBody, runtime=Depends(get_runtime)):
     previous = await _load_outbounds(runtime)
-    names = [outbound.name for outbound in body.outbounds]
+    candidates = await _merge_outbound_writes(runtime, body.outbounds)
+    names = [outbound.name for outbound in candidates]
     if len(names) != len(set(names)):
         raise HTTPException(422, "duplicate outbound names are not allowed")
-    _validate_outbound_capabilities(body.outbounds, runtime)
+    _validate_outbound_capabilities(candidates, runtime)
     try:
         # Deploy-before-persist: a bad profile/interface/table cannot replace
         # the last known-good desired state. The manager receives a temporary
         # candidate registry; SQL changes only after every runtime converges.
-        _sync_manager(runtime.outbound_manager, body.outbounds)
+        _sync_manager(runtime.outbound_manager, candidates)
         report = await runtime.outbound_manager.deploy(core_ids=body.core_ids)
         await runtime.kv.set_value(
             _OUTBOUNDS_KEY,
-            [o.model_dump(mode="json") for o in body.outbounds],
+            OutboundSecretCodec(runtime.cipher).encode(candidates),
         )
     except HTTPException:
         raise

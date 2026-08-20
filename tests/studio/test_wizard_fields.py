@@ -223,11 +223,11 @@ def test_softether_wizard_is_capability_aware_and_psk_is_secure_default():
     first = blueprint_for("softether")
     second = blueprint_for("softether")
     ids = {p["id"] for p in first["protocols"]}
-    assert {"softether", "l2tp", "l2tp_raw", "sstp", "ovpn", "pptp"} <= ids
-    pptp = next(p for p in first["protocols"] if p["id"] == "pptp")
-    assert pptp["availability"] == "unsupported"
-    assert pptp["transports"] == []
-    assert "PptpGet" in pptp["reason"]
+    assert {"softether", "l2tp", "l2tp_raw", "sstp", "ovpn"} <= ids
+    assert "pptp" not in ids  # independent ACCEL-PPP provider, never SoftEther
+    pptp = blueprint_for("pptp")["protocols"][0]
+    assert pptp["security_class"] == "legacy_insecure"
+    assert pptp["fixed_port"] is True and pptp["default_port"] == 1723
     l2tp = next(p for p in first["protocols"] if p["id"] == "l2tp")
     psk = next(f for t in l2tp["transports"] for s in t["securities"]
                for f in s["fields"] if f["key"] == "ipsec_psk")

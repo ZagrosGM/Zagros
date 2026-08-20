@@ -25,7 +25,8 @@
 | **hysteria2** | apernet/hysteria | **Traffic Stats API رسمی** (`/traffic`, `/online`, `/kick`, `/dump/streams`) + auth userpass + Masquerade + ACL | **Driver مستقل** | sing-box هیچ‌کدام از این سطح مدیریتی را برای hy2 ندارد |
 | **tuic** | EAimTY/tuic | فقط فایل config (users: uuid→pass)؛ **هیچ stats API در پروتکل وجود ندارد** | **Driver مستقلِ نازک (نگه‌داشته شد با توضیح صادقانه)** | در ادامه |
 | **ssh** | OpenSSH | account سیستم + `Match`/`sshd_config` + `ps`/session probe | **Driver مستقل** | — |
-| **softether** | SoftEther VPN Server | `vpncmd` RPC (Hub/User/Session/SecureNAT/IPsec) | **Driver مستقل** | L2TP/PPTP از همین سرو مدیریت می‌شود → درایور جدا برای L2TP لازم نیست |
+| **softether** | SoftEther VPN Server | `vpncmd` RPC (Hub/User/Session/SecureNAT/IPsec) | **Driver مستقل** | L2TP/SSTP compatibility is SoftEther-owned; PPTP is not supported by SoftEther |
+| **pptp** | Independent PPTP Server — Legacy / Insecure | ACCEL-PPP 1.14.0, TCP/1723 + GRE/47 | **Independent driver** | SoftEther remains unsupported |
 
 ## پرسش کلیدی: Hysteria2 و TUIC فقط «inboundهای sing-box» نیستند؟
 

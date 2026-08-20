@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "distribution": "Debian 13 (trixie)",
+  "architecture": "amd64",
+  "captured_at": "2026-08-19T11:48:25Z",
+  "repository": "https://deb.debian.org/debian trixie/main and https://deb.debian.org/debian-security trixie-security/main",
+  "packages": [
+    {
+      "package": "ppp",
+      "version": "2.5.2-1+1",
+      "filename": "ppp_2.5.2-1+1_amd64.deb",
+      "sha256": "571ec978a4958e04da89779864b56faceb274081805973b18b43f551864fcd4b",
+      "upstream": "https://ppp.samba.org/",
+      "license": "per-file mixed BSD/GPL; Debian copyright permits redistribution"
+    },
+    {
+      "package": "xl2tpd",
+      "version": "1.3.18-1+b1",
+      "filename": "xl2tpd_1.3.18-1+b1_amd64.deb",
+      "sha256": "dd6fdf32b90f9f7d516f5251e1abdb65851156c80163a41aab60cf94dcff16da",
+      "upstream": "https://github.com/xelerance/xl2tpd",
+      "license": "GPL-2+"
+    },
+    {
+      "package": "sstp-client",
+      "version": "1.0.20-1+b2",
+      "filename": "sstp-client_1.0.20-1+b2_amd64.deb",
+      "sha256": "bbab411f5bca49a407e014ed1815a2b21f8e225f79b75ec2d9dc58696ab6d11e",
+      "upstream": "https://gitlab.com/eivnaes/sstp-client",
+      "license": "GPL-2+ with OpenSSL exception"
+    },
+    {
+      "package": "pptp-linux",
+      "version": "1.10.0-2",
+      "filename": "pptp-linux_1.10.0-2_amd64.deb",
+      "sha256": "1bbd79a9b37a2c6499f15d7ce7a5247f61f440aa9753504e86f4614ea8b11db4",
+      "upstream": "https://github.com/quozl/pptp",
+      "license": "GPL-2.0+"
+    },
+    {
+      "package": "strongswan-charon",
+      "version": "6.0.1-6+deb13u6",
+      "filename": "strongswan-charon_6.0.1-6+deb13u6_amd64.deb",
+      "sha256": "b1816c11f46be4b9209b2cc32e7f3024d8a1ed4a01befe4f17792e1e68840b66",
+      "upstream": "https://www.strongswan.org/",
+      "license": "GPL-2+ with OpenSSL exception plus documented component licenses"
+    },
+    {
+      "package": "strongswan-swanctl",
+      "version": "6.0.1-6+deb13u6",
+      "filename": "strongswan-swanctl_6.0.1-6+deb13u6_amd64.deb",
+      "sha256": "0f1263231b9fd6dfe5015adf6a3cc5a43a95a5d1d65d3cfd25cfcdd2b41160d1",
+      "upstream": "https://www.strongswan.org/",
+      "license": "GPL-2+ with OpenSSL exception plus documented component licenses"
+    },
+    {
+      "package": "libstrongswan-standard-plugins",
+      "version": "6.0.1-6+deb13u6",
+      "filename": "libstrongswan-standard-plugins_6.0.1-6+deb13u6_amd64.deb",
+      "sha256": "e624a2ce6f08159c1fa5250832f68d8058af08be4a1df2da7d42121ebbdf485e",
+      "upstream": "https://www.strongswan.org/",
+      "license": "GPL-2+ with OpenSSL exception plus documented component licenses"
+    }
+  ]
+}

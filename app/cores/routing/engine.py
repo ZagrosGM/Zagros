@@ -84,7 +84,7 @@ class RoutingEngine:
         policy = None
         # Xray/sing-box route inside their own processes. The host policy
         # plane only classifies service-core traffic.
-        policy_cores = {"openvpn", "wireguard", "softether", "ssh"}
+        policy_cores = {"openvpn", "wireguard", "softether", "ssh", "pptp"}
         if self._policy is not None and policy_cores.intersection(targets):
             import asyncio
             policy = await asyncio.to_thread(self._policy.preview_rules, normalized)
@@ -144,7 +144,7 @@ class RoutingEngine:
         policy = None
         # Xray/sing-box route inside their own processes. The host policy
         # plane only classifies service-core traffic.
-        policy_cores = {"openvpn", "wireguard", "softether", "ssh"}
+        policy_cores = {"openvpn", "wireguard", "softether", "ssh", "pptp"}
         if self._policy is not None and policy_cores.intersection(targets):
             import asyncio
             policy = await asyncio.to_thread(self._policy.apply_rules, normalized)

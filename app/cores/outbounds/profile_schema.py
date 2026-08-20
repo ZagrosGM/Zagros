@@ -26,8 +26,12 @@ _SECURITIES = ["none", "tls", "reality"]
 
 def _str(key, title, *, group, widget="text", default=None, hint=None,
          required=False, secret=False):
-    prop: dict = {"type": "string", "title": title, "x-group": group,
-                  "x-widget": "password" if secret else widget}
+    prop: dict = {
+        "type": "string", "title": title, "x-group": group,
+        "x-widget": ("password" if secret and widget == "text" else widget),
+    }
+    if secret:
+        prop["x-secret"] = True
     if default is not None:
         prop["default"] = default
     if hint:
@@ -66,6 +70,37 @@ def _server_fields() -> dict:
         "server_port": _num("server_port", "port", group="basic",
                             minimum=1, maximum=65535),
     }
+
+
+def _ppp_client_fields(*, default_port: int) -> dict:
+    fields = _server_fields()
+    fields["server_port"]["default"] = default_port
+    fields.update({
+        "username": _str("username", "PPP username", group="auth"),
+        "password": _str("password", "PPP password", group="auth", secret=True),
+        "mtu": _num("mtu", "PPP MTU", group="transport", default=1400,
+                    minimum=1280, maximum=1500),
+        "ipv6": {
+            "type": "boolean", "title": "IPv6 (not supported)",
+            "x-group": "basic", "x-widget": "toggle", "default": False,
+        },
+        "test_url": _str(
+            "test_url", "HTTPS probe URL", group="basic",
+            default="https://1.1.1.1/cdn-cgi/trace",
+            hint=("Test establishes a fresh tunnel, measures 20-30 RTT samples, "
+                  "then performs CA-validated HTTPS through it"),
+        ),
+        "probe_ca_pem": _str(
+            "probe_ca_pem", "HTTPS probe CA certificate (optional)",
+            group="security", widget="textarea",
+            hint="Public CA PEM for a private probe origin; system trust is the default",
+        ),
+        "test_samples": _num(
+            "test_samples", "steady-state RTT samples", group="basic",
+            default=20, minimum=20, maximum=30,
+        ),
+    })
+    return fields
 
 
 def _policy_core_field() -> dict:
@@ -262,9 +297,9 @@ _KIND_SCHEMAS: dict[OutboundKind, dict] = {
          "cert_pem": _str("cert_pem", "client certificate (PEM, optional)",
                           group="auth", widget="textarea"),
          "key_pem": _str("key_pem", "client key (PEM, optional)", group="auth",
-                         widget="textarea"),
+                         widget="textarea", secret=True),
          "ovpn_content": _str("ovpn_content", "full .ovpn profile (paste/upload)",
-                              group="basic", widget="textarea",
+                              group="basic", widget="textarea", secret=True,
                               hint="when present, it wins over the individual fields"),
          "cipher": _str("cipher", "cipher (e.g. AES-256-GCM)", group="transport"),
          "auth": _str("auth", "digest auth (e.g. SHA256)", group="transport")},
@@ -276,10 +311,117 @@ _KIND_SCHEMAS: dict[OutboundKind, dict] = {
          "username": _str("username", "username", group="auth"),
          "password": _str("password", "password", group="auth", secret=True),
          "private_key": _str("private_key", "private key (PEM, optional)",
-                             group="auth", widget="textarea"),
+                             group="auth", widget="textarea", secret=True),
          "host_key": _str("host_key", "server host key (optional)", group="auth")},
         required=("server", "server_port", "username"),
         description="SSH tunnel upstream"),
+    OutboundKind.L2TP_IPSEC: {
+        **_schema(
+            {**_ppp_client_fields(default_port=1701),
+             "ipsec_psk": _str(
+                 "ipsec_psk", "IPsec pre-shared key", group="auth", secret=True),
+             "ike_version": _select(
+                 "ike_version", "IKE version", group="security",
+                 options=["ikev1"], default="ikev1"),
+             "ppp_authentication": _select(
+                 "ppp_authentication", "PPP authentication", group="auth",
+                 options=["mschapv2"], default="mschapv2")},
+            required=("server", "server_port", "username", "password", "ipsec_psk"),
+            description=(
+                "Independent strongSwan/XFRM + xl2tpd/PPP client for a real "
+                "L2TP/IPsec listener, including SoftEther-compatible peers")),
+        "x-security-class": "compatibility",
+        "x-peer-compatibility": ["softether"],
+    },
+    OutboundKind.L2TP_RAW: {
+        **_schema(
+            {**_ppp_client_fields(default_port=1701),
+             "legacy_risk_ack": {
+                 "type": "boolean", "title": "I accept unencrypted raw L2TP risk",
+                 "x-group": "security", "x-widget": "toggle", "default": False,
+             },
+             "ppp_authentication": _select(
+                 "ppp_authentication", "PPP authentication", group="auth",
+                 options=["mschapv2"], default="mschapv2")},
+            required=("server", "server_port", "username", "password",
+                      "legacy_risk_ack"),
+            description=(
+                "Independent raw-L2TP PPP client. No IPsec or TLS; "
+                "Legacy / Insecure acknowledgement is mandatory.")),
+        "x-security-class": "legacy_insecure",
+        "x-security-warning": "Raw L2TP provides no tunnel confidentiality.",
+        "x-peer-compatibility": ["softether"],
+    },
+    OutboundKind.SSTP: {
+        **_schema(
+            {**_ppp_client_fields(default_port=443),
+             "tls_server_name": _str(
+                 "tls_server_name", "TLS certificate hostname / SNI", group="security",
+                 hint="defaults to server; required when dialing an IP for a DNS certificate"),
+             "ca_pem": _str(
+                 "ca_pem", "private CA certificate (optional)", group="security",
+                 widget="textarea", hint="system trust store is used when omitted"),
+             "verify_certificate": {
+                 "type": "boolean", "title": "verify TLS certificate (required)",
+                 "x-group": "security", "x-widget": "toggle", "default": True,
+             },
+             "ppp_authentication": _select(
+                 "ppp_authentication", "PPP authentication", group="auth",
+                 options=["mschapv2"], default="mschapv2")},
+            required=("server", "server_port", "username", "password"),
+            description=(
+                "Independent sstp-client/PPP provider. CA and hostname "
+                "certificate validation can never be disabled.")),
+        "x-security-class": "compatibility",
+        "x-peer-compatibility": ["softether"],
+    },
+    OutboundKind.PPTP: {
+        **_schema(
+            {**_ppp_client_fields(default_port=1723),
+             "legacy_risk_ack": {
+                 "type": "boolean", "title": "I accept PPTP Legacy / Insecure risk",
+                 "x-group": "security", "x-widget": "toggle", "default": False,
+             },
+             "ppp_authentication": _select(
+                 "ppp_authentication", "PPP authentication", group="auth",
+                 options=["mschapv2"], default="mschapv2"),
+             "encryption": _select(
+                 "encryption", "PPP encryption", group="security",
+                 options=["mppe128"], default="mppe128")},
+            required=("server", "server_port", "username", "password",
+                      "legacy_risk_ack"),
+            description=(
+                "Independent pptp-linux/PPP provider on fixed TCP/1723 + GRE/47. "
+                "Legacy / Insecure; never advertised as SoftEther.")),
+        "x-security-class": "legacy_insecure",
+        "x-security-warning": (
+            "PPTP/MS-CHAPv2 is cryptographically obsolete. Use only for "
+            "explicit legacy compatibility."),
+        "x-peer-compatibility": ["accel-ppp", "reference-pptp"],
+    },
+    OutboundKind.SOFTETHER_NATIVE: _schema(
+        {**_server_fields(),
+         "hub": _str("hub", "Virtual Hub", group="basic",
+                     hint="remote SoftEther Virtual Hub name"),
+         "username": _str("username", "username", group="auth"),
+         "password": _str("password", "password", group="auth", secret=True),
+         "server_cert": _str(
+             "server_cert", "pinned server certificate (PEM, optional)",
+             group="security", widget="textarea",
+             hint="when supplied, vpnclient enables exact server certificate verification"),
+         "verify_server_certificate": {
+             "type": "boolean", "title": "require pinned server certificate",
+             "x-group": "security", "x-widget": "toggle", "default": False,
+         },
+         "dhcp_timeout": _num(
+             "dhcp_timeout", "DHCP/connect timeout (seconds)", group="basic",
+             default=45, minimum=10, maximum=180),
+         "mtu": _num("mtu", "Virtual NIC MTU", group="transport",
+                     default=1500, minimum=576, maximum=1500)},
+        required=("server", "server_port", "hub", "username", "password"),
+        description=(
+            "Native SoftEther VPN Client — dedicated vpnclient process, Virtual "
+            "NIC, DHCP lease and network namespace per outbound")),
     **{
         kind: _schema(
             {**_server_fields(),
@@ -295,7 +437,6 @@ _KIND_SCHEMAS: dict[OutboundKind, dict] = {
             (OutboundKind.SOFTETHER_L2TP_RAW, "SoftEther raw L2TP"),
             (OutboundKind.SOFTETHER_SSTP, "SoftEther SSTP"),
             (OutboundKind.SOFTETHER_PPTP, "PPTP"),
-            (OutboundKind.SOFTETHER_NATIVE, "SoftEther native VPN"),
         )
     },
     OutboundKind.CORE: _schema(
@@ -319,10 +460,17 @@ def outbound_schemas(runtime=None) -> dict[str, dict]:
     import copy
 
     from app.cores.capabilities import outbound_capabilities
+    from app.cores.outbounds.model import LEGACY_SOFTETHER_OUTBOUND_KINDS
 
     capabilities = outbound_capabilities(runtime)
     result: dict[str, dict] = {}
     for kind, source in _KIND_SCHEMAS.items():
+        # These historical IDs remain model-decodable for migration and safe
+        # deletion only. Publishing even a disabled schema kept them visible in
+        # the Create selector and falsely grouped independent providers under
+        # SoftEther.
+        if kind in LEGACY_SOFTETHER_OUTBOUND_KINDS:
+            continue
         schema = copy.deepcopy(source)
         capability = capabilities[kind]
         schema["x-supported"] = capability.selectable

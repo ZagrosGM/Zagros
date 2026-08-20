@@ -1025,7 +1025,7 @@ def test_softether_install_from_source_cached_and_targeted(tmp_path, monkeypatch
         build_dir = argv[2]
         import os as _os
         _os.makedirs(build_dir, exist_ok=True)  # the real configure step creates it
-        for name in ("vpnserver", "vpncmd", "hamcore.se2"):
+        for name in ("vpnserver", "vpnclient", "vpncmd", "hamcore.se2"):
             open(_os.path.join(build_dir, name), "wb").write(b"bin")
         return ""
 
@@ -1040,10 +1040,11 @@ def test_softether_install_from_source_cached_and_targeted(tmp_path, monkeypatch
     assert "--parallel" in argv and argv[argv.index("--parallel") + 1] == "4"
     targets = argv[argv.index("--target") + 1:]
     assert targets == ["cedar", "mayaqua", "hamcore-archive-build",
-                       "vpnserver", "vpncmd"]
-    # NOT built: the panel never installs the client/bridge/test binaries
-    assert all(t not in targets for t in ("vpnclient", "vpnbridge", "vpntest"))
+                       "vpnserver", "vpnclient", "vpncmd"]
+    # Native outbounds require vpnclient; bridge/test binaries stay excluded.
+    assert all(t not in targets for t in ("vpnbridge", "vpntest"))
     assert (install_root / "vpnserver").exists()
+    assert (install_root / "vpnclient").exists()
     assert (cache / "5.02.5187" / ".complete").exists()
 
     # retry: NO re-download, configure+build resume from the cached tree

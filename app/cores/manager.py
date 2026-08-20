@@ -327,8 +327,24 @@ class CoreManager:
             # A corrected inbound is the recovery path for a core whose prior
             # default config failed. RUNNING must also mean the process is
             # really alive; otherwise a successful wizard response with no
-            # listener is a lie. STOPPED/INSTALLED remain operator-controlled.
-            if state_before in (CoreState.RUNNING, CoreState.ERROR):
+            # listener is a lie. A physically single-listener service can
+            # explicitly declare that deleting its final inbound means
+            # stop+cleanup; never auto-restart such an empty document.
+            path = driver.metadata.studio_inbounds_path
+            empty_stops = bool(driver.metadata.stop_when_no_inbounds and path)
+            if empty_stops:
+                node: Any = document
+                for segment in (item for item in str(path).split("/") if item):
+                    node = node.get(segment) if isinstance(node, dict) else None
+                empty_stops = not isinstance(node, list) or not node
+
+            if empty_stops:
+                actual = await driver.status()
+                if actual.state is CoreState.RUNNING:
+                    await driver.stop()
+                if state_before in (CoreState.RUNNING, CoreState.ERROR):
+                    await self._set_state(core_id, CoreState.STOPPED)
+            elif state_before in (CoreState.RUNNING, CoreState.ERROR):
                 actual = await driver.status()
                 if actual.state is CoreState.RUNNING:
                     # A system-owned daemon (notably SoftEther) can recover
@@ -461,6 +477,12 @@ class CoreManager:
     async def start_enabled(self) -> None:
         """Boot policy: start every enabled, previously-running core."""
         for core_id in self.list_cores():
+            # Built-ins (currently Xray) are owned by the legacy application
+            # lifespan.  A persisted built-in row may be rehydrated before that
+            # process is attached; starting it here races/double-starts the same
+            # engine and produces a false boot traceback even though it is live.
+            if core_id in self._builtin_core_ids:
+                continue
             if not self._enabled[core_id]:
                 continue
             if self._states[core_id] not in (CoreState.INSTALLED, CoreState.STOPPED, CoreState.ERROR):

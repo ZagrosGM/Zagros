@@ -792,8 +792,10 @@ class SoftEtherDriver(BaseCoreDriver):
                 await asyncio.to_thread(self._backend._cmd, command, hub=False)  # noqa: SLF001
             except CoreError as exc:
                 text = str(exc).lower()
-                if ignore_exists and any(marker in text for marker in
-                                         ("exist", "already", "not found", "not exist")):
+                if ignore_exists and any(marker in text for marker in (
+                    "exist", "already", "not found", "not exist",
+                    "error code 52", "error code 54",
+                )):
                     return
                 raise
 
@@ -883,7 +885,8 @@ class SoftEtherDriver(BaseCoreDriver):
         # the stable-bundle installer reuses its mounted cache and preserves
         # vpn_server.config when present. A saved core must never require a
         # manual Reinstall merely because the image changed.
-        if server_binary() is None:
+        client_binary = getattr(self._backend, "client_binary", lambda: None)
+        if server_binary() is None or client_binary() is None:
             repair = getattr(self._backend, "install_packages", None)
             if not callable(repair):
                 raise CoreError(
@@ -1059,8 +1062,40 @@ class SoftEtherDriver(BaseCoreDriver):
 
     async def sync_accounts(self, accounts: list[UserAccount]) -> None:
         desired = {a.account_id: a for a in accounts}
+        stale = set(self._accounts) - set(desired)
+        reconcile = getattr(self._backend, "users_reconcile", None)
+        if callable(reconcile):
+            # One authenticated vpncmd session performs discovery + only the
+            # required creates + credential/expiry convergence. This avoids
+            # SoftEther's rapid-login guard during container account replay,
+            # while a failed verb still aborts and propagates normally.
+            for account in accounts:
+                self._ensure_supported(account.protocol)
+                self._provision_credentials(account)
+            await asyncio.to_thread(
+                reconcile,
+                [
+                    (
+                        account.account_id,
+                        account.username,
+                        str(account.settings["password"]),
+                        account.enabled,
+                    )
+                    for account in accounts
+                ],
+                sorted(stale),
+            )
+            for account_id in stale:
+                self._usage.forget(account_id)
+            self._accounts = dict(desired)
+            for account_id in desired:
+                self._usage.register(account_id)
+            return
+
+        # Compatibility boundary for injected/older backends. Production uses
+        # users_reconcile; this path retains the original driver protocol.
         current = set(await asyncio.to_thread(self._backend.user_list))
-        stale = (current & set(self._accounts)) - set(desired)
+        stale &= current
         for account_id in stale:
             await asyncio.to_thread(self._backend.user_delete, account_id)
         for account in accounts:

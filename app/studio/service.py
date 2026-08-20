@@ -161,10 +161,20 @@ class ConfigStudioService:
             return PreviewResult(core_id=driver.metadata.id, valid=False,
                                  errors=[str(exc)])
         errors = self._validate(driver, patched)
+        semantic_errors: list[str] = []
+        validator = getattr(driver, "validate_studio_document", None)
+        if not errors and callable(validator):
+            try:
+                result = validator(patched)
+                if result:
+                    semantic_errors.extend(str(item) for item in result)
+            except Exception as exc:  # driver validation is a fail-closed gate
+                semantic_errors.append(str(exc))
+        messages = [f"{e.path}: {e}" for e in errors] + semantic_errors
         return PreviewResult(
             core_id=driver.metadata.id,
-            valid=not errors,
-            errors=[f"{e.path}: {e}" for e in errors],
+            valid=not messages,
+            errors=messages,
             diff=unified_diff(current, patched),
             document=patched,
         )

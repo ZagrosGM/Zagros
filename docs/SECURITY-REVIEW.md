@@ -44,3 +44,18 @@
 ms→0.077ms) هم سرعت را بالا برد و هم سطح اطمینان پیاده‌سازی را (constant-time C).
 مسیر خالص‌پایتون حفظ شد اما صرفاً fallback بوت استرپ است؛ تست‌ها هر دو مسیر را روی
 همان golden vectors قفل می‌کنند.
+
+## Independent PPTP provider (legacy/insecure)
+
+PPTP is an explicitly legacy compatibility provider backed by pinned
+ACCEL-PPP 1.14.0, not SoftEther. MS-CHAPv2 is the only authentication method
+and MPPE128 is mandatory, but both remain cryptographically obsolete. The core
+is installed disabled, requires separate risk and Internet-exposure
+acknowledgements, and is always labeled `Legacy / Insecure`.
+
+Runtime exposure is limited to TCP/1723 and GRE/47. The child daemon receives
+`/dev/ppp`, `NET_ADMIN`, and `NET_RAW`; it receives no Docker socket, host PID
+namespace, `privileged:true`, or runtime compiler. Secrets are protected by
+mode-0600 atomic files and never placed on argv. Firewall/NAT state consists
+of exact comment-tagged nftables rules recorded by an ownership manifest;
+global forwarding is a prerequisite and is never mutated by provider lifecycle.

@@ -16,7 +16,7 @@ one driver among many, with no special status anywhere in the codebase.
 
 ## ⚠️ Alpha Warning
 
-**Current release: `1.0.0-alpha.8.6` — this is an ALPHA build.**
+**Current release: `1.0.0-alpha.8.7` — this is an ALPHA build.**
 
 * Suitable for evaluation, testing and feedback — **not recommended for
   production** unless you fully understand the limitations.
@@ -31,15 +31,18 @@ one driver among many, with no special status anywhere in the codebase.
 ## Features
 
 * **8 built-in core drivers** — xray, sing-box, WireGuard, OpenVPN,
-  Hysteria 2, TUIC v5, SSH tunnel, SoftEther (L2TP/IPsec, raw L2TP, SSTP) — all
-  behind one `BaseCoreDriver` contract.
+  Hysteria 2, TUIC v5, SSH tunnel and SoftEther — all behind one
+  `BaseCoreDriver` contract.
+* **Independent PPP providers** — L2TP/IPsec, raw L2TP, SSTP and legacy PPTP
+  use their own verified Linux client/server lifecycles. They are not SoftEther
+  aliases; SoftEther PPTP remains unsupported.
 * **Unified quota** — one counter per user across *all* cores
   (1 GB xray + 2 GB OpenVPN + 3 GB WireGuard + 4 GB sing-box = exactly
   10 GB), with persistent baselines (exactly-once across core restarts).
 * **One user, any protocols from any cores** — a single dashboard user can
-  hold VLESS from xray, Hysteria 2, WireGuard and SoftEther (raw L2TP, SSTP,
-  L2TP/IPsec) simultaneously, sharing ONE quota, ONE expiry and ONE global device limit
-  (`core_access` grants; the built-in xray is a protected platform core).
+  hold VLESS from xray, Hysteria 2, WireGuard, SoftEther and the independent
+  PPP providers simultaneously, sharing ONE quota, ONE expiry and ONE global
+  device limit (`core_access` grants; the built-in xray is a protected platform core).
 * **Multi-format subscription** — the portal serves each granted config
   exactly once, auto-negotiated per client: share-link list (v2rayNG &
   friends), mihomo YAML (Clash / Clash Meta / Stash / FlClash) and complete
@@ -47,7 +50,9 @@ one driver among many, with no special status anywhere in the codebase.
 * **Unified Device & Session managers** — global device-limit enforcement and
   live cross-core session history.
 * **Central Routing / Outbound / Policy engines** — capability-driven, with
-  honest per-core reports (no silently dropped rules, ever).
+  honest per-core reports (no silently dropped rules, ever). Native SoftEther
+  outbounds own a real `vpnclient` process, Virtual NIC, isolated namespace,
+  policy table, reconnect/DHCP recovery, exact counters and cleanup.
 * **Cross-core chaining** — chain traffic between heterogeneous cores
   (e.g. sing-box → WireGuard, xray → SSH) via native listeners.
 * **Zagros Subscription Portal** — a driver-agnostic page rendering whatever
@@ -101,7 +106,7 @@ Full design: [`docs/MULTICORE-ARCHITECTURE.md`](docs/MULTICORE-ARCHITECTURE.md)
 | openvpn | OpenVPN | Management Interface + mini-CA PKI | privileged (root) |
 | wireguard | kernel + `wg` | per-peer handshake stats | privileged (root) |
 | ssh | OpenSSH | system accounts + session probe | privileged (root) |
-| softether | SoftEther VPN Server | `vpncmd` RPC (incl. L2TP/IPsec) | privileged (root) |
+| softether | SoftEther VPN Server + Client | `vpncmd` RPC, native `vpnclient` Virtual NIC | privileged; native outbounds use isolated namespaces |
 
 ## Screenshots
 
@@ -145,7 +150,7 @@ sudo zagros install-core xray       # cores self-install their official binaries
 For release upgrades, refresh the host scripts and image together:
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/main/zagros.sh)" -- update --version v1.0.0-alpha.8.6
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/main/zagros.sh)" -- update --version v1.0.0-alpha.8.7
 ```
 
 Everyday operations — `zagros update` (auto-backup → pull → migrate → health →
@@ -215,7 +220,7 @@ Release images are published to **GitHub Container Registry only**
 (multi-arch: linux/amd64, linux/arm64):
 
 ```bash
-docker pull ghcr.io/zagrosgm/zagros:v1.0.0-alpha.8.6
+docker pull ghcr.io/zagrosgm/zagros:v1.0.0-alpha.8.7
 docker pull ghcr.io/zagrosgm/zagros:latest        # tracks stable releases
 ```
 
@@ -230,8 +235,11 @@ docker build -t zagros:dev .
 ```
 
 Note: privileged cores (WireGuard/OpenVPN/SoftEther/SSH) additionally need
-`cap_add: NET_ADMIN` (and kernel support on the host). The installer stack
-(`zagros install`) uses host networking like the upstream ecosystem expects.
+`cap_add: NET_ADMIN` (and kernel support on the host). Native SoftEther
+outbound namespaces also require `SYS_ADMIN`; the release Compose grants both
+without mounting the Docker socket or joining the host PID namespace. The
+installer stack (`zagros install`) uses host networking like the upstream
+ecosystem expects.
 
 ## Development
 
@@ -311,3 +319,16 @@ not Zagros contributors — see the Provenance note at the top).
 
 AGPL-3.0 — see `LICENSE`. Zagros keeps the upstream Marzban license intact
 and credits all upstream authors.
+
+### Independent PPTP provider (Legacy / Insecure)
+
+Zagros can optionally run a default-disabled, independent PPTP server backed
+by checksum-pinned ACCEL-PPP 1.14.0. It is **not a SoftEther feature**. The
+provider is fixed to TCP/1723 + GRE/47, MS-CHAPv2, mandatory MPPE128 and IPv4.
+PAP, CHAP-MD5, MS-CHAPv1, MPPE40, unencrypted mode, IPv6 and custom PPTP
+control ports are unsupported. Independent PPTP outbound uses the same fixed
+TCP/1723 + GRE contract; SoftEther PPTP remains unsupported. Installation and
+Internet exposure each require an explicit operator acknowledgement. Runtime
+requirements are `/dev/ppp`, `NET_ADMIN`, `NET_RAW`, `ppp_generic`, `ppp_mppe`,
+IPv4 forwarding, `nft` and `ip`. PPTP remains cryptographically obsolete;
+prefer a modern VPN whenever possible.

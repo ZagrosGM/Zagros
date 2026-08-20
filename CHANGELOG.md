@@ -10,6 +10,65 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.8.7] — 2026-08-20 — Final Phase 1–5 release
+
+### Added
+
+* Added independent PPP providers for L2TP/IPsec, raw L2TP, SSTP and PPTP.
+  These are separate Linux client/server implementations, not SoftEther
+  protocol aliases.
+* Added independent PPTP outbound support and the ACCEL-PPP PPTP server with
+  MS-CHAPv2, mandatory MPPE128, accounting, quota integration, lifecycle and
+  scoped cleanup.
+* Added secure outbound persistence with sealed credentials, API redaction and
+  secret-free process arguments/diagnostics.
+* Added provider-aware policy routing, disposable test domains, readiness
+  verification, real interface/IPv4/route checks and real HTTPS verification.
+
+### Fixed
+
+* SoftEther `UserCreate` duplicate/error-66 handling is idempotent and
+  retry-safe. Account replay uses parsed `vpncmd UserList /CSV` state and
+  reconciles password/expiry without blind duplicate creation.
+* SoftEther native client namespaces, VRFs, marks, routes, adapters, counters
+  and cleanup converge correctly across restart/reconnect/recreation.
+* SSTP command generation now matches the image's real `sstp-client 1.0.20`:
+  unsupported `--ca-dir` is never emitted. System trust or supported
+  `--ca-cert` is used while certificate and hostname validation remain active.
+* Outbound Test now returns only `{status, rtt_ms}`. RTT is selected from a
+  post-readiness real network measurement window after warm-up probes; setup,
+  PPP-ready, first, p95 and HTTPS durations are internal only.
+* Failed measurements fail closed and never display stale or fabricated RTT.
+
+### Security and compatibility decisions
+
+* PPTP server and client control is fixed to **TCP/1723** plus GRE. The
+  unmodified reference client does not support custom PPTP ports; no patched
+  client, proxy, REDIRECT or DNAT workaround is included.
+* SoftEther PPTP remains unsupported. No SoftEther PPTP server/client feature
+  is fabricated.
+* Raw L2TP is explicitly legacy/insecure and endpoint-dependent. It does not
+  become healthy without a real raw-L2TP endpoint.
+* Deprecated SoftEther outbound aliases are absent from the public catalog:
+  `softether_l2tp`, `softether_l2tp_raw`, `softether_sstp` and
+  `softether_pptp`.
+* No `--no-verify`, `--cert-warn`, insecure TLS, secret-bearing argv, Docker
+  socket, unrelated routing architecture change or unnecessary migration was
+  introduced.
+
+### Verification
+
+* Full Python suite: **945 passed, 8 skipped**.
+* Phase 5 targeted tests: **67 passed**.
+* Real VPS SSTP, L2TP/IPsec and independent PPTP tests passed with real PPP,
+  IPv4, route and HTTPS checks. Raw L2TP failed closed when the available
+  endpoint did not provide raw L2TP.
+* Browser E2E passed for the configured SSTP and L2TP/IPsec outbound cards with
+  zero console/page errors and only `healthy · RTT X ms` displayed.
+* Dashboard TypeScript/Vite, shell syntax, routing, accounting, quota,
+  lifecycle, security and negative-provider coverage passed in the release
+  cycle.
+
 ## [1.0.0-alpha.8.6] — 2026-08-18 — Runtime-verified routing capability matrix
 
 ### Fixed

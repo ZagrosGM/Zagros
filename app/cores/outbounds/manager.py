@@ -220,7 +220,7 @@ class OutboundManager:
         active = self.list()
         targets = core_ids if core_ids is not None else self._cores.list_cores()
         domains = {}
-        policy_cores = {"xray", "sing-box", "openvpn", "wireguard", "softether", "ssh"}
+        policy_cores = {"xray", "sing-box", "openvpn", "wireguard", "softether", "ssh", "pptp"}
         if self._policy is not None and policy_cores.intersection(targets):
             domains = await asyncio.to_thread(self._policy.prepare, active)
         results: dict[str, TranslatedOutbound] = {}

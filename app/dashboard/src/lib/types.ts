@@ -105,7 +105,11 @@ export interface UserTemplate {
 }
 
 /** Unified inbound catalog — one selectable tree across ALL cores. */
-export interface InboundCatalogEntry { tag: string; protocol: string | null; port: number | null; }
+export interface InboundCatalogEntry {
+  tag: string; protocol: string | null; port: number | null;
+  source_core?: string; source_id?: string; duplicate_tag?: boolean;
+  routing_only?: boolean; security_class?: string | null;
+}
 export interface InboundCatalogGroup {
   core_id: string; name: string; enabled: boolean;
   inbounds: InboundCatalogEntry[];
@@ -147,6 +151,7 @@ export interface CoreView {
   homepage?: string | null;
   /** non-null ⇒ the core hosts studio inbounds (wizard-capable) */
   studio_inbounds_path?: string | null;
+  security_class?: string | null;
 }
 
 export interface CoreRegistryEntry {
@@ -157,6 +162,7 @@ export interface CoreRegistryEntry {
   default_settings?: Record<string, unknown>;
   driver_version?: string | null;
   homepage?: string | null;
+  security_class?: string | null;
   installed: boolean; enabled?: boolean; state?: string;
 }
 
@@ -189,12 +195,25 @@ export interface RoutePreview {
 
 export interface Outbound {
   name: string;
-  kind: "direct" | "block" | "blackhole" | "dns" | "socks" | "http" | "vless" | "vmess" | "trojan" | "shadowsocks" | "wireguard" | "hysteria2" | "tuic" | "openvpn" | "ssh" | "softether_l2tp" | "softether_l2tp_raw" | "softether_sstp" | "softether_pptp" | "softether_native" | "core";
+  kind: "direct" | "block" | "blackhole" | "dns" | "socks" | "http" | "vless" | "vmess" | "trojan" | "shadowsocks" | "wireguard" | "hysteria2" | "tuic" | "openvpn" | "ssh" | "l2tp_ipsec" | "l2tp_raw" | "sstp" | "pptp" | "softether_l2tp" | "softether_l2tp_raw" | "softether_sstp" | "softether_pptp" | "softether_native" | "core";
   settings: Record<string, unknown>;
   enabled: boolean;
+  /** Secret values are never returned; true means leave blank to retain it. */
+  secret_state?: Record<string, boolean>;
+  /** Explicit deletion channel; an empty password input otherwise preserves. */
+  clear_secret_keys?: string[];
+  /** Opaque AES-GCM import capsule; never contains browser-readable secrets. */
+  sealed_credentials?: string | null;
 }
 
-export interface OutboundTest { ok: boolean; latency_ms: number | null; error?: string; detail?: string; availability?: SupportState }
+export interface OutboundTest {
+  /** Public Test contract: no setup/PPP/HTTPS/first/p95 diagnostics. */
+  status: "healthy" | "unhealthy";
+  /** Post-readiness network RTT selected from the measurement window. */
+  rtt_ms: number | null;
+  error?: string;
+  availability?: SupportState;
+}
 
 export type SupportState = "supported" | "unsupported" | "environment_limited" | "not_installed" | "not_applicable";
 export interface OutboundCapability {
@@ -214,6 +233,12 @@ export interface OutboundCapability {
   accounting_reason?: string | null;
   native_core_translation: string[];
   host_runtime?: string | null;
+  provider?: string | null;
+  protocol?: string | null;
+  authentication: string[];
+  ip_versions: string[];
+  security_class: string;
+  peer_compatibility: string[];
   reason?: string | null;
 }
 export interface OutboundsResponse {
@@ -248,6 +273,7 @@ export interface OutboundField {
   maximum?: number;
   "x-group"?: "basic" | "auth" | "transport" | "security";
   "x-widget"?: "text" | "password" | "textarea" | "number" | "select" | "toggle";
+  "x-secret"?: boolean;
 }
 export interface OutboundKindSchema {
   type: string;
@@ -258,6 +284,9 @@ export interface OutboundKindSchema {
   "x-availability"?: SupportState;
   "x-capability"?: OutboundCapability;
   "x-disabled-reason"?: string;
+  "x-security-class"?: string;
+  "x-security-warning"?: string;
+  "x-peer-compatibility"?: string[];
 }
 export type OutboundSchemas = Record<string, OutboundKindSchema>;
 
@@ -269,6 +298,8 @@ export interface ParsedShareURL {
   transport?: string;
   security?: string;
   supported_schemes: string[];
+  secret_state?: Record<string, boolean>;
+  sealed_credentials?: string | null;
 }
 
 export interface CoreRelease { tag: string; name?: string; prerelease: boolean; published_at?: string | null }

@@ -1,0 +1,19 @@
+{
+  "provider": "pptp",
+  "engine": "accel-ppp",
+  "version": "1.14.0",
+  "commit": "048d31cb446879e0d1a1471b4ab99135a92bf289",
+  "source": "https://codeload.github.com/accel-ppp/accel-ppp/tar.gz/048d31cb446879e0d1a1471b4ab99135a92bf289",
+  "sha256": "ee391e34b237e3e2c12d037bc1c36d23bdb9ec76956d771e4a9425c9193a193d",
+  "license": "GPL-2.0-only",
+  "runtime_libraries": ["libtriton.so"],
+  "runtime_modules": [
+    "libpptp.so",
+    "libauth_mschap_v2.so",
+    "libchap-secrets.so",
+    "libippool.so",
+    "libsigchld.so",
+    "libpppd_compat.so",
+    "liblog_file.so"
+  ]
+}

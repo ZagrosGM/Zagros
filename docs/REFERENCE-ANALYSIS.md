@@ -88,7 +88,7 @@
 **ردشده:**
 1. **کپسوله‌سازی همه‌ی پروتکل‌ها داخل فورک xray** — vpn-ui برای TUIC/AnyTLS/Hysteria، xray پچ‌شده می‌سازد «تا per-account accounting موروثی شود». این دقیقاً همان چیزی است که معماری CoreHub حذفش کرده: هر Core با API رسمی خودش (hy2 traffic API, wg dump, SE UserGet) حسابداری می‌کند — بدون وابستگی به فورک.
 2. **god-service** (سرویس‌های چندهزارخطی xray.go) — در مقابل: درایور نازک + Backend Protocol + منطق خالص قابل‌تست.
-3. **PPTP/L2TP/SSTP accel-ppp** — قابلیت اختیاری (بند اختیاری برنامه)؛ با توجه به SoftEtherDriver که همان سطح L2TP/SSTP را با مدیریت تمیزتر پوشش می‌دهد، فعلاً خارج از برنامه.
+3. **PPTP/L2TP/SSTP/PPP providers** — این بخش از تحلیل اولیهٔ مرجع بود و با چرخهٔ Phase 1 تا Phase 5 superseded شده است. Zagros اکنون providerهای مستقل و جدا از SoftEther برای L2TP/IPsec، raw L2TP، SSTP و PPTP دارد؛ SoftEther PPTP همچنان unsupported است و PPTP control port به TCP/1723 محدود می‌ماند.
 
 **نکته‌ی یادگرفته‌شده برای آینده:** template-unitهای systemd (`openvpnTemplateUnit %i.conf`) برای Multi-instance per-node — در P9 (node-agent عمومی) به‌کار می‌آید.
 

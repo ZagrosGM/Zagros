@@ -30,6 +30,9 @@ class Backend:
     def server_binary(self):
         return "/runtime/vpnserver"
 
+    def client_binary(self):
+        return "/runtime/vpnclient"
+
     def version(self):
         return "4.44 build 9807"
 
@@ -64,19 +67,37 @@ def test_command_inventory_and_pptp_detection_are_live_and_non_mutating() -> Non
 
 def test_softether_client_matrix_is_transport_specific_and_openvpn_is_real() -> None:
     matrix = softether_transport_capabilities(Runtime())
-    for transport in ("native", "l2tp_ipsec", "l2tp_raw", "sstp", "pptp"):
+    native = matrix["native"]["client"]
+    assert native["state"] in {"supported", "not_installed"}
+    assert native["tun"] is True
+    assert native["canonical_outbound_kind"] == "softether_native"
+    assert native["provider"] == "vpnclient+vpncmd+Virtual-NIC namespace adapter"
+    assert "dedicated client service/account/NIC" in " ".join(native["evidence"])
+    canonical = {
+        "l2tp_ipsec": "l2tp_ipsec",
+        "l2tp_raw": "l2tp_raw",
+        "sstp": "sstp",
+    }
+    for transport, kind in canonical.items():
         client = matrix[transport]["client"]
-        assert client["state"] == "unsupported"
-        assert client["tun"] is False
-        assert client["provider"] == "no Zagros client provider"
+        assert client["state"] in {"supported", "not_installed"}
+        assert client["tun"] is True
+        assert client["canonical_outbound_kind"] == kind
+        assert "canonical independent outbound" in " ".join(client["evidence"])
+        assert "SoftEther is only the compatible remote listener" in client["reason"]
+    pptp = matrix["pptp"]["client"]
+    assert pptp["state"] == "not_applicable"
+    assert pptp["tun"] is False
+    assert pptp["canonical_outbound_kind"] is None
+    assert "independent ACCEL-PPP/pptp-linux" in pptp["reason"]
     openvpn = matrix["openvpn"]["client"]
     # Host package presence can refine supported to not_installed, but the
     # canonical provider must never become a fake SoftEther client kind.
     assert openvpn["state"] in {"supported", "not_installed"}
     assert openvpn["canonical_outbound_kind"] == "openvpn"
-    assert openvpn["provider"] == "openvpn client"
+    assert openvpn["provider"] == "OpenVPN client"
     assert openvpn["tun"] is True
-    assert "standard OpenVPN client" in openvpn["reason"]
+    assert "canonical client is independent kind=openvpn" in openvpn["reason"]
 
 
 def test_live_wizard_uses_the_same_pptp_detector() -> None:
@@ -85,7 +106,8 @@ def test_live_wizard_uses_the_same_pptp_detector() -> None:
     by_id = {protocol["id"]: protocol for protocol in blueprint["protocols"]}
     assert by_id["l2tp"]["availability"] == "supported"
     assert by_id["sstp"]["availability"] == "supported"
-    assert by_id["pptp"]["availability"] == "unsupported"
-    assert by_id["pptp"]["transports"] == []
-    assert by_id["pptp"]["capability"]["runtime_version"] == "4.44 build 9807"
+    # PPTP has moved to an independent ACCEL-PPP provider and is not a
+    # SoftEther wizard choice. The live SoftEther matrix still reports it.
+    assert "pptp" not in by_id
     assert blueprint["transport_capabilities"]["pptp"]["server"]["state"] == "unsupported"
+    assert blueprint["transport_capabilities"]["pptp"]["client"]["state"] == "not_applicable"

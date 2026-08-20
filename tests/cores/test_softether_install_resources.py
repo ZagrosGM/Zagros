@@ -19,14 +19,14 @@ from app.cores.drivers.softether.backend import LocalSoftEtherBackend
 from app.cores.exceptions import CoreError
 
 
-def _bundle_bytes() -> bytes:
+def _bundle_bytes(kind: str) -> bytes:
     out = io.BytesIO()
     with tarfile.open(fileobj=out, mode="w:gz") as tar:
         for name, data in {
-            "vpnserver/Makefile": b"main:\n\ttrue\n",
-            "vpnserver/code/vpnserver.a": b"precompiled-server",
-            "vpnserver/code/vpncmd.a": b"precompiled-command",
-            "vpnserver/hamcore.se2": b"resources",
+            f"{kind}/Makefile": b"main:\n\ttrue\n",
+            f"{kind}/code/{kind}.a": f"precompiled-{kind}".encode(),
+            f"{kind}/code/vpncmd.a": b"precompiled-command",
+            f"{kind}/hamcore.se2": b"resources",
         }.items():
             info = tarfile.TarInfo(name)
             info.size = len(data)
@@ -39,9 +39,9 @@ def _release() -> dict:
         "tag_name": "v4.44-9807-rtm",
         "prerelease": False,
         "assets": [{
-            "name": "softether-vpnserver-v4.44-9807-rtm-linux-x64-64bit.tar.gz",
-            "browser_download_url": "https://example.invalid/softether.tar.gz",
-        }],
+            "name": f"softether-{kind}-v4.44-9807-rtm-linux-x64-64bit.tar.gz",
+            "browser_download_url": f"https://example.invalid/{kind}.tar.gz",
+        } for kind in ("vpnserver", "vpnclient")],
     }
 
 
@@ -59,15 +59,17 @@ def _fixture_backend(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(backend, "_ensure_bundle_deps", lambda: None)
     calls = {"download": 0, "build": 0}
 
-    def download(_url, dest, **_kwargs):
+    def download(url, dest, **_kwargs):
         calls["download"] += 1
-        Path(dest).write_bytes(_bundle_bytes())
+        kind = "vpnclient" if "vpnclient" in url else "vpnserver"
+        Path(dest).write_bytes(_bundle_bytes(kind))
         return Path(dest).stat().st_size
 
     def build(argv, *, timeout):
         calls["build"] += 1
         source = Path(argv[argv.index("-C") + 1])
-        (source / "vpnserver").write_bytes(b"server-bin")
+        kind = source.name
+        (source / kind).write_bytes(f"{kind}-bin".encode())
         (source / "vpncmd").write_bytes(b"cmd-bin")
         return "linked"
 
@@ -79,19 +81,23 @@ def _fixture_backend(tmp_path: Path, monkeypatch):
 def test_fresh_install_then_cache_hit(tmp_path, monkeypatch):
     backend, cache, root, calls = _fixture_backend(tmp_path, monkeypatch)
     result = backend._install_from_github()
-    assert "stable bundle" in result
-    assert calls == {"download": 1, "build": 1}
-    assert (root / "vpnserver").read_bytes() == b"server-bin"
+    assert "stable vpnserver+vpnclient bundles" in result
+    assert calls == {"download": 2, "build": 2}
+    assert (root / "vpnserver").read_bytes() == b"vpnserver-bin"
+    assert (root / "vpnclient").read_bytes() == b"vpnclient-bin"
     assert (root / "vpncmd").read_bytes() == b"cmd-bin"
-    assert (cache / "stable" / "v4.44-9807-rtm" / "x64-64bit" / ".complete").exists()
+    stable = cache / "stable" / "v4.44-9807-rtm" / "x64-64bit"
+    assert (stable / "vpnserver" / ".complete").exists()
+    assert (stable / "vpnclient" / ".complete").exists()
 
     # Simulate repair on a fresh live root: cache must skip both expensive
     # stages and atomically materialize the known-complete artifacts.
     import shutil
     shutil.rmtree(root)
     backend._install_from_github()
-    assert calls == {"download": 1, "build": 1}
+    assert calls == {"download": 2, "build": 2}
     assert (root / "vpnserver").exists()
+    assert (root / "vpnclient").exists()
 
 
 def test_bundle_build_failure_never_replaces_live_root(tmp_path, monkeypatch):
@@ -146,6 +152,8 @@ def test_concurrent_installs_share_one_build_lock(tmp_path, monkeypatch):
 
     for backend in backends:
         monkeypatch.setattr(backend, "server_binary",
+                            lambda p=installed: str(p) if p.exists() else None)
+        monkeypatch.setattr(backend, "client_binary",
                             lambda p=installed: str(p) if p.exists() else None)
         monkeypatch.setattr(backend, "_install_from_github", build_once)
 

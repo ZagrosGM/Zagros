@@ -133,6 +133,40 @@ def test_service_sources_map_to_real_subnets_and_one_policy_domain(
             "counter masquerade") in nft
 
 
+def test_service_source_to_ssh_uses_scoped_tcp_tun_and_return_mark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = FakeRunner()
+    monkeypatch.setattr(
+        "app.cores.routing.policy.shutil.which", lambda name: f"/usr/bin/{name}")
+    manager = PolicyRoutingManager(
+        SourceManager(), runtime_root=str(tmp_path), runner=runner,
+        sleep=lambda _: None,
+    )
+    outbound = Outbound(
+        name="egress-ssh", kind="ssh", settings={
+            "server": "ssh.example.test", "server_port": 22,
+            "username": "alice", "password": "not-in-argv",
+        },
+    )
+    domain = manager.prepare([outbound])[outbound.name]
+    rule = RoutingRule(
+        name="wg-to-ssh", priority=10, enabled=True,
+        matcher=RuleMatcher(inbounds=["wg-alt"], networks=["tcp"]),
+        action=RuleAction.ROUTE_TO, outbound=outbound.name,
+    )
+    report = manager.apply_rules([rule])
+    assert report.applied["wireguard"] == ["wg-to-ssh"]
+    nft = runner.nft_scripts[-1]
+    assert "ip saddr 10.67.67.0/24 meta l4proto { tcp }" in nft
+    assert f"meta mark set {domain.fwmark} return" in nft
+    assert (f"ct mark {domain.return_mark} counter meta mark set "
+            f"{domain.return_mark}") in nft
+    assert f'meta mark {domain.fwmark} oifname "{domain.interface}"' not in nft
+    assert "not-in-argv" not in "\n".join(
+        " ".join(call) for call, _input in runner.calls)
+
+
 def test_softether_securenat_is_reported_not_falsely_applied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

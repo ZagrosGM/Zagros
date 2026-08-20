@@ -97,6 +97,24 @@ def _build(core_id: str, tmp: str) -> tuple[BaseCoreDriver, Any]:
 
         return SoftEtherDriver(settings={"ipsec_psk": "psk"},
                                backend=fakes.FakeSEBackend()), None
+    if core_id == "pptp":
+        from app.cores.drivers.pptp import PptpDriver
+
+        backend = fakes.FakePptpBackend(work)
+        return PptpDriver(settings={
+            "work_dir": work,
+            "legacy_risk_ack": True,
+            "internet_exposure_ack": True,
+            "advertise_host": "vpn.example.test",
+            "inbounds": [{
+                "tag": "pptp", "protocol": "pptp", "listen": "0.0.0.0",
+                "port": 1723, "subnet": "10.77.0.0/24", "dns": "1.1.1.1",
+                "legacy_risk_ack": True, "internet_exposure_ack": True,
+                "authentication": "MS-CHAPv2", "encryption": "MPPE128",
+                "network": "IPv4", "ipv6": False,
+                "security_class": "legacy_insecure",
+            }],
+        }, backend=backend), None
     raise AssertionError(
         f"no fake backend wiring for new core '{core_id}' — add it to tests/cores/fakes.py")
 
@@ -113,6 +131,7 @@ _PROTOCOL_SETTINGS: dict[str, dict[str, Any]] = {
     "hysteria2": {"password": "pw"},
     "tuic": {},                           # uuid/password are driver-generated
     "ssh": {"password": "pw"},
+    "pptp": {"password": "pw"},
 }
 
 #: method-override requirements per capability (contract coherence)
@@ -131,7 +150,7 @@ _DRIVERS = _builtin_core_ids()
 
 
 _PREFERRED = ("vless", "ovpn", "wireguard", "hysteria2", "tuic", "l2tp",
-              "ssh", "vmess", "trojan", "shadowsocks", "sstp")
+              "pptp", "ssh", "vmess", "trojan", "shadowsocks", "sstp")
 
 
 def _sample_account(driver: BaseCoreDriver, user: int = 7, name: str = "probe") -> UserAccount:

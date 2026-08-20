@@ -113,6 +113,14 @@ class CoreMetadata(BaseModel):
     #: REPLACES its listener. Multi-interface/process engines such as
     #: WireGuard and OpenVPN leave this unset so Add Inbound appends.
     studio_max_inbounds: int | None = None
+    #: Security classification surfaced unchanged by API/UI.  ``legacy_insecure``
+    #: forces explicit operator acknowledgements and must never be presented as
+    #: a recommendation.
+    security_class: str | None = None
+    #: Single-listener daemons may define an empty Studio document as an
+    #: intentional stop+cleanup operation rather than a request to restart an
+    #: empty process.
+    stop_when_no_inbounds: bool = False
 
 
 class CoreMetrics(BaseModel):

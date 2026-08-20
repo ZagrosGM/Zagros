@@ -273,6 +273,75 @@ function ChipField({ label, values, onChange, placeholder, datalist, preserveCas
   );
 }
 
+function InboundTagSelector({ groups, values, onChange }: {
+  groups: InboundCatalogGroup[]; values: string[]; onChange: (values: string[]) => void;
+}) {
+  const rows = groups.flatMap((group) => group.inbounds.map((inbound) => ({
+    ...inbound, coreId: group.core_id, coreName: group.name,
+  })));
+  const owners = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const set = owners.get(row.tag) ?? new Set<string>();
+    set.add(row.coreId); owners.set(row.tag, set);
+  }
+  const duplicates = new Set([...owners].filter(([, set]) => set.size > 1).map(([tag]) => tag));
+  const known = new Set(rows.map((row) => row.tag));
+  const toggle = (tag: string, checked: boolean) => onChange(
+    checked ? [...new Set([...values, tag])] : values.filter((value) => value !== tag),
+  );
+  return (
+    <Field label="inbound tags" hint="Select one or more live inbounds. Core ownership is validated again by the backend.">
+      <div data-testid="inbound-tag-selector" className="space-y-2 rounded-xl border border-border bg-surface-2 p-3">
+        {groups.map((group) => (
+          <div key={group.core_id} className="rounded-lg border border-border/70 bg-surface-1 p-2.5">
+            <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-content-3">
+              {group.name} · {group.core_id}
+            </p>
+            <div className="grid gap-1.5 sm:grid-cols-2">
+              {group.inbounds.map((inbound) => {
+                const checked = values.includes(inbound.tag);
+                const duplicate = duplicates.has(inbound.tag);
+                return (
+                  <label key={`${group.core_id}:${inbound.tag}`} className={cn(
+                    "flex items-start gap-2 rounded-lg border px-2.5 py-2 text-xs",
+                    checked ? "border-brand/50 bg-brand/10" : "border-border",
+                    duplicate && !checked && "cursor-not-allowed opacity-55",
+                  )}>
+                    <input type="checkbox" className="mt-0.5" checked={checked}
+                      data-inbound-tag={inbound.tag} data-source-core={group.core_id}
+                      disabled={duplicate && !checked}
+                      onChange={(event) => toggle(inbound.tag, event.target.checked)} />
+                    <span className="min-w-0">
+                      <span className="block break-all font-mono">{inbound.tag}</span>
+                      <span className="text-[10px] text-content-3">
+                        {inbound.protocol ?? "unknown"}{inbound.port ? ` · :${inbound.port}` : ""}
+                        {inbound.security_class === "legacy_insecure" ? " · Legacy / Insecure · inventory only" : ""}
+                        {duplicate ? " · duplicate tag — rename before use" : ""}
+                      </span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+        {values.some((tag) => !known.has(tag)) && (
+          <div className="rounded-lg border border-danger/30 bg-danger-soft p-2 text-xs text-danger">
+            Deleted/unknown selections:
+            {values.filter((tag) => !known.has(tag)).map((tag) => (
+              <button type="button" key={tag} className="ms-2 underline"
+                onClick={() => toggle(tag, false)}>remove {tag}</button>
+            ))}
+          </div>
+        )}
+        <div className="text-[11px] text-content-3" data-testid="selected-inbound-tags">
+          Selected: {values.length ? values.join(", ") : "all live inbounds"}
+        </div>
+      </div>
+    </Field>
+  );
+}
+
 interface RoutingTargetOption {
   name: string;
   state: RoutingTarget["state"];
@@ -301,10 +370,16 @@ function RuleDialog({ rule, targets, inboundGroups, existingNames, onClose, onSa
   const setMatcher = (patch: Partial<RoutingRule["matcher"]>) =>
     setR({ ...r, matcher: { ...m, ...patch } });
 
-  const inboundCore = useMemo(() => new Map(
-    inboundGroups.flatMap((group) => group.inbounds.map((inbound) => [inbound.tag, group.core_id] as const)),
-  ), [inboundGroups]);
-  const inboundHints = useMemo(() => [...inboundCore.keys()].sort(), [inboundCore]);
+  const inboundCore = useMemo(() => {
+    const owners = new Map<string, Set<string>>();
+    for (const group of inboundGroups) for (const inbound of group.inbounds) {
+      const set = owners.get(inbound.tag) ?? new Set<string>();
+      set.add(group.core_id); owners.set(inbound.tag, set);
+    }
+    return new Map([...owners]
+      .filter(([, set]) => set.size === 1)
+      .map(([tag, set]) => [tag, [...set][0]] as const));
+  }, [inboundGroups]);
   const selectedInbounds = m.inbounds ?? [];
   const allSourceCores = [...new Set(inboundGroups.map((group) => group.core_id))];
   const selectedSourceCores = selectedInbounds.length
@@ -377,8 +452,8 @@ function RuleDialog({ rule, targets, inboundGroups, existingNames, onClose, onSa
 
         <div className="sm:col-span-2 grid gap-4 rounded-xl border border-border p-3.5">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-content-3">IF — matchers (all must match)</p>
-          <ChipField label="inbound tags" values={m.inbounds ?? []} onChange={(v) => setMatcher({ inbounds: v })}
-            datalist={inboundHints} preserveCase placeholder="reality-in" />
+          <InboundTagSelector groups={inboundGroups} values={m.inbounds ?? []}
+            onChange={(v) => setMatcher({ inbounds: v })} />
           <ChipField label="domains / geosites" values={m.domains ?? []} onChange={(v) => setMatcher({ domains: v })}
             placeholder="geosite:category-ir / example.com" />
           <div className="grid gap-4 sm:grid-cols-2">

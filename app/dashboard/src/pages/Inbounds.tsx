@@ -31,6 +31,7 @@ interface WizardProtocol {
   id: string; label: string; default_port: number; fixed_port?: boolean;
   availability?: "supported" | "unsupported" | "environment_limited" | "not_installed" | "not_applicable";
   reason?: string | null;
+  security_class?: string | null;
   transports: WizardTransport[];
 }
 interface WizardSchema { core_id: string; protocols: WizardProtocol[] }
@@ -128,7 +129,9 @@ export default function Inbounds() {
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <h3 className="truncate text-sm font-semibold" dir="ltr">{ib.tag}</h3>
-                  <Badge tone="brand">{ib.protocol}</Badge>
+                  <Badge tone={ib.security_class === "legacy_insecure" ? "danger" : "brand"}>
+                    {ib.protocol}{ib.security_class === "legacy_insecure" ? " · Legacy / Insecure" : ""}
+                  </Badge>
                 </div>
                 <p className="mt-1 font-mono text-[11px] text-content-3" dir="ltr">
                   {String(ib.listen ?? "0.0.0.0")}:{String(ib.port)}
@@ -535,6 +538,12 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
       {schema.data && step < 3 && renderChoice}
       {schema.data && step === 3 && spec && (
         <div className="space-y-4">
+          {effProto?.security_class === "legacy_insecure" && (
+            <div className="rounded-xl border border-danger/40 bg-danger-soft p-3 text-xs text-danger">
+              <p className="font-semibold">Legacy / Insecure</p>
+              <p className="mt-1">PPTP has known cryptographic weaknesses. Both risk acceptance and Internet-exposure confirmation are required and validated again by the backend.</p>
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-1.5 text-[11.5px] text-content-2">
             {[effProto?.label, effTransport?.label, effSecurity?.label].filter(Boolean).map((x, i, arr) => (
               <span key={String(x)} className="inline-flex items-center gap-1.5">

@@ -20,8 +20,15 @@ services:
     # host network namespace and Docker cannot mutate that host sysctl safely.
     cap_add:
       - NET_ADMIN
+      # Independent ACCEL-PPP PPTP uses GRE protocol 47 raw sockets.
+      - NET_RAW
+      # Named per-outbound network namespaces require mount/setns authority;
+      # the panel still has no Docker socket or host PID namespace.
+      - SYS_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
+      # PPP character device for the default-disabled legacy PPTP provider.
+      - /dev/ppp:/dev/ppp
     volumes:
       - ./.env:/code/.env:ro
       - /var/lib/zagros:/var/lib/zagros

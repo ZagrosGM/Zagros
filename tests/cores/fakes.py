@@ -307,3 +307,36 @@ class FakeSEBackend:
         self._ipsec = IPsecServices(l2tp=l2tp, l2tp_raw=l2tp_raw,
                                     etherip=etherip, psk=psk,
                                     default_hub=default_hub)
+
+# ---------------------------------------------------------------------- #
+# independent PPTP / ACCEL-PPP                                           #
+# ---------------------------------------------------------------------- #
+
+class FakePptpBackend:
+    def __init__(self, work_dir: str):
+        import os
+        self.work_dir = work_dir
+        self.accounting_path = os.path.join(work_dir, "accounting.sqlite3")
+        self.generation_path = os.path.join(work_dir, "generation")
+        self.chap_path = os.path.join(work_dir, "chap-secrets")
+        self.hook_path = os.path.join(work_dir, "accounting-hook.py")
+        self.running = False
+        self.configured = None
+        self.killed = []
+
+    def validate_subnet(self, subnet): return []
+    def verify_installation(self): return None
+    def ensure_management_secret(self): return "fake-management-secret"
+    def configure(self, config, chap, hook): self.configured = (config, chap, hook)
+    def reload(self): return None
+    def is_running(self): return self.running
+    def start(self, **kwargs): self.running = True
+    def stop(self): self.running = False
+    def purge(self): self.running = False
+    def version(self): return "1.14.0"
+    def sessions(self): return []
+    def metrics(self):
+        from app.cores.types import CoreMetrics
+        return CoreMetrics()
+    def logs(self, tail=200): return []
+    def terminate_account(self, account_id): self.killed.append(account_id)

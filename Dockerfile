@@ -1,6 +1,7 @@
 ARG PYTHON_VERSION=3.12
 # Dashboard toolchain for the unified Zagros panel (React 18 + vite 5 +
-# Tailwind) — node 20 LTS, multi-arch (amd64 + arm64).
+# Tailwind) — node 20 LTS. The release image is currently amd64-only because
+# the pinned PPP client package manifest below is amd64-specific.
 ARG NODE_IMAGE=node:20.19.0-bookworm-slim
 
 # --------------------------------------------------------------------------

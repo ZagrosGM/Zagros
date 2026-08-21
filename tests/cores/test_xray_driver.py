@@ -234,6 +234,28 @@ def test_usage_reports_deltas_and_keeps_node_split() -> None:
     asyncio.run(main())
 
 
+def test_usage_baselines_persist_for_main_and_node_counters() -> None:
+    async def main():
+        stats = [
+            XrayUsageStat("1.alice", 100, 1000, None),
+            XrayUsageStat("1.alice", 40, 60, 7),
+        ]
+        driver, _backend = _driver(stats=stats)
+        await driver.get_usage(account_ids=["1.alice"])
+        snapshot = driver.usage_tracker_snapshot(["1.alice"])
+        assert snapshot == {
+            "1.alice": (100, 1000),
+            "1.alice::node::7": (40, 60),
+        }
+
+        restarted, _backend2 = _driver(stats=stats)
+        restarted.restore_usage_baselines(snapshot)
+        same = await restarted.get_usage(account_ids=["1.alice"])
+        assert all((r.uplink_bytes, r.downlink_bytes) == (0, 0) for r in same)
+
+    asyncio.run(main())
+
+
 def test_online_devices_and_filtering() -> None:
     async def main():
         driver, backend = _driver(online=["1.alice", "2.bob"])

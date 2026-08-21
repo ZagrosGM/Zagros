@@ -373,8 +373,28 @@ def test_usage_interims_plus_authoritative_finals_no_double_count() -> None:
         third = await driver.get_usage(account_ids=["1.alice"])
         assert [(r.uplink_bytes, r.downlink_bytes) for r in third] == [(100, 50)]
 
-        # nothing left to report
+        # nothing left to report; persist a zero tombstone so a future panel
+        # restart cannot restore this closed session's old cursor.
         assert [(r.uplink_bytes, r.downlink_bytes) for r in await driver.get_usage(account_ids=["1.alice"])] == []
+        assert driver.usage_tracker_snapshot(["1.alice"]) == {"1.alice": (0, 0)}
+
+    asyncio.run(main())
+
+
+def test_live_session_baseline_survives_driver_restart() -> None:
+    async def main():
+        driver, _backend = _driver()
+        await driver.create_account(_account())
+        first = await driver.get_usage(account_ids=["1.alice"])
+        assert [(r.uplink_bytes, r.downlink_bytes) for r in first] == [(1000, 500)]
+        snapshot = driver.usage_tracker_snapshot(["1.alice"])
+        assert snapshot == {"1.alice": (1000, 500)}
+
+        restarted, _backend2 = _driver()
+        await restarted.create_account(_account())
+        restarted.restore_usage_baselines(snapshot)
+        same = await restarted.get_usage(account_ids=["1.alice"])
+        assert [(r.uplink_bytes, r.downlink_bytes) for r in same] == [(0, 0)]
 
     asyncio.run(main())
 

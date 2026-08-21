@@ -75,6 +75,12 @@ class PptpAccountingLedger:
                 os.chmod(candidate, 0o600)
 
     @staticmethod
+    def _delta(current: int, previous: int) -> int:
+        """Cumulative growth across an in-generation raw counter reset."""
+        current, previous = max(0, int(current)), max(0, int(previous))
+        return current - previous if current >= previous else current
+
+    @staticmethod
     def _add(db: sqlite3.Connection, account_id: str, up: int, down: int) -> None:
         db.execute(
             """INSERT INTO totals(account_id,uplink,downlink) VALUES(?,?,?)
@@ -101,8 +107,8 @@ class PptpAccountingLedger:
                 prev_down = int(previous[2]) if previous and previous[0] == session.username else 0
                 self._add(
                     db, session.username,
-                    max(0, session.rx_bytes - prev_up),
-                    max(0, session.tx_bytes - prev_down),
+                    self._delta(session.rx_bytes, prev_up),
+                    self._delta(session.tx_bytes, prev_down),
                 )
                 db.execute(
                     """INSERT INTO active(generation,ifname,account_id,uplink,downlink)
@@ -132,8 +138,8 @@ class PptpAccountingLedger:
             prev_down = int(previous[2]) if previous and previous[0] == account_id else 0
             self._add(
                 db, account_id,
-                max(0, int(bytes_received) - prev_up),
-                max(0, int(bytes_sent) - prev_down),
+                self._delta(bytes_received, prev_up),
+                self._delta(bytes_sent, prev_down),
             )
             db.execute(
                 "DELETE FROM active WHERE generation=? AND ifname=?",

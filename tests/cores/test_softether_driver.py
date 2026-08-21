@@ -429,6 +429,18 @@ def test_expire_based_suspend_and_resume() -> None:
     asyncio.run(run())
 
 
+def test_active_sstp_defers_management_poll_without_losing_cumulative_source() -> None:
+    async def run():
+        driver, backend = _driver()
+        await driver.create_account(_account(1, "alice"))
+        backend.sstp_sessions_active = lambda: True
+        backend.user_get = lambda _username: (_ for _ in ()).throw(
+            AssertionError("vpncmd UserGet must not run during SSTP"))
+        assert await driver.get_usage() == []
+
+    asyncio.run(run())
+
+
 def test_usage_deltas_from_native_counters() -> None:
     async def run():
         driver, backend = _driver()
@@ -502,6 +514,39 @@ def test_softether_accounting_delta_test() -> None:
         restarted.restore_usage_baselines(snapshot)
         after_restart = (await restarted.get_usage())[0]
         assert (after_restart.uplink_bytes, after_restart.downlink_bytes) == (0, 0)
+
+    asyncio.run(run())
+
+
+def test_restart_does_not_replay_delayed_userget_behind_billed_live_total() -> None:
+    async def run():
+        driver, backend = _driver()
+        await driver.create_account(_account(1, "alice"))
+        backend.sessions = [SESession("SID-live", "1.alice", "client", {})]
+        backend.session_stats["SID-live"] = (10, 100)
+        first = (await driver.get_usage())[0]
+        assert (first.uplink_bytes, first.downlink_bytes) == (100, 10)
+
+        # Disconnect commits slightly less than SessionGet had exposed. This
+        # is real SoftEther lag, not a provider counter reset.
+        backend.sessions = []
+        backend.stats["1.alice"] = (9, 90)
+        committed = (await driver.get_usage())[0]
+        assert committed.uplink_bytes + committed.downlink_bytes == 0
+        state = driver.usage_tracker_snapshot(["1.alice"])
+
+        restarted, restarted_backend = _driver()
+        await restarted.create_account(_account(1, "alice"))
+        restarted_backend.stats["1.alice"] = (9, 90)
+        restarted.restore_usage_baselines(state)
+        after = (await restarted.get_usage())[0]
+        assert (after.uplink_bytes, after.downlink_bytes) == (0, 0)
+
+        # Once UserGet moves beyond the covered position, only true growth is
+        # emitted and the delayed overlap is absorbed.
+        restarted_backend.stats["1.alice"] = (11, 101)
+        grown = (await restarted.get_usage())[0]
+        assert (grown.uplink_bytes, grown.downlink_bytes) == (1, 1)
 
     asyncio.run(run())
 
@@ -671,6 +716,67 @@ def test_vpncmd_primary_hub_csv_strips_login_preamble(monkeypatch) -> None:
     cleaned = backend._cmd("UserList", csv=True)
     assert cleaned.startswith("User Name,Full Name")
     assert "Command Line Management" not in cleaned
+
+
+def test_sstp_socket_probe_ignores_loopback_management(monkeypatch) -> None:
+    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
+
+    backend = LocalSoftEtherBackend({})
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/ss" if name == "ss" else None)
+    monkeypatch.setattr(
+        backend, "_run",
+        lambda *args, **kwargs: (
+            "0 0 127.0.0.1:443 127.0.0.1:50000\n"
+            "0 0 109.248.161.249:443 172.61.0.2:42000\n"
+        ),
+    )
+    assert backend.sstp_sessions_active() is True
+    monkeypatch.setattr(
+        backend, "_run",
+        lambda *args, **kwargs: "0 0 127.0.0.1:443 127.0.0.1:50000\n",
+    )
+    assert backend.sstp_sessions_active() is False
+
+
+def test_usage_batch_reads_many_users_in_one_management_session(monkeypatch) -> None:
+    import app.cores.routing.softether_client as channel
+    from app.cores.drivers.softether.backend import LocalSoftEtherBackend
+
+    backend = LocalSoftEtherBackend({
+        "admin_password": "server-admin", "hub": "DEFAULT",
+    })
+    monkeypatch.setattr(backend, "vpncmd_binary", lambda: "/vpncmd")
+    calls = []
+    transcript = (
+        "VPN Server/DEFAULT>UserGet 1.alice\n"
+        "User Name |1.alice\n"
+        "Outgoing Unicast Total Size|1,000 bytes\n"
+        "Outgoing Broadcast Total Size|20 bytes\n"
+        "Incoming Unicast Total Size|2,000 bytes\n"
+        "Incoming Broadcast Total Size|30 bytes\n"
+        "VPN Server/DEFAULT>UserGet 2.bob\n"
+        "User Name |2.bob\n"
+        "Outgoing Unicast Total Size|3,000 bytes\n"
+        "Outgoing Broadcast Total Size|40 bytes\n"
+        "Incoming Unicast Total Size|4,000 bytes\n"
+        "Incoming Broadcast Total Size|50 bytes\n"
+        "VPN Server/DEFAULT>\n"
+    )
+
+    def run(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return transcript
+
+    monkeypatch.setattr(channel, "run_vpncmd_pty", run)
+    result = backend.users_get(["1.alice", "2.bob"])
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == ["/vpncmd", "localhost", "/SERVER", "/HUB:DEFAULT"]
+    assert kwargs["commands"] == ["UserGet 1.alice", "UserGet 2.bob"]
+    assert result["1.alice"].outgoing_bytes == 1020
+    assert result["1.alice"].incoming_bytes == 2030
+    assert result["2.bob"].outgoing_bytes == 3040
+    assert result["2.bob"].incoming_bytes == 4050
 
 
 def test_bulk_account_replay_uses_one_live_inventory_session(monkeypatch) -> None:

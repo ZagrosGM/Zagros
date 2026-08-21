@@ -10,8 +10,14 @@ from __future__ import annotations
 from app import logger, scheduler
 from app.platform.usage_recorder import record_core_usages
 
+# Provider counters are cumulative and restart-safe; a 30-second sweep loses
+# no bytes. Keeping SoftEther management sampling away from a 10-second hot
+# loop is important for long-lived SSTP data streams on small VPS instances.
+_USAGE_SWEEP_SECONDS = 30
 scheduler.add_job(record_core_usages, 'interval',
-                  seconds=30, id='core_usage_recorder',
+                  seconds=_USAGE_SWEEP_SECONDS,
+                  id='core_usage_recorder',
                   coalesce=True, max_instances=1)
 
-logger.info("core usage recorder scheduled (30s)")
+logger.info("unified all-core usage recorder scheduled (%ss)",
+            _USAGE_SWEEP_SECONDS)

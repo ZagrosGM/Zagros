@@ -126,7 +126,7 @@ def test_softether_catalog_is_enabled_capability_aware():
         ("sstp-custom", "sstp"), ("softether-openvpn", "ovpn")]
     assert {e.protocol: e.port for e in entries} == {
         "softether": 5555, "l2tp": 1701, "l2tp_raw": 1701,
-        "etherip": None, "sstp": 46704, "ovpn": 1195,
+        "etherip": None, "sstp": 443, "ovpn": 1195,
     }
     assert all(e.protocol != "pptp" for e in entries)
 

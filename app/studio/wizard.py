@@ -566,7 +566,7 @@ def _softether_blueprint() -> list[Protocol]:
             # upload fields would be a lie here; certificate management is a
             # separate SoftEther server-certificate operation.
             _tr("tcp", "HTTPS/TCP 443", [_none()]),
-        ]),
+        ], fixed_port=True),
         _proto("ovpn", "OpenVPN compatibility", 1194, [
             _tr("udp", "UDP", [_none()]),
         ]),

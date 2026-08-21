@@ -105,6 +105,12 @@ async def _studio_inbounds(runtime, core_id: str) -> list[CatalogInbound]:
     doc = await runtime.studio_store.get_document(core_id)
     found = _doc_inbounds(doc)
     if found:
+        if core_id == "softether":
+            # Pre-8.8 Studio documents could claim an arbitrary SSTP port even
+            # though SoftEther's MS-SSTP HTTP dispatcher only serves TCP/443.
+            for inbound in found:
+                if inbound.protocol == "sstp":
+                    inbound.port = 443
         return found
     if core_id in _SERVICE_ENTRIES:
         return []  # healthy static fallback below in catalog()
@@ -133,8 +139,9 @@ def _service_inbounds(core_id: str, settings: dict[str, Any]) -> list[CatalogInb
                 # not a static list of theoretical protocols.
                 continue
             tag = str((settings.get("feature_tags") or {}).get(protocol) or tag)
-        port = {"l2tp": 1701, "l2tp_raw": 1701}.get(protocol)
-        if port_key is not None:
+        fixed_port = {"l2tp": 1701, "l2tp_raw": 1701, "sstp": 443}
+        port = fixed_port.get(protocol)
+        if port_key is not None and protocol not in fixed_port:
             try:
                 raw_port = settings.get(port_key)
                 if protocol == "ovpn" and raw_port:

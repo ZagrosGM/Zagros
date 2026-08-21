@@ -196,11 +196,17 @@ def test_sync_platform_user_mirrors_limits_expire_admin_and_quota(runtime):
         assert row.admin_id is None
         entry = await runtime.quota.get(pid)
         assert entry is not None and entry.total_bytes == 123456
-        # re-sync converges to the new snapshot instead of accumulating
+        # A stale/lower legacy snapshot must never move the live unified quota
+        # backwards (User Edit used to reset it and race recorder deltas).
         user.used_traffic = 50
         await provisioning.sync_platform_user(runtime, user)
         entry = await runtime.quota.get(pid)
-        assert entry.total_bytes == 50
+        assert entry.total_bytes == 123456
+        # Upgrade/bootstrap can still catch an older platform row up safely.
+        user.used_traffic = 200000
+        await provisioning.sync_platform_user(runtime, user)
+        entry = await runtime.quota.get(pid)
+        assert entry.total_bytes == 200000
 
 
     asyncio.run(_go())
@@ -233,6 +239,46 @@ def test_sync_legacy_accounts_mirrors_proxies_and_prunes(runtime):
 
 
     asyncio.run(_go())
+def test_softether_multi_protocol_grant_uses_one_batch_reconcile(runtime, monkeypatch):
+    async def _go():
+        from app.cores.types import Capability, CoreMetadata
+        from app.platform import provisioning
+
+        driver = RecordingDriver()
+        driver.metadata = CoreMetadata(
+            id="softether", name="SoftEther",
+            protocols=["softether", "sstp"],
+            capabilities={Capability.USER_MANAGEMENT, Capability.SUSPEND_RESUME},
+        )
+        batches = []
+
+        async def sync_accounts(accounts):
+            batches.append([account.account_id for account in accounts])
+            for account in accounts:
+                account.settings.setdefault("password", "batch-generated")
+
+        driver.sync_accounts = sync_accounts
+        runtime.core_manager.attach("softether", driver, enabled=True)
+        _stub_catalog(monkeypatch, _catalog(
+            ("softether", "softether", ["native"]),
+            ("softether", "sstp", ["sstp"]),
+        ))
+        user = LegacyUser("batch-se", user_id=81)
+        pid = await provisioning.sync_user(runtime, user, grants={
+            "softether": ["native", "sstp"],
+        })
+        assert len(batches) == 1
+        assert set(batches[0]) == {
+            "81.batch-se.softether", "81.batch-se.sstp",
+        }
+        rows = [row for row in runtime.users.accounts_of(pid)
+                if row["core_id"] == "softether"]
+        assert len(rows) == 2
+        assert all(row["settings"]["password"] == "batch-generated" for row in rows)
+
+    asyncio.run(_go())
+
+
 def test_apply_grants_creates_accounts_on_both_cores(runtime, monkeypatch):
     async def _go():
         from app.platform import provisioning

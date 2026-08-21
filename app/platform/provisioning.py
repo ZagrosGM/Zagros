@@ -42,6 +42,15 @@ class GrantError(RuntimeError):
     """A driver or catalog rejected a grant — message must name the core."""
 
 
+async def _drop_usage_baseline(runtime, core_id: str, account_id: str) -> None:
+    key = f"{core_id}:{account_id}"
+    drop_prefix = getattr(runtime.baselines, "drop_prefix", None)
+    if callable(drop_prefix):
+        await drop_prefix(key)
+    else:
+        await runtime.baselines.drop(key)
+
+
 def platform_account_id(user_id: int, username: str, protocol: str) -> str:
     """Same convention as the Marzban migration importer (§delivery matrix)."""
     return f"{user_id}.{username}.{protocol}"
@@ -113,15 +122,18 @@ async def sync_platform_user(runtime, user: Any) -> int:
     # limit must clear the mirror too, so reconcile the exact value:
     await asyncio.to_thread(_reconcile_device_limit, runtime, platform_id,
                             device_limit)
-    # Quota baseline mirror: the legacy counter is the master figure; the
-    # portal reads the platform store, so align them (never accumulate).
+    # Upgrade/bootstrap mirror: never reset an already-live unified quota on
+    # every User Edit.  The old reset-then-add sequence raced the recorder and
+    # could erase a concurrent core delta.  Bring a missing/older platform row
+    # up to the legacy compatibility total, but never move a counter backwards.
     try:
-        await runtime.quota.reset(platform_id)
         used = _legacy_used_bytes(user)
-        if used:
-            await runtime.quota.add(platform_id, 0, used)
+        entry = await runtime.quota.get(platform_id)
+        current = entry.total_bytes if entry else 0
+        if used > current:
+            await runtime.quota.add(platform_id, 0, used - current)
     except Exception as exc:  # noqa: BLE001 — quota mirror must not break sync
-        logger.warning("quota baseline mirror failed for %s: %s", user.username, exc)
+        logger.warning("quota baseline bootstrap failed for %s: %s", user.username, exc)
     return platform_id
 
 
@@ -261,6 +273,57 @@ async def apply_grants(runtime, user: Any, platform_id: int,
                            "with a valid selection to change them", core_id, tags)
             continue
 
+        if core_id == "softether":
+            # Four compatibility transports are four account identities, but
+            # provisioning them through create_account opened ~12 rapid
+            # localhost vpncmd logins and tripped SoftEther's management DoS
+            # guard. Reconcile the complete desired set in ONE authenticated
+            # PTY; sync_accounts mints credentials in place for persistence.
+            desired_accounts: list[UserAccount] = []
+            for protocol, proto_tags in wanted.items():
+                account_id = platform_account_id(user.id, user.username, protocol)
+                all_proto_tags = [i.tag for i in catalog[core_id].inbounds
+                                  if i.protocol == protocol]
+                excluded = sorted(set(all_proto_tags) - set(proto_tags))
+                previous = next(
+                    (a for a in existing
+                     if a["protocol"] == protocol and a["account_id"] == account_id),
+                    None,
+                )
+                settings = dict(previous["settings"] if previous else {})
+                settings["inbound_tags"] = list(proto_tags)
+                if excluded:
+                    settings["excluded_inbounds"] = excluded
+                else:
+                    settings.pop("excluded_inbounds", None)
+                desired_accounts.append(UserAccount(
+                    user_id=platform_id, username=user.username,
+                    account_id=account_id, protocol=protocol,
+                    enabled=active, settings=settings,
+                ))
+            try:
+                driver = runtime.core_manager.get(core_id)
+                await driver.sync_accounts(desired_accounts)
+            except Exception as exc:  # noqa: BLE001
+                raise GrantError(
+                    f"core '{core_id}' failed to batch-provision accounts: {exc}") from exc
+            desired_ids = {account.account_id for account in desired_accounts}
+            for acc in existing:
+                if acc["account_id"] not in desired_ids:
+                    await asyncio.to_thread(
+                        runtime.users.delete_account,
+                        user_id=platform_id, core_id=core_id,
+                        account_id=acc["account_id"])
+                    await _drop_usage_baseline(runtime, core_id, acc["account_id"])
+            for account in desired_accounts:
+                await asyncio.to_thread(
+                    runtime.users.upsert_core_account,
+                    user_id=platform_id, core_id=core_id,
+                    account_id=account.account_id, protocol=account.protocol,
+                    enabled=active, settings=dict(account.settings),
+                )
+            continue
+
         # revoke what is no longer selected
         for acc in existing:
             protocol = acc["protocol"]
@@ -272,6 +335,7 @@ async def apply_grants(runtime, user: Any, platform_id: int,
                 await asyncio.to_thread(
                     runtime.users.delete_account,
                     user_id=platform_id, core_id=core_id, account_id=acc["account_id"])
+                await _drop_usage_baseline(runtime, core_id, acc["account_id"])
 
         # provision / update what is selected
         for protocol, proto_tags in wanted.items():
@@ -372,6 +436,7 @@ async def remove_user(runtime, username: str) -> None:
         except Exception as exc:  # noqa: BLE001 — local rows are removed anyway
             logger.warning("core %s delete_account failed for %s: %s",
                            acc["core_id"], username, exc)
+        await _drop_usage_baseline(runtime, acc["core_id"], acc["account_id"])
     await asyncio.to_thread(runtime.users.delete_user, platform_id)
 
 
@@ -429,6 +494,7 @@ async def reconcile_accounts_after_inbound_change(runtime, core_id: str) -> dict
                     runtime.users.delete_account,
                     user_id=acc["user_id"], core_id=core_id,
                     account_id=acc["account_id"])
+                await _drop_usage_baseline(runtime, core_id, acc["account_id"])
                 report["revoked"] += 1
                 logger.info("inbound cascade: revoked %s on %s — its last "
                             "inbound %s is gone", acc["account_id"], core_id,

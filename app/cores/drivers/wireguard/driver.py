@@ -1014,6 +1014,41 @@ class WireGuardDriver(BaseCoreDriver):
         await self._publish()
 
     # ------------------------------------------------------------------ #
+    # durable usage baselines                                            #
+    # ------------------------------------------------------------------ #
+    def usage_tracker_snapshot(
+        self, account_ids: list[str] | None = None,
+    ) -> dict[str, tuple[int, int]]:
+        """Translate provider public-key cursors to stable account ids.
+
+        ``get_usage`` correctly keys raw WireGuard counters by public key, but
+        the recorder persists account ids.  Passing account ids directly to
+        DeltaTracker.baseline_snapshot used to return an empty mapping, so a
+        panel restart re-billed every peer's lifetime transfer counter.
+        """
+        wanted = set(account_ids) if account_ids is not None else None
+        raw = self._usage.baseline_snapshot()
+        out: dict[str, tuple[int, int]] = {}
+        for account_id, account in self._accounts.items():
+            if wanted is not None and account_id not in wanted:
+                continue
+            public_key = account.settings.get("public_key")
+            if public_key in raw:
+                out[account_id] = raw[public_key]
+        return out
+
+    def restore_usage_baselines(self, baselines: dict) -> None:
+        translated: dict[str, tuple[int, int]] = {}
+        for account_id, totals in (baselines or {}).items():
+            account = self._accounts.get(str(account_id))
+            if account is None:
+                continue
+            public_key = account.settings.get("public_key")
+            if public_key:
+                translated[str(public_key)] = (int(totals[0]), int(totals[1]))
+        self._usage.restore(translated)
+
+    # ------------------------------------------------------------------ #
     # statistics                                                         #
     # ------------------------------------------------------------------ #
     async def get_usage(

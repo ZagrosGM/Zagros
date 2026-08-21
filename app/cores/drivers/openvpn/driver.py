@@ -891,6 +891,40 @@ want_pass="${creds#*:}"
             pass  # core down — next boot reconciles anyway
 
     # ------------------------------------------------------------------ #
+    # durable live-session baselines
+    # ------------------------------------------------------------------ #
+    def usage_tracker_snapshot(
+        self, account_ids: list[str] | None = None,
+    ) -> dict[str, tuple[int, int]]:
+        """Persist the wildcard CN session cursor used by interim+final merge.
+
+        BaseCoreDriver only knew cumulative DeltaTracker snapshots. OpenVPN's
+        SessionUsageTracker was therefore always persisted as an empty map;
+        restarting the panel while a session existed could replay its complete
+        status counter before the disconnect final arrived.
+        """
+        wanted = set(account_ids) if account_ids is not None else None
+        # A disconnected account needs an explicit zero tombstone; otherwise
+        # the baseline row from its last live poll survives forever and a
+        # same-sized reconnect after panel restart is suppressed.
+        out: dict[str, tuple[int, int]] = {
+            account_id: (0, 0) for account_id in (wanted or set(self._accounts))
+        }
+        for key, totals in self._usage.session_snapshot().items():
+            if not isinstance(key, tuple) or len(key) != 2 or key[1] != "*":
+                continue
+            account_id = str(key[0])
+            if wanted is None or account_id in wanted:
+                out[account_id] = totals
+        return out
+
+    def restore_usage_baselines(self, baselines: dict) -> None:
+        self._usage.restore_sessions({
+            (str(account_id), "*"): (int(totals[0]), int(totals[1]))
+            for account_id, totals in (baselines or {}).items()
+        })
+
+    # ------------------------------------------------------------------ #
     # statistics: hook finals (authoritative) + status deltas (interim)
     # ------------------------------------------------------------------ #
     async def get_usage(

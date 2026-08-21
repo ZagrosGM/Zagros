@@ -15,7 +15,6 @@ from app.db.models import Admin, NodeUsage, NodeUserUsage, System, User
 from config import (
     DISABLE_RECORDING_NODE_USAGE,
     JOB_RECORD_NODE_USAGES_INTERVAL,
-    JOB_RECORD_USER_USAGES_INTERVAL,
 )
 from xray_api import XRay as XRayAPI
 from xray_api import exc as xray_exc
@@ -217,9 +216,12 @@ def record_node_usages():
         record_node_stats(params, node_id)
 
 
-scheduler.add_job(record_user_usages, 'interval',
-                  seconds=JOB_RECORD_USER_USAGES_INTERVAL,
-                  coalesce=True, max_instances=1)
+# Per-user provider reads are owned exclusively by
+# app.platform.usage_recorder. Scheduling ``record_user_usages`` here as well
+# consumed/reset Xray's stats in a second pipeline and either double-counted
+# the legacy master or left the platform quota/journal empty. Keep the
+# function as a compatibility entry point for callers/tests, but never run it
+# concurrently in production.
 scheduler.add_job(record_node_usages, 'interval',
                   seconds=JOB_RECORD_NODE_USAGES_INTERVAL,
                   coalesce=True, max_instances=1)

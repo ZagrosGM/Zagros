@@ -23,8 +23,8 @@ def test_reconnect_and_generation_restart_preserve_totals(tmp_path):
     assert PptpAccountingLedger(path).totals()["u"] == (17, 29)
 
 
-def test_counter_reset_never_subtracts(tmp_path):
+def test_counter_reset_accounts_new_generation_without_subtracting(tmp_path):
     ledger = PptpAccountingLedger(str(tmp_path / "acct.sqlite3"))
     ledger.observe("g", [PptpSession(ifname="zgppp0", username="u", rx_bytes=100, tx_bytes=100)])
     ledger.observe("g", [PptpSession(ifname="zgppp0", username="u", rx_bytes=2, tx_bytes=3)])
-    assert ledger.totals()["u"] == (100, 100)
+    assert ledger.totals()["u"] == (102, 103)

@@ -45,12 +45,14 @@ class SoftEtherBackend(Protocol):
     def user_expires_set(self, username: str, expires: str | None) -> None: ...
     def suspend_user(self, username: str) -> None: ...
     def user_get(self, username: str) -> UserStatistics: ...
+    def users_get(self, usernames: list[str]) -> dict[str, UserStatistics]: ...
     def user_list(self) -> list[str]: ...
     def users_reconcile(self, accounts: list[tuple[str, str, str, bool]],
                         delete: list[str]) -> None: ...
     def session_list(self) -> list[SESession]: ...
     def session_get(self, session_name: str) -> SessionStatistics: ...
     def session_disconnect(self, session_name: str) -> None: ...
+    def sstp_sessions_active(self) -> bool: ...
     def ipsec_psk(self) -> str | None: ...
     def ipsec_get(self) -> IPsecServices: ...
     def ipsec_services_set(self, *, l2tp: bool, l2tp_raw: bool, etherip: bool,
@@ -1313,6 +1315,59 @@ class LocalSoftEtherBackend:
     def user_get(self, username: str) -> UserStatistics:
         return parse_user_get(self._cmd(f"UserGet {username}"))
 
+    def users_get(self, usernames: list[str]) -> dict[str, UserStatistics]:
+        """Read many UserGet counters in one authenticated vpncmd session.
+
+        SoftEther rate-limits rapid localhost management logins. Opening one
+        process per account every recorder tick could pause an active SSTP
+        data stream (TCP-over-TCP then collapsed). Keep the whole account
+        sweep on one PTY/login; a failed or incomplete batch is discarded so
+        cumulative counters are retried on the next tick without loss.
+        """
+        wanted = [self._validate_user_name(value) for value in usernames]
+        if not wanted:
+            return {}
+        executable = self.vpncmd_binary()
+        if executable is None:
+            raise CoreError("vpncmd not found for SoftEther usage batch")
+        selected_hub = self._validate_hub_name(self.hub)
+        from app.cores.routing.softether_client import run_vpncmd_pty
+
+        transcript = run_vpncmd_pty(
+            [executable, self.server, "/SERVER", f"/HUB:{selected_hub}"],
+            commands=[f"UserGet {username}" for username in wanted],
+            administrator_password=self.password,
+            prompt="VPN Server",
+            timeout=max(self.timeout, 30.0),
+        )
+        # Every UserGet table starts with its stable English "User Name" row.
+        # Split there so parse_user_get cannot overwrite an earlier table with
+        # fields from the following command in the shared transcript.
+        blocks: list[list[str]] = []
+        current: list[str] | None = None
+        for line in transcript.splitlines():
+            label = line.split("|", 1)[0].strip(" -") if "|" in line else ""
+            if label.lower() == "user name":
+                if current:
+                    blocks.append(current)
+                current = [line]
+            elif current is not None:
+                current.append(line)
+        if current:
+            blocks.append(current)
+        result: dict[str, UserStatistics] = {}
+        for block in blocks:
+            stats = parse_user_get("\n".join(block))
+            if stats.username in wanted:
+                result[stats.username] = stats
+        missing = sorted(set(wanted) - set(result))
+        if missing:
+            raise CoreError(
+                "SoftEther usage batch returned no UserGet table for: "
+                + ", ".join(missing)
+            )
+        return result
+
     def user_list(self) -> list[str]:
         return [u.username for u in parse_user_list(self._cmd("UserList", csv=True))]
 
@@ -1396,6 +1451,35 @@ class LocalSoftEtherBackend:
 
     def session_disconnect(self, session_name: str) -> None:
         self._cmd(f"SessionDisconnect {session_name}")
+
+    def sstp_sessions_active(self) -> bool:
+        """Detect remote TCP/443 sessions without opening vpncmd.
+
+        SoftEther's management RPC shares the server and rapid polling can
+        collapse SSTP's nested TCP stream. During an active remote SSTP socket
+        the recorder defers its cumulative read until disconnect. Loopback
+        vpncmd sessions are ignored.
+        """
+        executable = shutil.which("ss")
+        if executable is None:
+            return False
+        try:
+            text = self._run(
+                [executable, "-Hnt", "state", "established",
+                 "sport", "=", ":443"],
+                timeout=5,
+            )
+        except CoreError:
+            return False
+        for line in text.splitlines():
+            columns = line.split()
+            if len(columns) < 4:
+                continue
+            peer = columns[-1]
+            host = peer.rsplit(":", 1)[0].strip("[]")
+            if host not in {"127.0.0.1", "::1"}:
+                return True
+        return False
 
     def ipsec_psk(self) -> str | None:
         return None  # optional: IPsecEnable inspection (kept honest: unset)

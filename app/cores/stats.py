@@ -22,11 +22,26 @@ class DeltaTracker:
     def __init__(self) -> None:
         self._baseline: dict[object, tuple[int, int]] = {}
 
+    @staticmethod
+    def _delta(current: int, previous: int) -> int:
+        """Growth of a cumulative counter, including a provider reset.
+
+        A lower value is not "negative traffic": the provider restarted and
+        ``current`` bytes have already crossed the new counter generation.
+        Returning zero here silently lost everything between the reset and the
+        first poll.  Treat the new value as growth while still never emitting a
+        negative delta.
+        """
+        current = max(0, int(current))
+        previous = max(0, int(previous))
+        return current - previous if current >= previous else current
+
     def observe(self, key: object, uplink: int, downlink: int) -> tuple[int, int]:
-        """Return (delta_up, delta_down); negative movement (reset) → 0."""
+        """Return growth since the previous read, reset-safe and non-negative."""
         base_up, base_down = self._baseline.get(key, (0, 0))
-        delta_up = max(0, uplink - base_up)
-        delta_down = max(0, downlink - base_down)
+        uplink, downlink = max(0, int(uplink)), max(0, int(downlink))
+        delta_up = self._delta(uplink, base_up)
+        delta_down = self._delta(downlink, base_down)
         self._baseline[key] = (uplink, downlink)
         return delta_up, delta_down
 
@@ -59,13 +74,20 @@ class SessionUsageTracker:
         self._sessions: dict[object, _SessionState] = {}
 
     def poll(self, key: object, uplink: int, downlink: int) -> tuple[int, int]:
-        """Interim delta for a *live* session counter."""
+        """Interim delta for a live session counter.
+
+        Some providers reuse a logical account/session key after reconnect.
+        When its raw counter drops, this is a new counter generation and the
+        new value must be emitted rather than suppressed until it catches the
+        previous session's total.
+        """
         last = self._sessions.get(key, _SessionState(0, 0))
+        uplink, downlink = max(0, int(uplink)), max(0, int(downlink))
         delta = (
-            max(0, uplink - last.uplink),
-            max(0, downlink - last.downlink),
+            DeltaTracker._delta(uplink, last.uplink),
+            DeltaTracker._delta(downlink, last.downlink),
         )
-        self._sessions[key] = _SessionState(max(uplink, last.uplink), max(downlink, last.downlink))
+        self._sessions[key] = _SessionState(uplink, downlink)
         return delta
 
     # ---- restart-safety (interim session counters) ----
@@ -84,8 +106,8 @@ class SessionUsageTracker:
         """
         last = self._sessions.pop(key, _SessionState(0, 0))
         return (
-            max(0, final_uplink - last.uplink),
-            max(0, final_downlink - last.downlink),
+            DeltaTracker._delta(final_uplink, last.uplink),
+            DeltaTracker._delta(final_downlink, last.downlink),
         )
 
     def active_sessions(self) -> list[object]:

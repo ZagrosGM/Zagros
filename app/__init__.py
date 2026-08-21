@@ -177,6 +177,18 @@ def _build_app_inner():
         async def zagros_stop_managed_cores():
             runtime = getattr(app.state, "zagros", None)
             if runtime is not None:
+                # Drain every live cumulative/session counter before stopping
+                # the processes/interfaces that own that generation. The
+                # scheduler is paused first and the recorder's process lock
+                # waits out an already-running tick.
+                try:
+                    scheduler.pause()
+                    from app.platform.usage_recorder import flush_before_shutdown
+
+                    await flush_before_shutdown(runtime)
+                except Exception as _exc:  # noqa: BLE001 — continue teardown
+                    logging.getLogger("uvicorn.error").warning(
+                        "final usage flush before shutdown failed: %s", _exc)
                 try:
                     await runtime.subscription_listener.stop()
                 except Exception as _exc:  # noqa: BLE001

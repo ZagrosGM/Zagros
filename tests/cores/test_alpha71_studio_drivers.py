@@ -739,22 +739,26 @@ def test_softether_vpncmd_convergence(tmp_path):
     assert "pre-shared key" not in flat2.lower()
 
 
-def test_softether_custom_sstp_port_is_materialized_and_delivered(tmp_path):
+def test_softether_legacy_custom_sstp_port_normalizes_to_443(tmp_path):
     from app.cores.drivers.softether.driver import SoftEtherDriver
 
     backend = _SEFakeBackend()
     driver = SoftEtherDriver(
-        settings={"hub": "DEFAULT", "advertise_host": "vpn.example.com"},
+        settings={"hub": "DEFAULT", "advertise_host": "vpn.example.com",
+                  "sstp_port": 46704},
         backend=backend)
-    asyncio.run(driver.apply_studio_document({"inbounds": [{
+    document = {"inbounds": [{
         "tag": "sstp-custom", "protocol": "sstp", "port": 46704,
-    }]}))
+    }]}
+    asyncio.run(driver.apply_studio_document(document))
     flat = " | ".join(backend.cmds)
     assert "SstpEnable yes" in flat
-    assert "ListenerCreate 46704" in flat
-    assert driver.settings["sstp_port"] == 46704
+    assert "ListenerCreate 443" in flat
+    assert "ListenerCreate 46704" not in flat
+    assert driver.settings["sstp_port"] == 443
+    assert document["inbounds"][0]["port"] == 443
     assert driver.export_config_document()["inbounds"][0] == {
-        "tag": "sstp-custom", "protocol": "sstp", "port": 46704,
+        "tag": "sstp-custom", "protocol": "sstp", "port": 443,
     }
     account = _acct(
         "sstp", "sstp", password="pw", inbound_tags=["sstp-custom"])
@@ -765,9 +769,9 @@ def test_softether_custom_sstp_port_is_materialized_and_delivered(tmp_path):
         for field in artifact.fields
         if field.key == "port"
     )
-    assert port_field == "46704/tcp"
+    assert port_field == "443/tcp"
     config = asyncio.run(driver.build_client_config(account))
-    assert config.payload["port"] == 46704
+    assert config.payload["port"] == 443
 
 
 def test_softether_legacy_fake_l2tp_port_normalizes_to_standard(tmp_path):

@@ -23,12 +23,12 @@ from app.cores.process import ManagedProcess  # noqa: E402
 from app.cores.stats import DeltaTracker, SessionUsageTracker  # noqa: E402
 
 
-def test_delta_tracker_basic_and_reset_clamp() -> None:
+def test_delta_tracker_basic_and_reset_accounts_new_generation() -> None:
     tracker = DeltaTracker()
     assert tracker.observe("u1", 100, 1000) == (100, 1000)     # first read: since start
     assert tracker.observe("u1", 150, 1000) == (50, 0)
     assert tracker.observe("u1", 150, 1000) == (0, 0)          # flat -> zero, no double count
-    assert tracker.observe("u1", 10, 5) == (0, 0)              # counter reset (core restart) -> clamp
+    assert tracker.observe("u1", 10, 5) == (10, 5)             # reset: bytes in new generation count
     assert tracker.observe("u1", 30, 5) == (20, 0)             # ...then resumes forward
     tracker.forget("u1")
     assert tracker.observe("u1", 7, 7) == (7, 7)               # forgotten baseline restarts
@@ -44,6 +44,12 @@ def test_session_tracker_interim_then_final_no_double_count() -> None:
     # new session starts at 0 -> no negative, no leftovers from the old one
     new_key = ("alice", "2026-08-04T11:00", "203.0.113.5:51235")
     assert tracker.poll(new_key, 42, 42) == (42, 42)
+    # A provider that reuses its account-level key on reconnect must account
+    # the first counters of the new generation instead of waiting until they
+    # exceed the previous session.
+    reused = ("bob", "*")
+    assert tracker.poll(reused, 1000, 2000) == (1000, 2000)
+    assert tracker.poll(reused, 7, 9) == (7, 9)
     # close on a session never polled -> full final
     assert tracker.close("ghost", 9, 9) == (9, 9)
 

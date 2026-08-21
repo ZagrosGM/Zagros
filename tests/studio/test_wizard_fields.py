@@ -238,7 +238,7 @@ def test_softether_wizard_is_capability_aware_and_psk_is_secure_default():
     assert psk["default"] != psk2["default"]
     assert l2tp["fixed_port"] is True and l2tp["default_port"] == 1701
     assert next(p for p in first["protocols"] if p["id"] == "l2tp_raw")["fixed_port"] is True
-    assert next(p for p in first["protocols"] if p["id"] == "sstp")["fixed_port"] is False
+    assert next(p for p in first["protocols"] if p["id"] == "sstp")["fixed_port"] is True
     for proto in ("softether", "l2tp_raw", "sstp", "ovpn"):
         assert "ipsec_psk" not in _field_keys(
             next(p for p in first["protocols"] if p["id"] == proto)["transports"][0])

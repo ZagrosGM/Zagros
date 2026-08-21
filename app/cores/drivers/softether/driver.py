@@ -66,42 +66,78 @@ class _SoftEtherUsageTracker:
         self._last_user: dict[str, tuple[int, int]] = {}
         self._last_sessions: dict[tuple[str, str], tuple[int, int]] = {}
         self._outstanding: dict[str, tuple[int, int]] = {}
+        self._last_logins: dict[str, int] = {}
         self._cold_after_restore: set[str] = set()
 
     def register(self, account_id: str) -> None:
         self._billed.setdefault(account_id, (0, 0))
         self._last_user.setdefault(account_id, (0, 0))
         self._outstanding.setdefault(account_id, (0, 0))
+        self._last_logins.setdefault(account_id, 0)
 
     @staticmethod
-    def _delta(current: tuple[int, int], previous: tuple[int, int]) -> tuple[int, int]:
-        return (max(0, current[0] - previous[0]),
-                max(0, current[1] - previous[1]))
+    def _delta(
+        current: tuple[int, int], previous: tuple[int, int], *, reset: bool = False,
+    ) -> tuple[int, int]:
+        def one(now: int, before: int) -> int:
+            now, before = max(0, int(now)), max(0, int(before))
+            if now >= before:
+                return now - before
+            return now if reset else 0
+
+        return one(current[0], previous[0]), one(current[1], previous[1])
 
     def observe(
         self,
         account_id: str,
         completed: tuple[int, int],
         live_sessions: dict[str, tuple[int, int]],
+        logins: int = 0,
     ) -> tuple[int, int]:
         self.register(account_id)
+        completed = (max(0, int(completed[0])), max(0, int(completed[1])))
+        logins = max(0, int(logins))
         if account_id in self._cold_after_restore:
-            # The persisted baseline is the authoritative already-billed
-            # total. Seed volatile session/user cursors from live state; only
-            # a completed counter beyond that baseline is immediately new.
+            # ``_billed`` is the covered provider position (UserGet plus live
+            # SessionGet bytes already emitted). It can legitimately be a bit
+            # AHEAD of delayed UserGet after disconnect. Never interpret that
+            # lag as a counter reset and replay the whole user's lifetime.
             billed = self._billed[account_id]
-            emitted = self._delta(completed, billed)
-            self._billed[account_id] = (
-                billed[0] + emitted[0], billed[1] + emitted[1])
+            prior_logins = self._last_logins.get(account_id, 0)
+            generation_reset = logins < prior_logins
+            live_total = (
+                sum(value[0] for value in live_sessions.values()),
+                sum(value[1] for value in live_sessions.values()),
+            )
+            effective = (max(completed[0], live_total[0]),
+                         max(completed[1], live_total[1]))
+            if generation_reset:
+                emitted = effective
+            else:
+                emitted = (max(0, effective[0] - billed[0]),
+                           max(0, effective[1] - billed[1]))
+            new_billed = (billed[0] + emitted[0], billed[1] + emitted[1])
+            self._billed[account_id] = new_billed
             self._last_user[account_id] = completed
+            self._last_logins[account_id] = logins
             for session_name, counters in live_sessions.items():
                 self._last_sessions[(account_id, session_name)] = counters
-            self._outstanding[account_id] = (0, 0)
+            self._outstanding[account_id] = (
+                max(0, new_billed[0] - completed[0]),
+                max(0, new_billed[1] - completed[1]),
+            )
             self._cold_after_restore.discard(account_id)
             return emitted
 
-        user_delta = self._delta(completed, self._last_user[account_id])
+        previous_user = self._last_user[account_id]
+        generation_reset = logins < self._last_logins.get(account_id, 0)
+        if generation_reset:
+            self._outstanding[account_id] = (0, 0)
+            for key in [key for key in self._last_sessions if key[0] == account_id]:
+                self._last_sessions.pop(key, None)
+        user_delta = self._delta(completed, previous_user, reset=generation_reset)
         self._last_user[account_id] = completed
+        self._last_logins[account_id] = logins
 
         live_delta = [0, 0]
         current_keys: set[tuple[str, str]] = set()
@@ -109,7 +145,7 @@ class _SoftEtherUsageTracker:
             key = (account_id, session_name)
             current_keys.add(key)
             previous = self._last_sessions.get(key, (0, 0))
-            delta = self._delta(counters, previous)
+            delta = self._delta(counters, previous, reset=True)
             live_delta[0] += delta[0]
             live_delta[1] += delta[1]
             self._last_sessions[key] = counters
@@ -118,9 +154,6 @@ class _SoftEtherUsageTracker:
             self._last_sessions.pop(key, None)
 
         outstanding = self._outstanding[account_id]
-        # UserGet's delayed increase may represent live bytes emitted on a
-        # previous poll OR bytes SessionGet exposed for the first time in this
-        # same poll. Subtract that overlap once, direction by direction.
         available = (outstanding[0] + live_delta[0],
                      outstanding[1] + live_delta[1])
         overlap = (min(user_delta[0], available[0]),
@@ -138,6 +171,7 @@ class _SoftEtherUsageTracker:
         self._billed.pop(account_id, None)
         self._last_user.pop(account_id, None)
         self._outstanding.pop(account_id, None)
+        self._last_logins.pop(account_id, None)
         self._cold_after_restore.discard(account_id)
         for key in [key for key in self._last_sessions if key[0] == account_id]:
             self._last_sessions.pop(key, None)
@@ -149,12 +183,35 @@ class _SoftEtherUsageTracker:
             return dict(self._billed)
         return {key: self._billed[key] for key in keys if key in self._billed}
 
+    def state_snapshot(self, keys: list[str]) -> dict[str, tuple[int, int]]:
+        out: dict[str, tuple[int, int]] = {}
+        for key in keys:
+            if key not in self._billed:
+                continue
+            out[key] = self._billed[key]
+            out[f"{key}::user"] = self._last_user.get(key, (0, 0))
+            out[f"{key}::outstanding"] = self._outstanding.get(key, (0, 0))
+            out[f"{key}::logins"] = (self._last_logins.get(key, 0), 0)
+        return out
+
     def restore(self, baseline: dict[object, tuple[int, int]]) -> None:
-        for raw_key, totals in baseline.items():
-            key = str(raw_key)
+        self.restore_state({str(key): value for key, value in baseline.items()})
+
+    def restore_state(self, state: dict[str, tuple[int, int]]) -> None:
+        accounts = [key for key in state if "::" not in key]
+        for key in accounts:
+            totals = state[key]
             self._billed[key] = (int(totals[0]), int(totals[1]))
-            self._last_user.pop(key, None)
-            self._outstanding[key] = (0, 0)
+            user = state.get(f"{key}::user")
+            self._last_user[key] = ((int(user[0]), int(user[1]))
+                                    if user is not None else (0, 0))
+            outstanding = state.get(f"{key}::outstanding")
+            self._outstanding[key] = (
+                (int(outstanding[0]), int(outstanding[1]))
+                if outstanding is not None else self._billed[key]
+            )
+            logins = state.get(f"{key}::logins")
+            self._last_logins[key] = int(logins[0]) if logins is not None else 0
             for session_key in [item for item in self._last_sessions
                                 if item[0] == key]:
                 self._last_sessions.pop(session_key, None)
@@ -196,7 +253,8 @@ class SoftEtherDriver(BaseCoreDriver):
                 "admin_password": {"type": "string"},
                 "ipsec_psk": {"type": "string", "minLength": 1, "maxLength": 128},
                 "native_port": {"type": "integer", "default": 5555},
-                "sstp_port": {"type": "integer", "default": 443},
+                "sstp_port": {"type": "integer", "enum": [443], "default": 443,
+                              "description": "MS-SSTP interoperability is fixed to TCP/443"},
                 "ovpn_ports": {"type": "string", "default": "1194"},
                 "secure_nat": {"type": "boolean", "default": True,
                                "description": "enable the hub's Virtual NAT + DHCP so remote-access clients receive an IP; policy routing automatically switches NAT to routed TAP while keeping DHCP"},
@@ -263,7 +321,13 @@ class SoftEtherDriver(BaseCoreDriver):
     )
 
     def __init__(self, settings: dict[str, Any] | None = None, *, backend: Any | None = None):
+        raw_sstp_port = int((settings or {}).get("sstp_port") or 443)
         super().__init__(settings)
+        # Heal pre-8.8 rows that persisted a custom generic TLS listener as an
+        # SSTP endpoint. Retain the old value only so the next Studio apply can
+        # remove that stale listener without touching unrelated ports.
+        self._legacy_sstp_port = raw_sstp_port
+        self.settings["sstp_port"] = 443
         if backend is None:
             from app.cores.drivers.softether.backend import LocalSoftEtherBackend
 
@@ -639,7 +703,11 @@ class SoftEtherDriver(BaseCoreDriver):
         tags = self.settings.get("feature_tags") or {}
         return str(tags.get(protocol) or defaults[protocol])
 
-    _FIXED_PROTOCOL_PORTS = {"l2tp": 1701, "l2tp_raw": 1701}
+    # These protocols are fixed by their client interoperability contracts.
+    # In particular, SoftEther advertises listeners on arbitrary TCP ports,
+    # but its MS-SSTP HTTP dispatcher only accepts SSTP_DUPLEX_POST on 443.
+    # Saving a custom "SSTP port" produced a healthy-looking, unusable inbound.
+    _FIXED_PROTOCOL_PORTS = {"l2tp": 1701, "l2tp_raw": 1701, "sstp": 443}
 
     def normalize_studio_document(self, document: dict[str, Any]) -> dict[str, Any]:
         """Repair legacy fake-custom ports for wire-standard protocols.
@@ -818,22 +886,24 @@ class SoftEtherDriver(BaseCoreDriver):
         # alone does NOT turn a port into PPTP/SSTP (the prior implementation
         # did exactly that); PPTP is absent because SoftEther does not support it.
         sstp = "sstp" in wanted
-        old_sstp_port = int(s.get("sstp_port") or 443)
-        sstp_port = int(wanted.get("sstp", {}).get("port") or 443)
-        if not 1 <= sstp_port <= 65535:
-            raise CoreError(f"SoftEther SSTP port out of range: {sstp_port}.")
-        if sstp != bool(s.get("feature_sstp")):
-            await command(f"SstpEnable {'yes' if sstp else 'no'}")
+        old_sstp_port = int(getattr(self, "_legacy_sstp_port", None)
+                            or s.get("sstp_port") or 443)
+        sstp_port = 443  # normalize_studio_document enforces this too
         if sstp:
-            # SSTP is enabled server-wide and is accepted on SoftEther TCP
-            # listeners. Materialize the exact wizard port instead of always
-            # creating 443 while displaying a different saved value.
-            await command(f"ListenerCreate {sstp_port}", ignore_exists=True)
-        if (old_sstp_port != 443 and old_sstp_port != sstp_port
+            # SoftEther may listen for its native TLS protocol on any port,
+            # but the MS-SSTP HTTP dispatcher is interoperable on TCP/443.
+            # Reasserting the server-wide switch is idempotent and also heals
+            # old rows that only created a custom generic TLS listener.
+            await command("SstpEnable yes")
+            await command("ListenerCreate 443", ignore_exists=True)
+        elif bool(s.get("feature_sstp")):
+            await command("SstpEnable no")
+        if (old_sstp_port != 443
                 and old_sstp_port != int(s.get("native_port") or 5555)):
             await command(f"ListenerDelete {old_sstp_port}", ignore_exists=True)
         s["feature_sstp"] = sstp
         s["sstp_port"] = sstp_port
+        self._legacy_sstp_port = 443
 
         ovpn = "ovpn" in wanted
         ovpn_port = int(wanted.get("ovpn", {}).get("port") or 1194)
@@ -1102,11 +1172,38 @@ class SoftEtherDriver(BaseCoreDriver):
             await self.create_account(account)
 
     # ------------------------------------------------------------------ #
+    # durable accounting state
+    # ------------------------------------------------------------------ #
+    def usage_tracker_snapshot(
+        self, account_ids: list[str] | None = None,
+    ) -> dict[str, tuple[int, int]]:
+        wanted = (list(account_ids) if account_ids is not None
+                  else list(self._accounts))
+        return self._usage.state_snapshot(wanted)
+
+    def restore_usage_baselines(self, baselines: dict) -> None:
+        self._usage.restore_state({
+            str(key): (int(value[0]), int(value[1]))
+            for key, value in (baselines or {}).items()
+        })
+
+    # ------------------------------------------------------------------ #
     # statistics — native per-user counters + live sessions
     # ------------------------------------------------------------------ #
     async def get_usage(
         self, account_ids: list[str] | None = None, since: Any | None = None
     ) -> list[UsageRecord]:
+        # Do not open vpncmd while a remote SSTP transport is active. Its data
+        # path is TCP inside TLS/TCP; management-login bursts can collapse the
+        # outer stream on a small VPS. UserGet is cumulative and durable, so
+        # the first poll after disconnect records every byte without loss.
+        sstp_active = getattr(self._backend, "sstp_sessions_active", None)
+        if callable(sstp_active):
+            try:
+                if await asyncio.to_thread(sstp_active):
+                    return []
+            except CoreError:
+                pass
         wanted = account_ids if account_ids is not None else list(self._accounts)
         records: list[UsageRecord] = []
         # SessionGet is the immediate ledger; UserGet catches up on a delayed
@@ -1122,12 +1219,24 @@ class SoftEtherDriver(BaseCoreDriver):
         for session in sessions:
             by_account.setdefault(session.username, []).append(session)
 
-        for account_id in wanted:
-            if account_id not in self._accounts:
-                continue
+        wanted = [account_id for account_id in wanted if account_id in self._accounts]
+        completed_batch: dict[str, Any] | None = None
+        users_get = getattr(self._backend, "users_get", None)
+        if callable(users_get):
             try:
-                completed = await asyncio.to_thread(self._backend.user_get, account_id)
-            except CoreError:
+                completed_batch = await asyncio.to_thread(users_get, wanted)
+            except CoreError as exc:
+                # Cumulative source: an incomplete batch is safely retried on
+                # the next tick. Never fall back to N rapid management logins.
+                logger.warning("SoftEther usage batch skipped: %s", exc)
+                return []
+
+        for account_id in wanted:
+            try:
+                completed = (completed_batch[account_id] if completed_batch is not None
+                             else await asyncio.to_thread(
+                                 self._backend.user_get, account_id))
+            except (CoreError, KeyError):
                 continue  # user vanished server-side; nothing to report
             live_sessions: dict[str, tuple[int, int]] = {}
             if callable(session_get):
@@ -1149,6 +1258,7 @@ class SoftEtherDriver(BaseCoreDriver):
                 account_id,
                 (completed.outgoing_bytes, completed.incoming_bytes),
                 live_sessions,
+                completed.num_logins,
             )
             records.append(UsageRecord(
                 core_id=self.metadata.id, account_id=account_id,
@@ -1349,7 +1459,7 @@ class SoftEtherDriver(BaseCoreDriver):
                     "password": password,
                     "hub": s["hub"],
                     "note": "SSTP listener must be enabled on the SoftEther server "
-                            "(SecureNAT/Listener 443 or your SSTP port).",
+                            "(SecureNAT with the fixed SSTP listener on TCP/443).",
                 },
                 display_name="VPN (SSTP)",
             )

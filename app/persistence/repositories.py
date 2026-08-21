@@ -196,6 +196,18 @@ class SQLBaselineStore:
                 return {r.key: (r.uplink_base, r.downlink_base) for r in rows}
         return await asyncio.to_thread(_sync)
 
+    async def get_prefix(self, prefix: str) -> dict[str, tuple[int, int]]:
+        """Read provider sub-keys (for example Xray's per-node cursors)."""
+        def _sync() -> dict[str, tuple[int, int]]:
+            with self._sf() as s:
+                rows = s.execute(
+                    select(UsageBaselineModel).where(
+                        UsageBaselineModel.key.like(prefix + "%")
+                    )
+                ).scalars().all()
+                return {r.key: (r.uplink_base, r.downlink_base) for r in rows}
+        return await asyncio.to_thread(_sync)
+
     async def set_many(self, values: dict[str, tuple[int, int]]) -> None:
         if not values:
             return
@@ -229,6 +241,17 @@ class SQLBaselineStore:
         def _sync() -> None:
             with self._sf() as s:
                 s.execute(delete(UsageBaselineModel).where(UsageBaselineModel.key == key))
+                s.commit()
+        await asyncio.to_thread(_sync)
+
+    async def drop_prefix(self, prefix: str) -> None:
+        """Forget one account and any provider-specific sub-cursors."""
+        def _sync() -> None:
+            with self._sf() as s:
+                s.execute(delete(UsageBaselineModel).where(
+                    (UsageBaselineModel.key == prefix)
+                    | UsageBaselineModel.key.like(prefix + "::%")
+                ))
                 s.commit()
         await asyncio.to_thread(_sync)
 

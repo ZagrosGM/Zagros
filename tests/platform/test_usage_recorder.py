@@ -176,6 +176,52 @@ def test_restart_never_re_reports_counters(runtime):
     assert asyncio.run(runtime.quota.get(pid)).total_bytes == 10500
 
 
+def test_builtin_xray_provider_identity_is_attributed_once(runtime):
+    from app.platform import usage_recorder
+
+    driver = CumulativeDriver()
+    # Instance metadata avoids registering a second global driver under the
+    # built-in id during test collection.
+    driver.metadata = CoreMetadata(
+        id="xray", name="Xray", protocols=["shadowsocks"],
+        capabilities={Capability.USER_MANAGEMENT, Capability.USAGE_ACCOUNTING},
+    )
+    runtime.core_manager.attach("xray", driver, enabled=True)
+    pid = _mk_account(
+        runtime, username="xray-owner", core_id="xray",
+        account_id="42.xray-owner.shadowsocks",
+    )
+    CumulativeDriver.backend_counters["42.xray-owner"] = (100, 2900)
+    assert asyncio.run(usage_recorder.record_once(runtime)) == 1
+    assert asyncio.run(runtime.quota.get(pid)).total_bytes == 3000
+    # A flat cumulative read cannot be folded a second time.
+    assert asyncio.run(usage_recorder.record_once(runtime)) == 0
+    assert asyncio.run(runtime.quota.get(pid)).total_bytes == 3000
+    totals = asyncio.run(runtime.usage_journal.totals_by_core())
+    assert totals["xray"] == (100, 2900)
+
+
+def test_managed_resetting_core_does_not_restore_stale_generation(runtime):
+    from app.platform import usage_recorder
+
+    driver = CumulativeDriver()
+    driver.metadata = CoreMetadata(
+        id="sing-box", name="sing-box", protocols=["hysteria2"],
+        capabilities={Capability.USER_MANAGEMENT, Capability.USAGE_ACCOUNTING},
+    )
+    runtime.core_manager.attach("sing-box", driver, enabled=True)
+    pid = _mk_account(runtime, username="new-generation", core_id="sing-box",
+                      account_id="acct-reset")
+    asyncio.run(runtime.baselines.set_many({"sing-box:acct-reset": (5000, 6000)}))
+    asyncio.run(usage_recorder.restore_baselines(runtime))
+    assert driver.usage_tracker_snapshot(["acct-reset"]) == {}
+
+    # New process generation reaches the same raw values: all bytes count.
+    CumulativeDriver.backend_counters["acct-reset"] = (5000, 6000)
+    asyncio.run(usage_recorder.record_once(runtime))
+    assert asyncio.run(runtime.quota.get(pid)).total_bytes == 11000
+
+
 def test_cores_without_accounting_capability_are_skipped(runtime):
     from app.platform import usage_recorder
 

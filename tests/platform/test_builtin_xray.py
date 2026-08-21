@@ -6,8 +6,8 @@ only knew operator-installed cores — so every mirror row was discarded at
 materialization time and the multi-core portal/subscription came out EMPTY
 for the most common protocols. ``boot_cores`` now attaches the real
 XrayDriver (legacy backend) automatically, protected by manager-level
-guards, skipped by the usage recorder (the legacy stack already accounts
-xray traffic — folding again would double-count) and de-duplicated in the
+guards, metered by the same unified usage recorder as every other core (the
+legacy reset=True reader is no longer scheduled), and de-duplicated in the
 inbound catalog.
 """
 from __future__ import annotations
@@ -74,8 +74,7 @@ if _HAS:
     )
 
     class _FakeAccountingDriver(BaseCoreDriver):
-        """Usage-capable double attached UNDER the id 'xray' — the recorder's
-        built-in skip must discard its deltas purely by identity."""
+        """Usage-capable double attached under the protected built-in id."""
 
         metadata = CoreMetadata(
             id="xrayprobe", name="fake-xray", protocols=["shadowsocks"],
@@ -98,12 +97,18 @@ if _HAS:
         async def sync_accounts(self, accounts): pass
 
         async def get_usage(self, account_ids=None, since=None):
-            return [UsageRecord(core_id="xray", account_id=a,
-                                uplink_bytes=10_000, downlink_bytes=10_000)
-                    for a in (account_ids or [])]
+            # Real legacy Xray emits the provider identity without the
+            # delivery row's protocol suffix.
+            provider_id = "1.nomix01"
+            if account_ids is not None and provider_id not in account_ids:
+                return []
+            return [UsageRecord(
+                core_id="xray", account_id=provider_id,
+                uplink_bytes=10_000, downlink_bytes=10_000,
+            )]
 
         def usage_tracker_snapshot(self, account_ids):
-            return {a: (10_000, 10_000) for a in account_ids}
+            return {"1.nomix01": (10_000, 10_000)}
 
 
 def test_boot_cores_attaches_builtin_xray_and_materializes_mirror_rows(runtime):
@@ -161,9 +166,9 @@ def test_manager_refuses_uninstall_and_disable_for_builtin(runtime):
     assert "xray" in runtime.core_manager.list_cores()
 
 
-def test_recorder_never_double_counts_builtin_xray(runtime):
-    """xray traffic is metered by the legacy stack already; the cross-core
-    recorder must skip built-in ids even when the driver is usage-capable."""
+def test_recorder_accounts_builtin_xray_through_provider_alias(runtime):
+    """Built-in Xray uses the same one-reader recorder and maps its native
+    ``id.username`` identity onto the protocol-suffixed platform row."""
     from app.platform import usage_recorder
 
     runtime.core_manager.attach("xray", _FakeAccountingDriver(), enabled=True)
@@ -173,9 +178,11 @@ def test_recorder_never_double_counts_builtin_xray(runtime):
         protocol="shadowsocks", enabled=True, settings={})
 
     applied = asyncio.run(usage_recorder.record_once(runtime))
-    assert applied == 0
+    assert applied == 1
     entry = asyncio.run(runtime.quota.get(pid))
-    assert entry is None or entry.total_bytes == 0
+    assert entry is not None and entry.total_bytes == 20_000
+    totals = asyncio.run(runtime.usage_journal.totals_by_core())
+    assert totals["xray"] == (10_000, 10_000)
 
 
 def test_core_view_marks_builtin(runtime):

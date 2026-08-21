@@ -389,11 +389,13 @@ def test_usage_deltas_and_reset_clamp() -> None:
         assert by_id["1.alice"].downlink_bytes == 0
         assert by_id["2.bob"].downlink_bytes == 0  # no re-report
 
-        # interface restarted → counters reset → clamp to 0, never negative
+        # interface restarted → counters reset: the first counters in the new
+        # generation are fresh usage, not a reason to drop bytes.
         backend.dump_text = DUMP_ALICE_RESET
         records = await driver.get_usage()
         by_id = {r.account_id: r for r in records}
-        assert by_id["1.alice"].uplink_bytes == 0
+        assert by_id["1.alice"].uplink_bytes == 1000
+        assert by_id["1.alice"].downlink_bytes == 1000
 
         # unknown peers are never billed to users
         assert all(r.account_id in {"1.alice", "2.bob"} for r in records)
@@ -833,6 +835,28 @@ def test_local_backend_forwarding_preflight_is_environment_aware(tmp_path, monke
     monkeypatch.setattr(backend, "_run", lambda argv, **kw: commands.append(argv) or "")
     backend._ensure_forwarding()
     assert commands == [["/usr/sbin/sysctl", "-w", "net.ipv4.ip_forward=1"]]
+
+
+def test_account_keyed_baseline_survives_driver_restart() -> None:
+    async def run() -> None:
+        settings = {
+            "public_key": KEY_ALICE, "private_key": "p",
+            "preshared_key": PSK_ALICE, "address": "10.66.66.2/32",
+        }
+        driver, _backend = _driver()
+        await driver.create_account(_account(1, "alice", settings=dict(settings)))
+        first = await driver.get_usage(account_ids=["1.alice"])
+        assert (first[0].uplink_bytes, first[0].downlink_bytes) == (1048576, 2097152)
+        snapshot = driver.usage_tracker_snapshot(["1.alice"])
+        assert snapshot == {"1.alice": (1048576, 2097152)}
+
+        restarted, _backend2 = _driver()
+        await restarted.create_account(_account(1, "alice", settings=dict(settings)))
+        restarted.restore_usage_baselines(snapshot)
+        same = await restarted.get_usage(account_ids=["1.alice"])
+        assert (same[0].uplink_bytes, same[0].downlink_bytes) == (0, 0)
+
+    asyncio.run(run())
 
 
 # ---------------------------------------------------------------------- #

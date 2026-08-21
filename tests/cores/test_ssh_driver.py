@@ -325,11 +325,12 @@ def test_usage_accounting_uses_transport_bidirectionally_without_sftp_double_cou
               for r in await driver.get_usage()}
         assert r2 == {"1.alice": (400, 500), "2.bob": (0, 0)}
 
-        # counter reset (fresh chain) never produces a negative bill
+        # counter reset (fresh collector generation) accounts bytes already
+        # present in that generation and never produces a negative bill.
         backend.counters[uid_a] = 50
         r3 = {r.account_id: (r.uplink_bytes, r.downlink_bytes)
               for r in await driver.get_usage()}
-        assert r3["1.alice"] == (0, 0)
+        assert r3["1.alice"] == (50, 0)
 
         # deleted account: forgotten from tracker + out of the rule set
         await driver.delete_account("2.bob")

@@ -117,8 +117,52 @@ class XrayDriver(BaseCoreDriver):
         self._backend = backend
         from app.cores.stats import DeltaTracker
 
-        self._deltas = DeltaTracker()
+        # BaseCoreDriver persists a tracker named ``_usage``.  The old private
+        # name ``_deltas`` made Xray the only cumulative provider whose
+        # baseline vanished on every panel restart.
+        self._usage = DeltaTracker()
+        self._deltas = self._usage  # one-release compatibility for extensions
         self._managed_native_outbounds: list[dict[str, Any]] = []
+
+    # ------------------------------------------------------------------ #
+    # durable usage baselines
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _usage_persistence_key(node_id: int | None, email: str) -> str:
+        # The main process is by far the common case and keeps the historical
+        # plain provider identity. Native-node counters remain independently
+        # restart-safe instead of being collapsed into an ambiguous sum.
+        return email if node_id is None else f"{email}::node::{node_id}"
+
+    @staticmethod
+    def _usage_tracker_key(value: str) -> tuple[int | None, str]:
+        email, marker, raw_node = value.rpartition("::node::")
+        if marker:
+            try:
+                return int(raw_node), email
+            except ValueError:
+                pass
+        return None, value
+
+    def usage_tracker_snapshot(
+        self, account_ids: list[str] | None = None,
+    ) -> dict[str, tuple[int, int]]:
+        wanted = set(account_ids) if account_ids is not None else None
+        out: dict[str, tuple[int, int]] = {}
+        for key, totals in self._usage.baseline_snapshot().items():
+            if not isinstance(key, tuple) or len(key) != 2:
+                continue
+            node_id, email = key
+            if wanted is not None and email not in wanted:
+                continue
+            out[self._usage_persistence_key(node_id, str(email))] = totals
+        return out
+
+    def restore_usage_baselines(self, baselines: dict) -> None:
+        self._usage.restore({
+            self._usage_tracker_key(str(key)): (int(value[0]), int(value[1]))
+            for key, value in (baselines or {}).items()
+        })
 
     # ------------------------------------------------------------------ #
     # helpers / policy

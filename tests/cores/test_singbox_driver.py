@@ -410,10 +410,11 @@ def test_usage_accounting_deltas_and_missing_user_guard() -> None:
         second = await driver.get_usage()
         assert (second[0].uplink_bytes, second[0].downlink_bytes) == (1000, 0)
 
-        # core restart (counters reset) → clamped to zero, never negative
+        # core restart (counters reset): bytes already present in the new
+        # generation are real, non-negative usage and must not be lost.
         stats.counters = {"1.alice": (50, 10)}
         third = await driver.get_usage()
-        assert (third[0].uplink_bytes, third[0].downlink_bytes) == (0, 0)
+        assert (third[0].uplink_bytes, third[0].downlink_bytes) == (50, 10)
 
     asyncio.run(run())
 

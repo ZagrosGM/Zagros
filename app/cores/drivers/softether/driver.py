@@ -945,8 +945,13 @@ class SoftEtherDriver(BaseCoreDriver):
 
         ovpn = "ovpn" in wanted
         ovpn_port = int(wanted.get("ovpn", {}).get("port") or 1194)
-        if ovpn != bool(s.get("feature_ovpn")) or (
-                ovpn and str(s.get("ovpn_ports") or "1194") != str(ovpn_port)):
+        # Runtime truth can outlive panel settings in vpn_server.config. Always
+        # assert the disabled state: otherwise a stale SoftEther OpenVPN clone
+        # keeps UDP/1194 after the real OpenVPN Core releases it for restart,
+        # and the real Core can never bind again (EADDRINUSE).
+        if (not ovpn
+                or ovpn != bool(s.get("feature_ovpn"))
+                or str(s.get("ovpn_ports") or "1194") != str(ovpn_port)):
             await command(f"OpenVpnEnable {'yes' if ovpn else 'no'} /PORTS:{ovpn_port}")
         s["feature_ovpn"] = ovpn
         s["ovpn_ports"] = str(ovpn_port)

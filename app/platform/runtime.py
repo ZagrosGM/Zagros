@@ -99,6 +99,16 @@ class PlatformRuntime:
         from app.platform.bandwidth import BandwidthLimiter
 
         self.bandwidth = BandwidthLimiter(self)
+        # Xray authenticates with immutable legacy emails (legacy-id.username),
+        # but its SO_MARK must use the canonical platform user ID used by every
+        # other Core and by BandwidthLimiter. The runtime exists before ASGI
+        # startup, so the first Xray config already receives this provider.
+        try:
+            from app import xray
+
+            xray.config.bandwidth_user_id_provider = self._bandwidth_ids_by_username
+        except Exception:  # noqa: BLE001 — minimal/unit runtimes may omit legacy xray
+            logger.exception("cannot attach canonical Xray bandwidth identity provider")
 
         # data adapters + services
         self.online_data = SQLOnlineDataAdapter(
@@ -147,6 +157,21 @@ class PlatformRuntime:
                or "sqlite:///zagros.db")
         secret = os.environ.get("ZAGROS_SECRET_KEY", "")
         return cls(database_url=url, master_secret=secret)
+
+    def _bandwidth_ids_by_username(self, usernames: list[str]) -> dict[str, int]:
+        """Resolve Xray legacy identities to canonical platform User IDs."""
+        from sqlalchemy import select
+        from app.persistence.models import UserModel
+
+        wanted = {str(value) for value in usernames if str(value)}
+        if not wanted:
+            return {}
+        with self.session_factory() as session:
+            rows = session.execute(
+                select(UserModel.id, UserModel.username).where(
+                    UserModel.username.in_(wanted))
+            ).all()
+        return {str(username): int(user_id) for user_id, username in rows}
 
     def _policy_identities(self, names: list[str]) -> dict[str, tuple[int, int]]:
         """Allocate/read stable table+mark ids in one SQL transaction."""

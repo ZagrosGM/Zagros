@@ -31,10 +31,25 @@ _ROOT = Path(__file__).resolve().parents[1]
 os.environ.setdefault("XRAY_JSON", str(_ROOT / "xray_config.json"))
 os.environ.setdefault("XRAY_EXECUTABLE_PATH", str(_ROOT / ".test-xray"))
 os.environ.setdefault("XRAY_ASSETS_PATH", str(_ROOT / ".test-xray-assets"))
+# The production limiter persists fail-closed/runtime state under
+# /var/lib/zagros. GitHub-hosted pytest runs unprivileged, so give the suite a
+# process-unique writable state file before app.platform.bandwidth is imported.
+_TEST_BANDWIDTH_STATE = Path("/tmp") / f"zagros-bandwidth-test-{os.getpid()}.json"
+os.environ.setdefault("ZAGROS_BANDWIDTH_STATE_PATH", str(_TEST_BANDWIDTH_STATE))
 
 import pytest
 
 from app.cores.exceptions import CoreError
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_test_bandwidth_state():
+    _TEST_BANDWIDTH_STATE.unlink(missing_ok=True)
+    try:
+        yield
+    finally:
+        _TEST_BANDWIDTH_STATE.unlink(missing_ok=True)
+        _TEST_BANDWIDTH_STATE.with_suffix(".part").unlink(missing_ok=True)
 
 
 def _blocked_install(settings: dict):  # pragma: no cover - trivial guard

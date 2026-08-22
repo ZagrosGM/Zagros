@@ -30,7 +30,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 TABLE = "zagros_bw"
-STATE_PATH = Path("/var/lib/zagros/bandwidth/state.json")
+STATE_PATH = Path(os.environ.get(
+    "ZAGROS_BANDWIDTH_STATE_PATH", "/var/lib/zagros/bandwidth/state.json"))
 MARK_PREFIX = 0x5A000000
 MARK_USER_MASK = 0xFFFF00
 MARK_KIND_OUTER = 0x40

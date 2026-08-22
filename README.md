@@ -16,7 +16,7 @@ one driver among many, with no special status anywhere in the codebase.
 
 ## ⚠️ Alpha Warning
 
-**Current release: `1.0.0-alpha.8.7` — this is an ALPHA build.**
+**Current release: `1.0.0-alpha.8.8` — this is an ALPHA build.**
 
 * Suitable for evaluation, testing and feedback — **not recommended for
   production** unless you fully understand the limitations.
@@ -39,6 +39,9 @@ one driver among many, with no special status anywhere in the codebase.
 * **Unified quota** — one counter per user across *all* cores
   (1 GB xray + 2 GB OpenVPN + 3 GB WireGuard + 4 GB sing-box = exactly
   10 GB), with persistent baselines (exactly-once across core restarts).
+* **Aggregate per-user bandwidth limits** — independent upload/download Mbps
+  limits enforced by shared kernel token buckets across every Core, connection,
+  process and IPv4/IPv6 path. `0` remains truly Unlimited.
 * **One user, any protocols from any cores** — a single dashboard user can
   hold VLESS from xray, Hysteria 2, WireGuard, SoftEther and the independent
   PPP providers simultaneously, sharing ONE quota, ONE expiry and ONE global
@@ -150,7 +153,7 @@ sudo zagros install-core xray       # cores self-install their official binaries
 For release upgrades, refresh the host scripts and image together:
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/main/zagros.sh)" -- update --version v1.0.0-alpha.8.7
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/main/zagros.sh)" -- update --version v1.0.0-alpha.8.8
 ```
 
 Everyday operations — `zagros update` (auto-backup → pull → migrate → health →
@@ -216,11 +219,12 @@ opt-in and empty by default.
 
 ## Docker
 
-Release images are published to **GitHub Container Registry only**
-(multi-arch: linux/amd64, linux/arm64):
+Release images are published to **GitHub Container Registry only**. The pinned
+PPP package manifest currently makes the release image **linux/amd64-only**;
+arm64 is not claimed until a matching verified package manifest exists:
 
 ```bash
-docker pull ghcr.io/zagrosgm/zagros:v1.0.0-alpha.8.7
+docker pull ghcr.io/zagrosgm/zagros:v1.0.0-alpha.8.8
 docker pull ghcr.io/zagrosgm/zagros:latest        # tracks stable releases
 ```
 
@@ -245,7 +249,7 @@ ecosystem expects.
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests/                # unit + integration (279 tests)
+python -m pytest tests/                # unit + integration (970 passed in the alpha.8.8 gate)
 ZAGROS_E2E=1 python -m pytest tests/e2e -q -rs   # real-binary E2E (downloads official core binaries)
 alembic upgrade head                   # schema
 python main.py                         # run the panel

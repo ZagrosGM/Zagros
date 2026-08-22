@@ -2614,6 +2614,10 @@ def _xray_hosts_put(body: HostsPutBody) -> dict[str, list[dict[str, Any]]]:
 # support & telegram bot integration
 # --------------------------------------------------------------------- #
 
+DEFAULT_SUPPORT_BOT_URL = "https://support.zagrosgm.site"
+DEFAULT_SUPPORT_INTEGRATION_SECRET = "6b3f42e6569ab1184fafe7ed3e60879ba5cb74ce855371d92274d36987ebd6dc"
+
+
 class SupportConfigBody(BaseModel):
     bot_url: str = Field(default="")
     integration_secret: str = Field(default="")
@@ -2689,11 +2693,12 @@ async def support_config_get(
     runtime=Depends(get_runtime),
 ):
     raw = await runtime.kv.get_value("admin.support.config.v1") or {}
-    secret = str(raw.get("integration_secret") or "")
+    bot_url = str(raw.get("bot_url") or "").strip() or DEFAULT_SUPPORT_BOT_URL
+    secret = str(raw.get("integration_secret") or "").strip() or DEFAULT_SUPPORT_INTEGRATION_SECRET
     return {
-        "bot_url": str(raw.get("bot_url") or ""),
+        "bot_url": bot_url,
         "secret_configured": bool(secret),
-        "secret_masked": f"set ({len(secret)} chars)" if secret else "",
+        "secret_masked": f"configured ({len(secret)} chars)" if secret else "",
     }
 
 
@@ -2707,11 +2712,11 @@ async def support_config_save(
     if not new_secret and existing.get("integration_secret"):
         new_secret = existing["integration_secret"]
     payload = {
-        "bot_url": body.bot_url.strip(),
-        "integration_secret": new_secret,
+        "bot_url": body.bot_url.strip() or DEFAULT_SUPPORT_BOT_URL,
+        "integration_secret": new_secret or DEFAULT_SUPPORT_INTEGRATION_SECRET,
     }
     await runtime.kv.set_value("admin.support.config.v1", payload)
-    return {"ok": True, "bot_url": payload["bot_url"], "secret_configured": bool(new_secret)}
+    return {"ok": True, "bot_url": payload["bot_url"], "secret_configured": bool(payload["integration_secret"])}
 
 
 @zagros_admin_router.post("/support/test")
@@ -2722,10 +2727,8 @@ async def support_test_send(
     if not body.confirm:
         raise HTTPException(400, "Admin confirmation required to send test message")
     config = await runtime.kv.get_value("admin.support.config.v1") or {}
-    bot_url = str(config.get("bot_url") or "").strip()
-    secret = str(config.get("integration_secret") or "").strip()
-    if not bot_url or not secret:
-        raise HTTPException(400, "Support Bot integration is not configured")
+    bot_url = str(config.get("bot_url") or "").strip() or DEFAULT_SUPPORT_BOT_URL
+    secret = str(config.get("integration_secret") or "").strip() or DEFAULT_SUPPORT_INTEGRATION_SECRET
 
     try:
         res = await _forward_ticket_to_bot(
@@ -2757,10 +2760,8 @@ async def support_submit_ticket(
         raise HTTPException(422, "Subject and Message are required")
 
     config = await runtime.kv.get_value("admin.support.config.v1") or {}
-    bot_url = str(config.get("bot_url") or "").strip()
-    secret = str(config.get("integration_secret") or "").strip()
-    if not bot_url or not secret:
-        raise HTTPException(503, "Support service is temporarily unavailable.")
+    bot_url = str(config.get("bot_url") or "").strip() or DEFAULT_SUPPORT_BOT_URL
+    secret = str(config.get("integration_secret") or "").strip() or DEFAULT_SUPPORT_INTEGRATION_SECRET
 
     file_bytes = None
     file_name = None
@@ -2784,4 +2785,148 @@ async def support_submit_ticket(
     except Exception as exc:
         logger.error("Support ticket submission failed: %s", exc)
         raise HTTPException(502, "Support service is temporarily unavailable.") from exc
+
+
+class BulkCreateUsersBody(BaseModel):
+    count: int = Field(gt=0, le=100)
+    prefix: str = Field(default="user")
+    status: str = Field(default="active")
+    data_limit_gb: float | None = None
+    expire_days: int | None = None
+    download_limit_mbps: int | None = None
+    upload_limit_mbps: int | None = None
+    template_id: int | None = None
+    core_access: dict[str, list[str]] | None = None
+
+
+@zagros_admin_router.post("/users/bulk-create")
+async def users_bulk_create(
+    body: BulkCreateUsersBody,
+    runtime=Depends(get_runtime),
+):
+    import re
+    import secrets
+    from datetime import datetime, timedelta
+    from app.db import GetDB, crud
+    from app.models.user import UserCreate, UserStatusCreate
+    from app import xray
+
+    created_usernames = []
+    clean_prefix = re.sub(r"[^a-zA-Z0-9-_]", "", body.prefix.strip()) or "user"
+    data_limit = int(body.data_limit_gb * (1024 ** 3)) if body.data_limit_gb and body.data_limit_gb > 0 else None
+    expire = int((datetime.utcnow() + timedelta(days=body.expire_days)).timestamp()) if body.expire_days and body.expire_days > 0 else None
+
+    with GetDB() as db:
+        tpl = crud.get_user_template(db, body.template_id) if body.template_id else None
+        if tpl:
+            if not data_limit and tpl.data_limit:
+                data_limit = tpl.data_limit
+            if not expire and tpl.expire_duration:
+                expire = int((datetime.utcnow() + timedelta(seconds=tpl.expire_duration)).timestamp())
+
+        core_access = body.core_access or {}
+
+        for i in range(body.count):
+            attempts = 0
+            while True:
+                suffix = secrets.token_hex(2)
+                candidate = f"{clean_prefix}_{suffix}" if attempts > 0 or not clean_prefix.isdigit() else f"{clean_prefix}{i+1}"
+                if not crud.get_user(db, candidate):
+                    username = candidate
+                    break
+                attempts += 1
+                if attempts > 50:
+                    username = f"{clean_prefix}_{secrets.token_hex(4)}"
+                    break
+
+            try:
+                proxies_val = {}
+                inbounds_val = {}
+                if not core_access:
+                    proxies_val = {"vless": {}, "vmess": {}}
+
+                user_create = UserCreate(
+                    username=username,
+                    status=UserStatusCreate.active if body.status not in ("active", "on_hold") else UserStatusCreate(body.status),
+                    data_limit=data_limit,
+                    expire=expire,
+                    download_limit_mbps=body.download_limit_mbps or 0,
+                    upload_limit_mbps=body.upload_limit_mbps or 0,
+                    core_access=core_access,
+                    proxies=proxies_val,
+                    inbounds=inbounds_val,
+                )
+                dbuser = crud.create_user(db, user_create)
+                try:
+                    from app.platform import provisioning
+                    await provisioning.sync_user(runtime, dbuser, core_access if core_access else None)
+                except Exception:
+                    pass
+
+                if dbuser.status in [UserStatusCreate.active, UserStatusCreate.on_hold]:
+                    try:
+                        xray.operations.add_user(dbuser)
+                    except Exception:
+                        pass
+
+                created_usernames.append(username)
+            except Exception as exc:
+                logger.error("Failed to create bulk user #%d (%s): %s", i+1, username, exc)
+
+    return {"ok": True, "created_count": len(created_usernames), "usernames": created_usernames}
+
+
+class DeleteByStatusBody(BaseModel):
+    status: str
+    confirm: bool = False
+
+
+@zagros_admin_router.post("/users/delete-by-status")
+async def users_delete_by_status(
+    body: DeleteByStatusBody,
+    runtime=Depends(get_runtime),
+):
+    from app.db import GetDB, crud
+    from app.models.user import UserStatus
+    from app import xray
+
+    status_val = body.status.strip().lower()
+    valid_statuses = [s.value for s in UserStatus]
+    if status_val not in valid_statuses:
+        raise HTTPException(400, f"Invalid status '{status_val}'. Valid statuses: {valid_statuses}")
+
+    with GetDB() as db:
+        users = crud.get_users(db, status=status_val)
+        matching_count = len(users)
+
+        if not body.confirm:
+            return {
+                "ok": True,
+                "status": status_val,
+                "matching_count": matching_count,
+                "usernames": [u.username for u in users[:50]],
+            }
+
+        deleted_count = 0
+        deleted_usernames = []
+        from app.routers.user import _bridge_remove
+        for dbuser in users:
+            try:
+                _bridge_remove(None, dbuser.username)
+                crud.remove_user(db, dbuser)
+                try:
+                    xray.operations.remove_user(dbuser=dbuser)
+                except Exception:
+                    pass
+                deleted_count += 1
+                deleted_usernames.append(dbuser.username)
+            except Exception as exc:
+                logger.error("Failed to delete user %s by status: %s", dbuser.username, exc)
+
+        return {
+            "ok": True,
+            "status": status_val,
+            "deleted_count": deleted_count,
+            "usernames": deleted_usernames,
+        }
 

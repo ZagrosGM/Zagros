@@ -29,12 +29,12 @@ const NAV = [
   ]},
   { section: "nav.section.network", items: [
     { to: "/cores", icon: Cpu, key: "nav.cores" },
-    { to: "/routing", icon: Route, key: "nav.routing" },
-    { to: "/outbounds", icon: Network, key: "nav.outbounds" },
     { to: "/inbounds", icon: Waypoints, key: "nav.inbounds" },
+    { to: "/outbounds", icon: Network, key: "nav.outbounds" },
+    { to: "/routing", icon: Route, key: "nav.routing" },
     { to: "/hosts", icon: ServerCog, key: "nav.hosts" },
-    { to: "/dns", icon: Globe, key: "nav.dns" },
     { to: "/certificates", icon: ShieldCheck, key: "nav.certificates" },
+    { to: "/dns", icon: Globe, key: "nav.dns" },
   ]},
   { section: "nav.section.observe", items: [
     { to: "/sessions", icon: Activity, key: "nav.sessions" },

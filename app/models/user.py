@@ -1,10 +1,10 @@
 import re
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from app import xray
 from app.models.admin import Admin
@@ -83,6 +83,16 @@ class User(BaseModel):
     sub_updated_at: Optional[datetime] = Field(None, nullable=True)
     sub_last_user_agent: Optional[str] = Field(None, nullable=True)
     online_at: Optional[datetime] = Field(None, nullable=True)
+
+    @field_serializer("online_at", mode="plain", check_fields=False)
+    def serialize_online_at(self, dt: datetime | None) -> str | None:
+        if dt is None:
+            return None
+        if isinstance(dt, datetime):
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.isoformat().replace("+00:00", "Z")
+        return str(dt)
     on_hold_expire_duration: Optional[int] = Field(None, nullable=True)
     on_hold_timeout: Optional[Union[datetime, None]] = Field(None, nullable=True)
 

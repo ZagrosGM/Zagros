@@ -10,6 +10,72 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.8.8] — 2026-08-22 — Unified accounting and aggregate bandwidth enforcement
+
+### Added
+
+* Added one persistent per-user traffic total across Xray, sing-box, OpenVPN,
+  WireGuard, SoftEther native, SSTP, L2TP/IPsec, raw L2TP, PPTP/ACCEL-PPP and
+  SSH forwarding. Provider counters feed one journal/quota identity without
+  double counting across reconnect, process generation changes or resets.
+* Added `download_limit_mbps` and `upload_limit_mbps` to legacy and platform
+  users. Both are strict non-negative integers in Mbps; `0` is Unlimited and
+  remains the upgrade default for every existing user.
+* Added real kernel datapath enforcement with one standalone global `tc police`
+  action per User/direction. IPv4/IPv6, every Core, every connection and every
+  process bind the same action index instead of receiving independent limits.
+* Added stable identity adapters: canonical Xray/sing-box socket marks,
+  OpenVPN/WireGuard/PPTP inner addresses, SSH Unix UID, and authenticated
+  SoftEther routed-TAP/session identities.
+* Added Alembic revision `0011_user_bandwidth_limits` with reversible schema
+  metadata and data-preserving zero defaults.
+
+### Fixed
+
+* Closed the Xray/Shadowsocks IPv6 bypass: marked IPv6 freedom sockets now pass
+  through IPv6 conntrack, upload and download classifiers bound to the same
+  global bucket as IPv4. The same-endpoint regression fell from 208.194 Mbps
+  to 4.758 Mbps with a configured 5 Mbps limit.
+* Xray keeps immutable legacy account emails while resolving their marks to the
+  canonical platform User ID. Newly created users whose legacy/platform IDs
+  differ can no longer bypass or consume another User's action.
+* Xray records the canonical identities in the exact running document, so user
+  admission never treats a restart without a per-user mark as success.
+* SoftEther SecureNAT identity loss is replaced by a routed TAP with durable,
+  reassignment-safe DHCP/session mapping and fail-closed quarantine for unknown
+  transports.
+* SoftEther now reasserts `OpenVpnEnable no` when its compatibility listener is
+  disabled. A stale persisted clone can no longer steal UDP/1194 during a real
+  OpenVPN Core restart.
+* Standalone tc actions are deleted in bounded delayed waves after their last
+  binding is released, eliminating `ref=1/bind=0` objects on live 0/Unlimited
+  transitions.
+* Accounting shutdown flush, reset/generation handling, provider aliases,
+  exactly-once baselines and cross-user attribution are restart-safe.
+
+### Migration and compatibility
+
+* Upgrade from alpha.8.7 preserves all user rows, credentials, usage totals,
+  journal entries, Core state and accounting baselines.
+* Existing users receive `0/0` bandwidth limits and are not shaped until an
+  administrator explicitly sets a non-zero direction.
+* API and dashboard expose both Mbps fields with `0 = Unlimited`; live updates
+  replace kernel rates without requiring a user reconnect.
+
+### Verification
+
+* Full Python suite: **970 passed, 8 skipped, 0 failed**.
+* Xray TCP and UDP passed upload/download over IPv4 and IPv6. At 5 Mbps,
+  receiver results were 4.65–4.93 Mbps.
+* Xray 1/2/4/8-connection download aggregates were 98.729/97.924/96.371/95.992
+  Mbps at a 100 Mbps limit; upload aggregates were 44.805–46.844 Mbps at 50.
+* Seven active Cores completed simultaneous upload payloads at an aggregate
+  46.185 Mbps with a 50 Mbps User limit. Cross-user 10/100 Mbps isolation and
+  an Unlimited user passed concurrently.
+* Dynamic active-session updates tracked 50 → 20 → Unlimited → 20 → 100 Mbps;
+  reconnect, Xray/OpenVPN Core restart, limiter reconcile and container
+  recreation retained enforcement.
+
 ## [1.0.0-alpha.8.7] — 2026-08-20 — Final Phase 1–5 release
 
 ### Added

@@ -87,7 +87,7 @@ RUN python3 -m pip install --upgrade pip setuptools \
 # Final image
 # --------------------------------------------------------------------------
 FROM python:$PYTHON_VERSION-slim
-ARG ZAGROS_VERSION=1.0.0-alpha.8.7
+ARG ZAGROS_VERSION=1.0.0-alpha.8.8
 LABEL org.opencontainers.image.title="Zagros" \
       org.opencontainers.image.description="Zagros — Enterprise Multi-Core VPN Management Platform" \
       org.opencontainers.image.source="https://github.com/ZagrosGM/Zagros" \

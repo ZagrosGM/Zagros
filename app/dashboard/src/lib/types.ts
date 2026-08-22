@@ -40,6 +40,9 @@ export interface User {
   subscription_url?: string;
   /** global device limit (all cores combined); null/0 = unlimited */
   device_limit?: number | null;
+  /** aggregate across every core/connection; 0 = unlimited */
+  download_limit_mbps: number;
+  upload_limit_mbps: number;
   sub_updated_at?: string | null;
   sub_last_user_agent?: string | null;
   online_at?: string | null;

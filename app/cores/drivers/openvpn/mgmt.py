@@ -25,7 +25,14 @@ from app.cores.exceptions import CoreError
 
 logger = logging.getLogger("zagros.cores.drivers.openvpn.mgmt")
 
-AuthHandler = Callable[["AuthRequest"], bool]
+@dataclass(frozen=True, slots=True)
+class AuthDecision:
+    allow: bool
+    config_lines: tuple[str, ...] = ()
+    reason: str = "denied"
+
+
+AuthHandler = Callable[["AuthRequest"], bool | AuthDecision]
 
 
 @dataclass(slots=True)
@@ -205,15 +212,24 @@ class ManagementClient:
     def set_auth_handler(self, handler: AuthHandler | None) -> None:
         self._auth_handler = handler
 
-    def authorize(self, request: AuthRequest, allow: bool, *, reason: str = "denied") -> None:
+    def authorize(
+        self, request: AuthRequest, decision: bool | AuthDecision, *,
+        reason: str = "denied",
+    ) -> None:
         write = self._writer or self._write
-        if allow:
+        result = (decision if isinstance(decision, AuthDecision)
+                  else AuthDecision(bool(decision), reason=reason))
+        if result.allow:
             write(f"client-auth-nt {request.cid} {request.kid}" if request.reauth
                   else f"client-auth {request.cid} {request.kid}")
             if not request.reauth:
+                for line in result.config_lines:
+                    if "\n" in line or "\r" in line:
+                        raise CoreError("OpenVPN client-auth config line contains newline")
+                    write(line)
                 write("END")
         else:
-            write(f'client-deny {request.cid} {request.kid} "{reason}"')
+            write(f'client-deny {request.cid} {request.kid} "{result.reason}"')
 
     # ------------------------------------------------------------------ #
     # line routing (transport-independent core)

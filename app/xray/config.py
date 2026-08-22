@@ -429,6 +429,35 @@ class XRayConfig(dict):
 
                         clients.append(client)
 
+            # Stable per-user SO_MARK identity for the shared kernel bandwidth
+            # limiter. Routes exist for every user (including unlimited), so
+            # changing 0 -> limited is a tc/nft-only dynamic update.
+            from app.platform.bandwidth import mark_for_user
+
+            identities = sorted({(int(row.id), str(row.username)) for row in result})
+            routing = config.setdefault("routing", {}).setdefault("rules", [])
+            outbounds = config.setdefault("outbounds", [])
+            known_tags = {str(item.get("tag")) for item in outbounds}
+            rules = []
+            for user_id, username in identities:
+                tag = f"zg-bw-u{user_id}"
+                if tag not in known_tags:
+                    outbounds.append({
+                        "tag": tag,
+                        "protocol": "freedom",
+                        "settings": {},
+                        "streamSettings": {
+                            "sockopt": {"mark": mark_for_user(user_id)}
+                        },
+                    })
+                    known_tags.add(tag)
+                rules.append({
+                    "type": "field",
+                    "user": [f"{user_id}.{username}"],
+                    "outboundTag": tag,
+                })
+            routing[0:0] = rules
+
         if DEBUG:
             with open('generated_config-debug.json', 'w') as f:
                 f.write(config.to_json(indent=4))

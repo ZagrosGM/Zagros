@@ -310,6 +310,21 @@ async def cores_traffic_totals(runtime=Depends(get_runtime)):
     return {"totals": totals}
 
 
+@zagros_admin_router.get("/bandwidth/status")
+async def bandwidth_status(runtime=Depends(get_runtime)):
+    status = runtime.bandwidth.status()
+    status["tc_police"] = await asyncio.to_thread(runtime.bandwidth.tc_stats)
+    return status
+
+
+@zagros_admin_router.post("/bandwidth/reconcile")
+async def bandwidth_reconcile(runtime=Depends(get_runtime)):
+    try:
+        return await asyncio.to_thread(runtime.bandwidth.reconcile)
+    except Exception as exc:
+        raise HTTPException(503, f"bandwidth limiter reconciliation failed: {exc}") from exc
+
+
 @zagros_admin_router.get("/cores/{core_id}")
 async def cores_detail(core_id: str, runtime=Depends(get_runtime)):
     try:

@@ -164,6 +164,18 @@ class BaseCoreDriver(abc.ABC):
                 pass
 
     # ------------------------------------------------------------------ #
+    # kernel bandwidth identity (management-plane only)
+    # ------------------------------------------------------------------ #
+    def bandwidth_identities(self) -> dict[str, dict[str, list]]:
+        """Stable account identities consumable by the shared kernel limiter.
+
+        Drivers return inner IPs and/or Unix UIDs. Empty means the provider
+        propagates identity by socket mark or an external authenticated-event
+        adapter (Xray/sing-box/SoftEther).
+        """
+        return {}
+
+    # ------------------------------------------------------------------ #
     # user management — abstract core of the contract
     # ------------------------------------------------------------------ #
     @abc.abstractmethod

@@ -36,6 +36,8 @@ def _user_record_view(row, used: int) -> dict[str, Any]:
         "client_auth_mode": row.client_auth_mode,
         "used_bytes": used,
         "data_limit_bytes": row.data_limit_bytes,
+        "download_limit_mbps": int(row.download_limit_mbps or 0),
+        "upload_limit_mbps": int(row.upload_limit_mbps or 0),
     }
 
 

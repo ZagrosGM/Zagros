@@ -747,8 +747,28 @@ class SingBoxDriver(BaseCoreDriver):
 
     def render_config(self) -> dict[str, Any]:
         """Desired-state → full sing-box JSON (deterministic, testable)."""
+        from app.platform.bandwidth import mark_for_user
+
+        bw_outbounds = [
+            {
+                "type": "direct", "tag": f"zg-bw-u{account.user_id}",
+                "routing_mark": mark_for_user(account.user_id),
+            }
+            for account in sorted(self._accounts.values(), key=lambda item: item.user_id)
+        ]
+        # One account per protocol may exist for the same platform user; tags
+        # are user-scoped and therefore de-duplicated.
+        bw_outbounds = list({item["tag"]: item for item in bw_outbounds}.values())
+        bw_rules = [
+            {
+                "auth_user": [account.account_id],
+                "action": "route", "outbound": f"zg-bw-u{account.user_id}",
+            }
+            for account in sorted(self._accounts.values(), key=lambda item: item.account_id)
+        ]
         outbounds = [
             {"type": "direct", "tag": "direct"},
+            *bw_outbounds,
             *self._native_outbounds,
         ]
         final = self.settings.get("final_outbound") or "direct"
@@ -762,7 +782,7 @@ class SingBoxDriver(BaseCoreDriver):
                 # DNS interception without the deprecated legacy `dns` special
                 # outbound (removed upstream in 1.13): rule action hijack-dns
                 "rules": [{"protocol": "dns", "action": "hijack-dns"},
-                          *self._native_rules],
+                          *bw_rules, *self._native_rules],
                 "final": final,
                 "auto_detect_interface": True,
             },

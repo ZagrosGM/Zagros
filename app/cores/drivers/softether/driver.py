@@ -538,32 +538,70 @@ class SoftEtherDriver(BaseCoreDriver):
         import shutil
         import subprocess
 
+        nft = shutil.which("nft")
+        if nft:
+            import re
+
+            comments = (
+                f"zagros:softether:{interface}:forward-up",
+                f"zagros:softether:{interface}:forward-down",
+            )
+            listing = subprocess.run(
+                [nft, "-a", "list", "chain", "ip", "filter", "FORWARD"],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            if listing.returncode == 0:
+                for index, (rule, comment) in enumerate(zip(
+                        cls._policy_forwarding_rules(interface, subnet), comments)):
+                    matches = [int(value) for value in re.findall(
+                        rf'comment "{re.escape(comment)}" # handle (\d+)',
+                        listing.stdout)]
+                    if enabled and not matches:
+                        if index == 0:
+                            expression = [
+                                "iifname", interface, "ip", "saddr", subnet,
+                                "counter", "accept", "comment", f'"{comment}"',
+                            ]
+                        else:
+                            expression = [
+                                "oifname", interface, "ip", "daddr", subnet,
+                                "ct", "state", "established,related", "counter",
+                                "accept", "comment", f'"{comment}"',
+                            ]
+                        result = subprocess.run(
+                            [nft, "insert", "rule", "ip", "filter", "FORWARD",
+                             *expression], text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+                        if result.returncode:
+                            raise CoreError(result.stderr.strip())
+                    elif not enabled:
+                        for handle in matches:
+                            subprocess.run(
+                                [nft, "delete", "rule", "ip", "filter", "FORWARD",
+                                 "handle", str(handle)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+
         iptables = shutil.which("iptables")
         if not iptables:
-            raise CoreError("SoftEther routed TAP needs iptables forwarding support")
+            raise CoreError("SoftEther routed TAP needs nftables or iptables")
         for rule in cls._policy_forwarding_rules(interface, subnet):
-            check = subprocess.run(
-                [iptables, "-C", "FORWARD", *rule],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            ).returncode
+            check = subprocess.run([iptables, "-C", "FORWARD", *rule],
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL).returncode
             if enabled and check != 0:
-                result = subprocess.run(
-                    [iptables, "-I", "FORWARD", "1", *rule],
-                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                )
+                result = subprocess.run([iptables, "-I", "FORWARD", "1", *rule],
+                                        text=True, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE)
                 if result.returncode:
-                    raise CoreError(
-                        result.stderr.strip()
-                        or f"cannot enable forwarding for {interface}"
-                    )
+                    raise CoreError(result.stderr.strip())
             elif not enabled:
-                # Delete every duplicate left by a killed pre-fix process.
                 for _ in range(8):
-                    result = subprocess.run(
+                    if subprocess.run(
                         [iptables, "-D", "FORWARD", *rule],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
-                    if result.returncode:
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    ).returncode:
                         break
 
     def ensure_policy_source(self, source_id: str | None = None) -> dict[str, str]:

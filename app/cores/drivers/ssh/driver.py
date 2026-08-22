@@ -646,6 +646,17 @@ class SSHTunnelDriver(BaseCoreDriver):
         await asyncio.to_thread(self._backend.kill_sessions, name)
 
     # ------------------------------------------------------------------ #
+    # global bandwidth identity
+    # ------------------------------------------------------------------ #
+    def bandwidth_identities(self) -> dict[str, dict[str, list]]:
+        out: dict[str, dict[str, list]] = {}
+        for account_id, account in self._accounts.items():
+            uid = self._uid_of_account(account)
+            out[account_id] = {
+                "inner_sources": [], "uids": ([] if uid is None else [int(uid)])}
+        return out
+
+    # ------------------------------------------------------------------ #
     # statistics — online sessions only (usage honestly unsupported)
     # ------------------------------------------------------------------ #
     async def get_online_devices(

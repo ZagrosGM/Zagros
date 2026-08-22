@@ -330,8 +330,9 @@ class PptpDriver(BaseCoreDriver):
             if not account.enabled:
                 continue
             self._validate_account(account)
+            assigned = str(account.settings.get("assigned_ipv4") or "*")
             lines.append(
-                f'"{account.account_id}" * "{account.settings["password"]}" *'
+                f'"{account.account_id}" * "{account.settings["password"]}" "{assigned}"'
             )
         return "\n".join(lines) + "\n"
 
@@ -451,6 +452,28 @@ hook_from_environment(%r, %r, sys.argv[1] if len(sys.argv) > 1 else "")
         if not account.settings.get("password"):
             account.settings["password"] = secrets.token_urlsafe(24)
 
+    def _ensure_bandwidth_address(self, account: UserAccount) -> None:
+        if account.settings.get("assigned_ipv4"):
+            return
+        listener = self._listener(required=False)
+        if not listener:
+            return
+        network = ipaddress.ip_network(listener["subnet"], strict=True)
+        # First host is the PPP gateway; every remaining host is a client slot.
+        candidates = [str(value) for value in list(network.hosts())[1:]]
+        used = {str(item.settings.get("assigned_ipv4"))
+                for item in self._accounts.values()
+                if item.settings.get("assigned_ipv4")}
+        if not candidates:
+            raise CoreError("PPTP subnet has no address available for bandwidth identity")
+        start = (max(1, int(account.user_id)) - 1) % len(candidates)
+        for offset in range(len(candidates)):
+            value = candidates[(start + offset) % len(candidates)]
+            if value not in used:
+                account.settings["assigned_ipv4"] = value
+                return
+        raise CoreError("PPTP address pool exhausted")
+
     async def _publish_accounts(self) -> None:
         if not self._listener(required=False):
             return
@@ -459,6 +482,7 @@ hook_from_environment(%r, %r, sys.argv[1] if len(sys.argv) > 1 else "")
 
     async def create_account(self, account: UserAccount) -> None:
         self._ensure_password(account)
+        self._ensure_bandwidth_address(account)
         self._validate_account(account)
         previous = self._accounts.get(account.account_id)
         self._accounts[account.account_id] = account
@@ -474,6 +498,7 @@ hook_from_environment(%r, %r, sys.argv[1] if len(sys.argv) > 1 else "")
 
     async def update_account(self, account: UserAccount) -> None:
         self._ensure_password(account)
+        self._ensure_bandwidth_address(account)
         self._validate_account(account)
         previous = self._accounts.get(account.account_id)
         self._accounts[account.account_id] = account
@@ -520,6 +545,7 @@ hook_from_environment(%r, %r, sys.argv[1] if len(sys.argv) > 1 else "")
         desired: dict[str, UserAccount] = {}
         for account in accounts:
             self._ensure_password(account)
+            self._ensure_bandwidth_address(account)
             self._validate_account(account)
             desired[account.account_id] = account
         previous = self._accounts
@@ -530,6 +556,19 @@ hook_from_environment(%r, %r, sys.argv[1] if len(sys.argv) > 1 else "")
             self._accounts = previous
             await self._publish_accounts()
             raise
+
+    # ------------------------------------------------------------------ #
+    # global bandwidth identity
+    # ------------------------------------------------------------------ #
+    def bandwidth_identities(self) -> dict[str, dict[str, list]]:
+        return {
+            account_id: {
+                "inner_sources": ([str(account.settings["assigned_ipv4"])]
+                                  if account.settings.get("assigned_ipv4") else []),
+                "uids": [],
+            }
+            for account_id, account in self._accounts.items()
+        }
 
     # ------------------------------------------------------------------ #
     # Real accounting + online sessions                                  #

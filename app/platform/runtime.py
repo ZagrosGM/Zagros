@@ -96,6 +96,9 @@ class PlatformRuntime:
         from app.platform.subscription_listener import SubscriptionListenerManager
 
         self.subscription_listener = SubscriptionListenerManager()
+        from app.platform.bandwidth import BandwidthLimiter
+
+        self.bandwidth = BandwidthLimiter(self)
 
         # data adapters + services
         self.online_data = SQLOnlineDataAdapter(
@@ -246,6 +249,11 @@ class PlatformRuntime:
         # to the master's eth0. Replay only after all source interfaces and
         # the built-in Xray adapter exist.
         routing_deferred = await self._hydrate_network_policy()
+        try:
+            await asyncio.to_thread(self.bandwidth.start)
+        except Exception as exc:  # limiter already fail-closes affected accounts
+            logger.critical("bandwidth limiter boot reconciliation failed: %s", exc)
+            routing_deferred.add("bandwidth")
         await self._write_boot_report(
             studio_deferred, account_deferred, routing_deferred)
 

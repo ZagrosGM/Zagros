@@ -195,6 +195,8 @@ class LocalPptpBackend:
         return True, ""
 
     def preflight(self, listen: str = "0.0.0.0") -> None:
+        if self.is_running():
+            return
         self.verify_installation()
         failures: list[str] = []
         ready, reason = self._ppp_device_ready()

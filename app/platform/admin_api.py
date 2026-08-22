@@ -2660,8 +2660,12 @@ async def _forward_ticket_to_bot(
             "attachment": (file_name, file_bytes, mime_type or "application/octet-stream")
         }
 
+    target_url = bot_url.rstrip("/")
+    if not target_url.endswith(".php"):
+        target_url = f"{target_url}/api.php"
+
     async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post(bot_url, data=form_data, files=files, headers=headers)
+        resp = await client.post(target_url, data=form_data, files=files, headers=headers)
         if resp.status_code != 200:
             raise RuntimeError(f"Support bot returned HTTP {resp.status_code}")
         data = resp.json()

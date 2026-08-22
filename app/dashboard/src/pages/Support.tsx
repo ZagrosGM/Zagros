@@ -1,25 +1,16 @@
-// Support — submit Bug Reports / Feature Requests to Telegram Bot, Admin config & test.
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+// Support — user-facing Bug Report & Feature Request submission.
+import { useMutation } from "@tanstack/react-query";
 import {
-  Bug, CheckCircle2, FileText, HelpCircle, LifeBuoy, Lightbulb, Paperclip, Send, Settings, ShieldAlert,
-  X,
+  Bug, CheckCircle2, FileText, LifeBuoy, Lightbulb, Paperclip, Send, ShieldAlert, X,
 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "../components/feedback";
-import { ConfirmDialog } from "../components/overlays";
-import { Badge, Button, Card, Field, Input, Select, Textarea, cn } from "../components/ui";
+import { Button, Card, Field, Input, Textarea, cn } from "../components/ui";
 import { api, ApiError } from "../lib/api";
 import { useT } from "../lib/i18n";
 
-interface SupportConfig {
-  bot_url: string;
-  secret_configured: boolean;
-  secret_masked: string;
-}
-
 export default function Support() {
   const t = useT();
-  const qc = useQueryClient();
 
   // Ticket Form State
   const [ticketType, setTicketType] = useState<"bug" | "feature">("bug");
@@ -28,23 +19,7 @@ export default function Support() {
   const [attachment, setAttachment] = useState<File | null>(null);
   const [successTicketId, setSuccessTicketId] = useState<string | null>(null);
 
-  // Admin Config State
-  const [showConfig, setShowConfig] = useState(false);
-  const [botUrl, setBotUrl] = useState("");
-  const [integrationSecret, setIntegrationSecret] = useState("");
-  const [confirmTest, setConfirmTest] = useState(false);
-
-  // Queries
-  const configQ = useQuery({
-    queryKey: ["support-config"],
-    queryFn: async () => {
-      const res = await api.get<SupportConfig>("/zagros/support/config");
-      setBotUrl(res.bot_url);
-      return res;
-    },
-  });
-
-  // Mutations
+  // Submit Mutation
   const submitTicket = useMutation({
     mutationFn: async () => {
       const fd = new FormData();
@@ -68,37 +43,6 @@ export default function Support() {
     },
   });
 
-  const saveConfig = useMutation({
-    mutationFn: async () => {
-      return api.put<{ ok: boolean }>("/zagros/support/config", {
-        bot_url: botUrl,
-        integration_secret: integrationSecret,
-      });
-    },
-    onSuccess: () => {
-      toast.ok(t("common.saved"));
-      setIntegrationSecret("");
-      qc.invalidateQueries({ queryKey: ["support-config"] });
-    },
-    onError: (e) => {
-      toast.error(e instanceof ApiError ? e.message : t("common.error"));
-    },
-  });
-
-  const sendTestMessage = useMutation({
-    mutationFn: async () => {
-      return api.post<{ ok: boolean; detail: string; ticket_id?: string }>("/zagros/support/test", { confirm: true });
-    },
-    onSuccess: (data) => {
-      setConfirmTest(false);
-      toast.ok(data.detail || "Test message delivered to Telegram");
-    },
-    onError: (e) => {
-      setConfirmTest(false);
-      toast.error(e instanceof ApiError ? e.message : "Support service is temporarily unavailable.");
-    },
-  });
-
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
@@ -112,73 +56,14 @@ export default function Support() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-6 animate-fade-up">
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <h1 className="flex items-center gap-2 text-xl font-bold tracking-tight">
-            <LifeBuoy size={22} className="text-brand" /> {t("nav.support")}
-          </h1>
-          <p className="mt-1 text-xs text-content-3">
-            Submit bug reports or feature requests directly to our support system.
-          </p>
-        </div>
-        <Button variant="ghost" size="sm" onClick={() => setShowConfig(!showConfig)}>
-          <Settings size={15} /> <span className="hidden sm:inline">Settings</span>
-        </Button>
+      <div>
+        <h1 className="flex items-center gap-2 text-xl font-bold tracking-tight">
+          <LifeBuoy size={22} className="text-brand" /> {t("nav.support")}
+        </h1>
+        <p className="mt-1 text-xs text-content-3">
+          Submit bug reports or feature requests directly to support.
+        </p>
       </div>
-
-      {showConfig && (
-        <Card className="p-5 space-y-4 border-brand/30 bg-surface-1">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold flex items-center gap-2">
-              <Settings size={16} className="text-brand" /> Telegram Support Bot Settings
-            </h2>
-            <Badge tone={configQ.data?.secret_configured ? "ok" : "warn"}>
-              {configQ.data?.secret_configured ? "Configured" : "Not Configured"}
-            </Badge>
-          </div>
-          <p className="text-xs text-content-3">
-            Configure the Support Bot endpoint URL and integration secret to route tickets to your Telegram Admin account.
-          </p>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Support Bot Endpoint URL" required hint="e.g. https://bot.example.com/api.php">
-              <Input
-                value={botUrl}
-                onChange={(e) => setBotUrl(e.target.value)}
-                placeholder="https://your-bot-domain.com/api.php"
-                dir="ltr"
-              />
-            </Field>
-            <Field label="Integration Secret" hint={configQ.data?.secret_configured ? configQ.data.secret_masked : "Secret key shared with Bot"}>
-              <Input
-                type="password"
-                value={integrationSecret}
-                onChange={(e) => setIntegrationSecret(e.target.value)}
-                placeholder={configQ.data?.secret_configured ? "••••••••••••" : "Enter integration secret"}
-                dir="ltr"
-              />
-            </Field>
-          </div>
-          <div className="flex items-center justify-end gap-2 pt-2">
-            {configQ.data?.secret_configured && (
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => setConfirmTest(true)}
-              >
-                Send Test Message
-              </Button>
-            )}
-            <Button
-              size="sm"
-              loading={saveConfig.isPending}
-              disabled={!botUrl}
-              onClick={() => saveConfig.mutate()}
-            >
-              Save Configuration
-            </Button>
-          </div>
-        </Card>
-      )}
 
       {successTicketId && (
         <Card className="p-4 border-ok/40 bg-ok-soft/30 flex items-start gap-3">
@@ -187,7 +72,7 @@ export default function Support() {
             <h3 className="text-sm font-semibold text-content">Ticket Submitted Successfully</h3>
             <p className="text-xs text-content-2 mt-1">
               Your ticket ID is <code className="font-mono font-bold text-ok">{successTicketId}</code>.
-              Our team has been notified via Telegram.
+              Our support team has been notified.
             </p>
           </div>
           <button onClick={() => setSuccessTicketId(null)} className="text-content-3 hover:text-content">
@@ -302,15 +187,6 @@ export default function Support() {
           </Button>
         </div>
       </Card>
-
-      <ConfirmDialog
-        open={confirmTest}
-        onClose={() => setConfirmTest(false)}
-        onConfirm={() => sendTestMessage.mutate()}
-        title="Send Test Message to Telegram?"
-        body="This will immediately send a test ticket to the configured Telegram Admin account to verify connection and credentials."
-        loading={sendTestMessage.isPending}
-      />
     </div>
   );
 }

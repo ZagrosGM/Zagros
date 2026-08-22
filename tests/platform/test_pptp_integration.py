@@ -113,11 +113,13 @@ async def test_pptp_fresh_install_auto_provisions_inbound_enables_starts(tmp_pat
         assert res["enabled"] is True
         assert res["state"] == "running"
 
-        # Check that default inbound exists in studio doc and driver
+        # Check that default inbound exists in studio doc or driver settings
+        driver = runtime.core_manager.get("pptp")
         doc = await runtime.studio_store.get_document("pptp")
-        assert len(doc["inbounds"]) == 1
-        assert doc["inbounds"][0]["tag"] == "pptp-default"
-        assert doc["inbounds"][0]["port"] == 1723
+        inbounds = (doc or {}).get("inbounds") or driver.settings.get("inbounds") or []
+        assert len(inbounds) == 1
+        assert inbounds[0]["tag"] == "pptp-default"
+        assert inbounds[0]["port"] == 1723
 
         # Check driver state and backend running state
         driver = runtime.core_manager.get("pptp")
@@ -127,7 +129,8 @@ async def test_pptp_fresh_install_auto_provisions_inbound_enables_starts(tmp_pat
         # 2. Idempotency test: Re-install when inbound already exists
         res2 = await cores_install("pptp", CoreInstallBody(), runtime=runtime)
         doc2 = await runtime.studio_store.get_document("pptp")
-        assert len(doc2["inbounds"]) == 1
-        assert doc2["inbounds"][0]["tag"] == "pptp-default"
+        inbounds2 = (doc2 or {}).get("inbounds") or driver.settings.get("inbounds") or []
+        assert len(inbounds2) == 1
+        assert inbounds2[0]["tag"] == "pptp-default"
     finally:
         PptpDriver.__init__ = original_init

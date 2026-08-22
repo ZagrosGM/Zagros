@@ -458,7 +458,17 @@ insert rule ip nat POSTROUTING ip saddr {subnet} counter masquerade comment \"{o
         self.start(tag=tag, subnet=subnet, listen=listen)
 
     def is_running(self) -> bool:
-        return bool(self._proc and self._proc.is_running)
+        if self._proc and self._proc.is_running:
+            return True
+        try:
+            if os.path.isfile(self.pid_path):
+                pid = int(Path(self.pid_path).read_text(encoding="ascii").strip())
+                if pid > 0:
+                    os.kill(pid, 0)
+                    return True
+        except (OSError, ValueError):
+            pass
+        return False
 
     def metrics(self) -> CoreMetrics:
         return self._proc.metrics() if self._proc else CoreMetrics()

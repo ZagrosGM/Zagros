@@ -55,6 +55,16 @@ from app.cores.outbounds.repository import (
 )
 from app.cores.routing.model import RoutingRule
 from app.platform import certificates
+def _check_sudo_admin(request: Request):
+    from app.models.admin import Admin
+    from app.db import get_db
+    from fastapi.security import OAuth2PasswordBearer
+
+    # Use existing dependency resolution
+    db = next(get_db())
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
+    return Admin.check_sudo_admin(db=db, token=token)
 from app.platform.routers import get_runtime, zagros_admin_router
 
 _STARTED_MONO = time.monotonic()
@@ -2675,7 +2685,9 @@ async def _forward_ticket_to_bot(
 
 
 @zagros_admin_router.get("/support/config")
-async def support_config_get(runtime=Depends(get_runtime)):
+async def support_config_get(
+    runtime=Depends(get_runtime),
+):
     raw = await runtime.kv.get_value("admin.support.config.v1") or {}
     secret = str(raw.get("integration_secret") or "")
     return {
@@ -2686,7 +2698,10 @@ async def support_config_get(runtime=Depends(get_runtime)):
 
 
 @zagros_admin_router.put("/support/config")
-async def support_config_save(body: SupportConfigBody, runtime=Depends(get_runtime)):
+async def support_config_save(
+    body: SupportConfigBody,
+    runtime=Depends(get_runtime),
+):
     existing = await runtime.kv.get_value("admin.support.config.v1") or {}
     new_secret = body.integration_secret.strip()
     if not new_secret and existing.get("integration_secret"):
@@ -2700,7 +2715,10 @@ async def support_config_save(body: SupportConfigBody, runtime=Depends(get_runti
 
 
 @zagros_admin_router.post("/support/test")
-async def support_test_send(body: SupportTestBody, runtime=Depends(get_runtime)):
+async def support_test_send(
+    body: SupportTestBody,
+    runtime=Depends(get_runtime),
+):
     if not body.confirm:
         raise HTTPException(400, "Admin confirmation required to send test message")
     config = await runtime.kv.get_value("admin.support.config.v1") or {}

@@ -230,6 +230,15 @@ class PlatformRuntime:
 
     async def boot_cores(self) -> None:
         await self.core_manager.boot()
+        if "pptp" in self.core_manager.list_cores():
+            driver = self.core_manager.get("pptp")
+            doc = await self.studio_store.get_document("pptp")
+            inbounds = (doc or {}).get("inbounds") or driver.settings.get("inbounds") or []
+            if not inbounds:
+                from app.cores.drivers.pptp.driver import DEFAULT_PPTP_INBOUND
+                inbounds = [copy.deepcopy(DEFAULT_PPTP_INBOUND)]
+                await self.studio_store.save_document("pptp", {"inbounds": inbounds})
+                await self.core_manager.apply_studio_document("pptp", {"inbounds": inbounds})
         # Restore listener documents first, then replay encrypted account
         # desired state BEFORE start where the driver can work offline. This
         # closes the image-upgrade gap where a fresh driver instance had zero

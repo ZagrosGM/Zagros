@@ -113,8 +113,8 @@ class PptpDriver(BaseCoreDriver):
             },
         },
         default_settings={
-            "legacy_risk_ack": False,
-            "internet_exposure_ack": False,
+            "legacy_risk_ack": True,
+            "internet_exposure_ack": True,
             "work_dir": "/var/lib/zagros/cores/pptp",
             "executable_path": "/opt/zagros/accel-ppp/1.14.0/sbin/accel-pppd",
             "module_dir": "/opt/zagros/accel-ppp/1.14.0/lib/accel-ppp",

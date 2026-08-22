@@ -9,6 +9,9 @@ from app.studio.service import ConfigStudioService, InMemoryStudioStore, Inbound
 from app.studio.wizard import blueprint_for
 
 
+from app.cores.types import CoreMetrics
+
+
 def test_independent_server_and_outbound_capabilities_stay_separate():
     provider = provider_capability(installed=True)
     assert provider["provider"] == "pptp" and provider["engine"] == "accel-ppp"
@@ -62,3 +65,69 @@ async def test_studio_preview_invokes_backend_semantic_validation(tmp_path):
                       })
     result = await studio.wizard_preview_inbound(driver, bad)
     assert not result.valid and any("1723" in error for error in result.errors)
+
+
+@pytest.mark.asyncio
+async def test_pptp_fresh_install_auto_provisions_inbound_enables_starts(tmp_path):
+    from app.platform.runtime import PlatformRuntime
+    from app.platform.admin_api import cores_install, CoreInstallBody
+
+    class FakeBackend:
+        accounting_path = str(tmp_path / "acct.sqlite3")
+        generation_path = str(tmp_path / "gen")
+        chap_path = str(tmp_path / "chap")
+        hook_path = str(tmp_path / "hook")
+        def __init__(self, settings):
+            self.settings = settings
+            self.running = False
+            self.configured = False
+        def verify_installation(self): pass
+        def ensure_management_secret(self): return "secret"
+        def configure(self, cfg, chap, hook): self.configured = True
+        def reload(self): pass
+        def is_running(self): return self.running
+        def start(self, tag, subnet, listen): self.running = True
+        def stop(self): self.running = False
+        def sessions(self): return []
+        def metrics(self): return CoreMetrics(active_sessions=0, active_accounts=0)
+
+    db_path = tmp_path / "test.db"
+    runtime = PlatformRuntime(database_url=f"sqlite:///{db_path}", master_secret="0123456789abcdef0123456789abcdef")
+    from app.persistence.base import Base
+    Base.metadata.create_all(bind=runtime.session_factory.kw["bind"])
+    runtime.verify_schema = lambda: None
+
+    # Patch PPTpDriver to use FakeBackend
+    from app.cores.drivers.pptp.driver import PptpDriver
+    original_init = PptpDriver.__init__
+
+    def patched_init(self, settings=None, *, backend=None, ledger=None):
+        original_init(self, settings, backend=FakeBackend(settings or {}), ledger=ledger)
+
+    PptpDriver.__init__ = patched_init
+    try:
+        # 1. Fresh install PPTP
+        res = await cores_install("pptp", CoreInstallBody(), runtime=runtime)
+        assert res["ok"] is True
+        assert res["core"] == "pptp"
+        assert res["enabled"] is True
+        assert res["state"] == "running"
+
+        # Check that default inbound exists in studio doc and driver
+        doc = await runtime.studio_store.get_document("pptp")
+        assert len(doc["inbounds"]) == 1
+        assert doc["inbounds"][0]["tag"] == "pptp-default"
+        assert doc["inbounds"][0]["port"] == 1723
+
+        # Check driver state and backend running state
+        driver = runtime.core_manager.get("pptp")
+        assert runtime.core_manager.is_enabled("pptp") is True
+        assert driver._backend.is_running() is True
+
+        # 2. Idempotency test: Re-install when inbound already exists
+        res2 = await cores_install("pptp", CoreInstallBody(), runtime=runtime)
+        doc2 = await runtime.studio_store.get_document("pptp")
+        assert len(doc2["inbounds"]) == 1
+        assert doc2["inbounds"][0]["tag"] == "pptp-default"
+    finally:
+        PptpDriver.__init__ = original_init

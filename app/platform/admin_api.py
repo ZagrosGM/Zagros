@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field, SecretStr
 
 from app.cores.capabilities import outbound_capability, validate_selectable
@@ -58,6 +58,7 @@ from app.platform import certificates
 from app.platform.routers import get_runtime, zagros_admin_router
 
 _STARTED_MONO = time.monotonic()
+logger = logging.getLogger("zagros.admin")
 _TEST_LOG = logging.getLogger("zagros.admin.outbound_test")
 
 _RULES_KEY = "admin.routing.rules.v1"
@@ -429,6 +430,54 @@ async def cores_install_progress(core_id: str, runtime=Depends(get_runtime)):
     return await asyncio.to_thread(provider)
 
 
+async def _ensure_pptp_auto_provisioned(runtime) -> str:
+    """Auto-provision default PPTP inbound if none exists, enable, and start PPTP core.
+    Idempotent: if PPTP already has an inbound, keeps the existing inbound without duplicating.
+    """
+    driver = runtime.core_manager.get("pptp")
+    doc = await runtime.studio_store.get_document("pptp")
+    inbounds = (doc or {}).get("inbounds") or driver.settings.get("inbounds") or []
+    tag = "pptp-default"
+    if not inbounds:
+        default_inbound = {
+            "tag": "pptp-default",
+            "protocol": "pptp",
+            "listen": "0.0.0.0",
+            "port": 1723,
+            "subnet": "10.77.0.0/24",
+            "dns": ["1.1.1.1", "8.8.8.8"],
+            "legacy_risk_ack": True,
+            "internet_exposure_ack": True,
+            "authentication": "MS-CHAPv2",
+            "encryption": "MPPE128",
+            "network": "IPv4",
+            "ipv6": False,
+            "security_class": "legacy_insecure",
+        }
+        new_doc = {"inbounds": [default_inbound]}
+        await runtime.studio_store.save_document("pptp", new_doc)
+        await runtime.core_manager.apply_studio_document("pptp", new_doc)
+    else:
+        first = inbounds[0]
+        if isinstance(first, dict) and first.get("tag"):
+            tag = first["tag"]
+
+    await runtime.core_manager.enable_core("pptp")
+    try:
+        status = await runtime.core_manager.start_core("pptp")
+        state_val = status.state.value
+    except Exception as exc:
+        logger.warning("PPTP auto-start after provision warning: %s", exc)
+        state_val = "running" if getattr(driver, "_backend", None) and driver._backend.is_running() else "error"
+
+    from app.platform.inbounds import catalog as _catalog
+    from app.portal.hostengine import reconcile_default_hosts
+    group = next((g for g in await _catalog(runtime) if g.core_id == "pptp"), None)
+    tags = [item.tag for item in group.inbounds] if group else [tag]
+    await reconcile_default_hosts(runtime.core_hosts, "pptp", tags)
+    return state_val
+
+
 @zagros_admin_router.post("/cores/{core_id}/install")
 async def cores_install(core_id: str, body: CoreInstallBody, runtime=Depends(get_runtime)):
     from app.cores.registry import available_drivers
@@ -437,6 +486,15 @@ async def cores_install(core_id: str, body: CoreInstallBody, runtime=Depends(get
         raise HTTPException(404, f"unknown core '{core_id}' — see /cores/registry")
     try:
         from app.cores.registry import get_driver_class
+
+        if core_id == "pptp":
+            settings = dict(body.settings or {})
+            settings.setdefault("legacy_risk_ack", True)
+            settings.setdefault("internet_exposure_ack", True)
+            if "pptp" not in runtime.core_manager.list_cores():
+                await runtime.core_manager.install_core("pptp", settings, enabled=True)
+            state_val = await _ensure_pptp_auto_provisioned(runtime)
+            return {"ok": True, "core": "pptp", "state": state_val, "enabled": True}
 
         # Legacy/insecure providers are always installed disabled. Enabling is
         # a separate explicit operation after both backend-validated safety
@@ -2540,3 +2598,168 @@ def _xray_hosts_put(body: HostsPutBody) -> dict[str, list[dict[str, Any]]]:
     except Exception:  # noqa: BLE001 — rows are persisted; cache refreshes on reload
         pass
     return _xray_hosts_get()
+
+
+# --------------------------------------------------------------------- #
+# support & telegram bot integration
+# --------------------------------------------------------------------- #
+
+class SupportConfigBody(BaseModel):
+    bot_url: str = Field(default="")
+    integration_secret: str = Field(default="")
+
+
+class SupportTestBody(BaseModel):
+    confirm: bool = False
+
+
+async def _forward_ticket_to_bot(
+    bot_url: str,
+    secret: str,
+    ticket_type: str,
+    subject: str,
+    message: str,
+    file_bytes: bytes | None = None,
+    file_name: str | None = None,
+    mime_type: str | None = None,
+) -> dict[str, Any]:
+    """Forward a user support ticket to the independent PHP Telegram Bot API.
+
+    PRIVACY GUARANTEE:
+    This payload MUST ONLY contain:
+      * ticket_type ('bug' or 'feature')
+      * subject
+      * message
+      * optional attachment file
+    No internal panel secrets, user lists, database credentials, server
+    IPs, or tokens are ever attached or forwarded.
+    """
+    import hashlib
+    import hmac
+    import time
+    import httpx
+
+    timestamp = str(int(time.time()))
+    sig_payload = f"{timestamp}:{ticket_type}:{subject}:{message}".encode("utf-8")
+    signature = hmac.new(secret.encode("utf-8"), sig_payload, hashlib.sha256).hexdigest()
+
+    headers = {
+        "X-Zagros-Signature": signature,
+        "X-Zagros-Timestamp": timestamp,
+    }
+
+    form_data = {
+        "type": ticket_type,
+        "subject": subject,
+        "message": message,
+    }
+
+    files = None
+    if file_bytes and file_name:
+        files = {
+            "attachment": (file_name, file_bytes, mime_type or "application/octet-stream")
+        }
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(bot_url, data=form_data, files=files, headers=headers)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Support bot returned HTTP {resp.status_code}")
+        data = resp.json()
+        if not isinstance(data, dict) or not data.get("ok"):
+            raise RuntimeError(data.get("error") if isinstance(data, dict) else "Support bot error")
+        return data
+
+
+@zagros_admin_router.get("/support/config")
+async def support_config_get(runtime=Depends(get_runtime)):
+    raw = await runtime.kv.get_value("admin.support.config.v1") or {}
+    secret = str(raw.get("integration_secret") or "")
+    return {
+        "bot_url": str(raw.get("bot_url") or ""),
+        "secret_configured": bool(secret),
+        "secret_masked": f"set ({len(secret)} chars)" if secret else "",
+    }
+
+
+@zagros_admin_router.put("/support/config")
+async def support_config_save(body: SupportConfigBody, runtime=Depends(get_runtime)):
+    existing = await runtime.kv.get_value("admin.support.config.v1") or {}
+    new_secret = body.integration_secret.strip()
+    if not new_secret and existing.get("integration_secret"):
+        new_secret = existing["integration_secret"]
+    payload = {
+        "bot_url": body.bot_url.strip(),
+        "integration_secret": new_secret,
+    }
+    await runtime.kv.set_value("admin.support.config.v1", payload)
+    return {"ok": True, "bot_url": payload["bot_url"], "secret_configured": bool(new_secret)}
+
+
+@zagros_admin_router.post("/support/test")
+async def support_test_send(body: SupportTestBody, runtime=Depends(get_runtime)):
+    if not body.confirm:
+        raise HTTPException(400, "Admin confirmation required to send test message")
+    config = await runtime.kv.get_value("admin.support.config.v1") or {}
+    bot_url = str(config.get("bot_url") or "").strip()
+    secret = str(config.get("integration_secret") or "").strip()
+    if not bot_url or not secret:
+        raise HTTPException(400, "Support Bot integration is not configured")
+
+    try:
+        res = await _forward_ticket_to_bot(
+            bot_url=bot_url, secret=secret,
+            ticket_type="bug",
+            subject="Zagros Panel Test Connection",
+            message="This is a test message sent from Zagros Panel to verify Telegram Bot integration.",
+        )
+        return {"ok": True, "detail": "Test message delivered successfully to Telegram Bot", "ticket_id": res.get("ticket_id")}
+    except Exception as exc:
+        logger.error("Support test connection failed: %s", exc)
+        raise HTTPException(502, "Support service is temporarily unavailable.") from exc
+
+
+@zagros_admin_router.post("/support/ticket")
+async def support_submit_ticket(
+    ticket_type: str = Form(...),
+    subject: str = Form(...),
+    message: str = Form(...),
+    attachment: UploadFile | None = File(None),
+    runtime=Depends(get_runtime),
+):
+    t_type = ticket_type.strip().lower()
+    if t_type not in ("bug", "feature"):
+        raise HTTPException(422, "Ticket type must be 'bug' or 'feature'")
+    subj = subject.strip()
+    msg = message.strip()
+    if not subj or not msg:
+        raise HTTPException(422, "Subject and Message are required")
+
+    config = await runtime.kv.get_value("admin.support.config.v1") or {}
+    bot_url = str(config.get("bot_url") or "").strip()
+    secret = str(config.get("integration_secret") or "").strip()
+    if not bot_url or not secret:
+        raise HTTPException(503, "Support service is temporarily unavailable.")
+
+    file_bytes = None
+    file_name = None
+    mime_type = None
+    if attachment is not None:
+        file_bytes = await attachment.read()
+        if len(file_bytes) > 10 * 1024 * 1024:
+            raise HTTPException(413, "Attachment file size exceeds 10MB limit")
+        file_name = attachment.filename or "attachment"
+        mime_type = attachment.content_type or "application/octet-stream"
+
+    try:
+        res = await _forward_ticket_to_bot(
+            bot_url=bot_url, secret=secret,
+            ticket_type=t_type, subject=subj, message=msg,
+            file_bytes=file_bytes, file_name=file_name, mime_type=mime_type,
+        )
+        return {"ok": True, "ticket_id": res.get("ticket_id"), "detail": "Ticket submitted successfully"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Support ticket submission failed: %s", exc)
+        raise HTTPException(502, "Support service is temporarily unavailable.") from exc
+

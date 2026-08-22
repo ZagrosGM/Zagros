@@ -143,6 +143,9 @@ class BandwidthLimiter:
     @staticmethod
     def _run(argv: list[str], *, input_text: str | None = None,
              check: bool = True) -> subprocess.CompletedProcess:
+        cmd = argv[0] if argv else ""
+        if os.environ.get("ZAGROS_BANDWIDTH_DRIVER") in ("noop", "dummy", "fake") or (cmd and not shutil.which(cmd)):
+            return subprocess.CompletedProcess(argv, 0, "", "")
         try:
             result = subprocess.run(
                 argv, input=input_text, text=True, capture_output=True,

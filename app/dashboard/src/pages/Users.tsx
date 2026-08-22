@@ -222,49 +222,63 @@ export default function Users() {
       ),
     },
     {
-      id: "user", header: t("users.title"), cell: (u) => (
-        <div className="flex min-w-0 items-center gap-2.5">
-          {/* item 15: the account-status lamp is gone — one presence dot only:
-              online = session on ≥1 core (green), offline = no session and
-              every online-capable core answered (gray), unknown = a core
-              failed its read OR the deployment has no online API at all
-              (gray + honest title). Account status lives in its own column. */}
-          <span
-            role="img"
-            data-presence={onlineMap[u.username] ?? "unknown"}
-            aria-label={`presence ${onlineMap[u.username] ?? "unknown"}`}
-            title={onlineMap[u.username] === "online"
-              ? "online (session on ≥1 core)"
-              : onlineMap[u.username] === "offline"
-                ? "offline (no session on any online-capable core)"
-                : (onlineQ.data?.failed_cores?.length
-                    ? `presence unknown (${onlineQ.data.failed_cores.join(", ")} failed its read)`
-                    : "presence unknown (no online-capable core on this deployment)")}
-            className={cn(
-              "inline-block h-2.5 w-2.5 shrink-0 rounded-full border",
-              onlineMap[u.username] === "online"
-                ? "border-ok bg-ok"
+      id: "user", header: t("users.title"), cell: (u) => {
+        const coreGrants: Record<string, string[]> = { ...(u.core_access ?? {}) };
+        if (!coreGrants[XRAY_CORE_ID]) {
+          let xrayTags: string[] = [];
+          if (u.inbounds && Object.keys(u.inbounds).length > 0) {
+            xrayTags = Object.values(u.inbounds).flat();
+          } else if (u.proxies && Object.keys(u.proxies).length > 0) {
+            xrayTags = Object.keys(u.proxies);
+          }
+          if (xrayTags.length > 0) {
+            coreGrants[XRAY_CORE_ID] = xrayTags;
+          }
+        }
+        return (
+          <div className="flex min-w-0 items-center gap-2.5">
+            {/* item 15: the account-status lamp is gone — one presence dot only:
+                online = session on ≥1 core (green), offline = no session and
+                every online-capable core answered (gray), unknown = a core
+                failed its read OR the deployment has no online API at all
+                (gray + honest title). Account status lives in its own column. */}
+            <span
+              role="img"
+              data-presence={onlineMap[u.username] ?? "unknown"}
+              aria-label={`presence ${onlineMap[u.username] ?? "unknown"}`}
+              title={onlineMap[u.username] === "online"
+                ? "online (session on ≥1 core)"
                 : onlineMap[u.username] === "offline"
-                  ? "border-content-3/60 bg-content-3/35"
-                  : "border-content-3/70 bg-transparent",
-            )}
-          />
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5">
-              <span className="truncate font-medium">{u.username}</span>
-              {u.app_username && <Badge tone="info">app</Badge>}
-            </div>
-            {u.core_access && Object.keys(u.core_access).length > 0 && (
-              <div className="mt-0.5 flex flex-wrap gap-1">
-                {Object.entries(u.core_access).map(([core, tags]) => (
-                  <Badge key={core} tone="brand">{core} · {tags.length}</Badge>
-                ))}
+                  ? "offline (no session on any online-capable core)"
+                  : (onlineQ.data?.failed_cores?.length
+                      ? `presence unknown (${onlineQ.data.failed_cores.join(", ")} failed its read)`
+                      : "presence unknown (no online-capable core on this deployment)")}
+              className={cn(
+                "inline-block h-2.5 w-2.5 shrink-0 rounded-full border",
+                onlineMap[u.username] === "online"
+                  ? "border-ok bg-ok"
+                  : onlineMap[u.username] === "offline"
+                    ? "border-content-3/60 bg-content-3/35"
+                    : "border-content-3/70 bg-transparent",
+              )}
+            />
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="truncate font-medium">{u.username}</span>
+                {u.app_username && <Badge tone="info">app</Badge>}
               </div>
-            )}
-            {u.note && <p className="truncate text-[11px] text-content-3">{u.note}</p>}
+              {Object.keys(coreGrants).length > 0 && (
+                <div className="mt-0.5 flex flex-wrap gap-1">
+                  {Object.entries(coreGrants).map(([core, tags]) => (
+                    <Badge key={core} tone="brand">{core} · {tags.length}</Badge>
+                  ))}
+                </div>
+              )}
+              {u.note && <p className="truncate text-[11px] text-content-3">{u.note}</p>}
+            </div>
           </div>
-        </div>
-      ),
+        );
+      },
     },
     {
       id: "status", header: t("common.status"), width: "130px",
@@ -392,8 +406,6 @@ export default function Users() {
           rows={users}
           rowKey={(u) => u.username}
           loading={isLoading}
-          virtual
-          height={620}
           onRowClick={(u) => setDialog({ mode: "edit", user: u })}
           empty={<EmptyState title={search || statusFilter !== "all" ? "No users match the current filter" : "No users yet"}
             action={!search && statusFilter === "all" ? <Button size="sm" onClick={() => setDialog({ mode: "create" })}><Plus size={14} />{t("users.new")}</Button> : undefined} />}

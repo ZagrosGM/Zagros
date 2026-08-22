@@ -16,7 +16,7 @@ export interface Command {
 export function useCommands(extra: Command[]): Command[] {
   const navigate = useNavigate();
   return useMemo(() => [
-    ...["", "users", "subscriptions", "nodes", "cores", "routing", "outbounds", "inbounds", "dns", "certificates", "sessions", "devices", "logs", "marketplace", "settings", "advanced"].map((p) => ({
+    ...["", "users", "subscriptions", "nodes", "cores", "routing", "outbounds", "inbounds", "dns", "certificates", "sessions", "devices", "logs", "support", "settings", "advanced"].map((p) => ({
       id: `go-${p || "overview"}`,
       title: p ? `Go to ${p[0].toUpperCase()}${p.slice(1)}` : "Go to Overview",
       hint: `/${p}`,

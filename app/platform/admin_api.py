@@ -2726,9 +2726,8 @@ async def support_test_send(
 ):
     if not body.confirm:
         raise HTTPException(400, "Admin confirmation required to send test message")
-    config = await runtime.kv.get_value("admin.support.config.v1") or {}
-    bot_url = str(config.get("bot_url") or "").strip() or DEFAULT_SUPPORT_BOT_URL
-    secret = str(config.get("integration_secret") or "").strip() or DEFAULT_SUPPORT_INTEGRATION_SECRET
+    bot_url = DEFAULT_SUPPORT_BOT_URL
+    secret = DEFAULT_SUPPORT_INTEGRATION_SECRET
 
     try:
         res = await _forward_ticket_to_bot(
@@ -2759,9 +2758,8 @@ async def support_submit_ticket(
     if not subj or not msg:
         raise HTTPException(422, "Subject and Message are required")
 
-    config = await runtime.kv.get_value("admin.support.config.v1") or {}
-    bot_url = str(config.get("bot_url") or "").strip() or DEFAULT_SUPPORT_BOT_URL
-    secret = str(config.get("integration_secret") or "").strip() or DEFAULT_SUPPORT_INTEGRATION_SECRET
+    bot_url = DEFAULT_SUPPORT_BOT_URL
+    secret = DEFAULT_SUPPORT_INTEGRATION_SECRET
 
     file_bytes = None
     file_name = None

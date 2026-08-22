@@ -2766,12 +2766,14 @@ async def support_submit_ticket(
     file_bytes = None
     file_name = None
     mime_type = None
-    if attachment is not None:
-        file_bytes = await attachment.read()
-        if len(file_bytes) > 10 * 1024 * 1024:
-            raise HTTPException(413, "Attachment file size exceeds 10MB limit")
-        file_name = attachment.filename or "attachment"
-        mime_type = attachment.content_type or "application/octet-stream"
+    if attachment is not None and attachment.filename:
+        raw = await attachment.read()
+        if len(raw) > 0:
+            if len(raw) > 10 * 1024 * 1024:
+                raise HTTPException(413, "Attachment file size exceeds 10MB limit")
+            file_bytes = raw
+            file_name = attachment.filename or "attachment"
+            mime_type = attachment.content_type or "application/octet-stream"
 
     try:
         res = await _forward_ticket_to_bot(

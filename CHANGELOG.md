@@ -50,6 +50,9 @@ multi-core platform line.
 * Standalone tc actions are deleted in bounded delayed waves after their last
   binding is released, eliminating `ref=1/bind=0` objects on live 0/Unlimited
   transitions.
+* The test suite now redirects limiter state through
+  `ZAGROS_BANDWIDTH_STATE_PATH`; unprivileged CI no longer attempts to write
+  `/var/lib/zagros`, while production keeps the mounted path as its default.
 * Accounting shutdown flush, reset/generation handling, provider aliases,
   exactly-once baselines and cross-user attribution are restart-safe.
 

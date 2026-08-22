@@ -632,4 +632,4 @@ class TestAlembicConsolidation:
             keys = {r[0] for r in db.execute("SELECT key FROM settings")}
             assert not any(k.startswith("studio.document.") for k in keys)
             (head,) = db.execute("SELECT version_num FROM alembic_version").fetchone()
-            assert head == "0010_native_node_agent"
+            assert head == "0011_user_bandwidth_limits"

@@ -122,6 +122,10 @@ class User(Base):
     # auto-revived when the count drops back under the limit.
     device_limit = Column(Integer, nullable=True, default=None)
     device_limit_disabled = Column(Boolean, nullable=False, default=False)
+    # Per-user aggregate bandwidth ceilings in decimal megabits/second.
+    # Zero is deliberately unlimited for backward compatibility.
+    download_limit_mbps = Column(Integer, nullable=False, default=0, server_default="0")
+    upload_limit_mbps = Column(Integer, nullable=False, default=0, server_default="0")
 
     next_plan = relationship(
         "NextPlan",

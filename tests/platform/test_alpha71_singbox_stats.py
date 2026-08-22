@@ -49,7 +49,7 @@ def test_stats_shortcircuits_when_build_lacks_api():
 
     driver = _driver(probe=False)
     driver._accounts["u"] = type("A", (), {
-        "protocol": "vless", "account_id": "u", "enabled": True,
+        "user_id": 1, "protocol": "vless", "account_id": "u", "enabled": True,
         "settings": {"id": "11111111-2222-3333-4444-555555555555"}})()
     driver.render_config()  # sets the honest degrade reason
     records = asyncio.run(driver.get_usage())

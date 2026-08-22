@@ -115,6 +115,10 @@ async def sync_platform_user(runtime, user: Any) -> int:
         data_limit_bytes=(int(getattr(user, "data_limit", 0) or 0) or None),
         expire_at=_legacy_expire_dt(user),
         device_limit=device_limit,
+        download_limit_mbps=max(0, int(
+            getattr(user, "download_limit_mbps", 0) or 0)),
+        upload_limit_mbps=max(0, int(
+            getattr(user, "upload_limit_mbps", 0) or 0)),
         admin_id=await asyncio.to_thread(_platform_admin_id, runtime, user),
         note=getattr(user, "note", None),
     )

@@ -27,6 +27,7 @@ if "app" not in sys.modules:
 
 from app.cores import Capability, CoreError  # noqa: E402
 from app.cores.drivers.openvpn import (  # noqa: E402
+    AuthDecision,
     AuthRequest,
     DisconnectRecord,
     ManagementClient,
@@ -135,7 +136,8 @@ class FakeBackend:
 
     # test helper: pretend a handshake arrived
     def simulate_auth(self, cn, password, meta=None):
-        return self.auth_handler(cn, password, meta or {})
+        result = self.auth_handler(cn, password, meta or {})
+        return bool(getattr(result, "allow", result))
 
 
 def _driver(status_text: str = STATUS3_SAMPLE) -> tuple[OpenVPNDriver, FakeBackend]:
@@ -234,6 +236,21 @@ def test_management_client_auth_session_allow_deny_reauth() -> None:
         "client-auth 5 0", "END",
         'client-deny 6 0 "denied"',
         "client-auth-nt 5 1",
+    ]
+
+
+def test_management_auth_can_push_stable_bandwidth_address() -> None:
+    sent: list[str] = []
+    client = ManagementClient(writer=sent.append)
+    client.set_auth_handler(lambda _req: AuthDecision(
+        True, ("ifconfig-push 10.8.0.77 255.255.255.0",)))
+    for line in ("CLIENT:CONNECT,9,0", "CLIENT:ENV,username=1.x",
+                 "CLIENT:ENV,password=p", "CLIENT:ENV,END"):
+        client._feed_line(">" + line)
+    assert sent == [
+        "client-auth 9 0",
+        "ifconfig-push 10.8.0.77 255.255.255.0",
+        "END",
     ]
 
 
@@ -343,6 +360,23 @@ def test_live_user_management_with_kill_semantics() -> None:
         # delete -> removed + killed
         await driver.delete_account("1.alice")
         assert backend.simulate_auth("1.alice", "newpw") is False
+
+    asyncio.run(main())
+
+
+def test_account_gets_stable_inner_ip_for_kernel_limiter() -> None:
+    async def main():
+        driver, _backend = _driver()
+        account = _account()
+        await driver.create_account(account)
+        address = account.settings["bandwidth_ipv4"]["openvpn"]
+        assert address.startswith("10.8.0.") and address != "10.8.0.1"
+        assert driver.bandwidth_identities()[account.account_id]["inner_sources"] == [address]
+        decision = driver._authorize(
+            account.account_id, "s3cret", {"inbound_tag": "openvpn"})
+        assert isinstance(decision, AuthDecision)
+        assert decision.config_lines == (
+            f"ifconfig-push {address} 255.255.255.0",)
 
     asyncio.run(main())
 

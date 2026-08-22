@@ -70,6 +70,14 @@ class User(BaseModel):
     device_limit: Optional[int] = Field(
         None, ge=0,
         description="max simultaneous devices across every core; 0/None = unlimited")
+    # Aggregate across every core/connection for this user. Strict integers
+    # reject NaN, booleans, strings and fractional values at the API boundary.
+    download_limit_mbps: int = Field(
+        0, strict=True, ge=0, le=100_000,
+        description="aggregate download ceiling in Mbps; 0 = unlimited")
+    upload_limit_mbps: int = Field(
+        0, strict=True, ge=0, le=100_000,
+        description="aggregate upload ceiling in Mbps; 0 = unlimited")
     inbounds: Dict[ProxyTypes, List[str]] = {}
     note: Optional[str] = Field(None, nullable=True)
     sub_updated_at: Optional[datetime] = Field(None, nullable=True)
@@ -263,6 +271,11 @@ class UserCreate(User):
 class UserModify(User):
     status: UserStatusModify = None
     data_limit_reset_strategy: UserDataLimitResetStrategy = None
+    # PATCH semantics: omitted keeps current; explicit 0 removes the limit.
+    download_limit_mbps: Optional[int] = Field(
+        None, strict=True, ge=0, le=100_000)
+    upload_limit_mbps: Optional[int] = Field(
+        None, strict=True, ge=0, le=100_000)
     model_config = ConfigDict(json_schema_extra={
         "example": {
             "proxies": {

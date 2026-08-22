@@ -91,7 +91,7 @@ def test_0002_seeds_required_singletons() -> None:
         assert uplink == 0
         (head,) = sqlite3.connect(base / "zagros.db").execute(
             "SELECT version_num FROM alembic_version").fetchone()
-        assert head == "0010_native_node_agent"
+        assert head == "0011_user_bandwidth_limits"
 
 
 def test_0002_reseed_never_rotates_keys() -> None:
@@ -152,7 +152,7 @@ def test_0003_adds_extras_to_preexisting_databases() -> None:
             "SELECT extras FROM core_hosts WHERE remark = 'old'").fetchone()
         assert extras_val == "{}", "old rows must be backfilled to {}"
         (head,) = db.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert head == "0010_native_node_agent"
+        assert head == "0011_user_bandwidth_limits"
 
 
 def test_0004_adds_governance_columns_to_preexisting_databases() -> None:
@@ -258,6 +258,36 @@ def test_0006_adds_device_limit_to_preexisting_databases() -> None:
         assert row == ("old-user", None, 0), "pre-existing user row must not be touched"
 
 
+def test_0011_adds_unlimited_bandwidth_defaults_to_both_user_tables() -> None:
+    import sqlite3
+
+    base = Path(tempfile.mkdtemp(prefix="zgbw0011-"))
+    platform_url = f"sqlite:///{base}/zagros.db"
+    legacy_url = f"sqlite:///{base}/legacy.db"
+    _upgrade(platform_url, legacy_url, "0010_native_node_agent")
+    with sqlite3.connect(base / "zagros.db") as db:
+        db.execute("INSERT INTO users "
+                   "(id,username,status,data_limit_reset_strategy,created_at) "
+                   "VALUES (77,'old-platform','active','no_reset',CURRENT_TIMESTAMP)")
+        db.commit()
+    with sqlite3.connect(base / "legacy.db") as db:
+        db.execute("INSERT INTO users (id,username,status,data_limit_reset_strategy,"
+                   "admin_limit_disabled,device_limit_disabled) "
+                   "VALUES (77,'old-legacy','active','no_reset',0,0)")
+        db.commit()
+
+    _upgrade(platform_url, legacy_url)
+    for path, username in ((base / "zagros.db", "old-platform"),
+                           (base / "legacy.db", "old-legacy")):
+        with sqlite3.connect(path) as db:
+            cols = {row[1] for row in db.execute("PRAGMA table_info(users)")}
+            assert {"download_limit_mbps", "upload_limit_mbps"} <= cols
+            row = db.execute(
+                "SELECT download_limit_mbps,upload_limit_mbps FROM users "
+                "WHERE username=?", (username,)).fetchone()
+            assert row == (0, 0)
+
+
 def test_0008_promotes_marzban_extras_to_inbound_tags() -> None:
     """0008: marzban-era core_hosts rows (inbound tag stashed in extras by
     0003) become live, queryable host-settings entries; idempotent replay
@@ -296,13 +326,13 @@ def test_0008_promotes_marzban_extras_to_inbound_tags() -> None:
         (head,) = db.execute("SELECT version_num FROM alembic_version").fetchone()
     assert rows["old"] == "VLESS-TCP", "extras tag must be promoted"
     assert rows["inert"] == "", "tag-less rows stay inert — never guessed"
-    assert head == "0010_native_node_agent"
+    assert head == "0011_user_bandwidth_limits"
 
     # replay is a no-op (column/index guards)
     _upgrade(platform_url, legacy_url)
     with sqlite3.connect(base / "zagros.db") as db:
         (head,) = db.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert head == "0010_native_node_agent"
+    assert head == "0011_user_bandwidth_limits"
 
 
 def test_0009_backfills_stable_domains_and_rule_defaults_with_lossless_downgrade() -> None:

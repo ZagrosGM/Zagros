@@ -2,6 +2,7 @@
 from app.cores.drivers.openvpn.backend import LocalOpenVPNBackend, OpenVPNBackend
 from app.cores.drivers.openvpn.driver import OpenVPNDriver
 from app.cores.drivers.openvpn.mgmt import (
+    AuthDecision,
     AuthRequest,
     DisconnectRecord,
     ManagementClient,
@@ -14,6 +15,7 @@ __all__ = [
     "OpenVPNBackend",
     "LocalOpenVPNBackend",
     "ManagementClient",
+    "AuthDecision",
     "AuthRequest",
     "DisconnectRecord",
     "StatusClient",

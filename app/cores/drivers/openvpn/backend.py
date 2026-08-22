@@ -479,7 +479,8 @@ class LocalOpenVPNBackend:
             # Install the callback BEFORE connect starts the reader thread.
             # Otherwise an eager reconnect can complete ENV while no handler
             # exists, and OpenVPN blocks that session waiting for a verdict.
-            client.set_auth_handler(self._bridge_auth_request)
+            client.set_auth_handler(
+                lambda request, tag=listener.tag: self._bridge_auth_request(request, tag))
         deadline = time.monotonic() + timeout
         last_error: Exception | None = None
         while time.monotonic() < deadline:
@@ -554,7 +555,7 @@ class LocalOpenVPNBackend:
                 continue
         return killed
 
-    def _bridge_auth_request(self, request: AuthRequest) -> bool:
+    def _bridge_auth_request(self, request: AuthRequest, inbound_tag: str | None = None):
         handler = self._auth_handler
         if handler is None:
             return False
@@ -562,17 +563,20 @@ class LocalOpenVPNBackend:
             "platform": request.platform,
             "client_version": request.client_version,
             "reauth": request.reauth,
+            "inbound_tag": inbound_tag,
             **{k: v for k, v in request.env.items()
                if k.startswith("IV_") or k in ("remote_ip", "untrusted_ip")},
         }
-        return bool(handler(request.username, request.password, meta))
+        return handler(request.username, request.password, meta)
 
     def set_auth_handler(self, handler: AuthCallback) -> None:
         self._auth_handler = handler
         for tag in self._order:
             listener = self._listeners[tag]
             if listener.mgmt is not None:
-                listener.mgmt.set_auth_handler(self._bridge_auth_request)
+                listener.mgmt.set_auth_handler(
+                    lambda request, inbound_tag=tag:
+                    self._bridge_auth_request(request, inbound_tag))
 
     # ------------------------------------------------------------------ #
     # accounting

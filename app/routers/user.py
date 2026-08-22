@@ -27,6 +27,35 @@ def _platform_runtime(request: Request):
     return getattr(request.app.state, "zagros", None)
 
 
+def _ensure_xray_bandwidth_identity(dbuser) -> None:
+    """Refresh immutable Xray routing only for a missing limited identity.
+
+    Every user present at Xray start already has an outbound SO_MARK route, so
+    ordinary 0 -> N -> M -> 0 updates never restart the core.  The sole gap is
+    a newly created limited Xray user added through the runtime API after that
+    start; it receives one bounded refresh before the request is accepted.
+    """
+    limited = (int(getattr(dbuser, "download_limit_mbps", 0) or 0) > 0
+               or int(getattr(dbuser, "upload_limit_mbps", 0) or 0) > 0)
+    if not limited or not (getattr(dbuser, "proxies", None) or []):
+        return
+    loaded = getattr(xray.core, "bandwidth_user_ids", set())
+    if int(dbuser.id) in loaded:
+        return
+    try:
+        xray.core.restart(xray.config.include_db_users())
+    except Exception as exc:  # noqa: BLE001 — admission must fail closed
+        raise HTTPException(
+            status_code=503,
+            detail=f"Xray bandwidth identity refresh failed: {exc}",
+        ) from exc
+    if int(dbuser.id) not in getattr(xray.core, "bandwidth_user_ids", set()):
+        raise HTTPException(
+            status_code=503,
+            detail="Xray bandwidth identity refresh completed without the new user mark",
+        )
+
+
 def _bridge_sync(request: Request, dbuser, grants) -> int | None:
     """Converge the platform projection + per-core accounts for a legacy user.
 
@@ -44,9 +73,16 @@ def _bridge_sync(request: Request, dbuser, grants) -> int | None:
     from app.platform import provisioning
 
     try:
-        return asyncio.run(provisioning.sync_user(runtime, dbuser, grants))
+        platform_id = asyncio.run(provisioning.sync_user(runtime, dbuser, grants))
+        runtime.bandwidth.reconcile()
+        return platform_id
     except provisioning.GrantError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"bandwidth limiter could not apply user state: {exc}",
+        ) from exc
 
 
 def _bridge_grants(request: Request, username: str) -> dict | None:
@@ -66,6 +102,7 @@ def _bridge_remove(request: Request, username: str) -> None:
 
     try:
         asyncio.run(provisioning.remove_user(runtime, username))
+        runtime.bandwidth.reconcile()
     except Exception as exc:  # noqa: BLE001 — legacy delete must still proceed
         logger.warning(f"platform cleanup for '{username}' failed (local rows are removed anyway): {exc}")
 
@@ -121,6 +158,7 @@ def add_user(
     bg.add_task(xray.operations.add_user, dbuser=dbuser)
     try:
         _bridge_sync(request, dbuser, new_user.core_access)
+        _ensure_xray_bandwidth_identity(dbuser)
     except HTTPException:
         # Provisioning failed AFTER the legacy row committed — roll the whole
         # create back so the caller never gets a half-created user, and say
@@ -182,6 +220,8 @@ def modify_user(
             )
 
     old_status = dbuser.status
+    old_download_limit = int(getattr(dbuser, "download_limit_mbps", 0) or 0)
+    old_upload_limit = int(getattr(dbuser, "upload_limit_mbps", 0) or 0)
     try:
         dbuser = crud.update_user(db, dbuser, modified_user)
     except crud.AdminLimitError as exc:
@@ -192,7 +232,29 @@ def modify_user(
     # Converge the platform projection + per-core accounts. An explicit
     # core_access mapping applies a grant diff; omitted keeps grants and only
     # syncs status/limits/enabled flags.
-    _bridge_sync(request, dbuser, modified_user.core_access)
+    try:
+        _bridge_sync(request, dbuser, modified_user.core_access)
+        _ensure_xray_bandwidth_identity(dbuser)
+    except HTTPException:
+        # CRUD commits before cross-core reconciliation. Restore only the two
+        # limiter fields on apply failure so the database can never claim an
+        # unenforced nonzero limit.
+        if (modified_user.download_limit_mbps is not None
+                or modified_user.upload_limit_mbps is not None):
+            dbuser.download_limit_mbps = old_download_limit
+            dbuser.upload_limit_mbps = old_upload_limit
+            db.commit()
+            runtime = _platform_runtime(request)
+            if runtime is not None:
+                try:
+                    asyncio.run(__import__(
+                        "app.platform.provisioning", fromlist=["sync_platform_user"]
+                    ).sync_platform_user(runtime, dbuser))
+                    runtime.bandwidth.reconcile()
+                except Exception as rollback_exc:  # noqa: BLE001
+                    logger.critical("bandwidth limit rollback failed: %s", rollback_exc)
+        raise
+    user = UserResponse.model_validate(dbuser)
     user.core_access = _bridge_grants(request, dbuser.username)
 
     if user.status in [UserStatus.active, UserStatus.on_hold]:

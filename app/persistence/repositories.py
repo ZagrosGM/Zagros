@@ -546,6 +546,8 @@ class UserRepository:
                     data_limit_bytes: int | None = None,
                     expire_at: datetime | None = None,
                     device_limit: int | None = None,
+                    download_limit_mbps: int | None = None,
+                    upload_limit_mbps: int | None = None,
                     note: str | None = None,
                     client_auth_mode: str | None = None,
                     admin_id: int | None = None) -> int:
@@ -570,6 +572,10 @@ class UserRepository:
                 row.expire_at = expire_at
             if device_limit is not None:
                 row.device_limit = device_limit
+            if download_limit_mbps is not None:
+                row.download_limit_mbps = int(download_limit_mbps)
+            if upload_limit_mbps is not None:
+                row.upload_limit_mbps = int(upload_limit_mbps)
             if note is not None:
                 row.note = note
             if client_auth_mode is not None:

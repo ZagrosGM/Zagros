@@ -190,6 +190,11 @@ def _build_app_inner():
                     logging.getLogger("uvicorn.error").warning(
                         "final usage flush before shutdown failed: %s", _exc)
                 try:
+                    runtime.bandwidth.stop()
+                except Exception as _exc:  # noqa: BLE001
+                    logging.getLogger("uvicorn.error").warning(
+                        "bandwidth limiter watcher cleanup failed: %s", _exc)
+                try:
                     await runtime.subscription_listener.stop()
                 except Exception as _exc:  # noqa: BLE001
                     logging.getLogger("uvicorn.error").warning(

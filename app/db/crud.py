@@ -539,6 +539,8 @@ def create_user(db: Session, user: UserCreate, admin: Admin = None) -> User:
         status=user.status,
         data_limit=(user.data_limit or None),
         device_limit=(user.device_limit or None),
+        download_limit_mbps=int(user.download_limit_mbps or 0),
+        upload_limit_mbps=int(user.upload_limit_mbps or 0),
         expire=(user.expire or None),
         admin=admin,
         data_limit_reset_strategy=user.data_limit_reset_strategy,
@@ -630,6 +632,10 @@ def update_user(db: Session, dbuser: User, modify: UserModify) -> User:
     # Global device limit: None (field absent) = keep; 0 = explicit unlimited.
     if modify.device_limit is not None:
         dbuser.device_limit = (modify.device_limit or None)
+    if modify.download_limit_mbps is not None:
+        dbuser.download_limit_mbps = int(modify.download_limit_mbps)
+    if modify.upload_limit_mbps is not None:
+        dbuser.upload_limit_mbps = int(modify.upload_limit_mbps)
 
     if modify.data_limit is not None:
         # Governance: the admin's allocation budget must still hold.

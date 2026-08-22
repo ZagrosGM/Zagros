@@ -32,6 +32,8 @@ interface UserForm {
   dataLimitGB: string;
   /** global device limit as text ("" / "0" = unlimited), all cores combined */
   deviceLimit: string;
+  downloadLimitMbps: string;
+  uploadLimitMbps: string;
   expireDate: string;
   /** alpha.7: creation mode — from a template, or manual inbound picking */
   mode: "template" | "manual";
@@ -44,7 +46,8 @@ interface UserForm {
 }
 
 const emptyForm: UserForm = {
-  username: "", note: "", status: "active", dataLimitGB: "", deviceLimit: "", expireDate: "",
+  username: "", note: "", status: "active", dataLimitGB: "", deviceLimit: "",
+  downloadLimitMbps: "0", uploadLimitMbps: "0", expireDate: "",
   mode: "manual", templateId: null, inbounds: {}, coreAccess: {}, telegramId: "",
 };
 
@@ -447,6 +450,8 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
         username: user.username, note: user.note ?? "", status: user.status,
         dataLimitGB: user.data_limit ? String(user.data_limit / 1024 ** 3) : "",
         deviceLimit: user.device_limit ? String(user.device_limit) : "",
+        downloadLimitMbps: String(user.download_limit_mbps ?? 0),
+        uploadLimitMbps: String(user.upload_limit_mbps ?? 0),
         expireDate: user.expire ? new Date(user.expire * 1000).toISOString().slice(0, 10) : "",
         inbounds: user.proxies
           ? Object.fromEntries(Object.keys(user.proxies).map((p) => [p, user.inbounds?.[p] ?? []]))
@@ -549,6 +554,8 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
     setBusy(true); setError("");
     const data_limit = form.dataLimitGB ? Math.round(parseFloat(form.dataLimitGB) * 1024 ** 3) : null;
     const device_limit = form.deviceLimit ? Math.max(0, parseInt(form.deviceLimit, 10) || 0) : null;
+    const download_limit_mbps = Math.max(0, Math.trunc(Number(form.downloadLimitMbps) || 0));
+    const upload_limit_mbps = Math.max(0, Math.trunc(Number(form.uploadLimitMbps) || 0));
     const expire = form.expireDate ? Math.floor(new Date(form.expireDate + "T23:59:59").getTime() / 1000) : null;
     const proxySettings: Record<string, Record<string, unknown>> = {};
     const inboundSel: Record<string, string[]> = {};
@@ -560,7 +567,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
       if (mode === "create") {
         await api.post("/user", {
           username: form.username.trim(), status: form.status,
-          data_limit, device_limit, expire,
+          data_limit, device_limit, download_limit_mbps, upload_limit_mbps, expire,
           note: form.note || null,
           proxies: proxySettings,
           inbounds: inboundSel,
@@ -573,7 +580,8 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
         toast.ok(`${form.username} created`);
       } else if (user) {
         const body: Record<string, unknown> = {
-          status: form.status, data_limit, device_limit, expire, note: form.note || null,
+          status: form.status, data_limit, device_limit,
+          download_limit_mbps, upload_limit_mbps, expire, note: form.note || null,
           telegram_id: form.telegramId ? Number(form.telegramId) : null,
         };
         if (chosen.length) { body.proxies = proxySettings; body.inbounds = inboundSel; }
@@ -653,6 +661,16 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
         <Field label={t("users.deviceLimit")} hint={t("users.deviceLimitHint")}>
           <Input id="deviceLimit" type="number" min="0" step="1" value={form.deviceLimit}
             onChange={(e) => setForm({ ...form, deviceLimit: e.target.value })} />
+        </Field>
+        <Field label="Download Limit (Mbps)" hint="0 = Unlimited · aggregate across all cores">
+          <Input id="downloadLimitMbps" type="number" min="0" max="100000" step="1"
+            value={form.downloadLimitMbps}
+            onChange={(e) => setForm({ ...form, downloadLimitMbps: e.target.value })} />
+        </Field>
+        <Field label="Upload Limit (Mbps)" hint="0 = Unlimited · aggregate across all cores">
+          <Input id="uploadLimitMbps" type="number" min="0" max="100000" step="1"
+            value={form.uploadLimitMbps}
+            onChange={(e) => setForm({ ...form, uploadLimitMbps: e.target.value })} />
         </Field>
         <Field label={t("users.expire")} hint="empty = never">
           <Input type="date" value={form.expireDate}

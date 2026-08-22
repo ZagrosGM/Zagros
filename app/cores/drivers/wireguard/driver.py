@@ -1014,6 +1014,18 @@ class WireGuardDriver(BaseCoreDriver):
         await self._publish()
 
     # ------------------------------------------------------------------ #
+    # global bandwidth identity
+    # ------------------------------------------------------------------ #
+    def bandwidth_identities(self) -> dict[str, dict[str, list]]:
+        out: dict[str, dict[str, list]] = {}
+        for account_id, account in self._accounts.items():
+            addresses = list((account.settings.get("inbound_addresses") or {}).values())
+            if account.settings.get("address"):
+                addresses.append(account.settings["address"])
+            out[account_id] = {"inner_sources": sorted(set(map(str, addresses))), "uids": []}
+        return out
+
+    # ------------------------------------------------------------------ #
     # durable usage baselines                                            #
     # ------------------------------------------------------------------ #
     def usage_tracker_snapshot(

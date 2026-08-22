@@ -17,6 +17,7 @@ Real capabilities used (no pretend features):
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import re
 import secrets
@@ -27,6 +28,7 @@ from typing import Any, ClassVar
 from app.cores.base import BaseCoreDriver
 from app.cores.exceptions import CoreError
 from app.cores.stats import SessionUsageTracker
+from app.cores.drivers.openvpn.mgmt import AuthDecision
 from app.cores.types import (
     Capability,
     ClientConfig,
@@ -794,19 +796,31 @@ want_pass="${creds#*:}"
     # ------------------------------------------------------------------ #
     # live authentication (management-client-auth)
     # ------------------------------------------------------------------ #
-    def _authorize(self, username: str, password: str, meta: dict[str, Any]) -> bool:
+    def _authorize(
+        self, username: str, password: str, meta: dict[str, Any],
+    ) -> bool | AuthDecision:
         account = self._accounts.get(username)
         allowed = bool(
             account and account.enabled
             and account.settings.get("password") == password
         )
-        if allowed:
-            self._device_meta[username] = {
-                "platform": meta.get("platform"),
-                "app_version": meta.get("client_version"),
-                "seen_at": datetime.now(timezone.utc).isoformat(),
-            }
-        return allowed
+        if not allowed or account is None:
+            return False
+        self._device_meta[username] = {
+            "platform": meta.get("platform"),
+            "app_version": meta.get("client_version"),
+            "seen_at": datetime.now(timezone.utc).isoformat(),
+        }
+        tag = str(meta.get("inbound_tag") or self._listeners()[0]["tag"])
+        address = str((account.settings.get("bandwidth_ipv4") or {}).get(tag) or "")
+        if not address:
+            return AuthDecision(True)
+        listener = next((item for item in self._listeners() if item["tag"] == tag),
+                        self._listeners()[0])
+        return AuthDecision(
+            True,
+            (f"ifconfig-push {address} {listener['netmask']}",),
+        )
 
     # ------------------------------------------------------------------ #
     # user management
@@ -835,6 +849,35 @@ want_pass="${creds#*:}"
         if not account.settings.get("password"):
             raise CoreError(f"OpenVPN account '{account.account_id}' needs settings.password.")
 
+    def _ensure_bandwidth_addresses(self, account: UserAccount) -> None:
+        assigned = dict(account.settings.get("bandwidth_ipv4") or {})
+        used = {
+            str(value)
+            for other in self._accounts.values()
+            for value in (other.settings.get("bandwidth_ipv4") or {}).values()
+        }
+        for listener in self._listeners():
+            tag = str(listener["tag"])
+            if assigned.get(tag):
+                used.add(str(assigned[tag]))
+                continue
+            network = ipaddress.ip_network(
+                f"{listener['subnet']}/{listener['netmask']}", strict=False)
+            candidates = [str(value) for value in list(network.hosts())[1:]]
+            if not candidates:
+                raise CoreError(f"OpenVPN listener '{tag}' has no client address slots")
+            seed = (int(account.user_id) * 131
+                    + sum(tag.encode("utf-8"))) % len(candidates)
+            for offset in range(len(candidates)):
+                value = candidates[(seed + offset) % len(candidates)]
+                if value not in used:
+                    assigned[tag] = value
+                    used.add(value)
+                    break
+            else:
+                raise CoreError(f"OpenVPN listener '{tag}' address pool exhausted")
+        account.settings["bandwidth_ipv4"] = assigned
+
     async def _kill_if_connected(self, account_id: str) -> None:
         try:
             await asyncio.to_thread(self._backend.kill_client, account_id)
@@ -845,6 +888,7 @@ want_pass="${creds#*:}"
         self._ensure_supported(account.protocol)
         self._provision_credentials(account)
         self._ensure_credentials(account)
+        self._ensure_bandwidth_addresses(account)
         self._accounts[account.account_id] = account
         if not account.enabled:
             await self._kill_if_connected(account.account_id)
@@ -853,6 +897,7 @@ want_pass="${creds#*:}"
         self._ensure_supported(account.protocol)
         self._provision_credentials(account)
         self._ensure_credentials(account)
+        self._ensure_bandwidth_addresses(account)
         previous = self._accounts.get(account.account_id)
         self._accounts[account.account_id] = account
         password_changed = bool(
@@ -875,12 +920,17 @@ want_pass="${creds#*:}"
 
     async def resume_account(self, account: UserAccount) -> None:
         self._ensure_supported(account.protocol)
+        existing = self._accounts.get(account.account_id)
+        if existing is not None and not account.settings:
+            account = existing
         self._accounts[account.account_id] = account.model_copy(update={"enabled": True})
 
     async def sync_accounts(self, accounts: list[UserAccount]) -> None:
         for account in accounts:
             if account.protocol == "ovpn":
                 self._provision_credentials(account)
+                self._ensure_credentials(account)
+                self._ensure_bandwidth_addresses(account)
         self._accounts = {a.account_id: a for a in accounts if a.protocol == "ovpn"}
         live = {a.account_id for a in self._accounts.values() if a.enabled}
         try:
@@ -889,6 +939,19 @@ want_pass="${creds#*:}"
                     await asyncio.to_thread(self._backend.kill_client, client.common_name)
         except CoreError:
             pass  # core down — next boot reconciles anyway
+
+    # ------------------------------------------------------------------ #
+    # global bandwidth identity
+    # ------------------------------------------------------------------ #
+    def bandwidth_identities(self) -> dict[str, dict[str, list]]:
+        return {
+            account_id: {
+                "inner_sources": sorted(set(map(
+                    str, (account.settings.get("bandwidth_ipv4") or {}).values()))),
+                "uids": [],
+            }
+            for account_id, account in self._accounts.items()
+        }
 
     # ------------------------------------------------------------------ #
     # durable live-session baselines

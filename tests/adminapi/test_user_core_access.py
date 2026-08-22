@@ -201,6 +201,57 @@ def test_create_user_with_core_access_provisions_on_the_core(monkeypatch):
     assert any(a["core_id"] == "xray" and a["protocol"] == "shadowsocks" for a in accounts)
 
 
+def test_bandwidth_limits_create_update_get_and_validation(monkeypatch):
+    runtime = _runtime()
+    applied = []
+    monkeypatch.setattr(runtime.bandwidth, "reconcile",
+                        lambda: applied.append(True) or {"ok": True})
+    # This API contract test has no real Xray process; immutable-route refresh
+    # has its own production/e2e coverage and must not download a core here.
+    monkeypatch.setattr(
+        "app.routers.user._ensure_xray_bandwidth_identity",
+        lambda _user, **_kwargs: None)
+    token = _sudo_token()
+    name = f"bw{uuid.uuid4().hex[:10]}"
+    created = _client.post("/api/user", headers=_auth(token), json={
+        "username": name,
+        "proxies": {"shadowsocks": {}},
+        "download_limit_mbps": 100,
+        "upload_limit_mbps": 20,
+    })
+    assert created.status_code == 200, created.text
+    assert created.json()["download_limit_mbps"] == 100
+    assert created.json()["upload_limit_mbps"] == 20
+    platform = runtime.users.get_user_by_username(name)
+    assert platform.download_limit_mbps == 100
+    assert platform.upload_limit_mbps == 20
+    assert applied
+
+    changed = _client.put(f"/api/user/{name}", headers=_auth(token), json={
+        "download_limit_mbps": 50,
+        "upload_limit_mbps": 10,
+    })
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["download_limit_mbps"] == 50
+    assert changed.json()["upload_limit_mbps"] == 10
+    fetched = _client.get(f"/api/user/{name}", headers=_auth(token))
+    assert fetched.json()["download_limit_mbps"] == 50
+    assert fetched.json()["upload_limit_mbps"] == 10
+
+    unlimited = _client.put(f"/api/user/{name}", headers=_auth(token), json={
+        "download_limit_mbps": 0, "upload_limit_mbps": 0,
+    })
+    assert unlimited.status_code == 200
+    assert unlimited.json()["download_limit_mbps"] == 0
+    assert unlimited.json()["upload_limit_mbps"] == 0
+
+    for invalid in (-1, 100001, 1.5, "10", True, "NaN"):
+        response = _client.put(f"/api/user/{name}", headers=_auth(token), json={
+            "download_limit_mbps": invalid,
+        })
+        assert response.status_code == 422, (invalid, response.text)
+
+
 def test_create_template_style_user_without_xray_proxy(monkeypatch):
     """From Template may grant only a non-Xray inbound. The real HTTP/schema/
     legacy DB/platform DB flow must accept it instead of failing Pydantic 422."""

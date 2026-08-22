@@ -93,7 +93,7 @@ def _singbox(supported: bool):
 def test_singbox_renders_v2ray_api_only_when_supported():
     driver = _singbox(True)
     driver._accounts["u"] = type("A", (), {
-        "protocol": "vless", "account_id": "u", "enabled": True,
+        "user_id": 1, "protocol": "vless", "account_id": "u", "enabled": True,
         "settings": {"id": "11111111-2222-3333-4444-555555555555"}})()
     config = driver.render_config()
     assert "v2ray_api" in config["experimental"]
@@ -102,7 +102,7 @@ def test_singbox_renders_v2ray_api_only_when_supported():
 def test_singbox_omits_v2ray_api_and_degrades_honestly_when_unsupported():
     driver = _singbox(False)
     driver._accounts["u"] = type("A", (), {
-        "protocol": "vless", "account_id": "u", "enabled": True,
+        "user_id": 1, "protocol": "vless", "account_id": "u", "enabled": True,
         "settings": {"id": "11111111-2222-3333-4444-555555555555"}})()
     config = driver.render_config()
     assert "experimental" not in config, "build without v2ray_api FATALs on this block"
@@ -160,7 +160,7 @@ def test_singbox_studio_unknown_fields_never_dropped_silently():
 def test_singbox_studio_users_stay_platform_driven_on_merge():
     driver = _studio_driver()
     driver._accounts["u1"] = type("A", (), {
-        "protocol": "vless", "account_id": "u1", "enabled": True,
+        "user_id": 1, "protocol": "vless", "account_id": "u1", "enabled": True,
         "settings": {"id": "11111111-2222-3333-4444-555555555555"}})()
     driver._studio_doc = {"inbounds": [
         {"tag": "w", "protocol": "vless", "port": 8443,

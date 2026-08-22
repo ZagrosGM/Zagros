@@ -60,6 +60,12 @@ class UserModel(Base):
     data_limit_reset_strategy: Mapped[str] = mapped_column(String(20), default="no_reset")
     expire_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
     device_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Decimal Mbps; 0 means unlimited. Non-null defaults keep every upgraded
+    # user unthrottled until an operator explicitly opts in.
+    download_limit_mbps: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0")
+    upload_limit_mbps: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0")
     admin_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utcnow)
     online_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)

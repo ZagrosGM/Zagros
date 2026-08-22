@@ -1,11 +1,10 @@
 // Settings — panel info + Advanced Mode gate.
 // (alpha.7: admins and user templates are no longer second-class Settings
 // widgets — both moved to first-class sidebar pages under "Management".)
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { LifeBuoy, Save, Settings as SettingsIcon, TerminalSquare } from "lucide-react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { Save, Settings as SettingsIcon, TerminalSquare } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "../components/feedback";
-import { ConfirmDialog } from "../components/overlays";
 import { Badge, Button, Card, CardHeader, Field, Input, Select, Skeleton, Switch } from "../components/ui";
 import { api, ApiError } from "../lib/api";
 import { useDigits, formatDuration } from "../lib/format";
@@ -15,7 +14,6 @@ import type { CertificateInfo, PanelInfo, PanelNetworkSettings } from "../lib/ty
 
 interface NetworkApplyAccepted { accepted: boolean; public_url: string; operation_id: string; status: string }
 interface NetworkApplyStatus { status: string; message?: string; rolled_back?: boolean; public_url?: string }
-interface SupportConfig { bot_url: string; secret_configured: boolean; secret_masked: string }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -38,49 +36,18 @@ function probeNewOrigin(base: string, operationId: string): Promise<void> {
 export default function Settings() {
   const t = useT();
   const digits = useDigits();
-  const qc = useQueryClient();
   const { advancedMode, setAdvancedMode, theme, locale } = useUI();
 
   const info = useQuery({ queryKey: ["zagros", "panel-info"], queryFn: () => api.get<PanelInfo>("/zagros/panel/info"), retry: false });
   const networkQ = useQuery({ queryKey: ["zagros", "panel-network"], queryFn: () => api.get<PanelNetworkSettings>("/zagros/settings/panel-network") });
   const certsQ = useQuery({ queryKey: ["zagros", "certificates"], queryFn: () => api.get<{ certificates: CertificateInfo[] }>("/zagros/certificates") });
-  const supportConfigQ = useQuery({ queryKey: ["zagros", "support-config"], queryFn: () => api.get<SupportConfig>("/zagros/support/config"), retry: false });
 
   const [network, setNetwork] = useState<PanelNetworkSettings | null>(null);
   const [networkTest, setNetworkTest] = useState<Record<string, unknown> | null>(null);
   const [networkTransition, setNetworkTransition] = useState("");
 
-  const [supportBotUrl, setSupportBotUrl] = useState("");
-  const [supportSecret, setSupportSecret] = useState("");
-  const [confirmSupportTest, setConfirmSupportTest] = useState(false);
-
   useEffect(() => { if (networkQ.data) setNetwork(networkQ.data); }, [networkQ.data]);
-  useEffect(() => { if (supportConfigQ.data) setSupportBotUrl(supportConfigQ.data.bot_url); }, [supportConfigQ.data]);
 
-  const saveSupportConfig = useMutation({
-    mutationFn: () => api.put("/zagros/support/config", {
-      bot_url: supportBotUrl,
-      integration_secret: supportSecret,
-    }),
-    onSuccess: () => {
-      toast.ok(t("common.saved"));
-      setSupportSecret("");
-      qc.invalidateQueries({ queryKey: ["zagros", "support-config"] });
-    },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
-  });
-
-  const testSupportConn = useMutation({
-    mutationFn: () => api.post<{ ok: boolean; detail?: string }>("/zagros/support/test", { confirm: true }),
-    onSuccess: (data) => {
-      setConfirmSupportTest(false);
-      toast.ok(data.detail || "Test message delivered to Telegram Bot");
-    },
-    onError: (e) => {
-      setConfirmSupportTest(false);
-      toast.error(e instanceof ApiError ? e.message : "Support service is temporarily unavailable.");
-    },
-  });
   const testNetwork = useMutation({
     mutationFn: () => api.post<Record<string, unknown>>("/zagros/settings/panel-network/test", network),
     onSuccess: (data) => { setNetworkTest(data); toast.ok("panel network configuration is valid"); },
@@ -176,44 +143,6 @@ export default function Settings() {
           )}
         </Card>
 
-        {supportConfigQ.isSuccess && (
-          <Card className="lg:col-span-2">
-            <CardHeader
-              title={<span className="inline-flex items-center gap-2"><LifeBuoy size={16} className="text-brand" /> Telegram Support Bot Settings</span>}
-              subtitle="Configure the Support Bot endpoint URL and integration secret (Sudo Admin only)"
-            />
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Support Bot Endpoint URL" required hint="e.g. https://support.zagrosgm.site">
-                <Input
-                  value={supportBotUrl}
-                  onChange={(e) => setSupportBotUrl(e.target.value)}
-                  placeholder="https://support.zagrosgm.site"
-                  dir="ltr"
-                />
-              </Field>
-              <Field label="Integration Secret" hint={supportConfigQ.data.secret_configured ? supportConfigQ.data.secret_masked : "Secret key shared with Bot"}>
-                <Input
-                  type="password"
-                  value={supportSecret}
-                  onChange={(e) => setSupportSecret(e.target.value)}
-                  placeholder={supportConfigQ.data.secret_configured ? "••••••••••••" : "Enter integration secret"}
-                  dir="ltr"
-                />
-              </Field>
-              <div className="flex flex-wrap items-center gap-2 sm:col-span-2">
-                {supportConfigQ.data.secret_configured && (
-                  <Button variant="secondary" size="sm" onClick={() => setConfirmSupportTest(true)}>
-                    Test Connection
-                  </Button>
-                )}
-                <Button size="sm" onClick={() => saveSupportConfig.mutate()} loading={saveSupportConfig.isPending}>
-                  <Save size={14} /> Save Configuration
-                </Button>
-              </div>
-            </div>
-          </Card>
-        )}
-
         <Card>
           <CardHeader title={<span className="inline-flex items-center gap-2"><TerminalSquare size={16} className="text-brand" /> Advanced Mode</span>} />
           <p className="text-[12.5px] leading-6 text-content-2">
@@ -229,15 +158,6 @@ export default function Settings() {
           </div>
         </Card>
       </div>
-
-      <ConfirmDialog
-        open={confirmSupportTest}
-        onClose={() => setConfirmSupportTest(false)}
-        onConfirm={() => testSupportConn.mutate()}
-        title="Send Test Message to Telegram Bot?"
-        body="This will immediately send a test ticket to the configured Support Bot endpoint to verify connection and signature authentication."
-        loading={testSupportConn.isPending}
-      />
     </div>
   );
 }

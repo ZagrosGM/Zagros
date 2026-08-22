@@ -49,6 +49,13 @@ class XRayConfig(dict):
 
         self.api_host = api_host
         self.api_port = api_port
+        # PlatformRuntime injects a username -> canonical platform-user-id
+        # provider before ASGI startup. Xray client emails must keep legacy IDs
+        # for compatibility, while SO_MARK must use the SAME canonical ID as
+        # every non-Xray Core and the global tc actions.
+        self.bandwidth_user_id_provider = None
+        self.bandwidth_user_ids: set[int] = set()
+        self.bandwidth_identity_map: dict[int, int] = {}
 
         super().__init__(config)
         self._validate()
@@ -356,7 +363,17 @@ class XRayConfig(dict):
         return json.dumps(self, **json_kwargs)
 
     def copy(self):
-        return deepcopy(self)
+        # A bound runtime provider owns SQLAlchemy engines/modules and is not
+        # pickleable. Clone config/data attributes deeply, but intentionally
+        # retain that read-only callable by reference.
+        clone = self.__class__.__new__(self.__class__)
+        dict.__init__(clone, deepcopy(dict(self)))
+        for name, value in self.__dict__.items():
+            setattr(
+                clone, name,
+                value if name == "bandwidth_user_id_provider" else deepcopy(value),
+            )
+        return clone
 
     def include_db_users(self) -> XRayConfig:
         config = self.copy()
@@ -434,12 +451,25 @@ class XRayConfig(dict):
             # changing 0 -> limited is a tc/nft-only dynamic update.
             from app.platform.bandwidth import mark_for_user
 
-            identities = sorted({(int(row.id), str(row.username)) for row in result})
+            legacy_identities = sorted({
+                (int(row.id), str(row.username)) for row in result
+            })
+            provider = getattr(self, "bandwidth_user_id_provider", None)
+            canonical_by_username = (
+                dict(provider([username for _legacy_id, username
+                               in legacy_identities]))
+                if callable(provider) else {}
+            )
             routing = config.setdefault("routing", {}).setdefault("rules", [])
             outbounds = config.setdefault("outbounds", [])
             known_tags = {str(item.get("tag")) for item in outbounds}
             rules = []
-            for user_id, username in identities:
+            identity_map: dict[int, int] = {}
+            for legacy_id, username in legacy_identities:
+                # Legacy email stays immutable; only the outbound's kernel
+                # identity uses the canonical platform ID shared by all Cores.
+                user_id = int(canonical_by_username.get(username, legacy_id))
+                identity_map[legacy_id] = user_id
                 tag = f"zg-bw-u{user_id}"
                 if tag not in known_tags:
                     outbounds.append({
@@ -453,10 +483,12 @@ class XRayConfig(dict):
                     known_tags.add(tag)
                 rules.append({
                     "type": "field",
-                    "user": [f"{user_id}.{username}"],
+                    "user": [f"{legacy_id}.{username}"],
                     "outboundTag": tag,
                 })
             routing[0:0] = rules
+            config.bandwidth_identity_map = identity_map
+            config.bandwidth_user_ids = set(identity_map.values())
 
         if DEBUG:
             with open('generated_config-debug.json', 'w') as f:

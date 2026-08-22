@@ -53,7 +53,7 @@ def test_shared_police_action_is_bound_to_both_packet_directions(tmp_path, monke
     monkeypatch.setattr("app.platform.bandwidth.STATE_PATH", tmp_path / "state.json")
     desired = {
         7: UserLimit(7, "alice", upload_mbps=20, download_mbps=100,
-                     inner_sources={"10.66.66.7"}, ssh_uids={1007},
+                     inner_sources={"10.66.66.7", "2001:db8::7"}, ssh_uids={1007},
                      softether_accounts={"7.alice.sstp"}),
     }
     limiter._endpoints[("198.51.100.7", 51234, 443, "tcp")] = SoftEtherEndpoint(
@@ -68,9 +68,14 @@ def test_shared_police_action_is_bound_to_both_packet_directions(tmp_path, monke
     down = str(action_index(7, "down"))
     up = str(action_index(7, "up"))
     # SAME action index is referenced by ingress inner-response and egress
-    # outer SoftEther filters: one aggregate token bucket, not per-core state.
-    assert sum(down in command for command in calls if "filter" in command) == 2
-    assert sum(up in command for command in calls if "filter" in command) == 2
+    # outer SoftEther filters for BOTH L3 families: one aggregate token bucket,
+    # not per-core, per-connection, or per-address-family state.
+    assert sum(down in command for command in calls if "filter" in command) == 4
+    assert sum(up in command for command in calls if "filter" in command) == 4
+    ipv6_filters = [command for command in calls
+                    if "filter" in command and "ipv6" in command]
+    assert any("40001" in command and "ct" in command for command in ipv6_filters)
+    assert result["users"]["7"]["prefs"]["ingress_down_v6"] == 21028
     police = [command for command in calls if command[:4] == ["tc", "actions", "replace", "action"]]
     assert any("100mbit" in command and down in command for command in police)
     assert any("20mbit" in command and up in command for command in police)
@@ -79,9 +84,89 @@ def test_shared_police_action_is_bound_to_both_packet_directions(tmp_path, monke
                if command == ["nft", "-f", "-"])
     marks = marks_for_user(7)
     assert "ip saddr 10.66.66.7" in nft
+    assert "ip6 saddr 2001:db8::7" in nft
     assert "meta skuid 1007" in nft
     assert "198.51.100.7 tcp sport 51234 tcp dport 443" in nft
     assert hex(marks["base"]) in nft and hex(marks["outer"]) in nft
+
+
+def test_xray_config_keeps_legacy_email_but_uses_canonical_platform_mark(
+    monkeypatch,
+):
+    import importlib
+
+    config_module = importlib.import_module("app.xray.config")
+    XRayConfig = config_module.XRayConfig
+
+    row = SimpleNamespace(
+        id=77, username="alice", type="shadowsocks",
+        settings={"password": "pw", "method": "chacha20-ietf-poly1305"},
+        excluded_inbound_tags=None,
+    )
+
+    class Query:
+        def join(self, *_args, **_kwargs): return self
+        def outerjoin(self, *_args, **_kwargs): return self
+        def filter(self, *_args, **_kwargs): return self
+        def group_by(self, *_args, **_kwargs): return self
+        def all(self): return [row]
+
+    class DB:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def query(self, *_args): return Query()
+
+    monkeypatch.setattr(config_module, "GetDB", lambda: DB())
+    config = XRayConfig({
+        "inbounds": [{
+            "tag": "ss-in", "port": 1080, "protocol": "shadowsocks",
+            "settings": {"clients": []},
+        }],
+        "outbounds": [{"tag": "direct", "protocol": "freedom"}],
+        "routing": {"rules": []},
+    })
+    class Provider:
+        # Modules are intentionally non-pickleable; a bound runtime method may
+        # own one through SQLAlchemy/runtime state.
+        module = importlib
+
+        def resolve(self, names):
+            return {"alice": 9}
+
+    provider = Provider()
+    config.bandwidth_user_id_provider = provider.resolve
+    merged = config.include_db_users()
+    assert merged.bandwidth_user_id_provider.__self__ is provider
+    client = merged.get_inbound("ss-in")["settings"]["clients"][0]
+    assert client["email"] == "77.alice"
+    rule = next(item for item in merged["routing"]["rules"]
+                if item.get("user") == ["77.alice"])
+    assert rule["outboundTag"] == "zg-bw-u9"
+    outbound = next(item for item in merged["outbounds"]
+                    if item.get("tag") == "zg-bw-u9")
+    assert outbound["streamSettings"]["sockopt"]["mark"] == mark_for_user(9)
+    assert merged.bandwidth_identity_map == {77: 9}
+    assert merged.bandwidth_user_ids == {9}
+
+
+def test_xray_core_tracks_canonical_ids_from_exact_running_document():
+    from app.xray.core import XRayCore
+
+    parsed = XRayCore._bandwidth_ids({
+        "outbounds": [
+            {"tag": "direct"},
+            {"tag": "zg-bw-u7"},
+            {"tag": "zg-bw-u42"},
+        ],
+    })
+    assert parsed == {7, 42}
+
+    class Config(dict):
+        bandwidth_user_ids = {91}
+
+    assert XRayCore._bandwidth_ids(Config(outbounds=[
+        {"tag": "zg-bw-u7"},
+    ])) == {91}
 
 
 def test_zero_zero_removes_owned_runtime_without_touching_root_qdisc(tmp_path, monkeypatch):

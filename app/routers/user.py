@@ -27,8 +27,10 @@ def _platform_runtime(request: Request):
     return getattr(request.app.state, "zagros", None)
 
 
-def _ensure_xray_bandwidth_identity(dbuser) -> None:
-    """Refresh immutable Xray routing only for a missing limited identity.
+def _ensure_xray_bandwidth_identity(
+    dbuser, *, platform_user_id: int | None = None,
+) -> None:
+    """Refresh Xray routing only for a missing canonical limited identity.
 
     Every user present at Xray start already has an outbound SO_MARK route, so
     ordinary 0 -> N -> M -> 0 updates never restart the core.  The sole gap is
@@ -39,8 +41,9 @@ def _ensure_xray_bandwidth_identity(dbuser) -> None:
                or int(getattr(dbuser, "upload_limit_mbps", 0) or 0) > 0)
     if not limited or not (getattr(dbuser, "proxies", None) or []):
         return
+    identity_id = int(platform_user_id if platform_user_id is not None else dbuser.id)
     loaded = getattr(xray.core, "bandwidth_user_ids", set())
-    if int(dbuser.id) in loaded:
+    if bool(getattr(xray.core, "started", False)) and identity_id in loaded:
         return
     try:
         xray.core.restart(xray.config.include_db_users())
@@ -49,10 +52,12 @@ def _ensure_xray_bandwidth_identity(dbuser) -> None:
             status_code=503,
             detail=f"Xray bandwidth identity refresh failed: {exc}",
         ) from exc
-    if int(dbuser.id) not in getattr(xray.core, "bandwidth_user_ids", set()):
+    if (not bool(getattr(xray.core, "started", False))
+            or identity_id not in getattr(xray.core, "bandwidth_user_ids", set())):
         raise HTTPException(
             status_code=503,
-            detail="Xray bandwidth identity refresh completed without the new user mark",
+            detail=("Xray bandwidth identity refresh completed without the "
+                    "canonical per-user mark"),
         )
 
 
@@ -157,8 +162,9 @@ def add_user(
 
     bg.add_task(xray.operations.add_user, dbuser=dbuser)
     try:
-        _bridge_sync(request, dbuser, new_user.core_access)
-        _ensure_xray_bandwidth_identity(dbuser)
+        platform_id = _bridge_sync(request, dbuser, new_user.core_access)
+        _ensure_xray_bandwidth_identity(
+            dbuser, platform_user_id=platform_id)
     except HTTPException:
         # Provisioning failed AFTER the legacy row committed — roll the whole
         # create back so the caller never gets a half-created user, and say
@@ -233,8 +239,9 @@ def modify_user(
     # core_access mapping applies a grant diff; omitted keeps grants and only
     # syncs status/limits/enabled flags.
     try:
-        _bridge_sync(request, dbuser, modified_user.core_access)
-        _ensure_xray_bandwidth_identity(dbuser)
+        platform_id = _bridge_sync(request, dbuser, modified_user.core_access)
+        _ensure_xray_bandwidth_identity(
+            dbuser, platform_user_id=platform_id)
     except HTTPException:
         # CRUD commits before cross-core reconciliation. Restore only the two
         # limiter fields on apply failure so the database can never claim an

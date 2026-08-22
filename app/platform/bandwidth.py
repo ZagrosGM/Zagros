@@ -38,6 +38,9 @@ MARK_KIND_UP = 0x01
 MARK_KIND_DOWN = 0x02
 INGRESS_CHAIN = 901
 CT_PREF = 40000
+CT_PREF_V6 = 40001
+IPV6_PREF_OFFSET = 20_000
+IPV6_HANDLE_OFFSET = 0x10000
 QUARANTINE_INNER = 0x5AFE0000
 QUARANTINE_CT = 0x5AFE0040
 QUARANTINE_UP = 0x5AFE0001
@@ -279,25 +282,46 @@ class BandwidthLimiter:
     def _tc(self, *args: str, check: bool = True):
         return self._runner(["tc", *args], check=check)
 
+    def _replace_or_add_filter(self, args: tuple[str, ...]) -> None:
+        """Replace one exact tc filter, falling back to an idempotent add.
+
+        iproute2 5.15 returns ``priority/protocol not found`` when ``replace``
+        targets a new protocol at an existing block.  Delete only the exact
+        family/pref/chain, then add — never delete the other address family.
+        """
+        result = self._tc(*args, check=False)
+        if not result.returncode:
+            return
+        direction = args[args.index("dev") + 2]
+        protocol = args[args.index("protocol") + 1]
+        pref = args[args.index("pref") + 1]
+        delete = ["filter", "del", "dev", self.interface, direction,
+                  "protocol", protocol, "pref", pref]
+        if "chain" in args:
+            delete += ["chain", args[args.index("chain") + 1]]
+        self._tc(*delete, check=False)
+        add_args = list(args)
+        add_args[1] = "add"
+        self._tc(*add_args)
+
     def _ensure_clsact(self) -> None:
         show = self._tc("qdisc", "show", "dev", self.interface).stdout
         if "clsact" not in show:
             self._tc("qdisc", "add", "dev", self.interface, "clsact")
             self._state["created_clsact"] = True
-        # One conntrack lookup feeds the private user chain.
-        args = (
-            "filter", "replace", "dev", self.interface, "ingress",
-            "protocol", "ip", "pref", str(CT_PREF), "chain", "0",
-            "handle", "0xb001", "flower", "action", "ct", "pipe",
-            "action", "goto", "chain", str(INGRESS_CHAIN),
-        )
-        result = self._tc(*args, check=False)
-        if result.returncode:
-            # Upgrade from pre-stable-handle candidates once; subsequent
-            # reconciles are atomic `replace` operations.
-            self._tc("filter", "del", "dev", self.interface, "ingress",
-                     "pref", str(CT_PREF), "chain", "0", check=False)
-            self._tc(*args)
+        # One conntrack lookup per L3 family feeds the SAME private user chain.
+        # Distinct preferences are required by iproute2 5.15; the chain and all
+        # police action indices remain global/shared across IPv4 and IPv6.
+        for protocol, pref, handle in (
+            ("ip", CT_PREF, 0xB001),
+            ("ipv6", CT_PREF_V6, 0x1B002),
+        ):
+            self._replace_or_add_filter((
+                "filter", "replace", "dev", self.interface, "ingress",
+                "protocol", protocol, "pref", str(pref), "chain", "0",
+                "handle", hex(handle), "flower", "action", "ct", "pipe",
+                "action", "goto", "chain", str(INGRESS_CHAIN),
+            ))
 
     def _replace_police(self, user_id: int, direction: str, rate: int) -> int:
         index = action_index(user_id, direction)
@@ -310,73 +334,85 @@ class BandwidthLimiter:
 
     def _replace_ingress_flower(
         self, pref: int, handle: int, flower_args: list[str],
-        action_args: list[str],
+        action_args: list[str], *, protocol: str = "ip",
     ) -> None:
-        args = (
+        self._replace_or_add_filter((
             "filter", "replace", "dev", self.interface, "ingress",
-            "protocol", "ip", "pref", str(pref), "chain", str(INGRESS_CHAIN),
-            "handle", hex(handle), "flower", *flower_args, *action_args,
-        )
-        result = self._tc(*args, check=False)
-        if result.returncode:
-            self._tc("filter", "del", "dev", self.interface, "ingress",
-                     "pref", str(pref), "chain", str(INGRESS_CHAIN), check=False)
-            self._tc(*args)
+            "protocol", protocol, "pref", str(pref),
+            "chain", str(INGRESS_CHAIN), "handle", hex(handle),
+            "flower", *flower_args, *action_args,
+        ))
+
+    def _replace_egress_fw(
+        self, pref: int, mark: int, action_args: list[str],
+        *, protocol: str = "ip",
+    ) -> None:
+        self._replace_or_add_filter((
+            "filter", "replace", "dev", self.interface, "egress",
+            "protocol", protocol, "pref", str(pref),
+            "handle", hex(mark), "fw", *action_args,
+        ))
 
     def _install_user_filters(self, limit: UserLimit) -> dict[str, int]:
         marks = marks_for_user(limit.user_id)
         base_pref = 1000 + limit.user_id * 4
+        base_handle = 0xC000 + limit.user_id * 4
         prefs: dict[str, int] = {}
-        # Inner response at ingress => user download.
-        if limit.download_mbps:
-            idx = self._replace_police(limit.user_id, "down", limit.download_mbps)
-            self._replace_ingress_flower(
-                base_pref, 0xC000 + limit.user_id * 4,
-                ["ct_state", "+trk", "ct_mark", hex(marks["base"])],
-                ["action", "police", "index", str(idx)],
-            )
-            # SoftEther outer server->client is physical egress download.
-            self._tc(
-                "filter", "replace", "dev", self.interface, "egress",
-                "protocol", "ip", "pref", str(base_pref + 1),
-                "handle", hex(marks["down"]), "fw",
-                "action", "police", "index", str(idx),
-            )
-            prefs["ingress_down"] = base_pref
-            prefs["egress_down"] = base_pref + 1
-        else:
-            # A mapped unlimited SoftEther user bypasses quarantine explicitly.
-            self._tc(
-                "filter", "replace", "dev", self.interface, "egress",
-                "protocol", "ip", "pref", str(base_pref + 1),
-                "handle", hex(marks["down"]), "fw", "action", "pass",
-            )
-            prefs["egress_down"] = base_pref + 1
+        families = (
+            ("ip", 0, 0, ""),
+            ("ipv6", IPV6_PREF_OFFSET, IPV6_HANDLE_OFFSET, "_v6"),
+        )
+
+        # Inner response at ingress => user download. The IPv4 and IPv6
+        # classifiers bind the exact same action index/global token bucket.
+        down_idx = (self._replace_police(limit.user_id, "down", limit.download_mbps)
+                    if limit.download_mbps else None)
+        for protocol, pref_offset, handle_offset, suffix in families:
+            if down_idx is not None:
+                self._replace_ingress_flower(
+                    base_pref + pref_offset,
+                    base_handle + handle_offset,
+                    ["ct_state", "+trk", "ct_mark", hex(marks["base"])],
+                    ["action", "police", "index", str(down_idx)],
+                    protocol=protocol,
+                )
+                prefs[f"ingress_down{suffix}"] = base_pref + pref_offset
+                self._replace_egress_fw(
+                    base_pref + 1 + pref_offset, marks["down"],
+                    ["action", "police", "index", str(down_idx)],
+                    protocol=protocol,
+                )
+            else:
+                # A mapped unlimited SoftEther user bypasses quarantine
+                # explicitly in both address families.
+                self._replace_egress_fw(
+                    base_pref + 1 + pref_offset, marks["down"],
+                    ["action", "pass"], protocol=protocol,
+                )
+            prefs[f"egress_down{suffix}"] = base_pref + 1 + pref_offset
 
         # Inner request at physical egress => user upload.
-        if limit.upload_mbps:
-            idx = self._replace_police(limit.user_id, "up", limit.upload_mbps)
-            self._tc(
-                "filter", "replace", "dev", self.interface, "egress",
-                "protocol", "ip", "pref", str(base_pref + 2),
-                "handle", hex(marks["up"]), "fw",
-                "action", "police", "index", str(idx),
-            )
+        up_idx = (self._replace_police(limit.user_id, "up", limit.upload_mbps)
+                  if limit.upload_mbps else None)
+        for protocol, pref_offset, handle_offset, suffix in families:
+            if up_idx is not None:
+                self._replace_egress_fw(
+                    base_pref + 2 + pref_offset, marks["up"],
+                    ["action", "police", "index", str(up_idx)],
+                    protocol=protocol,
+                )
+                prefs[f"egress_up{suffix}"] = base_pref + 2 + pref_offset
+                ingress_action = ["action", "police", "index", str(up_idx)]
+            else:
+                ingress_action = ["action", "pass"]
             # SoftEther outer client->server is physical ingress upload.
             self._replace_ingress_flower(
-                base_pref + 3, 0xC000 + limit.user_id * 4 + 3,
+                base_pref + 3 + pref_offset,
+                base_handle + 3 + handle_offset,
                 ["ct_state", "+trk", "ct_mark", hex(marks["outer"])],
-                ["action", "police", "index", str(idx)],
+                ingress_action, protocol=protocol,
             )
-            prefs["egress_up"] = base_pref + 2
-            prefs["ingress_up"] = base_pref + 3
-        else:
-            self._replace_ingress_flower(
-                base_pref + 3, 0xC000 + limit.user_id * 4 + 3,
-                ["ct_state", "+trk", "ct_mark", hex(marks["outer"])],
-                ["action", "pass"],
-            )
-            prefs["ingress_up"] = base_pref + 3
+            prefs[f"ingress_up{suffix}"] = base_pref + 3 + pref_offset
         return prefs
 
     def _install_softether_quarantine(
@@ -390,6 +426,10 @@ class BandwidthLimiter:
         actions: list[int] = []
         upload_rates = [item.upload_mbps for item in soft if item.upload_mbps]
         download_rates = [item.download_mbps for item in soft if item.download_mbps]
+        families = (
+            ("ip", 0, 0, ""),
+            ("ipv6", IPV6_PREF_OFFSET, IPV6_HANDLE_OFFSET, "_v6"),
+        )
         if upload_rates:
             rate = min(upload_rates)
             quarantine_kbit = max(64, rate * 10)  # 1% of the strictest Mbps
@@ -399,19 +439,20 @@ class BandwidthLimiter:
                 str(64 * 1024), "mtu", "65535",
                 "conform-exceed", "drop/ok",
             )
-            self._replace_ingress_flower(
-                30000, 0xCFFE,
-                ["ct_state", "+trk", "ct_mark", hex(QUARANTINE_CT)],
-                ["action", "police", "index", str(QUARANTINE_UP_ACTION)],
-            )
-            self._tc(
-                "filter", "replace", "dev", self.interface, "egress",
-                "protocol", "ip", "pref", "30002", "handle",
-                hex(QUARANTINE_UP), "fw", "action", "police", "index",
-                str(QUARANTINE_UP_ACTION),
-            )
-            prefs["ingress_quarantine"] = 30000
-            prefs["egress_inner_quarantine"] = 30002
+            for protocol, pref_offset, handle_offset, suffix in families:
+                self._replace_ingress_flower(
+                    30000 + pref_offset, 0xCFFE + handle_offset,
+                    ["ct_state", "+trk", "ct_mark", hex(QUARANTINE_CT)],
+                    ["action", "police", "index", str(QUARANTINE_UP_ACTION)],
+                    protocol=protocol,
+                )
+                self._replace_egress_fw(
+                    30002 + pref_offset, QUARANTINE_UP,
+                    ["action", "police", "index", str(QUARANTINE_UP_ACTION)],
+                    protocol=protocol,
+                )
+                prefs[f"ingress_quarantine{suffix}"] = 30000 + pref_offset
+                prefs[f"egress_inner_quarantine{suffix}"] = 30002 + pref_offset
             actions.append(QUARANTINE_UP_ACTION)
         if download_rates:
             rate = min(download_rates)
@@ -422,19 +463,20 @@ class BandwidthLimiter:
                 str(64 * 1024), "mtu", "65535",
                 "conform-exceed", "drop/ok",
             )
-            self._tc(
-                "filter", "replace", "dev", self.interface, "egress",
-                "protocol", "ip", "pref", "30001", "handle",
-                hex(QUARANTINE_DOWN), "fw", "action", "police", "index",
-                str(QUARANTINE_DOWN_ACTION),
-            )
-            self._replace_ingress_flower(
-                30003, 0xCFFD,
-                ["ct_state", "+trk", "ct_mark", hex(QUARANTINE_INNER)],
-                ["action", "police", "index", str(QUARANTINE_DOWN_ACTION)],
-            )
-            prefs["egress_quarantine"] = 30001
-            prefs["ingress_inner_quarantine"] = 30003
+            for protocol, pref_offset, handle_offset, suffix in families:
+                self._replace_egress_fw(
+                    30001 + pref_offset, QUARANTINE_DOWN,
+                    ["action", "police", "index", str(QUARANTINE_DOWN_ACTION)],
+                    protocol=protocol,
+                )
+                self._replace_ingress_flower(
+                    30003 + pref_offset, 0xCFFD + handle_offset,
+                    ["ct_state", "+trk", "ct_mark", hex(QUARANTINE_INNER)],
+                    ["action", "police", "index", str(QUARANTINE_DOWN_ACTION)],
+                    protocol=protocol,
+                )
+                prefs[f"egress_quarantine{suffix}"] = 30001 + pref_offset
+                prefs[f"ingress_inner_quarantine{suffix}"] = 30003 + pref_offset
             actions.append(QUARANTINE_DOWN_ACTION)
         return {"prefs": prefs, "actions": actions,
                 "upload_mbps": min(upload_rates) if upload_rates else 0,
@@ -452,8 +494,9 @@ class BandwidthLimiter:
                 if any(pref in state.get("prefs", {}).values() for state in new_users.values()):
                     continue
                 direction = "ingress" if hook.startswith("ingress") else "egress"
+                protocol = "ipv6" if hook.endswith("_v6") else "ip"
                 args = ["filter", "del", "dev", self.interface, direction,
-                        "pref", str(pref)]
+                        "protocol", protocol, "pref", str(pref)]
                 if direction == "ingress":
                     args += ["chain", str(INGRESS_CHAIN)]
                 self._tc(*args, check=False)
@@ -461,13 +504,25 @@ class BandwidthLimiter:
                 int(index) for index in user_state.get("actions", [])
                 if index not in keep_actions)
         # Delete standalone actions only after *all* old bindings are gone.
-        # A first delete can race the kernel's final bind-reference release;
-        # retrying is idempotent and prevents ref=1/bind=0 objects leaking when
-        # one user switches to Unlimited while another remains limited.
-        for index in sorted(obsolete_actions):
-            for _attempt in range(2):
-                self._tc("actions", "delete", "action", "police",
-                         "index", str(index), check=False)
+        # Kernel RCU can release the first action's final bind slightly after
+        # tc acknowledges filter deletion (observed as ref=1/bind=0 leakage).
+        # Retry every obsolete index in delayed waves; API latency stays below
+        # half a second and no unrelated User/action is touched.
+        pending = set(obsolete_actions)
+        for delay in (0.0, 0.05, 0.15, 0.30):
+            if not pending:
+                break
+            if delay:
+                time.sleep(delay)
+            for index in sorted(tuple(pending)):
+                result = self._tc(
+                    "actions", "delete", "action", "police",
+                    "index", str(index), check=False)
+                if result.returncode == 0:
+                    pending.discard(index)
+        if pending:
+            logger.warning("tc police actions pending kernel release: %s",
+                           sorted(pending))
 
     # ---------- nft identity ----------
     def _nft_script(self, desired: dict[int, UserLimit]) -> str:

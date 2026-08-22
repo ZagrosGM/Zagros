@@ -34,6 +34,11 @@ class XRayCore:
                 executable_path, exc)
         self.process = None
         self.restarting = False
+        # Canonical platform IDs whose running Xray document contains a
+        # per-user SO_MARK outbound. Used by admission control for newly
+        # created/changed limited users; never infer success from a restart
+        # alone.
+        self.bandwidth_user_ids: set[int] = set()
 
         self._logs_buffer = deque(maxlen=100)
         self._temp_log_buffers = {}
@@ -139,6 +144,19 @@ class XRayCore:
         })
         self.version = self.get_version()
 
+    @staticmethod
+    def _bandwidth_ids(config: XRayConfig) -> set[int]:
+        """Read canonical IDs from the exact document handed to Xray."""
+        explicit = getattr(config, "bandwidth_user_ids", None)
+        if explicit:
+            return {int(value) for value in explicit}
+        found: set[int] = set()
+        for outbound in config.get("outbounds", []):
+            match = re.fullmatch(r"zg-bw-u(\d+)", str(outbound.get("tag", "")))
+            if match:
+                found.add(int(match.group(1)))
+        return found
+
     def _validate_config(self, config: XRayConfig) -> None:
         """Make Xray compile the exact stdin document before live mutation.
 
@@ -197,7 +215,10 @@ class XRayCore:
         self.process.stdin.write(config.to_json())
         self.process.stdin.flush()
         self.process.stdin.close()
-        logger.warning(f"Xray core {self.version} started")
+        self.bandwidth_user_ids = self._bandwidth_ids(config)
+        logger.warning(
+            "Xray core %s started with %d canonical bandwidth identities",
+            self.version, len(self.bandwidth_user_ids))
 
         self.__capture_process_logs()
 
@@ -212,6 +233,7 @@ class XRayCore:
 
         self.process.terminate()
         self.process = None
+        self.bandwidth_user_ids = set()
         logger.warning("Xray core stopped")
 
         # execute on stop functions (daemons: same reasoning as start funcs)

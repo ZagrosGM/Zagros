@@ -177,6 +177,7 @@ app/dashboard/build/
 *.db-shm
 zagros.db*
 backups/
+support-bot/
 # Local credentials & tokens (never commit real secrets)
 .env.local
 *.local.env

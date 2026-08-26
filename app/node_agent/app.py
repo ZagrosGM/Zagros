@@ -98,6 +98,16 @@ class InboundDocument(BaseModel):
     document: dict[str, Any]
 
 
+class AccountWriteBody(BaseModel):
+    user_id: int = Field(ge=1)
+    username: str = Field(min_length=1, max_length=128)
+    protocol: str = Field(min_length=1, max_length=32,
+                          pattern=r"^[a-z0-9][a-z0-9+._-]*$")
+    enabled: bool = True
+    settings: dict[str, Any] = Field(default_factory=dict)
+    create: bool = False
+
+
 @app.post("/v1/register")
 async def register(body: RegisterBody, request: Request):
     # Production runner always configures TLS. An explicit test-only switch is
@@ -244,6 +254,65 @@ async def core_lifecycle(core_id: str, body: CoreActionBody,
     if action == "uninstall":
         return {"core_id": core_id, "state": "uninstalled"}
     return (await core_manager.status(core_id)).model_dump(mode="json")
+
+
+@app.put("/v1/cores/{core_id}/accounts/{account_id}")
+async def account_upsert(core_id: str, account_id: str, body: AccountWriteBody,
+                         _node=Depends(signed_request)):
+    """Provision one validated account through the selected real driver."""
+    from app.cores.types import UserAccount
+
+    _authorize_core(core_id)
+    if core_id not in core_manager.list_cores():
+        raise HTTPException(409, f"core '{core_id}' is not installed")
+    if not account_id or len(account_id) > 190 or any(
+            char in account_id for char in ("/", "\\", "\x00")):
+        raise HTTPException(422, "invalid account id")
+    driver = core_manager.get(core_id)
+    if body.protocol not in driver.metadata.protocols:
+        raise HTTPException(422, f"protocol '{body.protocol}' is not supported by {core_id}")
+    account = UserAccount(
+        user_id=body.user_id, username=body.username, account_id=account_id,
+        protocol=body.protocol, enabled=body.enabled,
+        settings=dict(body.settings),
+    )
+    try:
+        if body.create:
+            await asyncio.wait_for(driver.create_account(account), timeout=120)
+        else:
+            await asyncio.wait_for(driver.update_account(account), timeout=120)
+    except Exception as exc:
+        identity.audit("account.failed", {"core_id": core_id,
+                       "account_id": account_id, "operation": "create" if body.create else "update",
+                       "error_type": type(exc).__name__})
+        raise HTTPException(409, str(exc)) from exc
+    identity.audit("account.upsert", {"core_id": core_id,
+                   "account_id": account_id, "operation": "create" if body.create else "update"})
+    # Drivers may generate keys/passwords while provisioning; return them only
+    # over the pinned, signed control plane so Master can seal the final state.
+    return {"core_id": core_id, "account_id": account_id,
+            "settings": account.settings, "enabled": account.enabled}
+
+
+@app.delete("/v1/cores/{core_id}/accounts/{account_id}")
+async def account_delete(core_id: str, account_id: str,
+                         _node=Depends(signed_request)):
+    _authorize_core(core_id)
+    if core_id not in core_manager.list_cores():
+        raise HTTPException(409, f"core '{core_id}' is not installed")
+    if not account_id or len(account_id) > 190 or any(
+            char in account_id for char in ("/", "\\", "\x00")):
+        raise HTTPException(422, "invalid account id")
+    try:
+        await asyncio.wait_for(
+            core_manager.get(core_id).delete_account(account_id), timeout=120)
+    except Exception as exc:
+        identity.audit("account.failed", {"core_id": core_id,
+                       "account_id": account_id, "operation": "delete",
+                       "error_type": type(exc).__name__})
+        raise HTTPException(409, str(exc)) from exc
+    identity.audit("account.delete", {"core_id": core_id, "account_id": account_id})
+    return {"core_id": core_id, "account_id": account_id, "deleted": True}
 
 
 @app.put("/v1/cores/{core_id}/inbounds")

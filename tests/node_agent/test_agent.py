@@ -34,6 +34,14 @@ def _post_signed(client, node_id: str, key: bytes, path: str, payload: dict):
                        headers=_headers(node_id, key, "POST", path, body))
 
 
+def _signed(client, node_id: str, key: bytes, method: str, path: str,
+            payload: dict | None = None):
+    body = (json.dumps(payload, separators=(",", ":")).encode()
+            if payload is not None else b"")
+    return client.request(method, path, content=body or None,
+                          headers=_headers(node_id, key, method, path, body))
+
+
 def test_registration_signed_heartbeat_replay_guard_and_real_core_lifecycle(
     tmp_path, monkeypatch,
 ) -> None:
@@ -109,6 +117,29 @@ def test_registration_signed_heartbeat_replay_guard_and_real_core_lifecycle(
         assert stopped.json()["state"] == "stopped"
         state_text = (tmp_path / "cores.json").read_text()
         assert "settings_enc" in state_text and '"settings"' not in state_text
+
+        # Account provisioning is a signed, typed driver operation—not shell
+        # execution—and generated credentials are returned for Master sealing.
+        driver = module.core_manager.get("xray")
+        calls = []
+        async def create_account(account):
+            account.settings["id"] = "generated-test-uuid"
+            calls.append(("create", account.account_id))
+        async def delete_account(account_id):
+            calls.append(("delete", account_id))
+        monkeypatch.setattr(driver, "create_account", create_account)
+        monkeypatch.setattr(driver, "delete_account", delete_account)
+        account_path = "/v1/cores/xray/accounts/1.alice.vless"
+        provisioned = _signed(client, node_id, key, "PUT", account_path, {
+            "user_id": 1, "username": "alice", "protocol": "vless",
+            "enabled": True, "settings": {}, "create": True,
+        })
+        assert provisioned.status_code == 200, provisioned.text
+        assert provisioned.json()["settings"]["id"] == "generated-test-uuid"
+        deleted = _signed(client, node_id, key, "DELETE", account_path)
+        assert deleted.status_code == 200 and deleted.json()["deleted"] is True
+        assert calls == [("create", "1.alice.vless"),
+                         ("delete", "1.alice.vless")]
 
         # A signed panel still has bounded authority: core ids and setting keys
         # are allowlisted; neither arbitrary adapters nor shell-like settings

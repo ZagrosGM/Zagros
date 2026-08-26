@@ -141,6 +141,24 @@ class ZagrosNodeClient:
             timeout=920 if action in ("install", "uninstall") else 120,
         )
 
+    def provision_account(self, core_id: str, account_id: str, *, user_id: int,
+                          username: str, protocol: str, enabled: bool,
+                          settings: dict, create: bool) -> dict:
+        from urllib.parse import quote
+
+        path = f"/v1/cores/{quote(core_id, safe='')}/accounts/{quote(account_id, safe='')}"
+        return self._request("PUT", path, payload={
+            "user_id": user_id, "username": username,
+            "protocol": protocol, "enabled": enabled,
+            "settings": settings, "create": create,
+        }, timeout=150)
+
+    def delete_account(self, core_id: str, account_id: str) -> dict:
+        from urllib.parse import quote
+
+        path = f"/v1/cores/{quote(core_id, safe='')}/accounts/{quote(account_id, safe='')}"
+        return self._request("DELETE", path, timeout=150)
+
     def apply_inbounds(self, core_id: str, document: dict) -> dict:
         return self._request(
             "PUT", f"/v1/cores/{core_id}/inbounds",

@@ -1728,6 +1728,7 @@ def _native_node_view(row) -> dict[str, Any]:
         "agent_identity": row.agent_identity,
         "certificate_fingerprint": row.certificate_fingerprint,
         "last_seen": row.last_seen,
+        "agent_version": settings.get("agent_version"),
         "health": settings.get("health"),
         "cores": settings.get("cores"),
     }
@@ -2147,13 +2148,16 @@ async def native_node_delete(node_id: int, force: bool = False,
     if row is None:
         raise HTTPException(404, "native node not found")
     remote_revoked = False
-    try:
-        await asyncio.to_thread(_native_node_client(runtime, row).revoke)
-        remote_revoked = True
-    except Exception as exc:
-        if not force:
-            raise HTTPException(
-                502, f"node key revocation failed; use force only after isolating the node: {exc}") from exc
+    # A pending row has no remote authority yet; deleting it cascades and
+    # revokes its hashed enrollment credential without touching Node data.
+    if row.status != "pending":
+        try:
+            await asyncio.to_thread(_native_node_client(runtime, row).revoke)
+            remote_revoked = True
+        except Exception as exc:
+            if not force:
+                raise HTTPException(
+                    502, f"node key revocation failed; use force only after isolating the node: {exc}") from exc
     def remove():
         with runtime.session_factory() as session:
             current = session.get(NodeModel, node_id)

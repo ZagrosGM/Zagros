@@ -23,8 +23,8 @@ interface AgentCoreInventory {
 interface NativeNode {
   id: number; name: string; address: string; port: number; status: string;
   usage_coefficient: number; agent_type: "zagros_native";
-  agent_identity: string; certificate_fingerprint: string;
-  last_seen?: string | null;
+  agent_identity?: string | null; certificate_fingerprint?: string | null;
+  last_seen?: string | null; agent_version?: string | null;
   health?: { healthy?: boolean; resources?: Record<string, number | number[] | null> } | null;
   cores?: AgentCoreInventory | null;
 }
@@ -63,7 +63,7 @@ export default function Nodes() {
           <HardDrive size={18} className="text-brand" />{t("nav.nodes")}
         </h1>
         <Button variant="ghost" size="sm" onClick={() => list.refetch()}><RefreshCcw size={13} /></Button>
-        <Button size="sm" onClick={() => setRegisterOpen(true)}><Plus size={13} /> register Zagros Node</Button>
+        <Button size="sm" onClick={() => setRegisterOpen(true)}><Plus size={13} /> Add Node</Button>
       </div>
       <p className="rounded-xl border border-brand/30 bg-brand-soft px-3 py-2 text-[11px] text-content-2">
         Native nodes use certificate-pinned HTTPS, one-time registration and HMAC-signed commands with replay protection. No Docker socket or arbitrary shell endpoint is exposed. Legacy Marzban nodes are Xray-only and are not presented as multi-core nodes here.
@@ -71,8 +71,8 @@ export default function Nodes() {
 
       {list.isLoading ? <Skeleton className="h-40" /> : !(list.data?.nodes.length) ? (
         <Card><EmptyState title="No native Zagros nodes"
-          hint="Install zagros-node on the remote host, then register its one-time token and TLS SHA-256 fingerprint."
-          action={<Button size="sm" onClick={() => setRegisterOpen(true)}><Plus size={13} /> register node</Button>} /></Card>
+          hint="Generate a short-lived installer command or securely register an existing agent manually."
+          action={<Button size="sm" onClick={() => setRegisterOpen(true)}><Plus size={13} /> Add Node</Button>} /></Card>
       ) : (
         <div className="grid gap-3 lg:grid-cols-2">
           {list.data.nodes.map((node) => {
@@ -86,23 +86,25 @@ export default function Nodes() {
                     <h3 className="truncate text-sm font-semibold">{node.name}</h3>
                     <Badge tone="brand">Zagros Node</Badge>
                   </div>
-                  <p className="mt-1 font-mono text-[11px] text-content-3" dir="ltr">{node.address}:{node.port} · {node.agent_identity.slice(0, 12)}…</p>
+                  <p className="mt-1 font-mono text-[11px] text-content-3" dir="ltr">{node.address}:{node.port} · {node.agent_identity ? `${node.agent_identity.slice(0, 12)}…` : "awaiting registration"}</p>
                 </div>
                 <Badge tone={statusTone(node.status) as never} dot>{node.status}</Badge>
               </div>
-              <div className="mt-3 grid grid-cols-3 gap-2 text-[11px] text-content-3">
+              <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-content-3 sm:grid-cols-4">
                 <span>cores <b className="text-content">{installed.length}</b></span>
+                <span>version <b className="text-content">{node.agent_version ?? "—"}</b></span>
                 <span>memory <b className="text-content">{typeof resources.memory_used === "number" ? formatBytes(resources.memory_used, digits) : "—"}</b></span>
                 <span>CPU <b className="text-content">{typeof resources.cpu_percent === "number" ? `${resources.cpu_percent.toFixed(0)}%` : "—"}</b></span>
               </div>
+              <p className="mt-2 text-[10px] text-content-3">last heartbeat: {node.last_seen ? new Date(node.last_seen).toLocaleString() : "never"}</p>
               <div className="mt-3 flex flex-wrap gap-1.5">
                 {installed.map((core) => <Badge key={core.core_id} tone={core.state === "running" ? "ok" : core.state === "error" ? "danger" : "muted"}>
                   {core.core_id} · {core.state} · {core.core_version ?? "unknown"}
                 </Badge>)}
               </div>
               <div className="mt-3 flex items-center gap-1 border-t border-border pt-3">
-                <Button variant="ghost" size="sm" onClick={() => heartbeat.mutate(node.id)} loading={heartbeat.isPending}><Activity size={13} /> verify health</Button>
-                <Button variant="ghost" size="sm" onClick={() => setCoreFor(node)}><HardDrive size={13} /> core lifecycle</Button>
+                <Button variant="ghost" size="sm" onClick={() => heartbeat.mutate(node.id)} loading={heartbeat.isPending} disabled={!node.agent_identity}><Activity size={13} /> Health</Button>
+                <Button variant="ghost" size="sm" onClick={() => setCoreFor(node)} disabled={!node.agent_identity}><HardDrive size={13} /> Inventory</Button>
                 <Button variant="ghost" size="icon" className="ms-auto" aria-label="delete node" onClick={() => setDeleteFor(node)}><Trash2 size={14} /></Button>
               </div>
             </Card>;
@@ -124,23 +126,52 @@ function RegisterNodeDialog({ onClose }: { onClose: () => void }) {
   const t = useT();
   const qc = useQueryClient();
   const [form, setForm] = useState({ name: "", address: "", port: 62050, registration_token: "", certificate_fingerprint: "", usage_coefficient: 1 });
+  const [command, setCommand] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
   const [error, setError] = useState("");
-  const register = useMutation({
+  const generate = useMutation({
+    mutationFn: () => api.post<{ installer_command: string; expires_at: string }>("/zagros/nodes/pending", {
+      name: form.name, address: form.address, api_port: form.port,
+      usage_coefficient: form.usage_coefficient, expires_in_seconds: 900,
+    }),
+    onSuccess: (result) => {
+      setCommand(result.installer_command); setExpiresAt(result.expires_at);
+      qc.invalidateQueries({ queryKey: ["zagros", "native-nodes"] });
+      toast.ok("single-use installer command generated");
+    },
+    onError: (e) => setError(e instanceof ApiError ? e.message : t("common.error")),
+  });
+  const manual = useMutation({
     mutationFn: () => api.post("/zagros/nodes/register", form),
     onSuccess: () => { toast.ok("node registered; bootstrap token consumed"); qc.invalidateQueries({ queryKey: ["zagros", "native-nodes"] }); onClose(); },
     onError: (e) => setError(e instanceof ApiError ? e.message : t("common.error")),
   });
-  return <Dialog open onClose={onClose} title="register native Zagros Node"
-    subtitle="The remote agent must already be running with TLS. Registration consumes its one-time token."
-    footer={<><Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button><Button onClick={() => register.mutate()} loading={register.isPending} disabled={!form.name || !form.address || form.registration_token.length < 16 || form.certificate_fingerprint.replace(/:/g, "").length !== 64}>{t("common.save")}</Button></>}>
+  const commonValid = Boolean(form.name && form.address && form.port > 0 && form.port < 65536);
+  const manualValid = commonValid && form.registration_token.length >= 16 && form.certificate_fingerprint.replace(/:/g, "").length === 64;
+  return <Dialog open onClose={onClose} title="Add Node"
+    subtitle="Generate an expiring unattended installer command, or use Set Manual for an agent that is already running."
+    footer={<Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>}>
     <div className="grid gap-4 sm:grid-cols-2">
-      <Field label="name" required><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-      <Field label="address" required hint="DNS name/IP covered by the node certificate"><Input dir="ltr" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} /></Field>
-      <Field label="HTTPS port"><Input type="number" min={1} max={65535} value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} /></Field>
+      <Field label="Name" required><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+      <Field label="Address" required hint="DNS name/IP covered by the Node certificate"><Input dir="ltr" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} /></Field>
+      <Field label="API Port" required><Input type="number" min={1} max={65535} value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} /></Field>
       <Field label="usage coefficient"><Input type="number" min="0.1" step="0.1" value={form.usage_coefficient} onChange={(e) => setForm({ ...form, usage_coefficient: Number(e.target.value) })} /></Field>
-      <Field label="one-time registration token" required><Input type="password" autoComplete="off" value={form.registration_token} onChange={(e) => setForm({ ...form, registration_token: e.target.value })} /></Field>
+    </div>
+    <div className="mt-4 flex flex-wrap gap-2">
+      <Button onClick={() => generate.mutate()} loading={generate.isPending} disabled={!commonValid || Boolean(command)}>Generate installer command</Button>
+    </div>
+    {command && <div className="mt-4 space-y-2">
+      <p className="text-xs text-content-2">Expires {new Date(expiresAt).toLocaleString()}. The credential is single-use and is not recoverable after this dialog closes.</p>
+      <pre className="max-h-44 overflow-auto whitespace-pre-wrap break-all rounded-xl bg-surface p-3 text-[10px]" dir="ltr">{command}</pre>
+      <Button variant="secondary" size="sm" onClick={() => navigator.clipboard.writeText(command).then(() => toast.ok("installer command copied"))}>Copy command</Button>
+    </div>}
+    <div className="my-5 border-t border-border" />
+    <h3 className="mb-3 text-sm font-semibold">Set Manual</h3>
+    <div className="grid gap-4 sm:grid-cols-2">
+      <Field label="one-time agent registration token" required><Input type="password" autoComplete="off" value={form.registration_token} onChange={(e) => setForm({ ...form, registration_token: e.target.value })} /></Field>
       <Field label="TLS SHA-256 fingerprint" required><Input dir="ltr" value={form.certificate_fingerprint} onChange={(e) => setForm({ ...form, certificate_fingerprint: e.target.value })} /></Field>
     </div>
+    <Button className="mt-3" variant="secondary" onClick={() => manual.mutate()} loading={manual.isPending} disabled={!manualValid || Boolean(command)}>Set Manual</Button>
     {error && <p role="alert" className="mt-3 rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
   </Dialog>;
 }

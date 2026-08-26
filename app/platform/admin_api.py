@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel, Field, SecretStr
 
 from app.cores.capabilities import outbound_capability, validate_selectable
@@ -55,7 +55,7 @@ from app.cores.outbounds.repository import (
 )
 from app.cores.routing.model import RoutingRule
 from app.platform import certificates
-from app.platform.routers import get_runtime, zagros_admin_router
+from app.platform.routers import get_runtime, zagros_admin_router, zagros_router
 
 _STARTED_MONO = time.monotonic()
 _TEST_LOG = logging.getLogger("zagros.admin.outbound_test")
@@ -1685,6 +1685,22 @@ async def certificates_remove(ident: str, runtime=Depends(get_runtime)):
 # native Zagros multi-core nodes (separate from legacy Xray-only nodes)
 # --------------------------------------------------------------------- #
 
+class NativeNodePendingBody(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    address: str = Field(min_length=1, max_length=256)
+    api_port: int = Field(default=62050, ge=1, le=65535)
+    expires_in_seconds: int = Field(default=900, ge=60, le=3600)
+    usage_coefficient: float = Field(default=1.0, gt=0)
+
+
+class NativeNodeCallbackBody(BaseModel):
+    pending_id: int = Field(ge=1)
+    registration_token: SecretStr
+    bootstrap_token: SecretStr
+    certificate_fingerprint: str = Field(min_length=64, max_length=128)
+    agent_version: str | None = Field(default=None, max_length=64)
+
+
 class NativeNodeRegisterBody(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     address: str = Field(min_length=1, max_length=256)
@@ -1757,6 +1773,191 @@ async def native_nodes_list(runtime=Depends(get_runtime)):
                 NodeModel.agent_type == "zagros_native")).scalars().all()
             return [_native_node_view(row) for row in rows]
     return {"nodes": await asyncio.to_thread(load)}
+
+
+@zagros_admin_router.post("/nodes/pending")
+async def native_node_pending(body: NativeNodePendingBody, request: Request,
+                              runtime=Depends(get_runtime)):
+    """Reserve a Node and return its one-time installer command.
+
+    The bearer credential is returned exactly once and only its digest is
+    committed. It is intentionally absent from the Node row and settings.
+    """
+    import hashlib
+    from datetime import timedelta
+
+    from sqlalchemy import select
+    from app.persistence.models import NodeModel, PendingNodeRegistrationModel
+
+    token = secrets.token_urlsafe(32)
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(seconds=body.expires_in_seconds)
+
+    def persist():
+        with runtime.session_factory() as session:
+            if session.scalar(select(NodeModel.id).where(NodeModel.name == body.name)):
+                raise ValueError(f"node '{body.name}' already exists")
+            row = NodeModel(
+                name=body.name, address=body.address, port=body.api_port,
+                status="pending", usage_coefficient=body.usage_coefficient,
+                agent_type="zagros_native", settings_json={},
+            )
+            session.add(row)
+            session.flush()
+            pending = PendingNodeRegistrationModel(
+                node_id=row.id, token_hash=digest, status="pending",
+                created_at=now, expires_at=expires,
+            )
+            session.add(pending)
+            session.commit()
+            session.refresh(pending)
+            return row.id, pending.id
+
+    try:
+        node_id, pending_id = await asyncio.to_thread(persist)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    master_url = str(request.base_url).rstrip("/")
+    args = [
+        "install", "--name", body.name, "--address", body.address,
+        "--port", str(body.api_port), "--master-url", master_url,
+        "--pending-id", str(pending_id), "--registration-token", token,
+    ]
+    command = (
+        "curl -fsSL "
+        "https://raw.githubusercontent.com/ZagrosGM/zagros-node/main/install.sh "
+        "| sudo bash -s -- " + " ".join(shlex.quote(value) for value in args)
+    )
+    return {
+        "node_id": node_id, "pending_id": pending_id,
+        "expires_at": expires, "installer_command": command,
+    }
+
+
+@zagros_admin_router.delete("/nodes/{node_id}/pending")
+async def native_node_pending_revoke(node_id: int, runtime=Depends(get_runtime)):
+    from sqlalchemy import select
+    from app.persistence.models import PendingNodeRegistrationModel
+
+    def revoke():
+        with runtime.session_factory() as session:
+            row = session.scalar(select(PendingNodeRegistrationModel).where(
+                PendingNodeRegistrationModel.node_id == node_id))
+            if row is None:
+                return False
+            if row.status == "consumed":
+                raise ValueError("registration was already consumed")
+            row.status = "revoked"
+            row.revoked_at = datetime.now(timezone.utc)
+            session.commit()
+            return True
+    try:
+        found = await asyncio.to_thread(revoke)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not found:
+        raise HTTPException(404, "pending registration not found")
+    return {"ok": True, "status": "revoked"}
+
+
+@zagros_router.post("/api/zagros/node-registration/callback")
+async def native_node_registration_callback(body: NativeNodeCallbackBody,
+                                            runtime=Depends(get_runtime)):
+    """Token-authenticated callback used by the unattended installer."""
+    import base64
+    import hashlib
+    import hmac
+
+    from sqlalchemy import select
+    from app.nodes.client import NodeClientError, ZagrosNodeClient, fetch_pinned_certificate
+    from app.persistence.models import NodeModel, PendingNodeRegistrationModel
+
+    supplied_hash = hashlib.sha256(
+        body.registration_token.get_secret_value().encode("utf-8")).hexdigest()
+    now = datetime.now(timezone.utc)
+
+    def reserve():
+        with runtime.session_factory() as session:
+            pending = session.get(PendingNodeRegistrationModel, body.pending_id)
+            if pending is None or not hmac.compare_digest(pending.token_hash, supplied_hash):
+                return None, "invalid registration credential"
+            if pending.status != "pending" or pending.consumed_at or pending.revoked_at:
+                return None, "registration credential is not active"
+            if pending.expires_at <= now:
+                pending.status = "expired"
+                session.commit()
+                return None, "registration credential has expired"
+            pending.status = "registering"
+            node = session.get(NodeModel, pending.node_id)
+            session.commit()
+            session.expunge(node)
+            return node, None
+
+    node, error = await asyncio.to_thread(reserve)
+    if error:
+        raise HTTPException(401, error)
+    try:
+        certificate_pem, fingerprint = await asyncio.to_thread(
+            fetch_pinned_certificate, node.address, node.port,
+            body.certificate_fingerprint)
+        client = ZagrosNodeClient(node.address, node.port, None, None, certificate_pem)
+        panel_id = "panel-" + hashlib.sha256(runtime.cipher._key).hexdigest()[:24]
+        registration = await asyncio.to_thread(
+            client.register, panel_id, body.bootstrap_token.get_secret_value())
+        node_identity = str(registration["node_id"])
+        signing_key = base64.b64decode(registration["signing_key"])
+        if len(signing_key) != 32:
+            raise NodeClientError("agent returned an invalid signing key")
+        encrypted = runtime.cipher.encrypt_json(
+            {"signing_key": base64.b64encode(signing_key).decode("ascii")},
+            aad=f"node-agent:{node_identity}")
+    except Exception as exc:
+        def release():
+            with runtime.session_factory() as session:
+                pending = session.get(PendingNodeRegistrationModel, body.pending_id)
+                if pending and pending.status == "registering":
+                    pending.status = "pending" if pending.expires_at > datetime.now(timezone.utc) else "expired"
+                    session.commit()
+        await asyncio.to_thread(release)
+        raise HTTPException(422, f"node registration failed: {str(exc)[:300]}") from exc
+
+    def complete():
+        with runtime.session_factory() as session:
+            pending = session.get(PendingNodeRegistrationModel, body.pending_id)
+            current = session.get(NodeModel, pending.node_id) if pending else None
+            if pending is None or current is None or pending.status != "registering":
+                raise ValueError("registration reservation was lost")
+            duplicate = session.scalar(select(NodeModel.id).where(
+                NodeModel.agent_identity == node_identity,
+                NodeModel.id != current.id))
+            if duplicate:
+                raise ValueError("this node identity is already registered")
+            current.status = "connected"
+            current.agent_identity = node_identity
+            current.certificate_fingerprint = fingerprint
+            current.agent_credentials_enc = encrypted
+            current.last_seen = datetime.now(timezone.utc)
+            current.settings_json = {
+                "certificate_pem": certificate_pem,
+                "agent_version": body.agent_version,
+            }
+            pending.status = "consumed"
+            pending.consumed_at = datetime.now(timezone.utc)
+            session.commit()
+            session.refresh(current)
+            return _native_node_view(current)
+    try:
+        return await asyncio.to_thread(complete)
+    except Exception as exc:
+        try:
+            registered = ZagrosNodeClient(node.address, node.port, node_identity,
+                                          signing_key, certificate_pem)
+            await asyncio.to_thread(registered.revoke)
+        except Exception:  # noqa: BLE001
+            pass
+        raise HTTPException(500, "registration persistence failed; remote authority revoked") from exc
 
 
 @zagros_admin_router.post("/nodes/register")

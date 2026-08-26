@@ -83,9 +83,9 @@ def test_real_panel_api_to_tls_agent_registration_health_lifecycle_and_revoke(
         app_package.app  # noqa: B018 - deliberate lazy-app attribute access
 
         from app.persistence.base import create_schema
-        from app.persistence.models import NodeModel
+        from app.persistence.models import NodeModel, PendingNodeRegistrationModel
         from app.platform import admin_api  # noqa: F401 - register routes
-        from app.platform.routers import zagros_admin_router
+        from app.platform.routers import zagros_admin_router, zagros_router
         from app.platform.runtime import PlatformRuntime
 
         runtime = PlatformRuntime(
@@ -101,20 +101,44 @@ def test_real_panel_api_to_tls_agent_registration_health_lifecycle_and_revoke(
         for dependency in zagros_admin_router.dependencies:
             panel.dependency_overrides[dependency.dependency] = lambda: {
                 "username": "node-test-admin"}
+        panel.include_router(zagros_router)
         panel.include_router(zagros_admin_router)
 
         with TestClient(panel) as client:
-            registration = client.post("/api/zagros/nodes/register", json={
-                "name": "tls-node-1", "address": "127.0.0.1", "port": port,
-                "registration_token": token,
-                "certificate_fingerprint": fingerprint,
-                "usage_coefficient": 1.0,
+            pending_response = client.post("/api/zagros/nodes/pending", json={
+                "name": "tls-node-1", "address": "127.0.0.1",
+                "api_port": port, "expires_in_seconds": 900,
             })
-            assert registration.status_code == 200, registration.text
-            node = registration.json()
-            node_id = node["id"]
+            assert pending_response.status_code == 200, pending_response.text
+            pending_result = pending_response.json()
+            node_id = pending_result["node_id"]
+            command = pending_result["installer_command"]
+            assert "--pending-id" in command and "--registration-token" in command
+
+            # The command is the sole disclosure point. Recover its shell-safe
+            # test token to emulate the installer callback over the public,
+            # token-authenticated route.
+            import shlex
+            words = shlex.split(command)
+            registration_token = words[words.index("--registration-token") + 1]
+            callback = client.post("/api/zagros/node-registration/callback", json={
+                "pending_id": pending_result["pending_id"],
+                "registration_token": registration_token,
+                "bootstrap_token": token,
+                "certificate_fingerprint": fingerprint,
+                "agent_version": "1.0.0-test",
+            })
+            assert callback.status_code == 200, callback.text
+            node = callback.json()
             assert node["agent_type"] == "zagros_native"
             assert node["certificate_fingerprint"] == fingerprint
+            replay = client.post("/api/zagros/node-registration/callback", json={
+                "pending_id": pending_result["pending_id"],
+                "registration_token": registration_token,
+                "bootstrap_token": token,
+                "certificate_fingerprint": fingerprint,
+            })
+            assert replay.status_code == 401
 
             # Panel persistence contains only AES-GCM ciphertext. Neither the
             # bootstrap token nor raw signing key is a database column/value.
@@ -126,7 +150,14 @@ def test_real_panel_api_to_tls_agent_registration_health_lifecycle_and_revoke(
                     "settings": row.settings_json,
                 })
                 assert token not in serialized
+                assert registration_token not in serialized
                 assert "signing_key" not in serialized
+                pending = session.get(PendingNodeRegistrationModel,
+                                      pending_result["pending_id"])
+                assert pending is not None and pending.status == "consumed"
+                assert pending.consumed_at is not None
+                assert len(pending.token_hash) == 64
+                assert pending.token_hash != registration_token
                 decrypted = runtime.cipher.decrypt_json(
                     row.agent_credentials_enc,
                     aad=f"node-agent:{row.agent_identity}")

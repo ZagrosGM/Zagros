@@ -74,6 +74,10 @@ class UserModel(Base):
     # Zagros app credentials (Mode 2); password stored as scrypt hash only
     app_username: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
     app_password_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Native delivery/execution target. NULL means the local Master and keeps
+    # every upgraded Alpha 8.9 user on its existing route.
+    node_id: Mapped[int | None] = mapped_column(
+        ForeignKey("nodes.id", ondelete="SET NULL"), nullable=True, index=True)
 
     accounts: Mapped[list["UserCoreAccountModel"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -157,6 +161,33 @@ class NodeModel(Base):
     last_seen: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
 
+class PendingNodeRegistrationModel(Base):
+    """Master-issued, short-lived authority for one native Node enrollment.
+
+    Only a SHA-256 digest of the 256-bit random bearer token is persisted.
+    The associated node row reserves its stable identity and target address
+    before the installer runs. Revocation and consumption are explicit and
+    auditable without retaining the credential itself.
+    """
+
+    __tablename__ = "pending_node_registrations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    node_id: Mapped[int] = mapped_column(
+        ForeignKey("nodes.id", ondelete="CASCADE"), nullable=False,
+        unique=True, index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False,
+                                             unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False,
+                                         default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utcnow,
+                                                  nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False,
+                                                  index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+
 # --------------------------------------------------------------------- #
 # user <-> core accounts & usage ledger
 # --------------------------------------------------------------------- #
@@ -170,6 +201,11 @@ class UserCoreAccountModel(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     core_id: Mapped[str] = mapped_column(String(32), index=True)
+    # Actual execution target for this provisioned account. NULL is Master.
+    # Keeping this separate from users.node_id permits safe reconciliation
+    # while a user is moved between targets.
+    node_id: Mapped[int | None] = mapped_column(
+        ForeignKey("nodes.id", ondelete="SET NULL"), nullable=True, index=True)
     account_id: Mapped[str] = mapped_column(String(190))
     protocol: Mapped[str] = mapped_column(String(32))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)

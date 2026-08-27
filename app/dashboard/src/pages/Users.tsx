@@ -43,12 +43,15 @@ interface UserForm {
   /** multi-core grants: core_id -> inbound tags ([] revokes that core) */
   coreAccess: Record<string, string[]>;
   telegramId: string;
+  /** empty string is Master; otherwise a persistent native Node id */
+  nodeId: string;
 }
 
 const emptyForm: UserForm = {
   username: "", note: "", status: "active", dataLimitGB: "", deviceLimit: "",
   downloadLimitMbps: "0", uploadLimitMbps: "0", expireDate: "",
   mode: "manual", templateId: null, inbounds: {}, coreAccess: {}, telegramId: "",
+  nodeId: "",
 };
 
 // Mirror the backend's creation constraint closely enough to stop a known
@@ -469,6 +472,21 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
   const [genLen, setGenLen] = useState(8);
   const [genBusy, setGenBusy] = useState(false);
 
+  const nodesQ = useQuery({
+    queryKey: ["zagros", "native-nodes"],
+    queryFn: () => api.get<{ nodes: Array<{ id: number; name: string; status: string }> }>("/zagros/nodes"),
+  });
+  const assignmentQ = useQuery({
+    queryKey: ["zagros", "user-node", user?.username],
+    queryFn: () => api.get<{ node_id: number | null }>(`/zagros/users/${encodeURIComponent(user!.username)}/node`),
+    enabled: mode === "edit" && Boolean(user?.username),
+  });
+  useEffect(() => {
+    if (assignmentQ.data) setForm((current) => ({
+      ...current, nodeId: assignmentQ.data.node_id == null ? "" : String(assignmentQ.data.node_id),
+    }));
+  }, [assignmentQ.data]);
+
   const canonicalSubQ = useQuery({
     queryKey: ["zagros", "subscription-url", user?.username],
     queryFn: () => api.get<CanonicalSubscriptionURL>(
@@ -591,6 +609,10 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
         await api.put(`/user/${user.username}`, body);
         toast.ok(t("common.saved"));
       }
+      const savedUsername = mode === "create" ? form.username.trim() : user!.username;
+      await api.put(`/zagros/users/${encodeURIComponent(savedUsername)}/node`, {
+        node_id: form.nodeId ? Number(form.nodeId) : null,
+      });
       qc.invalidateQueries({ queryKey: ["users"] });
       onSaved();
     } catch (e) {
@@ -731,6 +753,14 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
           </Field>
         </div>
 
+        <Field label="Execution target" required hint="Accounts are provisioned on this host; subscriptions use its public address.">
+          <Select value={form.nodeId} onChange={(e) => setForm({ ...form, nodeId: e.target.value })}>
+            <option value="">Master</option>
+            {(nodesQ.data?.nodes ?? []).filter((node) => node.status === "connected").map((node) => (
+              <option key={node.id} value={node.id}>{node.name}</option>
+            ))}
+          </Select>
+        </Field>
         <Field label={t("users.telegramId")}>
           <Input type="number" value={form.telegramId} onChange={(e) => setForm({ ...form, telegramId: e.target.value })} />
         </Field>

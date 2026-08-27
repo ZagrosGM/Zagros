@@ -31,6 +31,8 @@ class SubscriptionContext:
 
     user: PortalUserView
     accounts: list[tuple[BaseCoreDriver, UserAccount]]
+    # Protocol endpoint host. None preserves the request/configured Master host.
+    delivery_host: str | None = None
 
 
 class PortalDataProvider(Protocol):
@@ -110,6 +112,9 @@ class PortalService:
         notes: list[str] = []
         variables = delivery_variables(ctx.user)
         delivery_context = self._delivery_context(settings, public_host)
+        if ctx.delivery_host:
+            delivery_context = delivery_context.model_copy(
+                update={"public_host": ctx.delivery_host})
         for driver, account in ctx.accounts:
             try:
                 profile = await driver.describe_delivery(account, delivery_context)
@@ -175,6 +180,9 @@ class PortalService:
         notes: list[str] = []
         variables = delivery_variables(ctx.user)
         delivery_context = self._delivery_context(settings, public_host)
+        if ctx.delivery_host:
+            delivery_context = delivery_context.model_copy(
+                update={"public_host": ctx.delivery_host})
         for driver, account in ctx.accounts:
             if not account.enabled:
                 continue

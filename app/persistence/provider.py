@@ -34,6 +34,7 @@ def _user_record_view(row, used: int) -> dict[str, Any]:
         "app_username": row.app_username,
         "app_password_hash": row.app_password_hash,
         "client_auth_mode": row.client_auth_mode,
+        "node_id": row.node_id,
         "used_bytes": used,
         "data_limit_bytes": row.data_limit_bytes,
         "download_limit_mbps": int(row.download_limit_mbps or 0),
@@ -101,12 +102,19 @@ class SQLOnlineDataAdapter:
         rows = self._users.accounts_of(user_id, decrypt=True)
         for row in rows:
             core_id = row["core_id"]
-            if not self._manager.is_enabled(core_id):
+            node_id = row.get("node_id")
+            if node_id is None and not self._manager.is_enabled(core_id):
                 continue
             try:
                 driver = self._manager.get(core_id)
-            except Exception:  # noqa: BLE001 — core not loaded: skip honestly
-                continue
+            except Exception:  # Node-hosted core need not be installed on Master.
+                if node_id is None:
+                    continue
+                try:
+                    from app.cores.registry import get_driver_class
+                    driver = get_driver_class(core_id)({})
+                except Exception:  # noqa: BLE001 — unavailable is honest skip
+                    continue
             account = UserAccount(
                 user_id=user_id,
                 username="",
@@ -141,4 +149,15 @@ class SQLOnlineDataAdapter:
             online=record["online"],
             client_auth_mode=record.get("client_auth_mode"),
         )
-        return SubscriptionContext(user=view, accounts=pairs)
+        delivery_host = None
+        node_id = record.get("node_id")
+        if node_id is not None:
+            def _node_address():
+                from app.persistence.models import NodeModel
+                with self._sf() as session:
+                    node = session.get(NodeModel, node_id)
+                    return (node.address if node and node.status == "connected"
+                            else None)
+            delivery_host = await asyncio.to_thread(_node_address)
+        return SubscriptionContext(user=view, accounts=pairs,
+                                   delivery_host=delivery_host)

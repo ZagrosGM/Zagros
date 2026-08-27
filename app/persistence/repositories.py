@@ -21,6 +21,8 @@ from app.cores.sessions import SessionRecord
 from app.cores.types import CoreState, UsageRecord
 from app.portal.models import PortalSettings
 from app.persistence.cipher import SecretsCipher
+_UNSET = object()
+
 from app.persistence.models import (
     CoreHostModel,
     CoreModel,
@@ -616,6 +618,29 @@ class UserRepository:
                       .values(status=status))
             s.commit()
 
+    def set_node(self, user_id: int, node_id: int | None) -> None:
+        """Persist the user's desired execution/delivery target."""
+        with self._sf() as s:
+            result = s.execute(update(UserModel).where(UserModel.id == user_id)
+                               .values(node_id=node_id))
+            if result.rowcount != 1:
+                raise ValueError("user not found")
+            s.commit()
+
+    def set_account_node(self, *, user_id: int, core_id: str,
+                         account_id: str, node_id: int | None) -> None:
+        with self._sf() as s:
+            result = s.execute(
+                update(UserCoreAccountModel)
+                .where(UserCoreAccountModel.user_id == user_id,
+                       UserCoreAccountModel.core_id == core_id,
+                       UserCoreAccountModel.account_id == account_id)
+                .values(node_id=node_id)
+            )
+            if result.rowcount != 1:
+                raise ValueError("account not found")
+            s.commit()
+
     def set_app_credentials(self, user_id: int, app_username: str,
                             app_password_hash: str) -> None:
         with self._sf() as s:
@@ -636,7 +661,8 @@ class UserRepository:
     # ---------------- core accounts ---------------- #
     def upsert_core_account(self, *, user_id: int, core_id: str, account_id: str,
                             protocol: str, enabled: bool = True,
-                            settings: dict[str, Any] | None = None) -> int:
+                            settings: dict[str, Any] | None = None,
+                            node_id: int | None | object = _UNSET) -> int:
         """Idempotent by (user_id, core_id, account_id); settings encrypted."""
         enc = None
         if settings is not None:
@@ -658,6 +684,13 @@ class UserRepository:
                 s.add(row)
             row.protocol = protocol
             row.enabled = enabled
+            if node_id is not _UNSET:
+                row.node_id = node_id
+            elif row.id is None:
+                # New accounts follow the user's persistent target. Existing
+                # call sites that update credentials cannot silently move it.
+                user = s.get(UserModel, user_id)
+                row.node_id = user.node_id if user else None
             if enc is not None:
                 row.credentials_enc = enc
             s.commit()
@@ -693,6 +726,7 @@ class UserRepository:
                     settings = self._cipher.decrypt_json(row.credentials_enc, aad=aad)
                 out.append({
                     "user_id": row.user_id, "core_id": row.core_id,
+                    "node_id": row.node_id,
                     "account_id": row.account_id, "protocol": row.protocol,
                     "enabled": row.enabled, "settings": settings,
                 })
@@ -717,6 +751,7 @@ class UserRepository:
                     settings = self._cipher.decrypt_json(row.credentials_enc, aad=aad)
                 out.append({
                     "user_id": row.user_id, "core_id": row.core_id,
+                    "node_id": row.node_id,
                     "account_id": row.account_id, "protocol": row.protocol,
                     "enabled": row.enabled, "settings": settings,
                 })

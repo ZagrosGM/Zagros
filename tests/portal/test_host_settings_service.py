@@ -192,6 +192,36 @@ def test_portal_context_prefers_configured_subscription_host():
     asyncio.run(run())
 
 
+def test_assigned_node_host_overrides_master_subscription_host():
+    async def run():
+        from app.portal.models import PortalSettings
+        from app.portal.service import SubscriptionContext
+
+        class NodeProvider(_Provider):
+            async def get_subscription_context(self, user_id):
+                original = await super().get_subscription_context(user_id)
+                return SubscriptionContext(user=original.user,
+                                           accounts=original.accounts,
+                                           delivery_host="95.182.94.144")
+
+        class ContextDriver(_FakeDriver):
+            async def describe_delivery(self, account, context=None):
+                self._link = f"hy2://pw@{context.public_host}:443#node"
+                return await super().describe_delivery(account, context)
+
+        settings = InMemorySettingsStore()
+        await settings.save_portal_settings(PortalSettings(
+            subscription_url_prefix="https://109.248.161.249/sub"))
+        service = PortalService(
+            NodeProvider([(ContextDriver(HY2_LINK), _Account())]), settings)
+        links, _ = await service.build_links(7, public_host="109.248.161.249")
+        assert len(links) == 1
+        assert "@95.182.94.144:443" in links[0]
+        assert "109.248.161.249" not in links[0]
+
+    asyncio.run(run())
+
+
 def test_server_ip_default_uses_public_context_for_singbox_and_wireguard():
     async def run():
         from app.cores.delivery import DeliveryContext

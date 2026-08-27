@@ -1717,6 +1717,10 @@ class NativeNodeLifecycleBody(BaseModel):
     force: bool = False
 
 
+class UserNodeAssignmentBody(BaseModel):
+    node_id: int | None = Field(default=None, ge=1)
+
+
 def _native_node_view(row) -> dict[str, Any]:
     settings = dict(row.settings_json or {})
     settings.pop("certificate_pem", None)
@@ -2165,6 +2169,117 @@ async def native_node_delete(node_id: int, force: bool = False,
                 session.delete(current); session.commit()
     await asyncio.to_thread(remove)
     return {"deleted": node_id, "remote_revoked": remote_revoked}
+
+
+async def _account_target_write(runtime, node_row, user, account: dict,
+                                *, create: bool) -> dict:
+    """Write account to Master or one registered Node and return final settings."""
+    from app.cores.types import UserAccount
+
+    settings = dict(account.get("settings") or {})
+    if node_row is not None:
+        result = await asyncio.to_thread(
+            _native_node_client(runtime, node_row).provision_account,
+            account["core_id"], account["account_id"], user_id=user.id,
+            username=user.username, protocol=account["protocol"],
+            enabled=account["enabled"], settings=settings, create=create)
+        return dict(result.get("settings") or settings)
+    driver = runtime.core_manager.get(account["core_id"])
+    model = UserAccount(
+        user_id=user.id, username=user.username,
+        account_id=account["account_id"], protocol=account["protocol"],
+        enabled=account["enabled"], settings=settings)
+    if create:
+        await driver.create_account(model)
+    else:
+        await driver.update_account(model)
+    return dict(model.settings)
+
+
+async def _account_target_delete(runtime, node_row, account: dict) -> None:
+    if node_row is not None:
+        await asyncio.to_thread(
+            _native_node_client(runtime, node_row).delete_account,
+            account["core_id"], account["account_id"])
+    else:
+        await runtime.core_manager.get(account["core_id"]).delete_account(
+            account["account_id"])
+
+
+@zagros_admin_router.get("/users/{username}/node")
+async def user_node_assignment(username: str, runtime=Depends(get_runtime)):
+    user = await asyncio.to_thread(runtime.users.get_user_by_username, username)
+    if user is None:
+        raise HTTPException(404, "user not found")
+    node = (await asyncio.to_thread(_native_node_row, runtime, user.node_id)
+            if user.node_id is not None else None)
+    return {"username": username, "node_id": user.node_id,
+            "target": "node" if node else "master",
+            "node": _native_node_view(node) if node else None}
+
+
+@zagros_admin_router.put("/users/{username}/node")
+async def user_node_assign(username: str, body: UserNodeAssignmentBody,
+                           runtime=Depends(get_runtime)):
+    """Move every account with compensating rollback, then commit assignment."""
+    user = await asyncio.to_thread(runtime.users.get_user_by_username, username)
+    if user is None:
+        raise HTTPException(404, "user not found")
+    if user.node_id == body.node_id:
+        return {"username": username, "node_id": body.node_id,
+                "migrated_accounts": 0}
+    old_node = (await asyncio.to_thread(_native_node_row, runtime, user.node_id)
+                if user.node_id is not None else None)
+    new_node = (await asyncio.to_thread(_native_node_row, runtime, body.node_id)
+                if body.node_id is not None else None)
+    if body.node_id is not None and (new_node is None or new_node.status != "connected"):
+        raise HTTPException(409, "target Node is not connected")
+    accounts = await asyncio.to_thread(runtime.users.accounts_of, user.id)
+    moved: list[tuple[dict, dict]] = []
+    try:
+        for account in accounts:
+            original = dict(account.get("settings") or {})
+            generated = await _account_target_write(
+                runtime, new_node, user, account, create=True)
+            try:
+                await _account_target_delete(runtime, old_node, account)
+            except Exception:
+                rollback_account = {**account, "settings": generated}
+                try:
+                    await _account_target_delete(runtime, new_node, rollback_account)
+                except Exception:  # noqa: BLE001 — preserve original exception
+                    pass
+                raise
+            await asyncio.to_thread(
+                runtime.users.upsert_core_account,
+                user_id=user.id, core_id=account["core_id"],
+                account_id=account["account_id"], protocol=account["protocol"],
+                enabled=account["enabled"], settings=generated,
+                node_id=body.node_id)
+            moved.append((account, original))
+        await asyncio.to_thread(runtime.users.set_node, user.id, body.node_id)
+    except Exception as exc:
+        # Compensate already completed account moves in reverse order.
+        for account, original in reversed(moved):
+            current = {**account, "settings": original}
+            try:
+                restored = await _account_target_write(
+                    runtime, old_node, user, current, create=True)
+                await _account_target_delete(runtime, new_node, current)
+                await asyncio.to_thread(
+                    runtime.users.upsert_core_account,
+                    user_id=user.id, core_id=account["core_id"],
+                    account_id=account["account_id"], protocol=account["protocol"],
+                    enabled=account["enabled"], settings=restored,
+                    node_id=user.node_id)
+            except Exception as rollback_exc:  # noqa: BLE001
+                logging.getLogger("zagros.node_assignment").critical(
+                    "account migration rollback failed for %s/%s: %s",
+                    account["core_id"], account["account_id"], rollback_exc)
+        raise HTTPException(409, f"Node assignment migration failed: {exc}") from exc
+    return {"username": username, "node_id": body.node_id,
+            "target": "node" if body.node_id is not None else "master",
+            "migrated_accounts": len(accounts)}
 
 
 # --------------------------------------------------------------------- #

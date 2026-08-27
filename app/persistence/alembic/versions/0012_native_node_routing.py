@@ -67,13 +67,21 @@ def downgrade() -> None:
         op.drop_table("pending_node_registrations")
 
     if "node_id" in _columns(bind, "user_core_accounts"):
+        foreign_keys = [fk.get("name") for fk in sa.inspect(bind).get_foreign_keys(
+            "user_core_accounts") if fk.get("constrained_columns") == ["node_id"]]
         with op.batch_alter_table("user_core_accounts") as batch:
             batch.drop_index("ix_user_core_accounts_node_id")
-            batch.drop_constraint("fk_user_core_accounts_node_id_nodes", type_="foreignkey")
+            for name in foreign_keys:
+                if name:  # SQLite commonly stores this batch-created FK unnamed.
+                    batch.drop_constraint(name, type_="foreignkey")
             batch.drop_column("node_id")
 
     if "node_id" in _columns(bind, "users"):
+        foreign_keys = [fk.get("name") for fk in sa.inspect(bind).get_foreign_keys(
+            "users") if fk.get("constrained_columns") == ["node_id"]]
         with op.batch_alter_table("users") as batch:
             batch.drop_index("ix_users_node_id")
-            batch.drop_constraint("fk_users_node_id_nodes", type_="foreignkey")
+            for name in foreign_keys:
+                if name:
+                    batch.drop_constraint(name, type_="foreignkey")
             batch.drop_column("node_id")

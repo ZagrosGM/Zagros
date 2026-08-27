@@ -91,7 +91,7 @@ def test_0002_seeds_required_singletons() -> None:
         assert uplink == 0
         (head,) = sqlite3.connect(base / "zagros.db").execute(
             "SELECT version_num FROM alembic_version").fetchone()
-        assert head == "0011_user_bandwidth_limits"
+        assert head == "0012_native_node_routing"
 
 
 def test_0002_reseed_never_rotates_keys() -> None:
@@ -152,7 +152,7 @@ def test_0003_adds_extras_to_preexisting_databases() -> None:
             "SELECT extras FROM core_hosts WHERE remark = 'old'").fetchone()
         assert extras_val == "{}", "old rows must be backfilled to {}"
         (head,) = db.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert head == "0011_user_bandwidth_limits"
+        assert head == "0012_native_node_routing"
 
 
 def test_0004_adds_governance_columns_to_preexisting_databases() -> None:
@@ -326,13 +326,13 @@ def test_0008_promotes_marzban_extras_to_inbound_tags() -> None:
         (head,) = db.execute("SELECT version_num FROM alembic_version").fetchone()
     assert rows["old"] == "VLESS-TCP", "extras tag must be promoted"
     assert rows["inert"] == "", "tag-less rows stay inert — never guessed"
-    assert head == "0011_user_bandwidth_limits"
+    assert head == "0012_native_node_routing"
 
     # replay is a no-op (column/index guards)
     _upgrade(platform_url, legacy_url)
     with sqlite3.connect(base / "zagros.db") as db:
         (head,) = db.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert head == "0011_user_bandwidth_limits"
+    assert head == "0012_native_node_routing"
 
 
 def test_0009_backfills_stable_domains_and_rule_defaults_with_lossless_downgrade() -> None:

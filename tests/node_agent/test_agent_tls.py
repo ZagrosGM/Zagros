@@ -140,6 +140,36 @@ def test_real_panel_api_to_tls_agent_registration_health_lifecycle_and_revoke(
             })
             assert replay.status_code == 401
 
+            expired_response = client.post("/api/zagros/nodes/pending", json={
+                "name": "tls-node-expired", "address": "127.0.0.1",
+                "api_port": port, "expires_in_seconds": 60,
+            })
+            assert expired_response.status_code == 200
+            expired_result = expired_response.json()
+            expired_words = shlex.split(expired_result["installer_command"])
+            expired_token = expired_words[expired_words.index("--registration-token") + 1]
+            from datetime import datetime, timedelta, timezone
+            with runtime.session_factory() as session:
+                expired_row = session.get(PendingNodeRegistrationModel,
+                                          expired_result["pending_id"])
+                expired_row.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+                session.commit()
+            expired_callback = client.post("/api/zagros/node-registration/callback", json={
+                "pending_id": expired_result["pending_id"],
+                "registration_token": expired_token,
+                "bootstrap_token": "unused-expired-bootstrap-token",
+                "certificate_fingerprint": fingerprint,
+            })
+            assert expired_callback.status_code == 401
+            with runtime.session_factory() as session:
+                expired_row = session.get(PendingNodeRegistrationModel,
+                                          expired_result["pending_id"])
+                assert expired_row.status == "expired" and expired_row.consumed_at is None
+            removed_expired = client.delete(
+                f"/api/zagros/nodes/{expired_result['node_id']}")
+            assert removed_expired.status_code == 200
+            assert removed_expired.json()["remote_revoked"] is False
+
             # Panel persistence contains only AES-GCM ciphertext. Neither the
             # bootstrap token nor raw signing key is a database column/value.
             with runtime.session_factory() as session:

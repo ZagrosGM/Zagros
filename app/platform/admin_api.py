@@ -2154,7 +2154,7 @@ async def native_node_delete(node_id: int, force: bool = False,
     remote_revoked = False
     # A pending row has no remote authority yet; deleting it cascades and
     # revokes its hashed enrollment credential without touching Node data.
-    if row.status != "pending":
+    if row.agent_identity:
         try:
             await asyncio.to_thread(_native_node_client(runtime, row).revoke)
             remote_revoked = True

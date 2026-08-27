@@ -73,6 +73,7 @@ class SoftEtherBackend(Protocol):
     def recover_fresh_server_password(self) -> bool:
         """Restore a persisted admin password onto a fresh blank server."""
         ...
+    def server_stop(self) -> None: ...
 
 
 class LocalSoftEtherBackend:
@@ -1277,6 +1278,13 @@ class LocalSoftEtherBackend:
                 "(Install action on the Cores page)."
             )
         self._run([binary, "start"], timeout=60)
+
+    def server_stop(self) -> None:
+        """Stop the persistent daemon without removing its configuration."""
+        binary = self.server_binary()
+        if binary is None:
+            raise CoreError("vpnserver binary not found — cannot stop SoftEther safely.")
+        self._run([binary, "stop"], timeout=60)
 
     # ------------------------------------------------------------------ #
     # Protocol implementation

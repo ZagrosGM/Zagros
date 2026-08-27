@@ -1038,8 +1038,17 @@ class SoftEtherDriver(BaseCoreDriver):
         )
 
     async def stop(self) -> None:
-        # the VPN server stays up (system-owned); accounts remain provisioned
-        pass
+        # Stop only the daemon; vpn_server.config and provisioned accounts stay
+        # in the persistent install root for a lossless subsequent start.
+        server_stop = getattr(self._backend, "server_stop", None)
+        if not callable(server_stop):
+            raise CoreError("SoftEther backend cannot stop its managed daemon safely.")
+        await asyncio.to_thread(server_stop)
+        for _ in range(20):
+            if not await asyncio.to_thread(self._backend.reachable):
+                return
+            await asyncio.sleep(0.25)
+        raise CoreError("SoftEther daemon remained reachable after stop.")
 
     async def status(self) -> CoreStatus:
         reachable = await asyncio.to_thread(self._backend.reachable)

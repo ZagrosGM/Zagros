@@ -681,7 +681,7 @@ def test_vpncmd_transports_all_credentials_over_private_pty_not_argv(monkeypatch
     command = f"IPsecEnable /PSK:{psk_secret} /DEFAULTHUB:TEST_HUB"
     backend._cmd(command, csv=True, hub=False)
     argv, kwargs = calls[0]
-    assert argv == ["/vpncmd", "localhost", "/SERVER", "/CSV"]
+    assert argv == ["/vpncmd", "localhost:5555", "/SERVER", "/CSV"]
     assert admin_secret not in " ".join(argv)
     assert psk_secret not in " ".join(argv)
     assert kwargs["administrator_password"] == admin_secret
@@ -771,7 +771,7 @@ def test_usage_batch_reads_many_users_in_one_management_session(monkeypatch) -> 
     result = backend.users_get(["1.alice", "2.bob"])
     assert len(calls) == 1
     argv, kwargs = calls[0]
-    assert argv == ["/vpncmd", "localhost", "/SERVER", "/HUB:DEFAULT"]
+    assert argv == ["/vpncmd", "localhost:5555", "/SERVER", "/HUB:DEFAULT"]
     assert kwargs["commands"] == ["UserGet 1.alice", "UserGet 2.bob"]
     assert result["1.alice"].outgoing_bytes == 1020
     assert result["1.alice"].incoming_bytes == 2030
@@ -810,7 +810,7 @@ def test_bulk_account_replay_uses_one_live_inventory_session(monkeypatch) -> Non
 
     assert len(calls) == 1
     argv, kwargs, commands = calls[0]
-    assert argv == ["/vpncmd", "localhost", "/SERVER", "/HUB:DEFAULT", "/CSV"]
+    assert argv == ["/vpncmd", "localhost:5555", "/SERVER", "/HUB:DEFAULT", "/CSV"]
     assert kwargs["commands"] == ["UserList"]
     assert kwargs["administrator_password"] == "server-admin"
     assert set(kwargs["secrets"]) == {"existing-password", "missing-password"}
@@ -926,7 +926,7 @@ def test_vpncmd_managed_hub_uses_server_auth_then_hub_switch(monkeypatch) -> Non
     )
     backend._cmd("UserList", hub_name="ZAGROS-E2E-unit")
     argv, kwargs = calls[0]
-    assert argv == ["/vpncmd", "localhost", "/SERVER"]
+    assert argv == ["/vpncmd", "localhost:5555", "/SERVER"]
     assert not any(item.startswith("/HUB:") for item in argv)
     assert kwargs["administrator_password"] == admin_secret
     assert kwargs["commands"] == ["Hub ZAGROS-E2E-unit", "UserList"]

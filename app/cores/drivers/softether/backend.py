@@ -80,7 +80,15 @@ class LocalSoftEtherBackend:
 
     def __init__(self, settings: dict):
         self.vpncmd = settings.get("executable_path", "vpncmd")
-        self.server = settings.get("server", "localhost")
+        self.server = str(settings.get("server") or "localhost:5555")
+        # vpncmd connects to TCP/443 when a server port is omitted. Zagros may
+        # reserve 443 for its HTTPS API or SSTP while the durable management
+        # listener is ``native_port`` (5555 by default). Older saved settings
+        # persisted the bare value "localhost", so normalize only loopback
+        # targets; retain vpncmd's normal behavior for explicit remote servers.
+        if self.server in {"localhost", "127.0.0.1", "::1", "[::1]"}:
+            host = "[::1]" if self.server in {"::1", "[::1]"} else self.server
+            self.server = f"{host}:{int(settings.get('native_port') or 5555)}"
         self.hub = settings.get("hub", "DEFAULT")
         self.password = settings.get("admin_password", "")
         self.timeout = float(settings.get("vpncmd_timeout", 30.0))

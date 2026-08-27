@@ -248,7 +248,7 @@ class SoftEtherDriver(BaseCoreDriver):
                 "install_root": {"type": "string",
                                  "default": "/var/lib/zagros/cores/softether/runtime",
                                  "description": "persistent vpnserver root; must survive panel container upgrades"},
-                "server": {"type": "string", "default": "localhost"},
+                "server": {"type": "string", "default": "localhost:5555"},
                 "hub": {"type": "string", "default": "DEFAULT"},
                 "admin_password": {"type": "string"},
                 "ipsec_psk": {"type": "string", "minLength": 1, "maxLength": 128},
@@ -288,7 +288,7 @@ class SoftEtherDriver(BaseCoreDriver):
         default_settings={
             "executable_path": "vpncmd",
             "install_root": "/var/lib/zagros/cores/softether/runtime",
-            "server": "localhost",
+            "server": "localhost:5555",
             "hub": "DEFAULT",
             "admin_password": "",
             "ipsec_psk": "",

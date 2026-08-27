@@ -107,6 +107,7 @@ class PlatformRuntime:
             from app import xray
 
             xray.config.bandwidth_user_id_provider = self._bandwidth_ids_by_username
+            xray.config.master_user_provider = self._master_routed_usernames
         except Exception:  # noqa: BLE001 — minimal/unit runtimes may omit legacy xray
             logger.exception("cannot attach canonical Xray bandwidth identity provider")
 
@@ -172,6 +173,15 @@ class PlatformRuntime:
                     UserModel.username.in_(wanted))
             ).all()
         return {str(username): int(user_id) for user_id, username in rows}
+
+    def _master_routed_usernames(self) -> set[str]:
+        """Users eligible for the Master's built-in Xray data plane."""
+        from sqlalchemy import select
+        from app.persistence.models import UserModel
+        with self.session_factory() as session:
+            return set(session.execute(
+                select(UserModel.username).where(UserModel.node_id.is_(None))
+            ).scalars().all())
 
     def _policy_identities(self, names: list[str]) -> dict[str, tuple[int, int]]:
         """Allocate/read stable table+mark ids in one SQL transaction."""

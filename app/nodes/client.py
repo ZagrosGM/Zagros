@@ -153,6 +153,18 @@ class ZagrosNodeClient:
             "settings": settings, "create": create,
         }, timeout=150)
 
+    def set_account_enabled(self, core_id: str, account_id: str, *,
+                            enabled: bool, user_id: int, username: str,
+                            protocol: str, settings: dict) -> dict:
+        from urllib.parse import quote
+
+        path = (f"/v1/cores/{quote(core_id, safe='')}/accounts/"
+                f"{quote(account_id, safe='')}/state")
+        return self._request("PUT", path, payload={
+            "enabled": enabled, "user_id": user_id, "username": username,
+            "protocol": protocol, "settings": settings,
+        }, timeout=150)
+
     def delete_account(self, core_id: str, account_id: str) -> dict:
         from urllib.parse import quote
 

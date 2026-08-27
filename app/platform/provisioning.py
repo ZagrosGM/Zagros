@@ -56,6 +56,57 @@ def platform_account_id(user_id: int, username: str, protocol: str) -> str:
     return f"{user_id}.{username}.{protocol}"
 
 
+def _native_node(runtime, node_id: int | None):
+    if node_id is None:
+        return None
+    from app.persistence.models import NodeModel
+    with runtime.session_factory() as session:
+        row = session.get(NodeModel, node_id)
+        if row is None or row.agent_type != "zagros_native" or not row.agent_identity:
+            raise GrantError(f"native Node {node_id} is unavailable")
+        session.expunge(row)
+        return row
+
+
+def _native_client(runtime, row):
+    import base64
+    from app.nodes.client import ZagrosNodeClient
+    credentials = runtime.cipher.decrypt_json(
+        row.agent_credentials_enc, aad=f"node-agent:{row.agent_identity}")
+    key = base64.b64decode(credentials["signing_key"])
+    certificate = str((row.settings_json or {}).get("certificate_pem") or "")
+    if len(key) != 32 or not certificate:
+        raise GrantError(f"native Node {row.id} credentials are incomplete")
+    return ZagrosNodeClient(row.address, row.port, row.agent_identity,
+                            key, certificate)
+
+
+async def _target_upsert(runtime, node, core_id: str, user: Any,
+                         platform_id: int, account: UserAccount,
+                         *, create: bool) -> None:
+    if node is None:
+        driver = runtime.core_manager.get(core_id)
+        if create:
+            await driver.create_account(account)
+        else:
+            await driver.update_account(account)
+        return
+    result = await asyncio.to_thread(
+        _native_client(runtime, node).provision_account,
+        core_id, account.account_id, user_id=platform_id,
+        username=user.username, protocol=account.protocol,
+        enabled=account.enabled, settings=dict(account.settings), create=create)
+    account.settings = dict(result.get("settings") or account.settings)
+
+
+async def _target_delete(runtime, node, core_id: str, account_id: str) -> None:
+    if node is None:
+        await runtime.core_manager.get(core_id).delete_account(account_id)
+    else:
+        await asyncio.to_thread(
+            _native_client(runtime, node).delete_account, core_id, account_id)
+
+
 def _legacy_status(value: Any) -> str:
     return getattr(value, "value", value) or "active"
 
@@ -175,15 +226,14 @@ def _proxy_rows(user: Any) -> Iterable[tuple[str, dict[str, Any], list[str]]]:
 
 
 async def sync_legacy_accounts(runtime, user: Any, platform_id: int) -> None:
-    """Mirror the legacy xray proxies as platform delivery accounts.
-
-    No driver calls are made for xray here — the legacy stack already pushes
-    users into the xray config; these rows exist so the portal/delivery layer
-    renders the xray protocols alongside the other cores.
-     Removed proxies are dropped from the mirror (the legacy stack removes
-    them from the xray config itself).
-    """
+    """Converge Xray delivery rows and native-Node Xray accounts."""
     enabled = _legacy_status(user.status) == "active"
+    platform_user = await asyncio.to_thread(runtime.users.get_user, platform_id)
+    desired_node_id = platform_user.node_id if platform_user is not None else None
+    desired_node = await asyncio.to_thread(_native_node, runtime, desired_node_id)
+    current = [a for a in await asyncio.to_thread(
+        runtime.users.accounts_of, platform_id, decrypt=True)
+        if a["core_id"] == LEGACY_CORE_ID]
     wanted: set[str] = set()
     for protocol, settings, excluded in _proxy_rows(user):
         account_id = platform_account_id(user.id, user.username, protocol)
@@ -191,19 +241,32 @@ async def sync_legacy_accounts(runtime, user: Any, platform_id: int) -> None:
         body = dict(settings)
         if excluded:
             body["excluded_inbounds"] = excluded
+        previous = next((a for a in current if a["account_id"] == account_id), None)
+        account = UserAccount(
+            user_id=platform_id, username=user.username, account_id=account_id,
+            protocol=protocol, enabled=enabled, settings=body)
+        # Master Xray remains legacy-owned. A native Node, however, requires
+        # an explicit signed provider write on every proxy edit.
+        if desired_node is not None:
+            same_target = previous is not None and previous.get("node_id") == desired_node_id
+            await _target_upsert(runtime, desired_node, LEGACY_CORE_ID, user,
+                                 platform_id, account, create=not same_target)
+            body = dict(account.settings)
         await asyncio.to_thread(
             runtime.users.upsert_core_account,
             user_id=platform_id, core_id=LEGACY_CORE_ID, account_id=account_id,
             protocol=protocol, enabled=enabled, settings=body,
-        )
-    current = [a for a in await asyncio.to_thread(
-        runtime.users.accounts_of, platform_id, decrypt=False)
-        if a["core_id"] == LEGACY_CORE_ID]
+            node_id=desired_node_id)
     for acc in current:
         if acc["account_id"] not in wanted:
+            if acc.get("node_id") is not None:
+                node = await asyncio.to_thread(_native_node, runtime, acc["node_id"])
+                await _target_delete(runtime, node, LEGACY_CORE_ID,
+                                     acc["account_id"])
             await asyncio.to_thread(
                 runtime.users.delete_account,
-                user_id=platform_id, core_id=LEGACY_CORE_ID, account_id=acc["account_id"])
+                user_id=platform_id, core_id=LEGACY_CORE_ID,
+                account_id=acc["account_id"])
         elif acc["enabled"] != enabled:
             await asyncio.to_thread(
                 runtime.users.set_account_enabled,
@@ -262,6 +325,9 @@ async def apply_grants(runtime, user: Any, platform_id: int,
     catalog = await _catalog_map(runtime)
     active = _legacy_status(user.status) == "active"
     current = await asyncio.to_thread(runtime.users.accounts_of, platform_id)
+    platform_user = await asyncio.to_thread(runtime.users.get_user, platform_id)
+    desired_node_id = platform_user.node_id if platform_user is not None else None
+    desired_node = await asyncio.to_thread(_native_node, runtime, desired_node_id)
 
     for core_id, tags in grants.items():
         if core_id == LEGACY_CORE_ID:
@@ -277,7 +343,7 @@ async def apply_grants(runtime, user: Any, platform_id: int,
                            "with a valid selection to change them", core_id, tags)
             continue
 
-        if core_id == "softether":
+        if core_id == "softether" and desired_node is None:
             # Four compatibility transports are four account identities, but
             # provisioning them through create_account opened ~12 rapid
             # localhost vpncmd logins and tripped SoftEther's management DoS
@@ -333,7 +399,10 @@ async def apply_grants(runtime, user: Any, platform_id: int,
             protocol = acc["protocol"]
             if protocol not in wanted:
                 try:
-                    await runtime.core_manager.get(core_id).delete_account(acc["account_id"])
+                    account_node = await asyncio.to_thread(
+                        _native_node, runtime, acc.get("node_id"))
+                    await _target_delete(runtime, account_node, core_id,
+                                         acc["account_id"])
                 except Exception as exc:  # noqa: BLE001 — keep converging others
                     raise GrantError(f"core '{core_id}' failed to delete account: {exc}") from exc
                 await asyncio.to_thread(
@@ -366,39 +435,60 @@ async def apply_grants(runtime, user: Any, platform_id: int,
                 user_id=platform_id, username=user.username, account_id=account_id,
                 protocol=protocol, enabled=active, settings=settings,
             )
+            previous_node_id = previous.get("node_id") if previous else None
+            same_target = previous is not None and previous_node_id == desired_node_id
             try:
-                driver = runtime.core_manager.get(core_id)
-                if previous:
-                    await driver.update_account(account)
-                else:
-                    await driver.create_account(account)
+                await _target_upsert(runtime, desired_node, core_id, user,
+                                     platform_id, account,
+                                     create=not same_target)
+                if previous is not None and not same_target:
+                    old_node = await asyncio.to_thread(
+                        _native_node, runtime, previous_node_id)
+                    try:
+                        await _target_delete(runtime, old_node, core_id, account_id)
+                    except Exception:
+                        # New copy must not remain active when removing the old
+                        # target fails; compensate before surfacing the error.
+                        await _target_delete(runtime, desired_node, core_id,
+                                             account_id)
+                        raise
             except Exception as exc:  # noqa: BLE001 — name the failing core
                 raise GrantError(f"core '{core_id}' failed to provision account: {exc}") from exc
             await asyncio.to_thread(
                 runtime.users.upsert_core_account,
                 user_id=platform_id, core_id=core_id, account_id=account_id,
                 protocol=protocol, enabled=active, settings=dict(account.settings),
+                node_id=desired_node_id,
             )
 
 
 async def sync_grants_enabled(runtime, user: Any, platform_id: int) -> None:
     """Push the legacy active/disabled state onto every platform account."""
     active = _legacy_status(user.status) == "active"
-    accounts = await asyncio.to_thread(runtime.users.accounts_of, platform_id, decrypt=False)
+    accounts = await asyncio.to_thread(runtime.users.accounts_of, platform_id, decrypt=True)
     for acc in accounts:
         if acc["enabled"] == active:
             continue
-        if acc["core_id"] != LEGACY_CORE_ID:
+        if acc["core_id"] != LEGACY_CORE_ID or acc.get("node_id") is not None:
             try:
-                driver = runtime.core_manager.get(acc["core_id"])
-                if active:
-                    await driver.resume_account(UserAccount(
+                node = await asyncio.to_thread(
+                    _native_node, runtime, acc.get("node_id"))
+                if node is not None:
+                    await asyncio.to_thread(
+                        _native_client(runtime, node).set_account_enabled,
+                        acc["core_id"], acc["account_id"], enabled=active,
                         user_id=platform_id, username=user.username,
-                        account_id=acc["account_id"], protocol=acc["protocol"],
-                        enabled=True, settings={},
-                    ))
+                        protocol=acc["protocol"], settings=acc["settings"])
                 else:
-                    await driver.suspend_account(acc["account_id"])
+                    driver = runtime.core_manager.get(acc["core_id"])
+                    if active:
+                        await driver.resume_account(UserAccount(
+                            user_id=platform_id, username=user.username,
+                            account_id=acc["account_id"], protocol=acc["protocol"],
+                            enabled=True, settings=acc["settings"],
+                        ))
+                    else:
+                        await driver.suspend_account(acc["account_id"])
             except Exception as exc:  # noqa: BLE001 — row state still converges
                 logger.warning("core %s suspend/resume failed for %s: %s",
                                acc["core_id"], user.username, exc)

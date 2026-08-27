@@ -54,6 +54,9 @@ class XRayConfig(dict):
         # for compatibility, while SO_MARK must use the SAME canonical ID as
         # every non-Xray Core and the global tc actions.
         self.bandwidth_user_id_provider = None
+        # Optional platform bridge filter: assigned native-Node users must not
+        # remain active in the Master's built-in Xray configuration.
+        self.master_user_provider = None
         self.bandwidth_user_ids: set[int] = set()
         self.bandwidth_identity_map: dict[int, int] = {}
 
@@ -371,7 +374,7 @@ class XRayConfig(dict):
         for name, value in self.__dict__.items():
             setattr(
                 clone, name,
-                value if name == "bandwidth_user_id_provider" else deepcopy(value),
+                value if name in ("bandwidth_user_id_provider", "master_user_provider") else deepcopy(value),
             )
         return clone
 
@@ -399,6 +402,10 @@ class XRayConfig(dict):
                 db_models.Proxy.settings,
             )
             result = query.all()
+            master_provider = getattr(self, "master_user_provider", None)
+            if callable(master_provider):
+                master_usernames = set(master_provider())
+                result = [row for row in result if row.username in master_usernames]
 
             grouped_data = defaultdict(list)
 

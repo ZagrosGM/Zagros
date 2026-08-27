@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.cores.manager import CoreManager
+from app.cores.types import UserAccount
 from app.cores.registry import available_drivers, discover_builtin
 from app.node_agent.security import (
     NodeIdentityStore,
@@ -96,6 +97,15 @@ class CoreActionBody(BaseModel):
 
 class InboundDocument(BaseModel):
     document: dict[str, Any]
+
+
+class AccountStateBody(BaseModel):
+    enabled: bool
+    user_id: int = Field(ge=1)
+    username: str = Field(default="", max_length=128)
+    protocol: str = Field(min_length=1, max_length=32,
+                          pattern=r"^[a-z0-9][a-z0-9+._-]*$")
+    settings: dict[str, Any] = Field(default_factory=dict)
 
 
 class AccountWriteBody(BaseModel):
@@ -296,6 +306,32 @@ async def account_upsert(core_id: str, account_id: str, body: AccountWriteBody,
     # over the pinned, signed control plane so Master can seal the final state.
     return {"core_id": core_id, "account_id": account_id,
             "settings": account.settings, "enabled": account.enabled}
+
+
+@app.put("/v1/cores/{core_id}/accounts/{account_id}/state")
+async def account_state(core_id: str, account_id: str, body: AccountStateBody,
+                        _node=Depends(signed_request)):
+    _authorize_core(core_id)
+    if core_id not in core_manager.list_cores():
+        raise HTTPException(409, f"core '{core_id}' is not installed")
+    driver = core_manager.get(core_id)
+    try:
+        if body.enabled:
+            await asyncio.wait_for(driver.resume_account(UserAccount(
+                user_id=body.user_id, username=body.username,
+                account_id=account_id, protocol=body.protocol, enabled=True,
+                settings=dict(body.settings))), timeout=120)
+        else:
+            await asyncio.wait_for(driver.suspend_account(account_id), timeout=120)
+    except Exception as exc:
+        identity.audit("account.state.failed", {"core_id": core_id,
+                       "account_id": account_id,
+                       "error_type": type(exc).__name__})
+        raise HTTPException(409, str(exc)) from exc
+    identity.audit("account.state", {"core_id": core_id,
+                   "account_id": account_id, "enabled": body.enabled})
+    return {"core_id": core_id, "account_id": account_id,
+            "enabled": body.enabled}
 
 
 @app.delete("/v1/cores/{core_id}/accounts/{account_id}")

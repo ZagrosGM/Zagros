@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 import psutil
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from app.cores.manager import CoreManager
 from app.cores.types import UserAccount
@@ -86,6 +86,10 @@ class RegisterBody(BaseModel):
     panel_id: str = Field(min_length=8, max_length=128,
                           pattern=r"^[A-Za-z0-9._-]+$")
     registration_token: str = Field(min_length=16, max_length=512)
+
+
+class ReenrollmentBody(BaseModel):
+    registration_token: SecretStr
 
 
 class CoreActionBody(BaseModel):
@@ -165,6 +169,13 @@ async def signed_request(
 async def heartbeat(_node=Depends(signed_request)):
     return {"node_id": identity.node_id, "ts": int(time.time()),
             "agent": "zagros-node", "api_version": 1}
+
+
+@app.post("/v1/prepare-reenrollment")
+async def prepare_reenrollment(body: ReenrollmentBody,
+                               _node=Depends(signed_request)):
+    identity.prepare_reenrollment(body.registration_token.get_secret_value())
+    return {"prepared": True}
 
 
 @app.post("/v1/revoke")

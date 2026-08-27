@@ -116,6 +116,11 @@ class ZagrosNodeClient:
     def health(self) -> dict:
         return self._request("GET", "/v1/health")
 
+    def prepare_reenrollment(self, registration_token: str) -> dict:
+        return self._request("POST", "/v1/prepare-reenrollment", payload={
+            "registration_token": registration_token,
+        })
+
     def revoke(self) -> dict:
         return self._request("POST", "/v1/revoke")
 

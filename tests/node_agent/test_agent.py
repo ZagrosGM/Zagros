@@ -125,9 +125,15 @@ def test_registration_signed_heartbeat_replay_guard_and_real_core_lifecycle(
         async def create_account(account):
             account.settings["id"] = "generated-test-uuid"
             calls.append(("create", account.account_id))
+        async def suspend_account(account_id):
+            calls.append(("suspend", account_id))
+        async def resume_account(account):
+            calls.append(("resume", account.account_id, account.settings.get("id")))
         async def delete_account(account_id):
             calls.append(("delete", account_id))
         monkeypatch.setattr(driver, "create_account", create_account)
+        monkeypatch.setattr(driver, "suspend_account", suspend_account)
+        monkeypatch.setattr(driver, "resume_account", resume_account)
         monkeypatch.setattr(driver, "delete_account", delete_account)
         account_path = "/v1/cores/xray/accounts/1.alice.vless"
         provisioned = _signed(client, node_id, key, "PUT", account_path, {
@@ -136,10 +142,39 @@ def test_registration_signed_heartbeat_replay_guard_and_real_core_lifecycle(
         })
         assert provisioned.status_code == 200, provisioned.text
         assert provisioned.json()["settings"]["id"] == "generated-test-uuid"
+        state_path = account_path + "/state"
+        disabled = _signed(client, node_id, key, "PUT", state_path, {
+            "enabled": False, "user_id": 1, "username": "alice",
+            "protocol": "vless", "settings": {"id": "generated-test-uuid"},
+        })
+        assert disabled.status_code == 200 and disabled.json()["enabled"] is False
+        enabled = _signed(client, node_id, key, "PUT", state_path, {
+            "enabled": True, "user_id": 1, "username": "alice",
+            "protocol": "vless", "settings": {"id": "generated-test-uuid"},
+        })
+        assert enabled.status_code == 200 and enabled.json()["enabled"] is True
+        # The exact same signed request is rejected by the persisted nonce guard.
+        state_body = json.dumps({
+            "enabled": False, "user_id": 1, "username": "alice",
+            "protocol": "vless", "settings": {"id": "generated-test-uuid"},
+        }, separators=(",", ":")).encode()
+        replay_headers = _headers(node_id, key, "PUT", state_path, state_body,
+                                  nonce=secrets.token_hex(16))
+        assert client.put(state_path, content=state_body, headers=replay_headers).status_code == 200
+        assert client.put(state_path, content=state_body, headers=replay_headers).status_code == 401
         deleted = _signed(client, node_id, key, "DELETE", account_path)
         assert deleted.status_code == 200 and deleted.json()["deleted"] is True
         assert calls == [("create", "1.alice.vless"),
+                         ("suspend", "1.alice.vless"),
+                         ("resume", "1.alice.vless", "generated-test-uuid"),
+                         ("suspend", "1.alice.vless"),
                          ("delete", "1.alice.vless")]
+        audit_path = tmp_path / "audit.jsonl"
+        audit_rows = [json.loads(line) for line in audit_path.read_text().splitlines()]
+        assert sum(row["action"] == "account.state" for row in audit_rows) == 3
+        assert any(row["action"] == "account.delete" for row in audit_rows)
+        assert audit_path.stat().st_mode & 0o777 == 0o600
+        assert "generated-test-uuid" not in audit_path.read_text()
 
         # A signed panel still has bounded authority: core ids and setting keys
         # are allowlisted; neither arbitrary adapters nor shell-like settings

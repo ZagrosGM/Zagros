@@ -1721,6 +1721,18 @@ class UserNodeAssignmentBody(BaseModel):
     node_id: int | None = Field(default=None, ge=1)
 
 
+class NativeNodeEditBody(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    address: str | None = Field(default=None, min_length=1, max_length=256)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    enabled: bool | None = None
+
+
+class NativeNodeReenrollBody(BaseModel):
+    certificate_fingerprint: str | None = Field(default=None, min_length=64,
+                                                 max_length=128)
+
+
 def _native_node_view(row) -> dict[str, Any]:
     settings = dict(row.settings_json or {})
     settings.pop("certificate_pem", None)
@@ -1732,6 +1744,7 @@ def _native_node_view(row) -> dict[str, Any]:
         "agent_identity": row.agent_identity,
         "certificate_fingerprint": row.certificate_fingerprint,
         "last_seen": row.last_seen,
+        "enabled": settings.get("enabled", True),
         "agent_version": settings.get("agent_version"),
         "health": settings.get("health"),
         "cores": settings.get("cores"),
@@ -2046,6 +2059,117 @@ async def native_node_register(body: NativeNodeRegisterBody,
         raise HTTPException(500, detail) from exc
 
 
+@zagros_admin_router.put("/nodes/{node_id}")
+async def native_node_edit(node_id: int, body: NativeNodeEditBody,
+                           runtime=Depends(get_runtime)):
+    from sqlalchemy import select
+    from app.persistence.models import NodeModel
+
+    def update_row():
+        with runtime.session_factory() as session:
+            row = session.get(NodeModel, node_id)
+            if row is None or row.agent_type != "zagros_native":
+                return None
+            if body.name is not None and body.name != row.name:
+                if session.scalar(select(NodeModel.id).where(
+                        NodeModel.name == body.name, NodeModel.id != node_id)):
+                    raise ValueError("Node name already exists")
+                row.name = body.name
+            # Changing a pinned endpoint requires explicit re-enrollment; an
+            # edit must never silently redirect signing authority.
+            if body.address is not None and body.address != row.address:
+                raise ValueError("address changes require re-enrollment")
+            if body.port is not None and body.port != row.port:
+                raise ValueError("API port changes require re-enrollment")
+            settings = dict(row.settings_json or {})
+            if body.enabled is not None:
+                settings["enabled"] = body.enabled
+                row.status = "disabled" if not body.enabled else (
+                    "connected" if row.agent_identity else row.status)
+            row.settings_json = settings
+            session.commit(); session.refresh(row)
+            return _native_node_view(row)
+    try:
+        result = await asyncio.to_thread(update_row)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if result is None:
+        raise HTTPException(404, "native node not found")
+    return result
+
+
+@zagros_admin_router.post("/nodes/{node_id}/reenroll")
+async def native_node_reenroll(node_id: int, body: NativeNodeReenrollBody,
+                               runtime=Depends(get_runtime)):
+    """Rotate Node signing authority without exposing it to an administrator."""
+    import base64
+    import hashlib
+    from app.nodes.client import ZagrosNodeClient, fetch_pinned_certificate
+    from app.persistence.models import NodeModel
+
+    row = await asyncio.to_thread(_native_node_row, runtime, node_id)
+    if row is None or not row.agent_identity:
+        raise HTTPException(409, "Node is not currently registered")
+    fingerprint_input = body.certificate_fingerprint or row.certificate_fingerprint
+    try:
+        certificate_pem, fingerprint = await asyncio.to_thread(
+            fetch_pinned_certificate, row.address, row.port, fingerprint_input)
+        old_client = _native_node_client(runtime, row)
+        bootstrap = secrets.token_urlsafe(32)
+        await asyncio.to_thread(old_client.prepare_reenrollment, bootstrap)
+        authority_replaced = True
+        unsigned = ZagrosNodeClient(row.address, row.port, None, None,
+                                    certificate_pem)
+        panel_id = "panel-" + hashlib.sha256(runtime.cipher._key).hexdigest()[:24]
+        registration = await asyncio.to_thread(
+            unsigned.register, panel_id, bootstrap)
+        signing_key = base64.b64decode(registration["signing_key"])
+        node_identity = str(registration["node_id"])
+        if node_identity != row.agent_identity or len(signing_key) != 32:
+            raise ValueError("Node returned inconsistent identity or signing key")
+        encrypted = runtime.cipher.encrypt_json(
+            {"signing_key": base64.b64encode(signing_key).decode("ascii")},
+            aad=f"node-agent:{node_identity}")
+    except Exception as exc:
+        if locals().get("authority_replaced", False):
+            def mark_disconnected():
+                with runtime.session_factory() as session:
+                    current = session.get(NodeModel, node_id)
+                    if current:
+                        current.status = "disconnected"
+                        current.settings_json = {**(current.settings_json or {}),
+                                                 "last_error": str(exc)[:300]}
+                        session.commit()
+            await asyncio.to_thread(mark_disconnected)
+        raise HTTPException(502, f"Node re-enrollment failed: {exc}") from exc
+    finally:
+        if "bootstrap" in locals():
+            bootstrap = ""  # discard the one-use plaintext immediately
+
+    def persist():
+        with runtime.session_factory() as session:
+            current = session.get(NodeModel, node_id)
+            current.agent_credentials_enc = encrypted
+            current.certificate_fingerprint = fingerprint
+            current.settings_json = {**(current.settings_json or {}),
+                                     "certificate_pem": certificate_pem}
+            current.status = "connected"
+            current.last_seen = datetime.now(timezone.utc)
+            session.commit(); session.refresh(current)
+            return _native_node_view(current)
+    try:
+        return await asyncio.to_thread(persist)
+    except Exception as exc:
+        try:
+            rotated = ZagrosNodeClient(row.address, row.port, node_identity,
+                                       signing_key, certificate_pem)
+            await asyncio.to_thread(rotated.revoke)
+        except Exception:  # noqa: BLE001
+            pass
+        raise HTTPException(
+            500, "re-enrollment persistence failed; rotated authority revoked") from exc
+
+
 @zagros_admin_router.post("/nodes/{node_id}/heartbeat")
 async def native_node_heartbeat(node_id: int, runtime=Depends(get_runtime)):
     from datetime import datetime, timezone
@@ -2054,6 +2178,8 @@ async def native_node_heartbeat(node_id: int, runtime=Depends(get_runtime)):
     row = await asyncio.to_thread(_native_node_row, runtime, node_id)
     if row is None:
         raise HTTPException(404, "native node not found")
+    if (row.settings_json or {}).get("enabled", True) is False:
+        raise HTTPException(409, "native node is disabled")
     try:
         client = _native_node_client(runtime, row)
         heartbeat, health, cores = await asyncio.gather(
@@ -2095,7 +2221,7 @@ async def native_node_heartbeat(node_id: int, runtime=Depends(get_runtime)):
 async def native_node_core_lifecycle(node_id: int, core_id: str,
                                      body: NativeNodeLifecycleBody,
                                      runtime=Depends(get_runtime)):
-    allowed = {"install", "uninstall", "start", "stop", "restart"}
+    allowed = {"install", "uninstall", "start", "stop", "restart", "enable", "disable"}
     if body.action not in allowed:
         raise HTTPException(422, f"action must be one of {sorted(allowed)}")
     row = await asyncio.to_thread(_native_node_row, runtime, node_id)

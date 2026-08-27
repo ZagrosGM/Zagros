@@ -110,9 +110,24 @@ class NodeIdentityStore:
             self.audit("node.register", {"panel_id": panel_id})
             return key
 
+    def prepare_reenrollment(self, token: str) -> None:
+        """Atomically replace panel authority with one hashed bootstrap token."""
+        if len(token) < 32:
+            raise NodeSecurityError("re-enrollment token is too short")
+        with self._lock:
+            state = self._read()
+            state["registration_token_hash"] = hashlib.sha256(
+                token.encode("utf-8")).hexdigest()
+            state["signing_key_enc"] = None
+            state.pop("signing_key", None)
+            state["registered_panel"] = None
+            self._write(state)
+            self.audit("node.reenrollment.prepare", {})
+
     def revoke(self) -> None:
         with self._lock:
             state = self._read()
+            state["registration_token_hash"] = ""
             state["signing_key_enc"] = None
             state.pop("signing_key", None)
             state["registered_panel"] = None

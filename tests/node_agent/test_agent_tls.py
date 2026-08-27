@@ -211,6 +211,25 @@ def test_real_panel_api_to_tls_agent_registration_health_lifecycle_and_revoke(
             assert "available" in result["cores"]
             assert "xray" in result["cores"]["installed"]
 
+            with runtime.session_factory() as session:
+                old_ciphertext = session.get(NodeModel, node_id).agent_credentials_enc
+            mismatch = client.post(
+                f"/api/zagros/nodes/{node_id}/reenroll",
+                json={"certificate_fingerprint": "0" * 64})
+            assert mismatch.status_code == 502
+            with runtime.session_factory() as session:
+                assert session.get(NodeModel, node_id).status == "connected"
+                assert session.get(NodeModel, node_id).agent_credentials_enc == old_ciphertext
+            reenrolled = client.post(
+                f"/api/zagros/nodes/{node_id}/reenroll", json={})
+            assert reenrolled.status_code == 200, reenrolled.text
+            assert reenrolled.json()["status"] == "connected"
+            with runtime.session_factory() as session:
+                rotated = session.get(NodeModel, node_id)
+                assert rotated.agent_credentials_enc != old_ciphertext
+            after_rotation = client.post(f"/api/zagros/nodes/{node_id}/heartbeat")
+            assert after_rotation.status_code == 200, after_rotation.text
+
             lifecycle = client.post(
                 f"/api/zagros/nodes/{node_id}/cores/xray/lifecycle",
                 json={"action": "stop", "settings": {},

@@ -24,7 +24,7 @@ interface NativeNode {
   id: number; name: string; address: string; port: number; status: string;
   usage_coefficient: number; agent_type: "zagros_native";
   agent_identity?: string | null; certificate_fingerprint?: string | null;
-  last_seen?: string | null; agent_version?: string | null;
+  last_seen?: string | null; agent_version?: string | null; enabled?: boolean;
   health?: { healthy?: boolean; resources?: Record<string, number | number[] | null> } | null;
   cores?: AgentCoreInventory | null;
 }
@@ -38,6 +38,7 @@ export default function Nodes() {
   const qc = useQueryClient();
   const [registerOpen, setRegisterOpen] = useState(false);
   const [deleteFor, setDeleteFor] = useState<NativeNode | null>(null);
+  const [editFor, setEditFor] = useState<NativeNode | null>(null);
   const [coreFor, setCoreFor] = useState<NativeNode | null>(null);
 
   const list = useQuery({
@@ -48,6 +49,16 @@ export default function Nodes() {
   const heartbeat = useMutation({
     mutationFn: (id: number) => api.post(`/zagros/nodes/${id}/heartbeat`),
     onSuccess: () => { toast.ok("signed heartbeat verified"); qc.invalidateQueries({ queryKey: ["zagros", "native-nodes"] }); },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
+  });
+  const toggle = useMutation({
+    mutationFn: ({ id, enabled }: { id: number; enabled: boolean }) => api.put(`/zagros/nodes/${id}`, { enabled }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["zagros", "native-nodes"] }),
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
+  });
+  const reenroll = useMutation({
+    mutationFn: (id: number) => api.post(`/zagros/nodes/${id}/reenroll`, {}),
+    onSuccess: () => { toast.ok("Node signing authority rotated"); qc.invalidateQueries({ queryKey: ["zagros", "native-nodes"] }); },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
   });
   const remove = useMutation({
@@ -105,6 +116,9 @@ export default function Nodes() {
               <div className="mt-3 flex items-center gap-1 border-t border-border pt-3">
                 <Button variant="ghost" size="sm" onClick={() => heartbeat.mutate(node.id)} loading={heartbeat.isPending} disabled={!node.agent_identity}><Activity size={13} /> Health</Button>
                 <Button variant="ghost" size="sm" onClick={() => setCoreFor(node)} disabled={!node.agent_identity}><HardDrive size={13} /> Inventory</Button>
+                <Button variant="ghost" size="sm" onClick={() => setEditFor(node)}>Edit</Button>
+                <Button variant="ghost" size="sm" onClick={() => toggle.mutate({ id: node.id, enabled: node.enabled === false })}>{node.enabled === false ? "Enable" : "Disable"}</Button>
+                <Button variant="ghost" size="sm" onClick={() => reenroll.mutate(node.id)} disabled={!node.agent_identity || node.enabled === false}>Re-register</Button>
                 <Button variant="ghost" size="icon" className="ms-auto" aria-label="delete node" onClick={() => setDeleteFor(node)}><Trash2 size={14} /></Button>
               </div>
             </Card>;
@@ -113,6 +127,7 @@ export default function Nodes() {
       )}
 
       {registerOpen && <RegisterNodeDialog onClose={() => setRegisterOpen(false)} />}
+      {editFor && <EditNodeDialog node={editFor} onClose={() => setEditFor(null)} />}
       {coreFor && <NodeCoreDialog node={coreFor} onClose={() => setCoreFor(null)} />}
       <ConfirmDialog open={Boolean(deleteFor)} onClose={() => setDeleteFor(null)}
         onConfirm={() => deleteFor && remove.mutate(deleteFor.id)} danger loading={remove.isPending}
@@ -120,6 +135,28 @@ export default function Nodes() {
         body="The panel first sends a signed revoke to the agent. If the node is offline, deletion fails closed so an orphan authority is not silently left behind." />
     </div>
   );
+}
+
+function EditNodeDialog({ node, onClose }: { node: NativeNode; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [name, setName] = useState(node.name);
+  const [error, setError] = useState("");
+  const save = useMutation({
+    mutationFn: () => api.put(`/zagros/nodes/${node.id}`, { name }),
+    onSuccess: () => { toast.ok("Node updated"); qc.invalidateQueries({ queryKey: ["zagros", "native-nodes"] }); onClose(); },
+    onError: (e) => setError(e instanceof ApiError ? e.message : "Node update failed"),
+  });
+  return <Dialog open onClose={onClose} title={`Edit Node — ${node.name}`}
+    subtitle="Address and API port are pinned identity properties and can only change through explicit re-enrollment."
+    footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button onClick={() => save.mutate()} loading={save.isPending} disabled={!name.trim()}>Save</Button></>}>
+    <Field label="Name" required><Input value={name} onChange={(event) => setName(event.target.value)} /></Field>
+    <div className="mt-3 grid gap-3 sm:grid-cols-2">
+      <Field label="Address"><Input value={node.address} disabled /></Field>
+      <Field label="API Port"><Input value={node.port} disabled /></Field>
+    </div>
+    <Field label="TLS fingerprint"><Input className="mt-3" value={node.certificate_fingerprint ?? "pending"} disabled /></Field>
+    {error && <p className="mt-3 text-xs text-danger">{error}</p>}
+  </Dialog>;
 }
 
 function RegisterNodeDialog({ onClose }: { onClose: () => void }) {

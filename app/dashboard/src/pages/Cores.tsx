@@ -19,7 +19,97 @@ import type { CoreRegistryEntry, CoreRelease, CoreView } from "../lib/types";
 const stateTone = (s: string) =>
   s === "running" ? "ok" : s === "error" ? "danger" : s === "stopped" || s === "installed" ? "info" : "muted";
 
+interface NodeCoreStatus {
+  core_id: string; state: string; health?: string; enabled?: boolean;
+  core_version?: string | null; message?: string | null;
+}
+interface CoreNode {
+  id: number; name: string; status: string;
+  cores?: { installed: Record<string, NodeCoreStatus>; available: string[] } | null;
+}
+
 export default function Cores() {
+  const [target, setTarget] = useState("master");
+  const nodes = useQuery({
+    queryKey: ["zagros", "native-nodes"],
+    queryFn: () => api.get<{ nodes: CoreNode[] }>("/zagros/nodes"),
+    refetchInterval: 5000,
+  });
+  const selected = (nodes.data?.nodes ?? []).find((node) => `node:${node.id}` === target);
+  return <div className="space-y-4">
+    <Tabs active={target} onChange={setTarget} tabs={[
+      { id: "master", label: "Master", icon: <Cpu size={13} /> },
+      ...(nodes.data?.nodes ?? []).filter((node) => node.status !== "pending").map((node) => ({
+        id: `node:${node.id}`, label: node.name, icon: <Cpu size={13} />,
+      })),
+    ]} />
+    {target === "master" ? <MasterCores /> : selected ? <NodeCores node={selected} /> : <Card><EmptyState title="Node unavailable" /></Card>}
+  </div>;
+}
+
+function NodeCores({ node }: { node: CoreNode }) {
+  const qc = useQueryClient();
+  const [section, setSection] = useState("installed");
+  const [logs, setLogs] = useState<{ core: string; lines: string[] } | null>(null);
+  const inventory = node.cores ?? { installed: {}, available: [] };
+  const installed = Object.values(inventory.installed ?? {});
+  const catalog = (inventory.available ?? []).filter((id) => !inventory.installed?.[id]);
+  const refresh = async () => {
+    await api.post(`/zagros/nodes/${node.id}/heartbeat`);
+    await qc.invalidateQueries({ queryKey: ["zagros", "native-nodes"] });
+  };
+  const lifecycle = useMutation({
+    mutationFn: ({ core, action }: { core: string; action: string }) =>
+      api.post(`/zagros/nodes/${node.id}/cores/${encodeURIComponent(core)}/lifecycle`, {
+        action, settings: {}, purge: false, force: false,
+      }),
+    onSuccess: async (_result, value) => { toast.ok(`${node.name} · ${value.core}: ${value.action}`); await refresh(); },
+    onError: (error) => toast.error(error instanceof ApiError ? error.message : "Node operation failed"),
+  });
+  const loadLogs = async (core: string) => {
+    try {
+      const result = await api.get<{ lines: string[] }>(`/zagros/nodes/${node.id}/cores/${encodeURIComponent(core)}/logs?tail=300`);
+      setLogs({ core, lines: result.lines });
+    } catch (error) { toast.error(error instanceof ApiError ? error.message : "Logs unavailable"); }
+  };
+  return <div className="space-y-4 animate-fade-up">
+    <div className="flex flex-wrap items-center gap-3">
+      <h1 className="me-auto flex items-center gap-2 text-lg font-bold"><Cpu size={18} className="text-brand" />{node.name} Core Management</h1>
+      <Badge tone={node.status === "connected" ? "ok" : "danger"}>{node.status}</Badge>
+      <Button variant="ghost" size="sm" onClick={refresh}><RefreshCcw size={13} /> refresh inventory</Button>
+      <Tabs active={section} onChange={setSection} tabs={[
+        { id: "installed", label: `Cores (${installed.length})`, icon: <Cpu size={13} /> },
+        { id: "catalog", label: `Catalog (${catalog.length})`, icon: <Download size={13} /> },
+      ]} />
+    </div>
+    {section === "installed" && <div className="grid gap-4 md:grid-cols-2">
+      {installed.length === 0 ? <Card><EmptyState title="No cores installed on this Node" /></Card> : installed.map((core) => <Card key={core.core_id}>
+        <div className="flex items-center justify-between"><h3 className="font-semibold">{core.core_id}</h3><Badge tone={stateTone(core.state) as never}>{core.state} · {core.health ?? "unknown"}</Badge></div>
+        <p className="mt-2 text-xs text-content-3">version {core.core_version ?? "unknown"}</p>
+        {core.message && <p className="mt-2 text-xs text-warn">{core.message}</p>}
+        <div className="mt-4 flex flex-wrap gap-1.5 border-t border-border pt-3">
+          <Button size="sm" onClick={() => lifecycle.mutate({ core: core.core_id, action: "start" })}><Play size={13} /> start</Button>
+          <Button size="sm" variant="secondary" onClick={() => lifecycle.mutate({ core: core.core_id, action: "stop" })}><Square size={13} /> stop</Button>
+          <Button size="sm" variant="secondary" onClick={() => lifecycle.mutate({ core: core.core_id, action: "restart" })}><RotateCw size={13} /> restart</Button>
+          <Button size="sm" variant="ghost" onClick={() => lifecycle.mutate({ core: core.core_id, action: core.enabled === false ? "enable" : "disable" })}>{core.enabled === false ? "enable" : "disable"}</Button>
+          <Button size="sm" variant="ghost" onClick={() => loadLogs(core.core_id)}><FileText size={13} /> logs</Button>
+          <Button size="sm" variant="danger" onClick={() => lifecycle.mutate({ core: core.core_id, action: "uninstall" })}><Trash2 size={13} /> uninstall</Button>
+        </div>
+      </Card>)}
+    </div>}
+    {section === "catalog" && <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      {catalog.length === 0 ? <Card><EmptyState title="Every available core is installed" /></Card> : catalog.map((core) => <Card key={core}>
+        <div className="flex items-center justify-between"><h3 className="font-semibold">{core}</h3><Badge tone="muted">Node catalog</Badge></div>
+        <Button className="mt-4" size="sm" onClick={() => lifecycle.mutate({ core, action: "install" })}><HardDriveDownload size={13} /> install</Button>
+      </Card>)}
+    </div>}
+    {logs && <Dialog open onClose={() => setLogs(null)} wide title={`logs — ${node.name} / ${logs.core}`} footer={<Button onClick={() => setLogs(null)}>close</Button>}>
+      <pre className="max-h-[60vh] overflow-auto rounded-xl bg-surface p-3 text-[10px]" dir="ltr">{logs.lines.join("\n")}</pre>
+    </Dialog>}
+  </div>;
+}
+
+function MasterCores() {
   const t = useT();
   const digits = useDigits();
   const qc = useQueryClient();

@@ -88,7 +88,7 @@ class RegisterBody(BaseModel):
 
 
 class CoreActionBody(BaseModel):
-    action: Literal["install", "uninstall", "start", "stop", "restart"]
+    action: Literal["install", "uninstall", "start", "stop", "restart", "enable", "disable"]
     settings: dict[str, Any] = Field(default_factory=dict)
     purge: bool = False
     force: bool = False
@@ -238,6 +238,10 @@ async def core_lifecycle(core_id: str, body: CoreActionBody,
             await core_manager.stop_core(core_id)
         elif action == "restart":
             await core_manager.restart_core(core_id)
+        elif action == "enable":
+            await core_manager.enable_core(core_id)
+        elif action == "disable":
+            await core_manager.disable_core(core_id)
 
     try:
         await asyncio.wait_for(execute(), timeout=timeout)

@@ -2,9 +2,9 @@
 // theme/locale toggles, mobile drawer, keyboard shortcuts.
 import { clsx } from "clsx";
 import {
-  Activity, Award, Boxes, ChevronLeft, Cpu, FileTerminal, Globe, Grid3X3,
-  HardDrive, LayoutDashboard, LayoutTemplate, LogOut, Menu, Moon, Network,
-  Radio, Route, Search, ServerCog, Settings, ShieldCheck, Store, Sun, TerminalSquare,
+  Activity, Award, Boxes, ChevronLeft, Cpu, FileTerminal, Globe,
+  HardDrive, LayoutDashboard, LayoutTemplate, LifeBuoy, LogOut, Menu, Moon, Network,
+  Radio, Route, Search, ServerCog, Settings, ShieldCheck, Sun, TerminalSquare,
   Users, Waypoints, Wifi,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -29,13 +29,12 @@ const NAV = [
   ]},
   { section: "nav.section.network", items: [
     { to: "/cores", icon: Cpu, key: "nav.cores" },
-    { to: "/capabilities", icon: Grid3X3, key: "nav.capabilities" },
-    { to: "/routing", icon: Route, key: "nav.routing" },
-    { to: "/outbounds", icon: Network, key: "nav.outbounds" },
     { to: "/inbounds", icon: Waypoints, key: "nav.inbounds" },
+    { to: "/outbounds", icon: Network, key: "nav.outbounds" },
+    { to: "/routing", icon: Route, key: "nav.routing" },
     { to: "/hosts", icon: ServerCog, key: "nav.hosts" },
-    { to: "/dns", icon: Globe, key: "nav.dns" },
     { to: "/certificates", icon: ShieldCheck, key: "nav.certificates" },
+    { to: "/dns", icon: Globe, key: "nav.dns" },
   ]},
   { section: "nav.section.observe", items: [
     { to: "/sessions", icon: Activity, key: "nav.sessions" },
@@ -43,7 +42,7 @@ const NAV = [
     { to: "/logs", icon: FileTerminal, key: "nav.logs" },
   ]},
   { section: "nav.section.system", items: [
-    { to: "/marketplace", icon: Store, key: "nav.marketplace" },
+    { to: "/support", icon: LifeBuoy, key: "nav.support" },
     { to: "/settings", icon: Settings, key: "nav.settings" },
     { to: "/advanced", icon: TerminalSquare, key: "nav.advanced" },
   ]},

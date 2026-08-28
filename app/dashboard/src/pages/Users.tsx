@@ -117,7 +117,10 @@ export default function Users() {
   const [showFilters, setShowFilters] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dialog, setDialog] = useState<{ mode: "create" } | { mode: "edit"; user: User } | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<User | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ type: "single"; username: string } | { type: "bulk"; usernames: string[] } | null>(null);
+  const [moreAnchor, setMoreAnchor] = useState<HTMLElement | null>(null);
+  const [bulkDialog, setBulkDialog] = useState(false);
+  const [statusDeleteDialog, setStatusDeleteDialog] = useState(false);
   // α7.2: the row menu is portal-mounted (RowMenu) → track the anchor element
   const [menu, setMenu] = useState<{ user: User; anchor: HTMLElement } | null>(null);
 
@@ -174,18 +177,41 @@ export default function Users() {
   const templates = useMemo(() => templatesQ.data ?? [], [templatesQ.data]);
 
   const bulk = async (action: "activate" | "disable" | "delete") => {
+    if (action === "delete") {
+      setConfirmDelete({ type: "bulk", usernames: Array.from(selected) });
+      return;
+    }
     const names = [...selected];
     setSelected(new Set());
     let failures = 0;
     for (const username of names) {
       try {
-        if (action === "delete") await api.delete(`/user/${username}`);
-        else await api.put(`/user/${username}`, { status: action === "activate" ? "active" : "disabled" });
+        await api.put(`/user/${username}`, { status: action === "activate" ? "active" : "disabled" });
       } catch { failures++; }
     }
     if (failures) toast.error(`${failures} ${t("common.error").toLowerCase()}`);
     else toast.ok(t("common.saved"));
     invalidate();
+  };
+
+  const executeConfirmDelete = async () => {
+    if (!confirmDelete) return;
+    if (confirmDelete.type === "single") {
+      deleteUser.mutate(confirmDelete.username);
+    } else if (confirmDelete.type === "bulk") {
+      const names = confirmDelete.usernames;
+      setConfirmDelete(null);
+      let failures = 0;
+      for (const username of names) {
+        try {
+          await api.delete(`/user/${username}`);
+        } catch { failures++; }
+      }
+      setSelected(new Set());
+      if (failures) toast.error(`${failures} deletion error(s)`);
+      else toast.ok(t("common.deleted"));
+      invalidate();
+    }
   };
 
   // α7.2 (item 16): copyText falls back to execCommand on plain-HTTP panels
@@ -222,49 +248,63 @@ export default function Users() {
       ),
     },
     {
-      id: "user", header: t("users.title"), cell: (u) => (
-        <div className="flex min-w-0 items-center gap-2.5">
-          {/* item 15: the account-status lamp is gone — one presence dot only:
-              online = session on ≥1 core (green), offline = no session and
-              every online-capable core answered (gray), unknown = a core
-              failed its read OR the deployment has no online API at all
-              (gray + honest title). Account status lives in its own column. */}
-          <span
-            role="img"
-            data-presence={onlineMap[u.username] ?? "unknown"}
-            aria-label={`presence ${onlineMap[u.username] ?? "unknown"}`}
-            title={onlineMap[u.username] === "online"
-              ? "online (session on ≥1 core)"
-              : onlineMap[u.username] === "offline"
-                ? "offline (no session on any online-capable core)"
-                : (onlineQ.data?.failed_cores?.length
-                    ? `presence unknown (${onlineQ.data.failed_cores.join(", ")} failed its read)`
-                    : "presence unknown (no online-capable core on this deployment)")}
-            className={cn(
-              "inline-block h-2.5 w-2.5 shrink-0 rounded-full border",
-              onlineMap[u.username] === "online"
-                ? "border-ok bg-ok"
+      id: "user", header: t("users.title"), cell: (u) => {
+        const coreGrants: Record<string, string[]> = { ...(u.core_access ?? {}) };
+        if (!coreGrants[XRAY_CORE_ID]) {
+          let xrayTags: string[] = [];
+          if (u.inbounds && Object.keys(u.inbounds).length > 0) {
+            xrayTags = Object.values(u.inbounds).flat();
+          } else if (u.proxies && Object.keys(u.proxies).length > 0) {
+            xrayTags = Object.keys(u.proxies);
+          }
+          if (xrayTags.length > 0) {
+            coreGrants[XRAY_CORE_ID] = xrayTags;
+          }
+        }
+        return (
+          <div className="flex min-w-0 items-center gap-2.5">
+            {/* item 15: the account-status lamp is gone — one presence dot only:
+                online = session on ≥1 core (green), offline = no session and
+                every online-capable core answered (gray), unknown = a core
+                failed its read OR the deployment has no online API at all
+                (gray + honest title). Account status lives in its own column. */}
+            <span
+              role="img"
+              data-presence={onlineMap[u.username] ?? "unknown"}
+              aria-label={`presence ${onlineMap[u.username] ?? "unknown"}`}
+              title={onlineMap[u.username] === "online"
+                ? "online (session on ≥1 core)"
                 : onlineMap[u.username] === "offline"
-                  ? "border-content-3/60 bg-content-3/35"
-                  : "border-content-3/70 bg-transparent",
-            )}
-          />
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5">
-              <span className="truncate font-medium">{u.username}</span>
-              {u.app_username && <Badge tone="info">app</Badge>}
-            </div>
-            {u.core_access && Object.keys(u.core_access).length > 0 && (
-              <div className="mt-0.5 flex flex-wrap gap-1">
-                {Object.entries(u.core_access).map(([core, tags]) => (
-                  <Badge key={core} tone="brand">{core} · {tags.length}</Badge>
-                ))}
+                  ? "offline (no session on any online-capable core)"
+                  : (onlineQ.data?.failed_cores?.length
+                      ? `presence unknown (${onlineQ.data.failed_cores.join(", ")} failed its read)`
+                      : "presence unknown (no online-capable core on this deployment)")}
+              className={cn(
+                "inline-block h-2.5 w-2.5 shrink-0 rounded-full border",
+                onlineMap[u.username] === "online"
+                  ? "border-ok bg-ok"
+                  : onlineMap[u.username] === "offline"
+                    ? "border-content-3/60 bg-content-3/35"
+                    : "border-content-3/70 bg-transparent",
+              )}
+            />
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="truncate font-medium">{u.username}</span>
+                {u.app_username && <Badge tone="info">app</Badge>}
               </div>
-            )}
-            {u.note && <p className="truncate text-[11px] text-content-3">{u.note}</p>}
+              {Object.keys(coreGrants).length > 0 && (
+                <div className="mt-0.5 flex flex-wrap gap-1">
+                  {Object.entries(coreGrants).map(([core, tags]) => (
+                    <Badge key={core} tone="brand">{core} · {tags.length}</Badge>
+                  ))}
+                </div>
+              )}
+              {u.note && <p className="truncate text-[11px] text-content-3">{u.note}</p>}
+            </div>
           </div>
-        </div>
-      ),
+        );
+      },
     },
     {
       id: "status", header: t("common.status"), width: "130px",
@@ -326,7 +366,7 @@ export default function Users() {
           <MenuItem icon={<RefreshCcw size={14} />} label={t("users.resetUsage")} onClick={() => { setMenu(null); resetUsage.mutate(mu.username); }} />
           <div className="my-1 border-t border-border" />
           <MenuItem icon={<Trash2 size={14} />} label={t("common.delete")} danger
-            onClick={() => { setMenu(null); setConfirmDelete(mu); }} />
+            onClick={() => { setMenu(null); setConfirmDelete({ type: "single", username: mu.username }); }} />
         </>
       )}
     </RowMenu>
@@ -351,6 +391,15 @@ export default function Users() {
           <RefreshCcw size={15} className={cn(isFetching && "animate-spin")} />
         </Button>
         <Button size="sm" onClick={() => setDialog({ mode: "create" })}><UserPlus size={14} />{t("users.new")}</Button>
+        <div className="relative">
+          <Button variant="secondary" size="sm" onClick={(e) => setMoreAnchor(e.currentTarget)}>
+            <MoreHorizontal size={14} /> <span className="hidden sm:inline">More</span>
+          </Button>
+          <RowMenu open={!!moreAnchor} anchor={moreAnchor} onClose={() => setMoreAnchor(null)}>
+            <MenuItem icon={<UserPlus size={14} />} label="Add Bulk" onClick={() => { setMoreAnchor(null); setBulkDialog(true); }} />
+            <MenuItem icon={<Trash2 size={14} />} label="Delete by Status" danger onClick={() => { setMoreAnchor(null); setStatusDeleteDialog(true); }} />
+          </RowMenu>
+        </div>
       </div>
 
       {showFilters && (
@@ -392,8 +441,6 @@ export default function Users() {
           rows={users}
           rowKey={(u) => u.username}
           loading={isLoading}
-          virtual
-          height={620}
           onRowClick={(u) => setDialog({ mode: "edit", user: u })}
           empty={<EmptyState title={search || statusFilter !== "all" ? "No users match the current filter" : "No users yet"}
             action={!search && statusFilter === "all" ? <Button size="sm" onClick={() => setDialog({ mode: "create" })}><Plus size={14} />{t("users.new")}</Button> : undefined} />}
@@ -415,12 +462,38 @@ export default function Users() {
       <ConfirmDialog
         open={!!confirmDelete}
         onClose={() => setConfirmDelete(null)}
-        onConfirm={() => confirmDelete && deleteUser.mutate(confirmDelete.username)}
-        title={`${t("common.delete")} — ${confirmDelete?.username ?? ""}`}
-        body={t("users.deleteConfirm")}
+        onConfirm={executeConfirmDelete}
+        title={
+          confirmDelete?.type === "single"
+            ? `${t("common.delete")} — ${confirmDelete.username}`
+            : `Delete ${confirmDelete?.usernames.length ?? 0} selected user(s)?`
+        }
+        body={
+          confirmDelete?.type === "single"
+            ? t("users.deleteConfirm")
+            : `Are you sure you want to permanently delete ${confirmDelete?.usernames.length ?? 0} selected user(s)? This action cannot be undone.`
+        }
         danger
         loading={deleteUser.isPending}
       />
+
+      {bulkDialog && (
+        <BulkUserDialog
+          open={bulkDialog}
+          onClose={() => setBulkDialog(false)}
+          catalog={catalogQ.data?.groups ?? []}
+          templates={templates}
+          onSaved={invalidate}
+        />
+      )}
+
+      {statusDeleteDialog && (
+        <DeleteByStatusDialog
+          open={statusDeleteDialog}
+          onClose={() => setStatusDeleteDialog(false)}
+          onDeleted={invalidate}
+        />
+      )}
     </div>
   );
 }
@@ -560,7 +633,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
     const proxySettings: Record<string, Record<string, unknown>> = {};
     const inboundSel: Record<string, string[]> = {};
     for (const p of chosen) {
-      proxySettings[p] = {};
+      proxySettings[p] = user?.proxies?.[p] ? { ...(user.proxies[p] as Record<string, unknown>) } : {};
       inboundSel[p] = form.inbounds[p] ?? [];
     }
     try {
@@ -752,6 +825,245 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
           </div>
         )}
 
+      </div>
+      {error && <p role="alert" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
+    </Dialog>
+  );
+}
+
+function BulkUserDialog({
+  open,
+  onClose,
+  catalog,
+  templates,
+  onSaved,
+}: {
+  open: boolean;
+  onClose: () => void;
+  catalog: InboundCatalogGroup[];
+  templates: UserTemplate[];
+  onSaved: () => void;
+}) {
+  const t = useT();
+  const [count, setCount] = useState("5");
+  const [prefix, setPrefix] = useState("user");
+  const [status, setStatus] = useState<UserStatus>("active");
+  const [templateId, setTemplateId] = useState<number | null>(null);
+  const [dataLimitGB, setDataLimitGB] = useState("");
+  const [expireDays, setExpireDays] = useState("");
+  const [downloadMbps, setDownloadMbps] = useState("");
+  const [uploadMbps, setUploadMbps] = useState("");
+  const [coreAccess, setCoreAccess] = useState<Record<string, string[]>>({});
+  const [xrayInbounds, setXrayInbounds] = useState<Record<string, string[]>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const applyTemplate = (id: number | null) => {
+    setTemplateId(id);
+    if (!id) return;
+    const tp = templates.find((t) => t.id === id);
+    if (tp) {
+      if (tp.data_limit) setDataLimitGB(String(tp.data_limit / 1024 ** 3));
+      if (tp.expire_duration) setExpireDays(String(Math.round(tp.expire_duration / 86400)));
+    }
+  };
+
+  const createBulk = async () => {
+    setBusy(true);
+    setError("");
+    const cnt = Math.max(1, Math.min(100, parseInt(count, 10) || 1));
+    const data_limit_gb = parseFloat(dataLimitGB) || undefined;
+    const expire_days = parseInt(expireDays, 10) || undefined;
+    const download_limit_mbps = parseInt(downloadMbps, 10) || undefined;
+    const upload_limit_mbps = parseInt(uploadMbps, 10) || undefined;
+
+    try {
+      const res = await api.post<{ ok: boolean; created_count: number; usernames: string[] }>(
+        "/zagros/users/bulk-create",
+        {
+          count: cnt,
+          prefix: prefix.trim() || "user",
+          status,
+          data_limit_gb,
+          expire_days,
+          download_limit_mbps,
+          upload_limit_mbps,
+          template_id: templateId,
+          core_access: Object.fromEntries(Object.entries(coreAccess).filter(([, tags]) => tags.length)),
+        }
+      );
+      toast.ok(`Created ${res.created_count} users successfully`);
+      onSaved();
+      onClose();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : t("common.error"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title="Create Bulk Users"
+      wide
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
+          <Button onClick={createBulk} loading={busy}>Create Users</Button>
+        </>
+      }
+    >
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="Count (1–100)" required>
+          <Input type="number" min={1} max={100} value={count} onChange={(e) => setCount(e.target.value)} />
+        </Field>
+        <Field label="Username Prefix" required hint="e.g. user -> user_a1b2">
+          <Input value={prefix} onChange={(e) => setPrefix(e.target.value)} />
+        </Field>
+        {templates.length > 0 && (
+          <div className="sm:col-span-2">
+            <Field label="Use Template (Optional)">
+              <Select value={templateId ?? ""} onChange={(e) => applyTemplate(e.target.value ? Number(e.target.value) : null)}>
+                <option value="">— none —</option>
+                {templates.map((tp) => (
+                  <option key={tp.id} value={tp.id}>
+                    {tp.name} · {tp.data_limit ? `${(tp.data_limit / 1024 ** 3).toFixed(0)}GB` : "∞"}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+        )}
+        <Field label="Data Limit (GB)" hint="0 = unlimited">
+          <Input type="number" step="0.1" value={dataLimitGB} onChange={(e) => setDataLimitGB(e.target.value)} />
+        </Field>
+        <Field label="Expiration (Days)" hint="empty = no expiration">
+          <Input type="number" value={expireDays} onChange={(e) => setExpireDays(e.target.value)} />
+        </Field>
+        <Field label="Download Limit (Mbps)" hint="0 = unlimited">
+          <Input type="number" value={downloadMbps} onChange={(e) => setDownloadMbps(e.target.value)} />
+        </Field>
+        <Field label="Upload Limit (Mbps)" hint="0 = unlimited">
+          <Input type="number" value={uploadMbps} onChange={(e) => setUploadMbps(e.target.value)} />
+        </Field>
+        <div className="sm:col-span-2">
+          <Field label="Core Access & Inbounds">
+            <CoreAccessPicker
+              groups={catalog}
+              value={coreAccess}
+              onChange={setCoreAccess}
+              xrayValue={xrayInbounds}
+              onXrayChange={setXrayInbounds}
+            />
+          </Field>
+        </div>
+      </div>
+      {error && <p role="alert" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
+    </Dialog>
+  );
+}
+
+function DeleteByStatusDialog({
+  open,
+  onClose,
+  onDeleted,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const t = useT();
+  const digits = useDigits();
+  const [selectedStatus, setSelectedStatus] = useState("expired");
+  const [matchingCount, setMatchingCount] = useState<number | null>(null);
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState("");
+
+  const checkPreview = async (st: string) => {
+    setLoadingPreview(true);
+    setError("");
+    try {
+      const res = await api.post<{ ok: boolean; matching_count: number }>(
+        "/zagros/users/delete-by-status",
+        { status: st, confirm: false }
+      );
+      setMatchingCount(res.matching_count);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : t("common.error"));
+    } finally {
+      setLoadingPreview(false);
+    }
+  };
+
+  useEffect(() => {
+    if (open) checkPreview(selectedStatus);
+  }, [open, selectedStatus]);
+
+  const executeDelete = async () => {
+    setDeleting(true);
+    setError("");
+    try {
+      const res = await api.post<{ ok: boolean; deleted_count: number }>(
+        "/zagros/users/delete-by-status",
+        { status: selectedStatus, confirm: true }
+      );
+      toast.ok(`Deleted ${res.deleted_count} user(s) with status "${selectedStatus}"`);
+      onDeleted();
+      onClose();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : t("common.error"));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title="Delete Users by Status"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
+          <Button
+            variant="danger"
+            onClick={executeDelete}
+            loading={deleting}
+            disabled={loadingPreview || matchingCount === null || matchingCount === 0}
+          >
+            <Trash2 size={14} /> Delete {matchingCount !== null ? digits(String(matchingCount)) : "0"} {selectedStatus} User(s)
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        <Field label="Select Status">
+          <Select value={selectedStatus} onChange={(e) => setSelectedStatus(e.target.value)}>
+            {ALL_STATUSES.map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </Select>
+        </Field>
+
+        <Card className="p-4 bg-surface-2 border-border">
+          {loadingPreview ? (
+            <p className="text-xs text-content-3">Checking matching users…</p>
+          ) : matchingCount !== null ? (
+            matchingCount > 0 ? (
+              <p className="text-sm font-medium text-danger">
+                Found <span className="font-bold">{digits(String(matchingCount))}</span> user(s) with status "<b>{selectedStatus}</b>".
+                Deleting them is permanent and will revoke all access.
+              </p>
+            ) : (
+              <p className="text-sm text-content-3">
+                No users found with status "<b>{selectedStatus}</b>".
+              </p>
+            )
+          ) : null}
+        </Card>
       </div>
       {error && <p role="alert" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
     </Dialog>

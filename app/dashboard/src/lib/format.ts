@@ -43,8 +43,18 @@ export function formatDate(ts: number | string | null | undefined, digits = digi
 
 export function formatRelative(ts: number | string | null | undefined, digits = digitsEn): string {
   if (!ts) return "—";
-  const d = typeof ts === "number" ? dayjs.unix(ts) : dayjs(ts);
-  return d.isValid() ? digits(d.fromNow()) : "—";
+  let parseInput: number | string = ts;
+  if (typeof ts === "string") {
+    const str = ts.trim();
+    if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(str)) {
+      parseInput = str.replace(" ", "T") + "Z";
+    }
+  }
+  const d = typeof parseInput === "number" ? dayjs.unix(parseInput) : dayjs(parseInput);
+  if (!d.isValid()) return "—";
+  const diffSec = Math.abs(dayjs().diff(d, "second"));
+  if (diffSec < 60) return digits("just now");
+  return digits(d.fromNow());
 }
 
 export function formatDuration(seconds: number | null | undefined, digits = digitsEn): string {

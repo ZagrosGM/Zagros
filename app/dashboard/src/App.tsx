@@ -12,7 +12,7 @@ const Templates = lazy(() => import("./pages/Templates"));
 const Subscriptions = lazy(() => import("./pages/Subscriptions"));
 const Nodes = lazy(() => import("./pages/Nodes"));
 const Cores = lazy(() => import("./pages/Cores"));
-const Capabilities = lazy(() => import("./pages/Capabilities"));
+const Support = lazy(() => import("./pages/Support"));
 const Routing = lazy(() => import("./pages/Routing"));
 const Outbounds = lazy(() => import("./pages/Outbounds"));
 const Inbounds = lazy(() => import("./pages/Inbounds"));
@@ -22,7 +22,6 @@ const Certificates = lazy(() => import("./pages/Certificates"));
 const Sessions = lazy(() => import("./pages/Sessions"));
 const Devices = lazy(() => import("./pages/Devices"));
 const Logs = lazy(() => import("./pages/Logs"));
-const Marketplace = lazy(() => import("./pages/Marketplace"));
 const Settings = lazy(() => import("./pages/Settings"));
 const Advanced = lazy(() => import("./pages/Advanced"));
 
@@ -51,7 +50,6 @@ export default function App() {
           <Route path="subscriptions" element={<Suspense fallback={<PageFallback />}><Subscriptions /></Suspense>} />
           <Route path="nodes" element={<Suspense fallback={<PageFallback />}><Nodes /></Suspense>} />
           <Route path="cores" element={<Suspense fallback={<PageFallback />}><Cores /></Suspense>} />
-          <Route path="capabilities" element={<Suspense fallback={<PageFallback />}><Capabilities /></Suspense>} />
           <Route path="routing" element={<Suspense fallback={<PageFallback />}><Routing /></Suspense>} />
           <Route path="outbounds" element={<Suspense fallback={<PageFallback />}><Outbounds /></Suspense>} />
           <Route path="inbounds" element={<Suspense fallback={<PageFallback />}><Inbounds /></Suspense>} />
@@ -61,7 +59,7 @@ export default function App() {
           <Route path="sessions" element={<Suspense fallback={<PageFallback />}><Sessions /></Suspense>} />
           <Route path="devices" element={<Suspense fallback={<PageFallback />}><Devices /></Suspense>} />
           <Route path="logs" element={<Suspense fallback={<PageFallback />}><Logs /></Suspense>} />
-          <Route path="marketplace" element={<Suspense fallback={<PageFallback />}><Marketplace /></Suspense>} />
+          <Route path="support" element={<Suspense fallback={<PageFallback />}><Support /></Suspense>} />
           <Route path="settings" element={<Suspense fallback={<PageFallback />}><Settings /></Suspense>} />
           <Route path="advanced" element={<Suspense fallback={<PageFallback />}><Advanced /></Suspense>} />
           <Route path="*" element={<Suspense fallback={<PageFallback />}><Overview /></Suspense>} />

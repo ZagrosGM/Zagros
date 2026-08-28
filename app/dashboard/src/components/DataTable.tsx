@@ -12,7 +12,7 @@ export interface Column<T> {
 }
 
 export function DataTable<T>({
-  columns, rows, rowKey, loading, empty, virtual = false, height = 560, onRowClick, estimate = 52,
+  columns, rows, rowKey, loading, empty, virtual = false, height, onRowClick, estimate = 52,
 }: {
   columns: Column<T>[];
   rows: T[];

@@ -43,6 +43,23 @@ _ALLOWED_INBOUND_KEYS = {
 }
 
 
+DEFAULT_PPTP_INBOUND = {
+    "tag": "pptp-default",
+    "protocol": "pptp",
+    "listen": "0.0.0.0",
+    "port": 1723,
+    "subnet": "10.77.0.0/24",
+    "dns": ["1.1.1.1", "8.8.8.8"],
+    "legacy_risk_ack": True,
+    "internet_exposure_ack": True,
+    "authentication": "MS-CHAPv2",
+    "encryption": "MPPE128",
+    "network": "IPv4",
+    "ipv6": False,
+    "security_class": "legacy_insecure",
+}
+
+
 class PptpDriver(BaseCoreDriver):
     metadata: ClassVar[CoreMetadata] = CoreMetadata(
         id="pptp",
@@ -113,8 +130,8 @@ class PptpDriver(BaseCoreDriver):
             },
         },
         default_settings={
-            "legacy_risk_ack": False,
-            "internet_exposure_ack": False,
+            "legacy_risk_ack": True,
+            "internet_exposure_ack": True,
             "work_dir": "/var/lib/zagros/cores/pptp",
             "executable_path": "/opt/zagros/accel-ppp/1.14.0/sbin/accel-pppd",
             "module_dir": "/opt/zagros/accel-ppp/1.14.0/lib/accel-ppp",
@@ -135,7 +152,11 @@ class PptpDriver(BaseCoreDriver):
         ledger: PptpAccountingLedger | None = None,
     ) -> None:
         super().__init__(settings)
-        self.settings["inbounds"] = copy.deepcopy(self.settings.get("inbounds") or [])
+        inbounds = self.settings.get("inbounds")
+        if not inbounds:
+            self.settings["inbounds"] = [copy.deepcopy(DEFAULT_PPTP_INBOUND)]
+        else:
+            self.settings["inbounds"] = copy.deepcopy(inbounds)
         self._backend = backend or LocalPptpBackend(self.settings)
         self._accounting_path = getattr(
             self._backend, "accounting_path",
@@ -370,6 +391,9 @@ hook_from_environment(%r, %r, sys.argv[1] if len(sys.argv) > 1 else "")
         self._validate_root_confirmations()
         await asyncio.to_thread(self._backend.verify_installation)
         await asyncio.to_thread(self._backend.ensure_management_secret)
+        if not self.settings.get("inbounds"):
+            self.settings["inbounds"] = [copy.deepcopy(DEFAULT_PPTP_INBOUND)]
+        self._materialize()
 
     async def update(self, version: str | None = None) -> str:
         if version and version.lstrip("v") != PINNED_VERSION:

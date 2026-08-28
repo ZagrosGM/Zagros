@@ -1,13 +1,14 @@
 import re
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from app import xray
-from app.models.admin import Admin
+if TYPE_CHECKING:
+    from app.models.admin import Admin
 from app.models.proxy import ProxySettings, ProxyTypes
 from app.subscription.share import generate_v2ray_links
 from app.utils.jwt import create_subscription_token
@@ -83,6 +84,16 @@ class User(BaseModel):
     sub_updated_at: Optional[datetime] = Field(None, nullable=True)
     sub_last_user_agent: Optional[str] = Field(None, nullable=True)
     online_at: Optional[datetime] = Field(None, nullable=True)
+
+    @field_serializer("online_at", mode="plain", check_fields=False)
+    def serialize_online_at(self, dt: datetime | None) -> str | None:
+        if dt is None:
+            return None
+        if isinstance(dt, datetime):
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.isoformat().replace("+00:00", "Z")
+        return str(dt)
     on_hold_expire_duration: Optional[int] = Field(None, nullable=True)
     on_hold_timeout: Optional[Union[datetime, None]] = Field(None, nullable=True)
 
@@ -360,8 +371,20 @@ class UserResponse(User):
     proxies: dict
     excluded_inbounds: Dict[ProxyTypes, List[str]] = {}
 
-    admin: Optional[Admin] = None
+    admin: Optional[Any] = None
     model_config = ConfigDict(from_attributes=True)
+
+    @field_serializer("admin", mode="plain", check_fields=False)
+    def serialize_admin(self, admin_obj: Any) -> dict | None:
+        if admin_obj is None:
+            return None
+        if hasattr(admin_obj, "username"):
+            return {
+                "id": getattr(admin_obj, "id", None),
+                "username": getattr(admin_obj, "username", None),
+                "is_sudo": getattr(admin_obj, "is_sudo", False),
+            }
+        return admin_obj if isinstance(admin_obj, dict) else None
 
     @model_validator(mode="after")
     def validate_links(self):
@@ -402,7 +425,7 @@ class UserResponse(User):
 
 
 class SubscriptionUserResponse(UserResponse):
-    admin: Admin | None = Field(default=None, exclude=True)
+    admin: Any | None = Field(default=None, exclude=True)
     excluded_inbounds: Dict[ProxyTypes, List[str]] | None = Field(None, exclude=True)
     note: str | None = Field(None, exclude=True)
     inbounds: Dict[ProxyTypes, List[str]] | None = Field(None, exclude=True)

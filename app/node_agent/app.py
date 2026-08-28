@@ -39,7 +39,7 @@ core_manager = CoreManager(
     NodeCoreStateStore(NODE_ROOT), builtin_core_ids=frozenset(),
     settings_transform=_node_driver_settings)
 NODE_CORE_ALLOWLIST = frozenset({
-    "xray", "sing-box", "openvpn", "wireguard", "ssh", "softether", "pptp"})
+    "xray", "sing-box", "openvpn", "wireguard", "ssh", "softether"})
 
 
 def _authorize_core(core_id: str, settings: dict[str, Any] | None = None) -> None:

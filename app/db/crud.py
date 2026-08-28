@@ -610,7 +610,19 @@ def update_user(db: Session, dbuser: User, modify: UserModify) -> User:
                 .where(Proxy.user == dbuser, Proxy.type == proxy_type) \
                 .first()
             if dbproxy:
-                dbproxy.settings = settings.dict(no_obj=True)
+                existing_settings = dict(dbproxy.settings or {})
+                new_settings = settings.dict(no_obj=True)
+                # Preserve existing proxy credentials (id/uuid, password, method, flow)
+                # so editing a user's limits or status never mutates their keys/passwords.
+                if existing_settings.get("id"):
+                    new_settings["id"] = existing_settings["id"]
+                if existing_settings.get("password"):
+                    new_settings["password"] = existing_settings["password"]
+                if existing_settings.get("method") and not new_settings.get("method"):
+                    new_settings["method"] = existing_settings["method"]
+                if existing_settings.get("flow") and not new_settings.get("flow"):
+                    new_settings["flow"] = existing_settings["flow"]
+                dbproxy.settings = new_settings
             else:
                 new_proxy = Proxy(type=proxy_type, settings=settings.dict(no_obj=True))
                 dbuser.proxies.append(new_proxy)

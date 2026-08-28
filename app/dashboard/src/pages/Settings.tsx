@@ -41,10 +41,13 @@ export default function Settings() {
   const info = useQuery({ queryKey: ["zagros", "panel-info"], queryFn: () => api.get<PanelInfo>("/zagros/panel/info"), retry: false });
   const networkQ = useQuery({ queryKey: ["zagros", "panel-network"], queryFn: () => api.get<PanelNetworkSettings>("/zagros/settings/panel-network") });
   const certsQ = useQuery({ queryKey: ["zagros", "certificates"], queryFn: () => api.get<{ certificates: CertificateInfo[] }>("/zagros/certificates") });
+
   const [network, setNetwork] = useState<PanelNetworkSettings | null>(null);
   const [networkTest, setNetworkTest] = useState<Record<string, unknown> | null>(null);
   const [networkTransition, setNetworkTransition] = useState("");
+
   useEffect(() => { if (networkQ.data) setNetwork(networkQ.data); }, [networkQ.data]);
+
   const testNetwork = useMutation({
     mutationFn: () => api.post<Record<string, unknown>>("/zagros/settings/panel-network/test", network),
     onSuccess: (data) => { setNetworkTest(data); toast.ok("panel network configuration is valid"); },

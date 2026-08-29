@@ -172,14 +172,53 @@ async def record_once(runtime) -> int:
             totals[1] += r.downlink_bytes
             applied.append(r)
 
-    if not applied:
+    # Nodes hold their own cumulative counters and their own baselines, so
+    # their deltas are a separate provider: folding them here is what makes a
+    # user's quota follow them to whatever server they connect through.
+    # They are kept out of ``applied`` until they are durable on purpose: a
+    # node-side failure (agent unreachable, node row deleted mid-tick) must
+    # never take the local cores' accounting down with it.
+    node_applied: list = []
+    node_per_user: dict[int, list[int]] = {}
+    try:
+        from app.nodes.service import collect_node_usage
+
+        for r in await collect_node_usage(runtime):
+            owner = owners.get((r.core_id, r.account_id))
+            if owner is None:
+                continue
+            totals = node_per_user.setdefault(owner, [0, 0])
+            totals[0] += r.uplink_bytes
+            totals[1] += r.downlink_bytes
+            node_applied.append(r)
+    except Exception as exc:  # noqa: BLE001 — never break the local fold
+        logger.warning("node usage collection failed (tick continues): %s", exc)
+        node_applied, node_per_user = [], {}
+
+    if not applied and not node_applied:
         if pending_baselines:
             await runtime.baselines.set_many(pending_baselines)
         return 0
 
-    await runtime.usage_journal.append(applied, owners)
-    for user_id, (up, down) in per_user.items():
-        await runtime.quota.add(user_id, up, down)
+    if applied:
+        await runtime.usage_journal.append(applied, owners)
+        for user_id, (up, down) in per_user.items():
+            await runtime.quota.add(user_id, up, down)
+
+    if node_applied:
+        try:
+            await runtime.usage_journal.append(node_applied, owners)
+            for user_id, (up, down) in node_per_user.items():
+                await runtime.quota.add(user_id, up, down)
+        except Exception as exc:  # noqa: BLE001 — local bytes are already safe
+            logger.warning("node usage could not be recorded this tick: %s", exc)
+            node_applied, node_per_user = [], {}
+        else:
+            for user_id, (up, down) in node_per_user.items():
+                totals = per_user.setdefault(user_id, [0, 0])
+                totals[0] += up
+                totals[1] += down
+            applied.extend(node_applied)
 
     # Fold into the legacy master/admin counters in one transaction.  This is
     # still the quota/review API's compatibility view, but it no longer owns a

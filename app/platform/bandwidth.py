@@ -109,8 +109,13 @@ class SoftEtherEndpoint:
 
 class BandwidthLimiter:
     def __init__(self, runtime, *, interface: str | None = None,
-                 runner=None) -> None:
+                 runner=None, desired_provider=None) -> None:
         self.runtime = runtime
+        # ``desired_provider`` makes the limiter usable where the user
+        # database does not exist (a node agent). The node is handed the
+        # rates the panel computed and resolves the rest from its own
+        # drivers, so shaping happens on the host that carries the traffic.
+        self._desired_provider = desired_provider
         self.interface = interface or os.environ.get("ZAGROS_BANDWIDTH_INTERFACE", "eth0")
         self._runner = runner or self._run
         self._lock = threading.RLock()
@@ -217,6 +222,8 @@ class BandwidthLimiter:
 
     # ---------- desired identity ----------
     def _desired(self) -> dict[int, UserLimit]:
+        if self._desired_provider is not None:
+            return self._desired_provider()
         from sqlalchemy import select
         from app.persistence.models import UserModel
 

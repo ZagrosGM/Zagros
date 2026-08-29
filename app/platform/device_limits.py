@@ -81,6 +81,30 @@ async def collect_devices_diag(runtime) -> tuple[dict[int, set[str]], list[str],
                 continue  # revoked after the read — honest drop + log elsewhere
             key = str(sess.ip) if sess.ip else f"presence:{sess.core_id}:{sess.account_id}"
             devices.setdefault(owner, set()).add(key)
+
+    # Nodes: a user connected through a node is just as online as one on this
+    # host, and the session material is identical (drivers report it; the
+    # panel only attributes it).
+    try:
+        from app.nodes.service import collect_node_devices
+
+        node_sessions, node_failed = await collect_node_devices(runtime)
+    except Exception as exc:  # noqa: BLE001 — never break local collection
+        logger.debug("node device collection unavailable: %s", exc)
+        node_sessions, node_failed = [], []
+    if node_sessions:
+        for item in node_sessions:
+            owner = owners.get((item.get("core_id"), item.get("account_id")))
+            if owner is None and item.get("core_id") == "xray":
+                owner = await _xray_owner_id(runtime, str(item.get("account_id")))
+            if owner is None:
+                continue
+            key = (str(item.get("ip")) if item.get("ip")
+                   else f"presence:node{item.get('node_id')}:"
+                        f"{item.get('core_id')}:{item.get('account_id')}")
+            devices.setdefault(owner, set()).add(key)
+        probed += 1
+    failed.extend(f"node:{name}" for name in node_failed)
     return devices, sorted(failed), probed
 
 

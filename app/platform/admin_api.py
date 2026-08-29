@@ -352,9 +352,18 @@ async def bandwidth_status(runtime=Depends(get_runtime)):
 @zagros_admin_router.post("/bandwidth/reconcile")
 async def bandwidth_reconcile(runtime=Depends(get_runtime)):
     try:
-        return await asyncio.to_thread(runtime.bandwidth.reconcile)
+        state = await asyncio.to_thread(runtime.bandwidth.reconcile)
     except Exception as exc:
         raise HTTPException(503, f"bandwidth limiter reconciliation failed: {exc}") from exc
+    # A limit is only real on a node once the node installed it: push the same
+    # intent everywhere, and report per-node failures instead of hiding them.
+    try:
+        from app.nodes.service import sync_bandwidth_limits
+
+        nodes = await sync_bandwidth_limits(runtime)
+    except Exception as exc:  # noqa: BLE001 — local reconcile already succeeded
+        nodes = {"pushed": [], "errors": [str(exc)]}
+    return {**state, "nodes": nodes}
 
 
 @zagros_admin_router.get("/cores/{core_id}")

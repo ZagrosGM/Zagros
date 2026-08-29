@@ -28,6 +28,8 @@ from typing import Any
 
 from sqlalchemy import select
 
+from app import logger
+
 from app.nodes.client import (
     NodeClientError,
     ZagrosNodeClient,
@@ -838,3 +840,176 @@ async def delete_node(runtime, node_id: int, *, force: bool = False) -> dict:
             session.commit()
     await asyncio.to_thread(_persist(runtime, mutate))
     return {"deleted": node_id, "remote_revoked": revoked}
+
+
+# --------------------------------------------------------------------------- #
+# bandwidth limits — push enforcement to the host that carries the traffic
+# --------------------------------------------------------------------------- #
+# Shaping is host-local: tc filters and nft marks only change what happens on
+# the machine forwarding the packets. The panel therefore cannot enforce a
+# limit for a user connected through a node; it hands the node the same
+# decision its own limiter would have made.
+
+def bandwidth_limits_payload(runtime) -> dict[str, dict]:
+    """{user_id: {username, upload_mbps, download_mbps, accounts}}.
+
+    Mirrors what :meth:`BandwidthLimiter._desired` builds locally, minus the
+    per-core identities — those are host-specific (a node's ssh uid or dhcp
+    lease differs from the master's), so each node resolves its own.
+    """
+    from sqlalchemy import select
+
+    from app.persistence.models import UserModel
+
+    def read(session):
+        rows = session.execute(select(UserModel)).scalars().all()
+        owners = runtime.users.account_owners()
+        by_user: dict[int, dict[str, list[str]]] = {}
+        for (core_id, account_id), user_id in owners.items():
+            by_user.setdefault(int(user_id), {}).setdefault(
+                str(core_id), []).append(str(account_id))
+        payload: dict[str, dict] = {}
+        for row in rows:
+            user_id = int(row.id)
+            payload[str(user_id)] = {
+                "username": str(row.username),
+                "upload_mbps": max(0, int(row.upload_limit_mbps or 0)),
+                "download_mbps": max(0, int(row.download_limit_mbps or 0)),
+                "accounts": by_user.get(user_id, {}),
+            }
+        return payload
+
+    try:
+        return _persist(runtime, read)()
+    except Exception as exc:  # noqa: BLE001 — shaping push is best-effort
+        logger.warning("bandwidth limits could not be read for nodes: %s", exc)
+        return {}
+
+
+async def push_bandwidth_limits(runtime) -> dict[str, Any]:
+    """Send the current limits to every paired node. Returns a per-node report."""
+    payload = await asyncio.to_thread(bandwidth_limits_payload, runtime)
+    if not payload:
+        return {"pushed": [], "errors": []}
+    loop = asyncio.get_running_loop()
+    pushed: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    def _one(row):
+        return _client(runtime, row).push_bandwidth_limits(payload)
+
+    for row in paired_nodes(runtime):
+        try:
+            result = await loop.run_in_executor(None, _one, row)
+        except Exception as exc:  # noqa: BLE001 — one node never blocks others
+            errors.append(f"node {row.id}: {exc}")
+            continue
+        pushed.append({"node_id": int(row.id),
+                       "limited_users": (result or {}).get("limited_users"),
+                       "ok": bool((result or {}).get("ok", True))})
+    return {"pushed": pushed, "errors": errors}
+
+
+# --------------------------------------------------------------------------- #
+# telemetry fan-out — what a node knows and the panel cannot see locally
+# --------------------------------------------------------------------------- #
+# Quota, presence and shaping are all computed from the panel's OWN cores, so
+# a user connected through a node looked offline, consumed nothing and was
+# never limited. These helpers ask every paired node for the same readings its
+# local drivers give it, and never let one unreachable node distort the rest.
+
+def paired_nodes(runtime) -> list[Any]:
+    """Rows of every node that finished pairing (cheap, no I/O)."""
+    from app.persistence.models import NodeModel
+
+    def read(session):
+        return (session.query(NodeModel)
+                .filter(NodeModel.agent_type == "zagros_native",
+                        NodeModel.agent_credentials_enc.isnot(None))
+                .all())
+
+    try:
+        rows = _persist(runtime, read)()
+    except Exception:  # noqa: BLE001 — telemetry must never break accounting
+        logger.debug("node telemetry: cannot enumerate nodes")
+        return []
+    return list(rows or [])
+
+
+async def collect_node_devices(runtime) -> tuple[list[dict], list[str]]:
+    """(sessions, failed_node_names) from every paired node."""
+    loop = asyncio.get_running_loop()
+    sessions: list[dict] = []
+    failed: list[str] = []
+
+    def _one(row):
+        client = _client(runtime, row)
+        response = client.runtime_devices()
+        rows = list(response.get("devices") or [])
+        for item in rows:
+            if isinstance(item, dict):
+                item["node_id"] = int(row.id)
+        return rows
+
+    for row in paired_nodes(runtime):
+        try:
+            found = await loop.run_in_executor(None, _one, row)
+        except Exception as exc:  # noqa: BLE001 — one node never blocks others
+            logger.debug("node %s device collect failed: %s", row.id, exc)
+            failed.append(getattr(row, "name", str(row.id)))
+            continue
+        sessions.extend(found)
+    return sessions, failed
+
+
+async def collect_node_usage(runtime) -> list[Any]:
+    """UsageRecord-shaped deltas from every paired node."""
+    from app.cores.types import UsageRecord
+
+    loop = asyncio.get_running_loop()
+    records: list[Any] = []
+
+    def _one(row):
+        client = _client(runtime, row)
+        return list(client.runtime_usage().get("usage") or [])
+
+    for row in paired_nodes(runtime):
+        try:
+            raw = await loop.run_in_executor(None, _one, row)
+        except Exception as exc:  # noqa: BLE001 — one node never blocks others
+            logger.debug("node %s usage collect failed: %s", row.id, exc)
+            continue
+        node_id = int(row.id)
+        coefficient = float(getattr(row, "usage_coefficient", 1.0) or 1.0)
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                up = int(item.get("uplink_bytes") or 0)
+                down = int(item.get("downlink_bytes") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not (up or down):
+                continue
+            if coefficient != 1.0:
+                up = int(up * coefficient)
+                down = int(down * coefficient)
+            records.append(UsageRecord(
+                core_id=str(item.get("core_id") or ""),
+                account_id=str(item.get("account_id") or ""),
+                node_id=node_id,
+                uplink_bytes=up,
+                downlink_bytes=down,
+            ))
+    return records
+
+
+async def sync_bandwidth_limits(runtime) -> dict[str, Any]:
+    """Push limits to nodes, recording failures on the node row."""
+    try:
+        result = await push_bandwidth_limits(runtime)
+    except Exception as exc:  # noqa: BLE001 — never break the caller
+        return {"pushed": [], "errors": [str(exc)]}
+    for message in result.get("errors") or []:
+        logger.warning("node bandwidth push: %s", message)
+    return result

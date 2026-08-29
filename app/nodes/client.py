@@ -217,6 +217,24 @@ class ZagrosNodeClient:
         return self._request("PUT", f"/v1/cores/{core_id}/identity",
                              payload={"material": material}, timeout=300)
 
+    def runtime_devices(self) -> dict:
+        """Online sessions this node is serving (all cores)."""
+        return self._request("GET", "/v1/runtime/devices", timeout=30)
+
+    def runtime_usage(self) -> dict:
+        """Per-account usage deltas since the previous call."""
+        return self._request("GET", "/v1/runtime/usage", timeout=60)
+
+    def push_bandwidth_limits(self, limits: dict) -> dict:
+        """Hand this node the per-user speed limits it must enforce locally.
+
+        Shaping is a host-level act (tc/nft on the node itself), so the panel
+        cannot do it remotely: it pushes the desired rates and the node
+        installs them against its own cores.
+        """
+        return self._request("PUT", "/v1/bandwidth/limits",
+                             payload={"limits": limits}, timeout=120)
+
     def apply_inbounds(self, core_id: str, document: dict) -> dict:
         return self._request(
             "PUT", f"/v1/cores/{core_id}/inbounds",

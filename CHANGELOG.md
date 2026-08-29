@@ -10,6 +10,75 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.9] — 2026-08-29 — Multi-node: a node serves traffic the panel can meter
+
+### Added
+
+* **Nodes menu** in the dashboard: create → discover → pair (certificate-pinned
+  fingerprint), a copy-paste installer command, a per-node **Cores** tab
+  (settings, lifecycle, live logs), heartbeat with resource metrics, and an
+  audit trail of privileged operations.
+* **`ZagrosGM/zagros-node`**: a standalone node agent that supports *every*
+  core — xray, sing-box, OpenVPN, WireGuard, SSH, SoftEther and PPTP — not just
+  Xray. The core drivers are vendored, so a node runs the same code the panel
+  runs. Bootstrap/info on `:62051` (node id, certificate, SHA-256 pin), signed
+  HTTPS control plane on `:62050`.
+* **Server identity federation**: a node adopts the master's CA, server keys and
+  IPsec PSK, so a config whose address points at the node keeps authenticating
+  the same server instead of being handed a different PKI per node.
+* **Account federation** to nodes: Xray through the config document, every
+  other core through an explicit signed accounts push over the control plane.
+* **Node telemetry**: `GET /v1/runtime/devices` and `GET /v1/runtime/usage`
+  report a node's online sessions and per-account usage deltas. The panel folds
+  them into the same pipelines its local cores feed — device/online view and
+  quota — applying the node's `usage_coefficient` and keeping durable baselines
+  so an agent restart cannot re-emit a whole cumulative counter.
+* **Bandwidth enforcement on nodes**: shaping is host-local (`tc`/`nft` only
+  affect the machine carrying the packets), so the panel hands each node the
+  decision its own limiter would have built (`PUT /v1/bandwidth/limits`). A 60s
+  job keeps nodes in step behind a digest gate, and `/bandwidth/reconcile`
+  pushes to nodes too. Pushed limits survive an agent restart.
+
+### Fixed
+
+* A user connected through a node was reported **offline**, consumed **no
+  quota** and was **never limited**: presence, usage and shaping were all
+  derived from the panel's own cores only. Verified live — a 15.2 MB download
+  through a node raised the user's usage by 16.4 MB, `online_at` tracked the
+  session, and a 2 Mbps pushed limit measured 1.75 Mbps.
+* Presence is keyed per node when a core reports no client IP, so two nodes
+  serving the same account no longer collide into one device.
+* A node-side accounting failure can no longer abort the local cores' pass, and
+  a local failure can no longer discard node deltas: both are committed
+  separately, each only once durable.
+* Node agent: compatibility shims shadowed the vendored `app.platform.bandwidth`
+  and crashed startup in a loop. A module the vendored tree ships is never
+  shadowed now.
+* Node agent: sing-box per-user accounting was dead — the image carried no
+  `xray_api` and no `grpcio`/`protobuf`, and the driver reads counters over the
+  StatsService gRPC dialect. Both now ship with the agent.
+* Node agent: accounts lived only in the drivers' memory, so a restart silently
+  disabled shaping (identities resolve from account settings) while serving,
+  presence and usage all looked healthy. Accounts are cached under
+  `<data_dir>/accounts/` and replayed at boot.
+
+### Changed
+
+* `app/platform/bandwidth.py` takes an injectable `desired_provider`, so the
+  module can be driven where no user database exists — the node agent vendors
+  it and has none.
+* Node fan-out is isolated per node: one unreachable node is reported honestly
+  and never distorts the others.
+
+### Tests
+
+* Full panel suite: **987 passed / 7 skipped**.
+* New `tests/platform/test_node_telemetry.py` (7 tests) pins all three
+  behaviours end to end: presence with and without a client IP, usage
+  coefficient and zero-delta handling, quota folding, per-node push reporting.
+
+---
+
 ## [1.0.0-alpha.8.8] — 2026-08-22 — Unified accounting and aggregate bandwidth enforcement
 
 ### Added

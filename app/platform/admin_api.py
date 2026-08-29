@@ -54,6 +54,7 @@ from app.nodes.service import (
     list_nodes,
     node_cores,
     pair,
+    reconnect,
     sync_node,
     update_core_settings,
     update_node,
@@ -1907,6 +1908,21 @@ async def nodes_pair(node_id: int, body: NativeNodePairBody,
                                 if body.registration_token else None),
             node_id_hint=body.node_id,
         )
+    except Exception as exc:  # noqa: BLE001
+        raise _node_http_error(exc) from exc
+    return node.model_dump(mode="json")
+
+
+@zagros_admin_router.post("/nodes/{node_id}/reconnect")
+async def nodes_reconnect(node_id: int, runtime=Depends(get_runtime)):
+    """Bring a node back online, pairing it first if that is what is missing.
+
+    Everything a stuck node needs in one call: a heartbeat when the pairing is
+    intact, otherwise discovery + pairing with the installer's one-time token,
+    then the configuration push and core start that make it serve traffic.
+    """
+    try:
+        node = await reconnect(runtime, node_id)
     except Exception as exc:  # noqa: BLE001
         raise _node_http_error(exc) from exc
     return node.model_dump(mode="json")

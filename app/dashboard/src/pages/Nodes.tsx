@@ -67,7 +67,11 @@ export default function Nodes() {
   const list = useQuery({
     queryKey: ["zagros", "nodes"],
     queryFn: () => api.get<NodeList>("/zagros/nodes"),
-    refetchInterval: 15000,
+    // The panel re-checks unpaired nodes on its own; the page only has to
+    // catch up. Poll faster while something is still pending so the status
+    // change is visible without a manual refresh.
+    refetchInterval: (q) =>
+      (q.state.data?.nodes ?? []).some((n) => n.pending) ? 7000 : 20000,
   });
 
   const heartbeat = useMutation({
@@ -85,6 +89,12 @@ export default function Nodes() {
       if (data.errors?.length) toast.error(data.errors.join(" · "));
       invalidate();
     },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
+  });
+
+  const reconnect = useMutation({
+    mutationFn: (id: number) => api.post(`/zagros/nodes/${id}/reconnect`),
+    onSuccess: () => { toast.ok("node reconnected"); invalidate(); },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
   });
 
@@ -180,7 +190,8 @@ export default function Nodes() {
                 )}
                 {pending && !node.last_error && (
                   <p className="mt-2 rounded-lg bg-brand-soft px-2.5 py-1.5 text-[11px] text-content-2">
-                    Not paired yet — run the installer command on the node, then confirm its fingerprint.
+                    Not paired yet — run the installer command on the node. The panel
+                    checks every 45s and pairs it automatically; use reconnect to try now.
                   </p>
                 )}
 
@@ -190,12 +201,20 @@ export default function Nodes() {
                       <Button variant="secondary" size="sm" onClick={() => setInstallerFor(node.id)}>
                         <Terminal size={13} /> installer command
                       </Button>
-                      <Button size="sm" onClick={() => setPairFor(node)}>
-                        <KeyRound size={13} /> set manual
+                      <Button size="sm" onClick={() => reconnect.mutate(node.id)}
+                        loading={reconnect.isPending}>
+                        <RefreshCcw size={13} /> reconnect
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => setPairFor(node)}>
+                        <KeyRound size={13} /> pair manual
                       </Button>
                     </>
                   ) : (
                     <>
+                      <Button variant="ghost" size="sm" onClick={() => reconnect.mutate(node.id)}
+                        loading={reconnect.isPending}>
+                        <RefreshCcw size={13} /> reconnect
+                      </Button>
                       <Button variant="ghost" size="sm" onClick={() => heartbeat.mutate(node.id)}
                         loading={heartbeat.isPending}>
                         <Activity size={13} /> verify

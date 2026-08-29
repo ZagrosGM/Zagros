@@ -9,7 +9,7 @@ stack (fastapi/apscheduler/xray singletons) into their interpreter.
 import asyncio
 import logging
 
-__version__ = "1.0.0-alpha.9"  # Zagros begins a new version line after the rebrand
+__version__ = "1.0.0-alpha.9.1"  # Zagros begins a new version line after the rebrand
 
 
 _building = False
@@ -172,6 +172,33 @@ def _build_app_inner():
                 except Exception as _exc:  # noqa: BLE001 - never block boot
                     logging.getLogger("uvicorn.error").warning(
                         "usage baseline restore failed: %s", _exc)
+                # Re-prove every node's pairing: the credentials live in the
+                # database and survive a restart, but nothing else would
+                # notice them again until an operator clicked something.
+                # Backgrounded — a node that is slow to answer must not hold
+                # up the panel's own boot.
+                try:
+                    import asyncio
+
+                    from app.nodes.service import reconnect_all as _reconnect_all
+
+                    async def _boot_nodes() -> None:
+                        try:
+                            report = await _reconnect_all(runtime)
+                        except Exception as _inner:  # noqa: BLE001
+                            logging.getLogger("uvicorn.error").warning(
+                                "node reconnect at boot failed: %s", _inner)
+                            return
+                        logging.getLogger("uvicorn.error").info(
+                            "node reconnect at boot: %d node(s) — %d reachable, "
+                            "%d failing", report["checked"],
+                            len(report["connected"]) + len(report["paired"]),
+                            len(report["failed"]))
+
+                    asyncio.create_task(_boot_nodes())
+                except Exception as _exc:  # noqa: BLE001 - never block boot
+                    logging.getLogger("uvicorn.error").warning(
+                        "node reconnect at boot could not start: %s", _exc)
 
         @app.on_event("shutdown")
         async def zagros_stop_managed_cores():

@@ -129,6 +129,28 @@ def _seal_token(runtime, node_identity: str, token: str) -> str:
         {"registration_token": token}, aad=f"node-token:{node_identity}")
 
 
+def _row_token(runtime, row) -> str | None:
+    """The node's one-time registration token, however it came to be sealed.
+
+    The token is sealed under the node's identity at the time — a bare
+    ``pending:<name>`` while the node is unpaired, the agent's id afterwards.
+    Re-installing the agent changes that id underneath us, so a single guess
+    is not enough: an operator who rotates the token of a node whose agent was
+    reinstalled would otherwise be told (wrongly) that no token exists.
+    """
+    blob = getattr(row, "registration_token_enc", "") or ""
+    if not blob:
+        return None
+    for identity in (getattr(row, "agent_identity", "") or "",
+                     f"pending:{getattr(row, 'name', '') or ''}"):
+        if not identity:
+            continue
+        token = _unseal_token(runtime, identity, blob)
+        if token:
+            return token
+    return None
+
+
 def _unseal_token(runtime, node_identity: str, blob: str) -> str | None:
     if not blob:
         return None
@@ -242,10 +264,7 @@ async def installer_command(runtime, node_id: int, *,
     if row is None:
         raise KeyError(node_id)
     if not rotate:
-        token = _unseal_token(
-            runtime, row.agent_identity or f"pending:{row.name}",
-            getattr(row, "registration_token_enc", "") or "")
-        return _installer_command(row, token)
+        return _installer_command(row, _row_token(runtime, row))
 
     if row.status == "connected":
         raise PermissionError(
@@ -320,9 +339,7 @@ async def pair(runtime, node_id: int, *, certificate_fingerprint: str,
     if len(fingerprint) != 64:
         raise ValueError("certificate fingerprint must be a 64-character hex SHA-256")
 
-    token = registration_token or _unseal_token(
-        runtime, node_id_hint or row.agent_identity or f"pending:{row.name}",
-        getattr(row, "registration_token_enc", "") or "")
+    token = registration_token or _row_token(runtime, row)
     if not token:
         raise ValueError(
             "no registration token is available — regenerate the installer "
@@ -506,6 +523,16 @@ async def core_lifecycle(runtime, node_id: int, core_id: str, *, action: str,
     result = await asyncio.to_thread(
         _client(runtime, row).lifecycle, core_id, action, settings=settings,
         purge=purge, force=force)
+    # A freshly installed core owns no listeners yet: it cannot start, and it
+    # serves nothing, until this panel's configuration reaches it. Converge it
+    # here so "install" means "installed and serving", not "installed, now go
+    # find the sync button".
+    if action in ("install", "update"):
+        try:
+            result["convergence"] = await converge_node(
+                runtime, node_id, core_ids=[core_id])
+        except Exception as exc:  # noqa: BLE001 — the action itself succeeded
+            result["convergence"] = {"errors": [str(exc)]}
     # Refresh the cached inventory so the UI reflects the change immediately.
     try:
         await heartbeat(runtime, node_id)
@@ -627,8 +654,12 @@ async def _push_identity(runtime, client, core_id: str,
     return list(applied)
 
 
-async def sync_node(runtime, node_id: int) -> SyncResult:
+async def sync_node(runtime, node_id: int, *,
+                    core_ids: list[str] | None = None) -> SyncResult:
     """Push this panel's desired inbound state to every core on the node.
+
+    ``core_ids`` narrows the pass to a subset (used right after one core was
+    installed, so the node converges without waiting for a manual sync).
 
     Two halves, because "a client can connect via the node" needs both:
 
@@ -651,7 +682,9 @@ async def sync_node(runtime, node_id: int) -> SyncResult:
     master_cores = set(runtime.core_manager.list_cores())
 
     result = SyncResult(node_id=node_id)
-    for core_id in sorted(installed):
+    wanted = sorted(installed if core_ids is None
+                    else [c for c in installed if c in set(core_ids or ())])
+    for core_id in wanted:
         if core_id not in master_cores:
             result.skipped.append({"core_id": core_id,
                                    "reason": "core is not installed on the master"})
@@ -712,7 +745,7 @@ async def sync_node(runtime, node_id: int) -> SyncResult:
 
     if row.add_as_new_host:
         try:
-            result.hosts = await _add_node_hosts(runtime, row, sorted(installed))
+            result.hosts = await _add_node_hosts(runtime, row, wanted)
         except Exception as exc:  # noqa: BLE001 — config push already succeeded
             result.errors.append(f"hosts: {exc}")
 
@@ -1013,3 +1046,186 @@ async def sync_bandwidth_limits(runtime) -> dict[str, Any]:
     for message in result.get("errors") or []:
         logger.warning("node bandwidth push: %s", message)
     return result
+
+
+# --------------------------------------------------------------------------- #
+# convergence — a node must end up configured AND running, not merely paired   #
+# --------------------------------------------------------------------------- #
+# Pairing only proves identity. A freshly installed core still has no listeners
+# and no accounts, and it refuses to start until it does — which used to mean
+# an operator had to find the "sync config" button before the node served
+# anything. These helpers make the panel finish the job it started.
+
+_RUNNING_STATES = frozenset({"running", "starting"})
+
+
+def native_nodes(runtime) -> list[Any]:
+    """Every Zagros-native node row, paired or not."""
+    from app.persistence.models import NodeModel
+
+    def read(session):
+        return (session.query(NodeModel)
+                .filter(NodeModel.agent_type == "zagros_native")
+                .all())
+
+    try:
+        rows = _persist(runtime, read)()
+    except Exception:  # noqa: BLE001 — never break a boot over bookkeeping
+        logger.debug("node convergence: cannot enumerate nodes")
+        return []
+    return list(rows or [])
+
+
+async def start_node_cores(runtime, node_id: int, *,
+                           core_ids: list[str] | None = None) -> dict[str, Any]:
+    """Start every installed core that should be serving traffic.
+
+    A core the master does not run is left alone: the node is an extension of
+    this panel, not an independent server with its own opinion.
+    """
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+    client = _client(runtime, row)
+    inventory = await asyncio.to_thread(client.cores)
+    installed = dict(inventory.get("installed") or {})
+    master = set(runtime.core_manager.list_cores())
+
+    started: list[str] = []
+    errors: list[str] = []
+    skipped: list[str] = []
+    for core_id in sorted(installed):
+        if core_ids is not None and core_id not in set(core_ids):
+            continue
+        if core_id not in master:
+            skipped.append(f"{core_id}: not installed on the master")
+            continue
+        state = str((installed.get(core_id) or {}).get("state") or "").lower()
+        if state in _RUNNING_STATES:
+            continue
+        try:
+            await asyncio.to_thread(client.lifecycle, core_id, "start")
+        except Exception as exc:  # noqa: BLE001 — one core never blocks the rest
+            errors.append(f"{core_id}: {exc}")
+            continue
+        started.append(core_id)
+
+    report = {"started": started, "errors": errors, "skipped": skipped}
+    try:
+        await heartbeat(runtime, node_id)
+    except Exception:  # noqa: BLE001 — the state was changed either way
+        pass
+    return report
+
+
+async def converge_node(runtime, node_id: int, *,
+                        core_ids: list[str] | None = None) -> dict[str, Any]:
+    """Push the configuration, then start what the node has to serve.
+
+    Order matters: a node core refuses to start before it owns its listeners
+    (identity, inbounds, accounts), so the sync always runs first.
+    """
+    report: dict[str, Any] = {"synced": None, "started": [], "errors": []}
+    try:
+        sync = await sync_node(runtime, node_id, core_ids=core_ids)
+    except Exception as exc:  # noqa: BLE001 — report, never raise into pairing
+        report["errors"].append(f"sync: {exc}")
+        return report
+    report["synced"] = sync.model_dump(mode="json")
+    report["errors"].extend(str(e) for e in (sync.errors or []))
+    if core_ids is None or any(
+            item.get("core_id") in set(core_ids)
+            for item in (sync.pushed or []) if isinstance(item, dict)):
+        try:
+            started = await start_node_cores(runtime, node_id, core_ids=core_ids)
+        except Exception as exc:  # noqa: BLE001
+            report["errors"].append(f"start: {exc}")
+        else:
+            report["started"] = started.get("started") or []
+            report["errors"].extend(started.get("errors") or [])
+            report.setdefault("skipped", started.get("skipped") or [])
+    return report
+
+
+async def reconnect(runtime, node_id: int) -> NodeView:
+    """Bring one node back online — pairing it first when that is what is missing.
+
+    Adding a node only records intent: the agent is installed afterwards, by
+    hand, on a machine this panel cannot see. Nothing then moved the row out of
+    ``pending``. This is the single entry point that closes that gap, for the
+    button, the scheduler and the boot sequence alike:
+
+    1. a paired node only needs a heartbeat (cheapest proof of life);
+    2. an unpaired one is discovered on its info port and paired with the
+       one-time token the installer carried — the token is single-use and the
+       fingerprint is verified against the certificate the control plane
+       actually serves, so this is not trust-on-first-use over a new channel;
+    3. anything that just came up is converged (configuration + start).
+    """
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+
+    paired = bool(row.agent_identity and row.agent_credentials_enc)
+    heartbeat_error = ""
+    if paired:
+        try:
+            return await heartbeat(runtime, node_id)
+        except Exception as exc:  # noqa: BLE001 — fall through to re-pairing
+            heartbeat_error = str(exc)
+            logger.info("node %s heartbeat failed (%s); checking whether it can "
+                        "be paired again", node_id, exc)
+
+    # A node that is not reachable keeps its credentials: a container restart
+    # is not a reason to throw a working pairing away and demand the installer
+    # be run again.
+    info = await discover(runtime, node_id)
+    if not info.reachable:
+        message = info.error or "node is not reachable"
+        await _mark_error(runtime, node_id, message)
+        raise NodeClientError(message)
+    if not info.pending_token:
+        if paired:
+            # The agent answers, but with no token to offer and no memory of
+            # us — the usual cause is a reinstall. Say so, because "re-run the
+            # installer" is only half the story: the token has to be rotated
+            # first, the old one is spent.
+            message = ("this node no longer recognises the stored pairing \u2014 the "
+                       "agent looks freshly installed; rotate the installer token "
+                       "and run the new command on the node")
+        else:
+            message = ("the node is not waiting for a registration token \u2014 "
+                       "run the installer command on the node")
+        await _mark_error(runtime, node_id, message)
+        raise NodeClientError(message)
+    if not info.certificate_sha256:
+        await _mark_error(runtime, node_id, "the node published no certificate")
+        raise NodeClientError("the node published no certificate")
+
+    view = await pair(runtime, node_id,
+                      certificate_fingerprint=info.certificate_sha256,
+                      node_id_hint=info.node_id)
+    try:
+        await converge_node(runtime, node_id)
+    except Exception as exc:  # noqa: BLE001 — pairing already succeeded
+        logger.warning("node %s paired but could not be converged: %s",
+                       node_id, exc)
+    return view
+
+
+async def reconnect_all(runtime) -> dict[str, Any]:
+    """Reconnect every native node. Used at boot and by the scheduler."""
+    report: dict[str, Any] = {"checked": 0, "connected": [], "paired": [],
+                              "failed": {}}
+    for row in native_nodes(runtime):
+        report["checked"] += 1
+        was_connected = row.status == "connected"
+        try:
+            view = await reconnect(runtime, int(row.id))
+        except Exception as exc:  # noqa: BLE001 — one node never blocks the rest
+            report["failed"][str(row.name)] = str(exc)[:300]
+            continue
+        bucket = "connected" if was_connected else "paired"
+        report[bucket].append({"node_id": int(row.id), "name": view.name,
+                               "status": view.status})
+    return report

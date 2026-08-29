@@ -10,6 +10,43 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.9.1] — 2026-08-30 — A node joins without being hand-held
+
+Three ways a node used to need an operator to finish what the panel had
+started. All three are now automatic.
+
+### Added
+
+* **Automatic node attachment.** A node that was added but not yet paired is
+  re-checked on a 45s sweep: the agent is discovered on its info port and
+  paired with the one-time token, so installing the agent on the server is the
+  last manual step. Unpaired nodes are retried on every sweep — there is no
+  state to protect while waiting for the installer, so there is nothing to back
+  off from.
+* **Reconnect button** on every node card (paired or not) for the cases where
+  waiting is not what you want.
+* **Reconnect on boot.** Restarting the panel re-proves every native node's
+  pairing in the background, so a restart no longer leaves the nodes page
+  looking stale.
+* A node whose heartbeat fails is told apart from one that was never paired:
+  an agent that has been reinstalled says the token must be *rotated*, because
+  the old one is spent, instead of asking you to re-run a dead command.
+
+### Fixed
+
+* **Cores now start when they are installed.** Installing or updating a core on
+  a node converges it immediately — configuration, then start — instead of
+  leaving a core that cannot serve anything until someone presses *sync
+  config*. The same convergence runs the moment a node pairs.
+* Pairing no longer loses its own registration token when the agent was
+  reinstalled: the token is stored under the identity the panel knew when it
+  was issued, and is now found under either identity.
+* Heartbeating healthy nodes is throttled (every 8th sweep) and failing nodes
+  back off (45s → 90s → 3m → 5m), so a down node is not hammered and a healthy
+  one is not polled to death.
+
+---
+
 ## [1.0.0-alpha.9] — 2026-08-29 — Multi-node: a node serves traffic the panel can meter
 
 ### Added

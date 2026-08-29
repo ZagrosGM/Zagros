@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import os
 import logging
 import re
 import secrets
@@ -534,6 +535,59 @@ class OpenVPNDriver(BaseCoreDriver):
                 raise CoreError(f"uploaded CA certificate is not valid PEM: {exc}") from exc
             self._write_if_changed(os.path.join(work_dir, "ca.crt"), str(ca_pem), 0o644)
         self._pki = None  # force ensure_pki/client-profile re-read
+
+    # ------------------------------------------------------------------ #
+    # server identity — the CA / server certificate clients pin            #
+    # ------------------------------------------------------------------ #
+    # Every node must serve the master's CA, otherwise a profile whose
+    # remote points at the node is reset during the TLS handshake (the
+    # client trusts a CA the node never heard of).
+
+    _IDENTITY_PKI_FILES: ClassVar[tuple[str, ...]] = (
+        "ca.crt", "ca.key", "server.csr", "server.crt", "server.key",
+        "ta.key", "dh.pem",
+    )
+
+    def export_identity(self) -> dict[str, str]:
+        work_dir = str(self.settings.get("work_dir") or ".")
+        out: dict[str, str] = {}
+        for name in self._IDENTITY_PKI_FILES:
+            try:
+                with open(os.path.join(work_dir, name), encoding="utf-8") as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            if text.strip():
+                out[name] = text
+        return out
+
+    def import_identity(self, material: dict[str, str]) -> list[str]:
+        """Adopt the master's PKI. Validated with the same rules as an
+        operator upload, so a mismatched bundle can never brick the core."""
+        if not material:
+            return []
+        import os as _os
+
+        work_dir = str(self.settings.get("work_dir") or ".")
+        _os.makedirs(work_dir, exist_ok=True)
+        # Validate (and write) the CA / server cert / server key trio.
+        self._materialize_uploaded_pki(
+            ca_pem=material.get("ca.crt"),
+            cert_pem=material.get("server.crt"),
+            key_pem=material.get("server.key"))
+        written = [name for name in ("ca.crt", "server.crt", "server.key")
+                   if (material.get(name) or "").strip()]
+        for name in self._IDENTITY_PKI_FILES:
+            if name in written:
+                continue
+            text = material.get(name)
+            if not text or not text.strip():
+                continue
+            self._write_if_changed(_os.path.join(work_dir, name), text,
+                                   0o600 if name.endswith(".key") else 0o644)
+            written.append(name)
+        self._pki = None  # force ensure_pki / client-profile re-read
+        return written
 
     @staticmethod
     def _write_if_changed(path: str, text: str, mode: int) -> None:

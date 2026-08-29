@@ -226,6 +226,38 @@ class BaseCoreDriver(abc.ABC):
             await self.create_account(account)
 
     # ------------------------------------------------------------------ #
+    # server identity — the material a client authenticates the SERVER by
+    # ------------------------------------------------------------------ #
+    # Multi-node is only useful if a config keeps working when its address
+    # is switched from the master to a node: the user must not be handed a
+    # different CA / server key / pre-shared key per node. Nodes therefore
+    # ADOPT the master's identity instead of generating their own.
+    #
+    # The material is a flat {name: content} map whose meaning is private to
+    # each driver (relative file paths under the core work dir for file
+    # based cores, reserved keys such as ``ipsec_psk`` for daemon-managed
+    # ones). Empty map = this core has no server identity to federate.
+
+    def export_identity(self) -> dict[str, str]:
+        """Server identity material as it exists on THIS host.
+
+        Read-only and offline-safe: a core that was never started has
+        nothing to export and returns an empty map rather than raising.
+        """
+        return {}
+
+    def import_identity(self, material: dict[str, str]) -> list[str]:
+        """Adopt the master's identity material. Returns the applied keys.
+
+        Material is written BEFORE the listener document is applied, so the
+        next start (or restart) renders/serves the federated identity.
+        """
+        if not material:
+            return []
+        raise NotImplementedError(
+            f"{self.metadata.id} has no server identity to import")
+
+    # ------------------------------------------------------------------ #
     # statistics — capability gated
     # ------------------------------------------------------------------ #
     async def get_usage(

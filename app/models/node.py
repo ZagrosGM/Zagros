@@ -1,76 +1,36 @@
-from enum import Enum
-from typing import List, Optional
+"""Legacy node *accounting* types — deliberately the only survivor of the
+removed Xray-only node transport.
 
-from pydantic import ConfigDict, BaseModel, Field
+The Marzban-era node feature (rpyc transport, ``app/xray/node.py``,
+``/api/node*``, node CRUD) is gone: a Zagros node is now the standalone
+multi-core agent, implemented in ``app/nodes/`` and paired over
+certificate-pinned HTTPS.
+
+What remains here is the historical usage schema. ``nodes``, ``node_usages``
+and ``node_user_usages`` hold traffic records operators already collected,
+and the reporting endpoints (``crud.get_users_usage`` / ``get_nodes_usage``)
+read them. Dropping the tables would destroy accounting history for a
+feature that is simply no longer offered, so they stay — read-only in
+practice, with the enum and the response model they need.
+
+Nothing in this module can create, connect or command a node any more.
+"""
+from enum import Enum
+
+from pydantic import BaseModel
 
 
 class NodeStatus(str, Enum):
+    """Historical status values persisted in ``nodes.status``."""
+
     connected = "connected"
     connecting = "connecting"
     error = "error"
     disabled = "disabled"
 
 
-class NodeSettings(BaseModel):
-    min_node_version: str = "v0.2.0"
-    certificate: str
-
-
-class Node(BaseModel):
-    name: str
-    address: str
-    port: int = 62050
-    api_port: int = 62051
-    usage_coefficient: float = Field(gt=0, default=1.0)
-
-
-class NodeCreate(Node):
-    add_as_new_host: bool = True
-    model_config = ConfigDict(json_schema_extra={
-        "example": {
-            "name": "DE node",
-            "address": "192.168.1.1",
-            "port": 62050,
-            "api_port": 62051,
-            "add_as_new_host": True,
-            "usage_coefficient": 1
-        }
-    })
-
-
-class NodeModify(Node):
-    name: Optional[str] = Field(None, nullable=True)
-    address: Optional[str] = Field(None, nullable=True)
-    port: Optional[int] = Field(None, nullable=True)
-    api_port: Optional[int] = Field(None, nullable=True)
-    status: Optional[NodeStatus] = Field(None, nullable=True)
-    usage_coefficient: Optional[float] = Field(None, nullable=True)
-    model_config = ConfigDict(json_schema_extra={
-        "example": {
-            "name": "DE node",
-            "address": "192.168.1.1",
-            "port": 62050,
-            "api_port": 62051,
-            "status": "disabled",
-            "usage_coefficient": 1.0
-        }
-    })
-
-
-class NodeResponse(Node):
-    id: int
-    xray_version: Optional[str] = None
-    status: NodeStatus
-    message: Optional[str] = None
-    model_config = ConfigDict(from_attributes=True)
-
-
 class NodeUsageResponse(BaseModel):
-    node_id: Optional[int] = None
+    node_id: int | None = None
     node_name: str
     uplink: int
     downlink: int
-
-
-class NodesUsageResponse(BaseModel):
-    usages: List[NodeUsageResponse]

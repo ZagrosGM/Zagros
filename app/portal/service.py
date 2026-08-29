@@ -182,7 +182,15 @@ class PortalService:
                 profile = await driver.describe_delivery(account, delivery_context)
                 profile = await self._expand_hosts(driver.metadata.id, profile, variables)
             except Exception as exc:  # noqa: BLE001 — honest, never crash the list
-                notes.append(f"{account.protocol}: temporarily unavailable ({exc.__class__.__name__})")
+                # Name alone ("CoreError") tells an operator nothing; carry a
+                # short reason so "why is this protocol missing?" is answerable
+                # from the subscription itself. Kept short: this text is
+                # user-visible.
+                detail = str(exc).strip().replace("\n", " ")
+                reason = f" — {detail[:160]}" if detail else ""
+                notes.append(
+                    f"{account.protocol}: temporarily unavailable "
+                    f"({exc.__class__.__name__}){reason}")
                 continue
             for section in profile.sections:
                 for artifact in section.artifacts:

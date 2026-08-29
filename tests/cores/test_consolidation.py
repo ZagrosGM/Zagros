@@ -632,4 +632,10 @@ class TestAlembicConsolidation:
             keys = {r[0] for r in db.execute("SELECT key FROM settings")}
             assert not any(k.startswith("studio.document.") for k in keys)
             (head,) = db.execute("SELECT version_num FROM alembic_version").fetchone()
-            assert head == "0011_user_bandwidth_limits"
+            # Derived, not hardcoded: every new revision is the fresh-install
+            # head, so pinning a literal here would fail on each schema change.
+            from alembic.config import Config
+            from alembic.script import ScriptDirectory
+
+            script = ScriptDirectory.from_config(Config("alembic.ini"))
+            assert head == script.get_current_head()

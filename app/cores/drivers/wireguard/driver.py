@@ -1014,6 +1014,72 @@ class WireGuardDriver(BaseCoreDriver):
         await self._publish()
 
     # ------------------------------------------------------------------ #
+    # server identity — the keypair every client authenticates the peer by
+    # ------------------------------------------------------------------ #
+    # A node must serve the SAME public key as the master, otherwise a
+    # config that points at the node never completes a handshake: the
+    # client encrypts its initiation to the master's key. Material name:
+    # "server.key" for the primary inbound, "listeners/<iface>/server.key"
+    # for any additional one.
+
+    @staticmethod
+    def _identity_name(listener: dict[str, Any], index: int) -> str:
+        if index == 0:
+            return "server.key"
+        return f"listeners/{listener['interface']}/server.key"
+
+    @staticmethod
+    def _identity_work_dir(listener: dict[str, Any], index: int,
+                           base: str) -> str:
+        stored = listener.get("_work_dir")
+        if stored:
+            return str(stored)
+        return base if index == 0 else os.path.join(base, "listeners",
+                                                    listener["interface"])
+
+    def export_identity(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for index, listener in enumerate(self._listeners()):
+            backend = self._backends.get(listener["tag"])
+            reader = getattr(backend, "read_server_private_key", None)
+            if not callable(reader):
+                continue
+            private = reader()
+            if private:
+                out[self._identity_name(listener, index)] = private
+        return out
+
+    def import_identity(self, material: dict[str, str]) -> list[str]:
+        if not material:
+            return []
+        base = str(self.settings.get("work_dir")
+                   or "/var/lib/zagros/cores/wireguard")
+        applied: list[str] = []
+        for index, listener in enumerate(self._listeners()):
+            name = self._identity_name(listener, index)
+            content = (material.get(name) or "").strip()
+            if not content:
+                continue
+            backend = self._backends.get(listener["tag"])
+            # Validate before touching the file: a malformed key would take
+            # the interface down with no way back.
+            validator = getattr(backend, "public_from_private", None)
+            if callable(validator):
+                validator(content)
+            writer = getattr(backend, "write_server_private_key", None)
+            if callable(writer):
+                writer(content)
+            else:  # backend without a key file (pure in-memory test double)
+                work_dir = self._identity_work_dir(listener, index, base)
+                os.makedirs(work_dir, exist_ok=True)
+                path = os.path.join(work_dir, "server.key")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(content + "\n")
+                os.chmod(path, 0o600)
+            applied.append(name)
+        return applied
+
+    # ------------------------------------------------------------------ #
     # global bandwidth identity
     # ------------------------------------------------------------------ #
     def bandwidth_identities(self) -> dict[str, dict[str, list]]:

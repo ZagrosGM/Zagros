@@ -1173,6 +1173,45 @@ class SoftEtherDriver(BaseCoreDriver):
         self._accounts[account.account_id] = account.model_copy(update={"enabled": True})
         await asyncio.to_thread(self._backend.user_expires_set, account.account_id, None)
 
+    # ------------------------------------------------------------------ #
+    # server identity — the L2TP/IPsec pre-shared key                      #
+    # ------------------------------------------------------------------ #
+    # Clients authenticate the server with this PSK, so a node must serve
+    # the master's value: the portal hands out one PSK per hub, and a
+    # client pointing at a node with a different PSK never establishes
+    # the IPsec SA.
+
+    def export_identity(self) -> dict[str, str]:
+        psk = str(self.settings.get("ipsec_psk") or "").strip()
+        return {"ipsec_psk": psk} if psk else {}
+
+    async def import_identity(self, material: dict[str, str]) -> list[str]:
+        psk = str(material.get("ipsec_psk") or "").strip()
+        if not psk:
+            return []
+        self.settings["ipsec_psk"] = psk
+        applied = ["ipsec_psk"]
+        # Applying the listener document later does NOT re-push the PSK (the
+        # service flags are unchanged), so push it now — live when the
+        # daemon is up, and it is picked up from settings on next start
+        # otherwise.
+        try:
+            current = await asyncio.to_thread(self._backend.ipsec_get)
+        except Exception:  # noqa: BLE001 — daemon down: settings suffice
+            return applied
+        if current is None:
+            return applied
+        hub = str(self.settings.get("hub") or "DEFAULT")
+        await asyncio.to_thread(
+            self._backend.ipsec_services_set,
+            l2tp=current.l2tp,
+            l2tp_raw=current.l2tp_raw,
+            etherip=current.etherip,
+            psk=psk,
+            default_hub=current.default_hub or hub,
+        )
+        return applied
+
     async def sync_accounts(self, accounts: list[UserAccount]) -> None:
         desired = {a.account_id: a for a in accounts}
         stale = set(self._accounts) - set(desired)

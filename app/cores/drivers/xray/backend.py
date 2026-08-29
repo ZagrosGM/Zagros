@@ -106,14 +106,6 @@ class LegacyXrayBackend:
             self._mod = mod
         return self._mod
 
-    def _connected_nodes(self) -> list[tuple[int, Any]]:
-        mod = self._x()
-        return [
-            (node_id, node)
-            for node_id, node in list(mod.nodes.items())
-            if getattr(node, "connected", False) and getattr(node, "started", False)
-        ]
-
     def executable_path(self) -> str:
         """The binary path the wrapped legacy core will actually exec.
 
@@ -145,8 +137,6 @@ class LegacyXrayBackend:
     def restart(self) -> None:
         mod = self._x()
         mod.core.restart(mod.config.include_db_users())
-        for node_id, _node in self._connected_nodes():
-            mod.operations.restart_node(node_id)  # legacy is already threaded
 
     def is_running(self) -> bool:
         return bool(self._x().core.started)
@@ -233,11 +223,6 @@ class LegacyXrayBackend:
             mod.api.add_inbound_user(tag=tag, user=account, timeout=30)
         except (mod.exc.EmailExistsError, mod.exc.ConnectionError):
             pass
-        for _node_id, node in self._connected_nodes():
-            try:
-                node.api.add_inbound_user(tag=tag, user=account, timeout=30)
-            except (mod.exc.EmailExistsError, mod.exc.ConnectionError):
-                pass
 
     def remove_user(self, tag: str, email: str) -> None:
         mod = self._x()
@@ -245,11 +230,6 @@ class LegacyXrayBackend:
             mod.api.remove_inbound_user(tag=tag, email=email, timeout=30)
         except (mod.exc.EmailNotFoundError, mod.exc.ConnectionError):
             pass
-        for _node_id, node in self._connected_nodes():
-            try:
-                node.api.remove_inbound_user(tag=tag, email=email, timeout=30)
-            except (mod.exc.EmailNotFoundError, mod.exc.ConnectionError):
-                pass
 
     # ------------------------------------------------------------------ #
     # statistics
@@ -257,7 +237,6 @@ class LegacyXrayBackend:
     def usage(self, reset: bool = False) -> list[XrayUsageStat]:
         mod = self._x()
         sources: list[tuple[int | None, Any]] = [(None, mod.api)]
-        sources += [(nid, node.api) for nid, node in self._connected_nodes()]
 
         records: list[XrayUsageStat] = []
         for node_id, api in sources:

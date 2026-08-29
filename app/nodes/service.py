@@ -1,0 +1,840 @@
+"""Panel-side service layer for native Zagros nodes.
+
+Every node operation lives here rather than in the router: pairing has a
+state machine (pending → connected → error) with an **irreversible** step in
+the middle (the node burns its one-time token), so the ordering, the
+rollback rules and the "never leave an orphan authority behind" guarantees
+need to be testable in one place.
+
+Two invariants this module protects:
+
+1. **A fingerprint is never trusted implicitly.** Pairing requires the
+   operator's pin and verifies it against the certificate the node actually
+   serves on the control plane — the node equivalent of checking an SSH host
+   key before typing "yes".
+2. **No orphan panel authority.** If registration succeeds on the node but
+   persistence fails, the freshly issued signing key is revoked remotely
+   before the error is reported.
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import datetime as _dt
+import hashlib
+import json
+import secrets
+from typing import Any
+
+from sqlalchemy import select
+
+from app.nodes.client import (
+    NodeClientError,
+    ZagrosNodeClient,
+    fetch_node_info,
+    fetch_pinned_certificate,
+)
+from app.nodes.models import (
+    NODE_ACTIONS,
+    Discovery,
+    InstallerCommand,
+    NodeCores,
+    NodeCreate,
+    NodeUpdate,
+    NodeView,
+    SyncResult,
+)
+
+# Where the generated installer script is fetched from. Overridable so forks
+# and air-gapped setups can serve their own copy.
+INSTALLER_BASE = "https://raw.githubusercontent.com/ZagrosGM/zagros-node/main"
+PANEL_ID_PREFIX = "panel-"
+# Cores whose accounts live INSIDE their config document instead of the
+# platform account table (see app/platform/provisioning.py).
+LEGACY_CORE_ID = "xray"
+
+
+def _now() -> _dt.datetime:
+    return _dt.datetime.now(_dt.timezone.utc)
+
+
+def _settings(row) -> dict[str, Any]:
+    return dict(row.settings_json or {})
+
+
+def _normalize_fingerprint(value: str) -> str:
+    return "".join(char for char in (value or "").lower() if char in "0123456789abcdef")
+
+
+def panel_id(runtime) -> str:
+    """Stable, non-secret identifier this panel presents when registering."""
+    return PANEL_ID_PREFIX + hashlib.sha256(runtime.cipher._key).hexdigest()[:24]
+
+
+# --------------------------------------------------------------------------- #
+# persistence helpers
+# --------------------------------------------------------------------------- #
+def _get_row(runtime, node_id: int):
+    from app.persistence.models import NodeModel
+
+    with runtime.session_factory() as session:
+        row = session.get(NodeModel, node_id)
+        if row is None:
+            return None
+        session.expunge(row)
+        return row
+
+
+def _persist(runtime, mutate):
+    """Open a session, run ``mutate(session)``, commit and return its result.
+
+    Each mutation is responsible for its own ``refresh``/``expunge``: rows are
+    handed back detached so callers can read them after the session is closed.
+    """
+    def _run():
+        with runtime.session_factory() as session:
+            result = mutate(session)
+            session.commit()
+            return result
+    return _run
+
+
+def _view(row) -> NodeView:
+    settings = _settings(row)
+    return NodeView(
+        id=row.id,
+        name=row.name,
+        address=row.address,
+        port=row.port,
+        api_port=getattr(row, "api_port", 62051) or 62051,
+        status=row.status,
+        usage_coefficient=row.usage_coefficient,
+        add_as_new_host=bool(getattr(row, "add_as_new_host", False)),
+        agent_type=row.agent_type,
+        agent_identity=row.agent_identity,
+        certificate_fingerprint=row.certificate_fingerprint,
+        agent_version=getattr(row, "agent_version", None),
+        last_seen=row.last_seen.isoformat() if row.last_seen else None,
+        last_error=getattr(row, "last_error", None),
+        pending=row.status != "connected",
+        health=settings.get("health"),
+        cores=NodeCores(**settings["cores"]) if settings.get("cores") else None,
+    )
+
+
+def _seal_token(runtime, node_identity: str, token: str) -> str:
+    return runtime.cipher.encrypt_json(
+        {"registration_token": token}, aad=f"node-token:{node_identity}")
+
+
+def _unseal_token(runtime, node_identity: str, blob: str) -> str | None:
+    if not blob:
+        return None
+    try:
+        value = runtime.cipher.decrypt_json(blob, aad=f"node-token:{node_identity}")
+    except Exception:  # noqa: BLE001 — a lost key must not mask the real error
+        return None
+    return str(value.get("registration_token") or "") or None
+
+
+# --------------------------------------------------------------------------- #
+# client construction
+# --------------------------------------------------------------------------- #
+def _client(runtime, row) -> ZagrosNodeClient:
+    import base64 as _b64
+
+    if row.agent_type != "zagros_native" or not row.agent_identity \
+            or not row.agent_credentials_enc:
+        raise NodeClientError("node is not paired yet")
+    credentials = runtime.cipher.decrypt_json(
+        row.agent_credentials_enc, aad=f"node-agent:{row.agent_identity}")
+    key = _b64.b64decode(credentials["signing_key"])
+    cert = str((row.settings_json or {}).get("certificate_pem") or "")
+    if len(key) != 32 or not cert:
+        raise NodeClientError("node credentials are incomplete")
+    return ZagrosNodeClient(row.address, row.port, row.agent_identity, key, cert,
+                            api_port=getattr(row, "api_port", None))
+
+
+# --------------------------------------------------------------------------- #
+# listing
+# --------------------------------------------------------------------------- #
+async def list_nodes(runtime) -> list[NodeView]:
+    from app.persistence.models import NodeModel
+
+    def load():
+        with runtime.session_factory() as session:
+            rows = session.execute(select(NodeModel)).scalars().all()
+            views = [_view(row) for row in rows]
+            for row in rows:
+                session.expunge(row)
+            return views
+    return await asyncio.to_thread(load)
+
+
+async def get_node(runtime, node_id: int) -> NodeView | None:
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    return None if row is None else _view(row)
+
+
+# --------------------------------------------------------------------------- #
+# create + installer command
+# --------------------------------------------------------------------------- #
+def _installer_command(row, token: str | None, *, rotated: bool = False) -> InstallerCommand:
+    command = (
+        f"curl -fsSL {INSTALLER_BASE}/scripts/install.sh | bash -s --"
+        f" --panel-id {row.panel_id}"
+        f" --token {token or '<TOKEN>'}"
+        f" --name {row.name}"
+        f" --address {row.address}"
+        f" --port {row.port}"
+        f" --api-port {getattr(row, 'api_port', 62051)}"
+    )
+    notes = [
+        "Run it as root on the node server.",
+        "The token is single-use and is not shown again — regenerate it if lost.",
+        "The installer prints the TLS fingerprint; confirm it here to finish pairing.",
+    ]
+    if rotated:
+        notes.insert(0, "A previous token was invalidated by this command.")
+    return InstallerCommand(command=command, panel_id=row.panel_id,
+                            registration_token=token, notes=notes)
+
+
+async def create_node(runtime, body: NodeCreate) -> tuple[NodeView, InstallerCommand]:
+    from app.persistence.models import NodeModel
+
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def mutate(session):
+        if session.scalar(select(NodeModel).where(NodeModel.name == body.name)):
+            raise ValueError(f"node '{body.name}' already exists")
+        row = NodeModel(
+            name=body.name, address=body.address, port=body.port,
+            api_port=body.api_port, status="pending",
+            usage_coefficient=body.usage_coefficient,
+            add_as_new_host=body.add_as_new_host,
+            agent_type="zagros_native",
+            panel_id=panel_id(runtime),
+            registration_token_hash=token_hash,
+            registration_token_enc=_seal_token(runtime, f"pending:{body.name}", token),
+            created_at=_now(),
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        session.expunge(row)
+        return row
+
+    row = await asyncio.to_thread(_persist(runtime, mutate))
+    return _view(row), _installer_command(row, token)
+
+
+async def installer_command(runtime, node_id: int, *,
+                            rotate: bool = False) -> InstallerCommand:
+    """Show (or reissue) the installer command for a node."""
+    from app.persistence.models import NodeModel
+
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+    if not rotate:
+        token = _unseal_token(
+            runtime, row.agent_identity or f"pending:{row.name}",
+            getattr(row, "registration_token_enc", "") or "")
+        return _installer_command(row, token)
+
+    if row.status == "connected":
+        raise PermissionError(
+            "this node is paired — rotating the token would orphan the pairing; "
+            "delete and re-add the node instead")
+
+    token = secrets.token_urlsafe(32)
+
+    def mutate(session):
+        current = session.get(NodeModel, node_id)
+        if current is None:
+            raise KeyError(node_id)
+        current.registration_token_hash = hashlib.sha256(token.encode()).hexdigest()
+        current.registration_token_enc = _seal_token(
+            runtime, current.agent_identity or f"pending:{current.name}", token)
+        current.status = "pending"
+        session.commit()
+        session.refresh(current)
+        session.expunge(current)
+        return current
+
+    row = await asyncio.to_thread(_persist(runtime, mutate))
+    return _installer_command(row, token, rotated=True)
+
+
+# --------------------------------------------------------------------------- #
+# discovery + pairing
+# --------------------------------------------------------------------------- #
+async def discover(runtime, node_id: int) -> Discovery:
+    """Ask the node's info port who it is (read-only, unauthenticated)."""
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+    try:
+        info = await asyncio.to_thread(
+            fetch_node_info, row.address, getattr(row, "api_port", 62051))
+    except NodeClientError as exc:
+        return Discovery(reachable=False, error=str(exc))
+
+    fingerprint = _normalize_fingerprint(str(info.get("certificate_sha256") or ""))
+    return Discovery(
+        reachable=True,
+        node_id=info.get("node_id"),
+        name=info.get("name"),
+        agent_version=info.get("agent_version"),
+        certificate_sha256=fingerprint,
+        certificate_not_after=info.get("certificate_not_after"),
+        registered=bool(info.get("registered")),
+        pending_token=bool(info.get("pending_token")),
+        control_plane_port=info.get("control_plane_port"),
+        already_paired=bool(
+            row.agent_identity and info.get("node_id") == row.agent_identity),
+    )
+
+
+async def pair(runtime, node_id: int, *, certificate_fingerprint: str,
+               registration_token: str | None = None,
+               node_id_hint: str | None = None) -> NodeView:
+    """Pin the node's certificate and exchange the signing key.
+
+    The fingerprint is verified against the certificate the node *actually*
+    serves on the control plane (not merely against what the info port
+    claims), then the one-time token is exchanged once.
+    """
+    from app.persistence.models import NodeModel
+
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+
+    fingerprint = _normalize_fingerprint(certificate_fingerprint)
+    if len(fingerprint) != 64:
+        raise ValueError("certificate fingerprint must be a 64-character hex SHA-256")
+
+    token = registration_token or _unseal_token(
+        runtime, node_id_hint or row.agent_identity or f"pending:{row.name}",
+        getattr(row, "registration_token_enc", "") or "")
+    if not token:
+        raise ValueError(
+            "no registration token is available — regenerate the installer "
+            "command or paste the token manually")
+
+    try:
+        certificate_pem, pinned = await asyncio.to_thread(
+            fetch_pinned_certificate, row.address, row.port, fingerprint)
+        client = ZagrosNodeClient(
+            row.address, row.port, None, None, certificate_pem)
+        registration = await asyncio.to_thread(
+            client.register, row.panel_id or panel_id(runtime), token)
+    except NodeClientError as exc:
+        await _mark_error(runtime, node_id, str(exc))
+        raise
+
+    identity = str(registration["node_id"])
+    if node_id_hint and identity != node_id_hint:
+        # The operator pinned a certificate belonging to a different node.
+        # Nothing was persisted, but the token is now burned on that node —
+        # say so plainly instead of silently half-pairing.
+        raise ValueError(
+            f"the node answered with id '{identity}', not the expected "
+            f"'{node_id_hint}' — it must be re-armed with a new token")
+
+    signing_key = base64.b64decode(registration["signing_key"])
+    if len(signing_key) != 32:
+        raise NodeClientError("agent returned an invalid signing key")
+
+    sealed = runtime.cipher.encrypt_json(
+        {"signing_key": base64.b64encode(signing_key).decode("ascii")},
+        aad=f"node-agent:{identity}")
+
+    def mutate(session):
+        current = session.get(NodeModel, node_id)
+        if current is None:
+            raise KeyError(node_id)
+        clash = session.scalar(select(NodeModel).where(
+            NodeModel.agent_identity == identity, NodeModel.id != node_id))
+        if clash is not None:
+            raise ValueError(
+                f"node identity {identity[:12]}… is already registered as "
+                f"'{clash.name}'")
+        current.agent_identity = identity
+        current.agent_credentials_enc = sealed
+        current.certificate_fingerprint = pinned
+        current.agent_version = str(registration.get("agent_version") or "")
+        current.status = "connected"
+        current.last_seen = _now()
+        current.last_error = None
+        # The token is single-use: destroy every copy the panel holds.
+        current.registration_token_hash = ""
+        current.registration_token_enc = ""
+        settings = dict(current.settings_json or {})
+        settings["certificate_pem"] = certificate_pem
+        current.settings_json = settings
+        session.commit()
+        session.refresh(current)
+        session.expunge(current)
+        return current
+
+    try:
+        row = await asyncio.to_thread(_persist(runtime, mutate))
+    except Exception as exc:
+        # Registration was consumed remotely but could not be stored here.
+        # Revoke the key we just received so no orphan authority remains.
+        try:
+            await asyncio.to_thread(
+                ZagrosNodeClient(row.address, row.port, identity, signing_key,
+                                 certificate_pem).revoke)
+        except Exception:  # noqa: BLE001 — best effort, never mask the cause
+            pass
+        raise exc
+    return _view(row)
+
+
+async def _mark_error(runtime, node_id: int, message: str) -> None:
+    from app.persistence.models import NodeModel
+
+    def mutate(session):
+        current = session.get(NodeModel, node_id)
+        if current is not None:
+            current.status = "error" if current.status == "connected" else current.status
+            current.last_error = str(message)[:500]
+            session.commit()
+    await asyncio.to_thread(_persist(runtime, mutate))
+
+
+# --------------------------------------------------------------------------- #
+# health / cores / lifecycle
+# --------------------------------------------------------------------------- #
+async def heartbeat(runtime, node_id: int) -> NodeView:
+    """Verify the signing key end-to-end and refresh health + inventory."""
+    from app.persistence.models import NodeModel
+
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+    client = _client(runtime, row)
+    try:
+        beat, health, cores = await asyncio.gather(
+            asyncio.to_thread(client.heartbeat),
+            asyncio.to_thread(client.health),
+            asyncio.to_thread(client.cores),
+        )
+    except NodeClientError as exc:
+        await _mark_error(runtime, node_id, str(exc))
+        raise
+
+    def mutate(session):
+        current = session.get(NodeModel, node_id)
+        if current is None:
+            raise KeyError(node_id)
+        current.status = "connected"
+        current.last_seen = _now()
+        current.last_error = None
+        current.agent_version = str(beat.get("agent_version") or current.agent_version or "")
+        settings = dict(current.settings_json or {})
+        settings["health"] = health
+        settings["cores"] = cores
+        current.settings_json = settings
+        session.commit()
+        session.refresh(current)
+        session.expunge(current)
+        return current
+
+    row = await asyncio.to_thread(_persist(runtime, mutate))
+    return _view(row)
+
+
+async def node_cores(runtime, node_id: int, *,
+                     allow_stale: bool = True) -> NodeCores:
+    """Live inventory (installed + catalog), falling back to the last known."""
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+    try:
+        inventory = await asyncio.to_thread(_client(runtime, row).cores)
+        inventory.setdefault("preview", {})
+        return NodeCores(**inventory, stale=False)
+    except NodeClientError as exc:
+        cached = _settings(row).get("cores")
+        if allow_stale and cached:
+            return NodeCores(**cached, stale=True, error=str(exc))
+        raise
+
+
+async def core_settings(runtime, node_id: int, core_id: str) -> dict:
+    """A core's effective settings on the node (secrets already masked)."""
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+    return await asyncio.to_thread(_client(runtime, row).core_settings, core_id)
+
+
+async def update_core_settings(runtime, node_id: int, core_id: str,
+                               settings: dict) -> dict:
+    """Patch a core's settings on the node.
+
+    The node re-validates every value against the driver's own schema and
+    refuses paths outside the core root, so the panel cannot be used to
+    smuggle a setting the driver would not accept locally.
+    """
+    if not isinstance(settings, dict) or not settings:
+        raise ValueError("no settings supplied")
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+    return await asyncio.to_thread(
+        _client(runtime, row).apply_settings, core_id, settings)
+
+
+async def core_lifecycle(runtime, node_id: int, core_id: str, *, action: str,
+                         settings: dict | None = None, purge: bool = False,
+                         force: bool = False) -> dict:
+    if action not in NODE_ACTIONS:
+        raise ValueError(f"action must be one of {list(NODE_ACTIONS)}")
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+    result = await asyncio.to_thread(
+        _client(runtime, row).lifecycle, core_id, action, settings=settings,
+        purge=purge, force=force)
+    # Refresh the cached inventory so the UI reflects the change immediately.
+    try:
+        await heartbeat(runtime, node_id)
+    except Exception:  # noqa: BLE001 — the action itself already succeeded
+        pass
+    return result
+
+
+async def core_logs(runtime, node_id: int, core_id: str, tail: int = 200) -> dict:
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+    return await asyncio.to_thread(
+        _client(runtime, row).core_logs, core_id, max(1, min(tail, 2000)))
+
+
+# --------------------------------------------------------------------------- #
+# configuration sync (so clients can connect through the node's address)
+# --------------------------------------------------------------------------- #
+async def _master_document(runtime, core_id: str) -> dict | None:
+    """The master's authoritative config document for one core.
+
+    Cores whose configuration still lives in their own file (xray reads the
+    mounted ``XRAY_JSON``) expose it through ``export_config_document()``.
+    Reading it directly — instead of through ``studio.get_document`` — keeps
+    the sync read-only: it must not seed the Studio store as a side effect of
+    a sync, because that would silently change what the Studio page edits.
+    """
+    if core_id == LEGACY_CORE_ID:
+        return _xray_document_with_accounts()
+    document = await runtime.studio_store.get_document(core_id)
+    if (document or {}).get("inbounds"):
+        return document
+    try:
+        driver = runtime.core_manager.get(core_id)
+    except Exception:  # noqa: BLE001 — driver missing = nothing to push
+        return document or None
+    export = getattr(driver, "export_config_document", None)
+    if not callable(export):
+        return document or None
+    try:
+        seeded = export()
+    except Exception:  # noqa: BLE001 — a broken core must not abort the sync
+        return document or None
+    return seeded if isinstance(seeded, dict) else (document or None)
+
+
+def _xray_document_with_accounts() -> dict | None:
+    """The master's xray config **including its database users**.
+
+    xray is the one core whose accounts live inside its configuration file
+    (as inbound ``clients``), not in the platform account table — it is still
+    governed by the legacy proxy stack. Pushing the bare config would give
+    the node correct inbounds with an empty client list, which is exactly the
+    failure "the master connects, the node does not": the node would simply
+    not recognise the user's credential.
+
+    ``include_db_users()`` is a copy, so the running master config is never
+    mutated here.
+    """
+    try:
+        from app import xray as _xray
+
+        config = _xray.config.include_db_users()
+        document = json.loads(config.to_json())
+    except Exception:  # noqa: BLE001 — legacy stack unavailable: report honestly
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def _core_accounts(runtime, core_id: str) -> list[dict] | None:
+    """Every live account the master holds for one core (credentials included).
+
+    Secrets are decrypted here — the panel is the only side that owns the
+    master key — and travel to the node inside the signed TLS channel.
+    """
+    try:
+        rows = runtime.users.accounts_of_core(core_id)
+    except Exception:  # noqa: BLE001 — a core may have no account table yet
+        return None  # unknown, NOT empty: never revoke accounts on a read error
+    accounts: list[dict] = []
+    for row in rows:
+        accounts.append({
+            "user_id": int(row["user_id"]),
+            "username": str(row.get("username") or row["account_id"]),
+            "account_id": str(row["account_id"]),
+            "protocol": str(row.get("protocol") or ""),
+            "enabled": bool(row.get("enabled", True)),
+            "settings": dict(row.get("settings") or {}),
+        })
+    return accounts
+
+
+async def _push_identity(runtime, client, core_id: str,
+                         result: "SyncResult") -> list[str] | None:
+    """Hand the master's server identity to a node (best-effort).
+
+    Returns the applied material names, or ``None`` when there was nothing
+    to federate. A failure is recorded on ``result`` and never aborts the
+    rest of the sync: an outdated identity is a client-trust problem, while
+    a cancelled sync would leave the node serving stale inbounds.
+    """
+    exporter = getattr(runtime.core_manager.get(core_id), "export_identity", None)
+    if not callable(exporter):
+        return None
+    try:
+        material = await asyncio.to_thread(exporter)
+    except Exception as exc:  # noqa: BLE001 — per-core isolation
+        result.errors.append(f"{core_id}: identity could not be read: {exc}")
+        return None
+    if not material:
+        return None
+    try:
+        response = await asyncio.to_thread(client.apply_identity, core_id, material)
+    except NodeClientError as exc:
+        result.errors.append(f"{core_id} identity: {exc}")
+        return None
+    applied = response.get("applied") or []
+    return list(applied)
+
+
+async def sync_node(runtime, node_id: int) -> SyncResult:
+    """Push this panel's desired inbound state to every core on the node.
+
+    Two halves, because "a client can connect via the node" needs both:
+
+    1. **identity** — the master's server identity (CA, server keypair,
+       IPsec PSK) is handed to the node, so a profile keeps authenticating
+       the server when its address is switched to the node;
+    2. **config** — each core's Config Studio document is applied on the
+       node, so the node serves the same inbounds as the master;
+    3. **accounts** — the users themselves (xray carries them inside the
+       document; every other core needs them reconciled explicitly);
+    4. **hosts** — the node's address is registered as a Host on those
+       inbounds, so subscriptions can be issued against the node IP.
+    """
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+    client = _client(runtime, row)
+    inventory = await asyncio.to_thread(client.cores)
+    installed = dict(inventory.get("installed") or {})
+    master_cores = set(runtime.core_manager.list_cores())
+
+    result = SyncResult(node_id=node_id)
+    for core_id in sorted(installed):
+        if core_id not in master_cores:
+            result.skipped.append({"core_id": core_id,
+                                   "reason": "core is not installed on the master"})
+            continue
+        try:
+            document = await _master_document(runtime, core_id)
+        except Exception as exc:  # noqa: BLE001 — per-core isolation
+            result.errors.append(f"{core_id}: cannot read its configuration: {exc}")
+            continue
+        if not document or not (document.get("inbounds") or []):
+            result.skipped.append({"core_id": core_id,
+                                   "reason": "no inbounds configured on the master"})
+            continue
+        # Identity first: the node must own the master's server material
+        # BEFORE it applies listeners, or it would serve a locally generated
+        # CA / keypair that no existing profile trusts.
+        identity_applied = await _push_identity(runtime, client, core_id, result)
+
+        try:
+            applied = await asyncio.to_thread(client.apply_inbounds, core_id, document)
+        except NodeClientError as exc:
+            result.errors.append(f"{core_id}: {exc}")
+            continue
+        pushed: dict[str, Any] = {
+            "core_id": core_id,
+            "inbound_count": applied.get("inbound_count", 0),
+        }
+        if identity_applied is not None:
+            pushed["identity"] = identity_applied
+        # Accounts: the other half of "a config that points at the node
+        # actually connects". xray carries its users inside the document that
+        # was just applied; every other core keeps them in the platform
+        # account table and needs them reconciled explicitly.
+        if core_id == LEGACY_CORE_ID:
+            def _clients(inbound: dict) -> int:
+                settings = inbound.get("settings") or {}
+                return len(settings.get("clients")
+                           or inbound.get("clients") or [])
+
+            pushed["accounts"] = sum(
+                _clients(inbound) for inbound in (document.get("inbounds") or [])
+                if isinstance(inbound, dict))
+        else:
+            accounts = await asyncio.to_thread(_core_accounts, runtime, core_id)
+            if accounts is None:
+                result.errors.append(
+                    f"{core_id}: accounts could not be read from the panel "
+                    "database — left untouched on the node")
+            else:
+                try:
+                    synced = await asyncio.to_thread(
+                        client.apply_accounts, core_id, accounts)
+                except NodeClientError as exc:
+                    result.errors.append(f"{core_id} accounts: {exc}")
+                else:
+                    pushed["accounts"] = synced.get("count", len(accounts))
+        result.pushed.append(pushed)
+
+    if row.add_as_new_host:
+        try:
+            result.hosts = await _add_node_hosts(runtime, row, sorted(installed))
+        except Exception as exc:  # noqa: BLE001 — config push already succeeded
+            result.errors.append(f"hosts: {exc}")
+
+    def mutate(session):
+        from app.persistence.models import NodeModel
+
+        current = session.get(NodeModel, node_id)
+        if current is not None:
+            settings = dict(current.settings_json or {})
+            settings["last_sync"] = _now().isoformat()
+            current.settings_json = settings
+            session.commit()
+    await asyncio.to_thread(_persist(runtime, mutate))
+    return result
+
+
+async def _add_node_hosts(runtime, row, core_ids: list[str]) -> list[str]:
+    """Register the node's address as a Host on every inbound it will serve."""
+    added: list[str] = []
+    remark = f"{row.name} ({{USERNAME}}) [{{PROTOCOL}} - {{TRANSPORT}}]"
+
+    if "xray" in core_ids:
+        # xray keeps its hosts in the legacy table consumed by delivery.
+        from app import xray as _xray
+        from app.db import GetDB, crud
+        from app.models.proxy import ProxyHost
+
+        with GetDB() as db:
+            for tag in _xray.config.inbounds_by_tag:
+                existing = crud.get_hosts(db, tag)
+                if any(host.address == row.address for host in existing):
+                    continue
+                crud.add_host(db, tag, ProxyHost(remark=remark, address=row.address))
+                added.append(f"xray:{tag}")
+        try:
+            _xray.hosts.update()
+        except Exception:  # noqa: BLE001 — rows are persisted; cache refreshes later
+            pass
+
+    for core_id in core_ids:
+        if core_id == "xray":
+            continue
+        try:
+            document = (await _master_document(runtime, core_id)) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        tags = [inbound.get("tag") for inbound in (document.get("inbounds") or [])
+                if inbound.get("tag")]
+        if not tags:
+            continue
+        from app.portal.hostengine import HostEntry
+
+        grouped = await runtime.core_hosts.list_grouped(core_id)
+        touched: dict[str, list] = {}
+        for tag in tags:
+            entries = list(grouped.get(tag) or [])
+            if any(entry.address == row.address for entry in entries):
+                continue
+            entries.append(HostEntry(remark=f"{row.name}", address=row.address))
+            touched[tag] = entries
+            added.append(f"{core_id}:{tag}")
+        if touched:
+            await runtime.core_hosts.replace_tags(core_id, touched)
+    return added
+
+
+# --------------------------------------------------------------------------- #
+# modify / delete
+# --------------------------------------------------------------------------- #
+async def update_node(runtime, node_id: int, body: NodeUpdate) -> NodeView:
+    from app.persistence.models import NodeModel
+
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+
+    def mutate(session):
+        current = session.get(NodeModel, node_id)
+        if current is None:
+            raise KeyError(node_id)
+        for field in ("name", "address", "port", "api_port",
+                      "usage_coefficient", "add_as_new_host"):
+            value = getattr(body, field, None)
+            if value is not None:
+                setattr(current, field, value)
+        # Changing how we reach the node invalidates the pinned certificate
+        # and the sealed key: the node must be paired again.
+        if body.address is not None and body.address != row.address:
+            current.status = "pending"
+            current.agent_identity = None
+            current.agent_credentials_enc = None
+            current.certificate_fingerprint = None
+        session.commit()
+        session.refresh(current)
+        session.expunge(current)
+        return current
+
+    row = await asyncio.to_thread(_persist(runtime, mutate))
+    return _view(row)
+
+
+async def delete_node(runtime, node_id: int, *, force: bool = False) -> dict:
+    """Revoke the panel's authority on the node, then forget it."""
+    from app.persistence.models import NodeModel
+
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+
+    revoked = False
+    if row.agent_identity and row.agent_credentials_enc:
+        try:
+            await asyncio.to_thread(_client(runtime, row).revoke)
+            revoked = True
+        except NodeClientError as exc:
+            if not force:
+                raise PermissionError(
+                    f"revoking the node's key failed ({exc}); pass force=true only "
+                    "after isolating the node") from exc
+
+    def mutate(session):
+        current = session.get(NodeModel, node_id)
+        if current is not None:
+            session.delete(current)
+            session.commit()
+    await asyncio.to_thread(_persist(runtime, mutate))
+    return {"deleted": node_id, "remote_revoked": revoked}

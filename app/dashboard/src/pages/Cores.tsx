@@ -5,21 +5,621 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Cpu, Download, FileText, HardDriveDownload, Loader2, Play, PowerOff,
-  RefreshCcw, RotateCw, Square, Trash2, UploadCloud,
+  RefreshCcw, RotateCw, Server, Settings2, Square, Trash2, UploadCloud,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "../components/feedback";
 import { ConfirmDialog, Dialog, Drawer } from "../components/overlays";
 import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Select, Skeleton, StatusDot, Switch, Tabs, cn } from "../components/ui";
 import { api, ApiError } from "../lib/api";
 import { useDigits, formatBytes, formatDuration, formatNumber } from "../lib/format";
 import { useT } from "../lib/i18n";
-import type { CoreRegistryEntry, CoreRelease, CoreView } from "../lib/types";
+import type {
+  CoreRegistryEntry, CoreRelease, CoreView, Node, NodeCatalogEntry,
+  NodeCores, NodeCoreStatus, NodeList,
+} from "../lib/types";
+
+// --------------------------------------------------------------------------- //
+// Cores — tab host.
+//
+// "Master" is the panel's own core set (unchanged behaviour). Every paired
+// node gets its own tab: the same catalog → install → manage flow, executed
+// remotely over the node's signed control plane. Deep-linkable with
+// ?node=<id> so the Nodes page can hand off directly.
+// --------------------------------------------------------------------------- //
+export default function Cores() {
+  const t = useT();
+  const [params, setParams] = useSearchParams();
+  const nodeParam = params.get("node");
+  const [tab, setTab] = useState<string>(nodeParam ? `node:${nodeParam}` : "master");
+
+  const nodes = useQuery({
+    queryKey: ["zagros", "nodes"],
+    queryFn: () => api.get<NodeList>("/zagros/nodes"),
+    refetchInterval: 20000,
+  });
+
+  // Arriving from the Nodes page (or a bookmark) focuses that node.
+  useEffect(() => {
+    if (nodeParam) setTab(`node:${nodeParam}`);
+  }, [nodeParam]);
+
+  const select = (id: string) => {
+    setTab(id);
+    if (id.startsWith("node:")) setParams({ node: id.slice(5) }, { replace: true });
+    else setParams({}, { replace: true });
+  };
+
+  const tabs = [
+    { id: "master", label: "Master", icon: <Cpu size={13} /> },
+    ...(nodes.data?.nodes ?? []).map((n: Node) => ({
+      id: `node:${n.id}`,
+      label: `${n.name}${n.status === "connected" ? "" : " ⚠"}`,
+      icon: <Server size={13} />,
+    })),
+  ];
+
+  const activeNode = tab.startsWith("node:")
+    ? (nodes.data?.nodes ?? []).find((n) => n.id === Number(tab.slice(5))) ?? null
+    : null;
+
+  return (
+    <div className="space-y-4 animate-fade-up">
+      <div className="flex flex-wrap items-center gap-3">
+        <h1 className="me-auto flex items-center gap-2 text-lg font-bold tracking-tight">
+          <Cpu size={18} className="text-brand" />{t("nav.cores")}
+        </h1>
+        <Tabs active={tab} onChange={select} tabs={tabs} />
+      </div>
+      {activeNode
+        ? <NodeCoresPanel key={activeNode.id} node={activeNode} />
+        : <MasterCores />}
+    </div>
+  );
+}
+
+// --------------------------------------------------------------------------- //
+// One node's cores — installed / catalog, driven entirely through the node's
+// signed API (installs run as jobs on the node, so this call can legitimately
+// take minutes; the UI says so instead of timing out silently).
+// --------------------------------------------------------------------------- //
+function NodeCoresPanel({ node }: { node: Node }) {
+  const t = useT();
+  const digits = useDigits();
+  const qc = useQueryClient();
+  const [tab, setTab] = useState("installed");
+  const [installFor, setInstallFor] = useState<NodeCatalogEntry | null>(null);
+  const [logsFor, setLogsFor] = useState<string | null>(null);
+  const [settingsFor, setSettingsFor] = useState<string | null>(null);
+  const [uninstallFor, setUninstallFor] = useState<NodeCoreStatus | null>(null);
+  const [purge, setPurge] = useState(false);
+
+  const inventory = useQuery({
+    queryKey: ["zagros", "node-cores", node.id],
+    queryFn: () => api.get<NodeCores>(`/zagros/nodes/${node.id}/cores`),
+    refetchInterval: 8000,
+  });
+
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["zagros", "node-cores", node.id] });
+    qc.invalidateQueries({ queryKey: ["zagros", "nodes"] });
+  };
+
+  const act = useMutation({
+    mutationFn: ({ core, action, settings, purge: doPurge }: {
+      core: string; action: string; settings?: Record<string, unknown>; purge?: boolean;
+    }) => api.post(`/zagros/nodes/${node.id}/cores/${encodeURIComponent(core)}/lifecycle`,
+      { action, settings: settings ?? {}, purge: Boolean(doPurge), force: false }),
+    onSuccess: (_d, v) => { toast.ok(`${node.name}: ${v.core} ${v.action}`); invalidate(); },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
+    onSettled: invalidate,
+  });
+
+  const installed = Object.values(inventory.data?.installed ?? {});
+  const catalog = Object.values(inventory.data?.preview ?? {})
+    .filter((entry) => !installed.some((c) => c.core_id === entry.id));
+  const busy = act.isPending
+    ? `${act.variables?.action ?? "working"} on ${act.variables?.core ?? ""}`
+    : null;
+
+  if (node.status !== "connected") {
+    return (
+      <Card>
+        <EmptyState
+          title={`${node.name} is not paired`}
+          hint="Finish pairing from the Nodes page (confirm the certificate fingerprint) before managing its cores."
+        />
+      </Card>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <p className="me-auto text-[11px] text-content-3" dir="ltr">
+          {node.address}:{node.port}{node.agent_version ? ` · agent ${node.agent_version}` : ""}
+        </p>
+        <Tabs
+          active={tab} onChange={setTab}
+          tabs={[
+            { id: "installed", label: `cores (${installed.length})`, icon: <Cpu size={13} /> },
+            { id: "catalog", label: `catalog (${catalog.length})`, icon: <Download size={13} /> },
+          ]}
+        />
+      </div>
+
+      {inventory.isError && (
+        <Card>
+          <ErrorState message={(inventory.error as Error).message} onRetry={() => invalidate()} />
+        </Card>
+      )}
+      {inventory.data?.stale && (
+        <p className="rounded-xl bg-warn-soft px-3 py-2 text-[11px] text-warn">
+          Showing the last known inventory — the node did not answer ({inventory.data.error}).
+        </p>
+      )}
+      {busy && (
+        <p role="status" aria-live="polite"
+          className="flex items-center gap-2 rounded-xl border border-brand/30 bg-brand-soft/30 px-3 py-2 text-xs text-brand">
+          <Loader2 size={13} className="animate-spin" />
+          {busy} — this can take a few minutes for downloads
+        </p>
+      )}
+
+      {tab === "installed" && (
+        inventory.isLoading ? (
+          <div className="grid gap-4 md:grid-cols-2">{[1, 2].map((i) => <Skeleton key={i} className="h-52" />)}</div>
+        ) : !installed.length ? (
+          <Card>
+            <EmptyState
+              title="No cores installed on this node"
+              hint="Install one from the catalog — the node downloads and verifies the official release itself."
+              action={<Button size="sm" onClick={() => setTab("catalog")}><Download size={14} /> open catalog</Button>}
+            />
+          </Card>
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2">
+            {installed.map((core) => (
+              <Card key={core.core_id}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-brand-soft text-brand">
+                      <Cpu size={19} />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <h3 className="truncate text-[15px] font-semibold">{core.core_id}</h3>
+                        <StatusDot tone={(core.state === "running" ? "ok"
+                          : core.state === "error" ? "danger" : "muted") as never}
+                          pulse={core.state === "running"} />
+                      </div>
+                      <p className="truncate text-[11px] text-content-3">
+                        {core.core_version ? `version ${core.core_version}` : "version unknown"}
+                        {core.uptime_seconds ? ` · up ${formatDuration(core.uptime_seconds, digits)}` : ""}
+                      </p>
+                    </div>
+                  </div>
+                  <Badge tone={stateTone(core.state ?? "") as never} dot>{core.state}</Badge>
+                </div>
+
+                {core.binary_path && (
+                  <p className="mt-3 truncate font-mono text-[10.5px] text-content-3" dir="ltr"
+                    title={core.binary_path}>{core.binary_path}</p>
+                )}
+                {core.message && (
+                  <p className="mt-2 rounded-lg bg-warn-soft px-2.5 py-1.5 text-[11px] text-warn">{core.message}</p>
+                )}
+
+                <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t border-border pt-3.5">
+                  {core.state === "running" ? (
+                    <>
+                      <Button size="sm" variant="secondary"
+                        onClick={() => act.mutate({ core: core.core_id, action: "stop" })}>
+                        <Square size={13} /> stop</Button>
+                      <Button size="sm" variant="secondary"
+                        onClick={() => act.mutate({ core: core.core_id, action: "restart" })}>
+                        <RotateCw size={13} /> restart</Button>
+                    </>
+                  ) : (
+                    <Button size="sm"
+                      onClick={() => act.mutate({ core: core.core_id, action: "start" })}>
+                      <Play size={13} /> start</Button>
+                  )}
+                  <Button size="sm" variant="ghost" onClick={() => setLogsFor(core.core_id)}>
+                    <FileText size={13} /> logs</Button>
+                  <Button size="sm" variant="ghost" onClick={() => setSettingsFor(core.core_id)}>
+                    <Settings2 size={13} /> settings</Button>
+                  <Button size="sm" variant="ghost"
+                    onClick={() => act.mutate({ core: core.core_id, action: "update" })}>
+                    <UploadCloud size={13} /> update</Button>
+                  <div className="ms-auto">
+                    <Button size="sm" variant="danger"
+                      onClick={() => { setPurge(false); setUninstallFor(core); }}>
+                      <Trash2 size={13} />
+                    </Button>
+                  </div>
+                </div>
+              </Card>
+            ))}
+          </div>
+        )
+      )}
+
+      {tab === "catalog" && (
+        inventory.isLoading ? (
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {[1, 2, 3].map((i) => <Skeleton key={i} className="h-44" />)}
+          </div>
+        ) : !catalog.length ? (
+          <Card><EmptyState title="Every available core is installed on this node" /></Card>
+        ) : (
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {catalog.map((entry) => (
+              <Card key={entry.id}>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-[15px] font-semibold">{entry.name || entry.id}</h3>
+                    <p className="mt-0.5 line-clamp-2 min-h-[2em] text-[11px] text-content-3">
+                      {entry.description || "—"}
+                    </p>
+                  </div>
+                  <Badge tone="muted">{entry.id}</Badge>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {(entry.protocols ?? []).slice(0, 6).map((p) => <Badge key={p} tone="info">{p}</Badge>)}
+                </div>
+                <div className="mt-4 flex items-center justify-between border-t border-border pt-3.5">
+                  <span className="text-[10.5px] text-content-3">installed on the node</span>
+                  <Button size="sm" onClick={() => setInstallFor(entry)}>
+                    <HardDriveDownload size={13} /> install
+                  </Button>
+                </div>
+              </Card>
+            ))}
+          </div>
+        )
+      )}
+
+      {installFor && (
+        <NodeInstallDialog
+          node={node} entry={installFor}
+          onClose={() => setInstallFor(null)}
+          onDone={() => { setInstallFor(null); setTab("installed"); invalidate(); }}
+        />
+      )}
+
+      <Dialog
+        open={!!uninstallFor}
+        onClose={() => setUninstallFor(null)}
+        title={`uninstall — ${uninstallFor?.core_id}`}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setUninstallFor(null)}>{t("common.cancel")}</Button>
+            <Button variant="danger" loading={act.isPending}
+              onClick={() => uninstallFor && act.mutate(
+                { core: uninstallFor.core_id, action: "uninstall", purge })}>
+              <PowerOff size={13} /> uninstall
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-content-2">
+            The core binary and its runtime are removed on {node.name}. Users assigned to it stop
+            being served there.
+          </p>
+          <label className="flex items-center gap-2.5 text-sm text-content-2">
+            <Switch checked={purge} onChange={setPurge} label="purge" />
+            also delete the core's data directory on the node
+          </label>
+        </div>
+      </Dialog>
+
+      <NodeLogsDrawer nodeId={node.id} coreId={logsFor} onClose={() => setLogsFor(null)} />
+      <NodeSettingsDrawer
+        nodeId={node.id} coreId={settingsFor}
+        onClose={() => { setSettingsFor(null); invalidate(); }}
+      />
+    </div>
+  );
+}
+
+// --------------------------------------------------------------------------- //
+function NodeInstallDialog({ node, entry, onClose, onDone }: {
+  node: Node; entry: NodeCatalogEntry; onClose: () => void; onDone: () => void;
+}) {
+  const t = useT();
+  const schema = entry.config_schema as
+    { properties?: Record<string, { type?: string; title?: string; description?: string; default?: unknown; enum?: unknown[] }>;
+      required?: string[] } | null | undefined;
+  const props = schema?.properties ?? {};
+  const required = new Set(schema?.required ?? []);
+  const [mode, setMode] = useState<"simple" | "advanced">("simple");
+  const [version, setVersion] = useState("");       // "" = latest
+  const [customVersion, setCustomVersion] = useState("");
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [startNow, setStartNow] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  // Release tags come from the panel's registry endpoint (the driver's own
+  // release repo). It is advisory only: if the list is unavailable the node
+  // simply installs the latest build.
+  const versions = useQuery({
+    queryKey: ["zagros", "core-versions", entry.id],
+    queryFn: () => api.get<{ releases: CoreRelease[] }>(`/zagros/cores/${entry.id}/versions`),
+    retry: false, staleTime: 600000,
+  });
+
+  const install = async () => {
+    setBusy(true); setError("");
+    const settings: Record<string, unknown> = {};
+    if (mode === "advanced") {
+      for (const [k, v] of Object.entries(values)) {
+        if (v === "") continue;
+        const type = props[k]?.type;
+        settings[k] = type === "integer" || type === "number" ? Number(v)
+          : type === "boolean" ? v === "true" : v;
+      }
+    }
+    const chosen = customVersion.trim() || version;
+    if (chosen) settings.release_version = chosen.replace(/^v/, "");
+    try {
+      await api.post(
+        `/zagros/nodes/${node.id}/cores/${encodeURIComponent(entry.id)}/lifecycle`,
+        { action: "install", settings, purge: false, force: false });
+      toast.ok(`${entry.id} installed on ${node.name}`);
+      if (startNow) {
+        try {
+          await api.post(
+            `/zagros/nodes/${node.id}/cores/${encodeURIComponent(entry.id)}/lifecycle`,
+            { action: "start", settings: {}, purge: false, force: false });
+          toast.ok(`${entry.id} started`);
+        } catch (e) {
+          toast.error(`start: ${e instanceof ApiError ? e.message : t("common.error")}`);
+        }
+      }
+      onDone();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : t("common.error"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const fields = Object.entries(props);
+
+  return (
+    <Dialog open wide onClose={onClose} title={`install on ${node.name} — ${entry.name || entry.id}`}
+      subtitle={entry.description ?? undefined}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
+          <Button onClick={install} loading={busy}>
+            <HardDriveDownload size={14} /> install
+          </Button>
+        </>
+      }>
+      <Tabs active={mode} onChange={(m) => setMode(m as "simple" | "advanced")}
+        tabs={[
+          { id: "simple", label: t("cores.install.simple") },
+          { id: "advanced", label: t("cores.install.advanced") },
+        ]} />
+      <div className="mt-4 space-y-3.5">
+        {mode === "simple" && (
+          <>
+            <p className="rounded-xl bg-surface-2 p-3 text-[12px] leading-5 text-content-2">
+              {t("cores.install.autoNote")} The node downloads and verifies the official release
+              itself — nothing is transferred from the panel.
+            </p>
+            <Field label={t("cores.install.version")}>
+              {versions.isLoading ? <Skeleton className="h-9" /> : (
+                <>
+                  <Select value={version} onChange={(e) => setVersion(e.target.value)}
+                    disabled={!versions.data?.releases?.length}>
+                    <option value="">{t("cores.install.latest")}</option>
+                    {(versions.data?.releases ?? []).map((r) => (
+                      <option key={r.tag} value={r.tag}>{r.tag}{r.prerelease ? " (pre)" : ""}</option>
+                    ))}
+                  </Select>
+                  {!versions.data?.releases?.length && (
+                    <p className="mt-1 text-[11px] text-content-3">
+                      version list unavailable — the latest build will be installed
+                    </p>
+                  )}
+                </>
+              )}
+            </Field>
+            <Field label="custom tag (optional)" hint="e.g. 1.8.23 — overrides the picker">
+              <Input value={customVersion} onChange={(e) => setCustomVersion(e.target.value)}
+                dir="ltr" placeholder="leave empty" />
+            </Field>
+          </>
+        )}
+
+        {mode === "advanced" && (
+          <>
+            {fields.length === 0 && (
+              <p className="rounded-xl bg-surface-2 p-3 text-xs text-content-2">
+                This core needs no settings — the official binary is downloaded and verified
+                automatically.
+              </p>
+            )}
+            {fields.map(([key, meta]) => (
+              <Field key={key} label={meta?.title ?? key} hint={meta?.description}
+                required={required.has(key)}>
+                {meta?.enum ? (
+                  <Select value={values[key] ?? String(meta.default ?? "")}
+                    onChange={(e) => setValues({ ...values, [key]: e.target.value })}>
+                    {(meta.enum as string[]).map((o) => <option key={o} value={String(o)}>{String(o)}</option>)}
+                  </Select>
+                ) : meta?.type === "boolean" ? (
+                  <Select value={values[key] ?? String(meta.default ?? false)}
+                    onChange={(e) => setValues({ ...values, [key]: e.target.value })}>
+                    <option value="true">{t("common.yes")}</option>
+                    <option value="false">{t("common.no")}</option>
+                  </Select>
+                ) : (
+                  <Input
+                    type={key.toLowerCase().match(/secret|password|token|key/) ? "password"
+                      : meta?.type === "integer" || meta?.type === "number" ? "number" : "text"}
+                    placeholder={meta?.default !== undefined ? String(meta.default) : ""}
+                    value={values[key] ?? ""}
+                    onChange={(e) => setValues({ ...values, [key]: e.target.value })}
+                  />
+                )}
+              </Field>
+            ))}
+          </>
+        )}
+
+        <label className="flex items-center gap-2.5 pt-1 text-sm text-content-2">
+          <Switch checked={startNow} onChange={setStartNow} label={t("cores.install.startAfter")} />
+          {t("cores.install.startAfter")}
+        </label>
+
+        {busy && (
+          <div role="status" aria-live="polite"
+            className="rounded-xl border border-brand/30 bg-brand-soft/30 px-3 py-2.5 text-xs text-content-2">
+            <p className="flex items-center gap-2 font-medium text-brand">
+              <Loader2 size={13} className="animate-spin" />
+              installing on {node.name} — the node downloads and verifies the release
+            </p>
+          </div>
+        )}
+        {error && (
+          <p role="alert" className="rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">
+            {error}
+          </p>
+        )}
+      </div>
+    </Dialog>
+  );
+}
+
+// --------------------------------------------------------------------------- //
+function NodeSettingsDrawer({ nodeId, coreId, onClose }: {
+  nodeId: number; coreId: string | null; onClose: () => void;
+}) {
+  const t = useT();
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [error, setError] = useState("");
+
+  const settings = useQuery({
+    queryKey: ["zagros", "node-core-settings", nodeId, coreId],
+    queryFn: () => api.get<{ settings: Record<string, unknown> }>(
+      `/zagros/nodes/${nodeId}/cores/${encodeURIComponent(coreId ?? "")}/settings`),
+    enabled: !!coreId,
+  });
+
+  const current = settings.data?.settings ?? {};
+  // Values are strings here for editing; the node re-parses them against the
+  // driver's schema (so "644" becomes 644 for an integer setting).
+  const value = (key: string) =>
+    draft[key] ?? (current[key] === null || current[key] === undefined
+      ? "" : String(current[key]));
+
+  const save = useMutation({
+    mutationFn: () => {
+      const patch: Record<string, unknown> = {};
+      for (const [key, raw] of Object.entries(draft)) {
+        const before = current[key];
+        if (String(before ?? "") === raw) continue;   // only send real changes
+        patch[key] = raw === "" ? null
+          : typeof before === "number" ? Number(raw)
+          : typeof before === "boolean" ? raw === "true" : raw;
+      }
+      return api.put(`/zagros/nodes/${nodeId}/cores/${encodeURIComponent(coreId ?? "")}/settings`,
+        { settings: patch });
+    },
+    onSuccess: () => { setDraft({}); toast.ok("settings applied — restart the core to load them"); onClose(); },
+    onError: (e) => setError(e instanceof ApiError ? e.message : t("common.error")),
+  });
+
+  const entries = Object.entries(current);
+  const changed = Object.keys(draft).filter(
+    (k) => String(current[k] ?? "") !== draft[k]).length;
+
+  return (
+    <Drawer open={!!coreId} onClose={onClose} title={`settings — ${coreId ?? ""}`}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
+          <Button onClick={() => save.mutate()} loading={save.isPending} disabled={!changed}>
+            save{changed ? ` (${changed})` : ""}
+          </Button>
+        </>
+      }>
+      {settings.isLoading ? <Skeleton className="h-40" /> : !entries.length ? (
+        <EmptyState title="This core has no editable settings"
+          hint="Its driver needs nothing beyond the installed binary." />
+      ) : (
+        <div className="space-y-3.5">
+          <p className="rounded-xl bg-surface-2 p-3 text-[11px] leading-5 text-content-2">
+            Secrets are masked by the node and cannot be read back. Every value is validated on the
+            node against the driver's schema before it is written.
+          </p>
+          {entries.map(([key, raw]) => (
+            <Field key={key} label={key}
+              hint={raw === null || raw === undefined ? "unset" : undefined}>
+              {typeof raw === "boolean" ? (
+                <Select value={value(key)} onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}>
+                  <option value="true">{t("common.yes")}</option>
+                  <option value="false">{t("common.no")}</option>
+                </Select>
+              ) : (
+                <Input
+                  type={typeof raw === "number" ? "number" : "text"}
+                  dir="ltr" value={value(key)}
+                  onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+                />
+              )}
+            </Field>
+          ))}
+          {error && <p role="alert" className="rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
+        </div>
+      )}
+    </Drawer>
+  );
+}
+
+function NodeLogsDrawer({ nodeId, coreId, onClose }: {
+  nodeId: number; coreId: string | null; onClose: () => void;
+}) {
+  const [lines, setLines] = useState(200);
+  const logs = useQuery({
+    queryKey: ["zagros", "node-core-logs", nodeId, coreId, lines],
+    queryFn: () => api.get<{ lines: string[] }>(
+      `/zagros/nodes/${nodeId}/cores/${encodeURIComponent(coreId ?? "")}/logs?tail=${lines}`),
+    enabled: !!coreId,
+    refetchInterval: 5000,
+  });
+  return (
+    <Drawer open={!!coreId} onClose={onClose} title={`logs — ${coreId ?? ""}`}
+      footer={
+        <div className="flex items-center gap-2">
+          <Select value={String(lines)} onChange={(e) => setLines(Number(e.target.value))} className="w-32">
+            {[100, 200, 500, 1000].map((n) => <option key={n} value={n}>{n} lines</option>)}
+          </Select>
+          <Button variant="secondary" size="sm" onClick={() => logs.refetch()} className="ms-auto">
+            <RefreshCcw size={13} /> refresh
+          </Button>
+        </div>
+      }>
+      {logs.isLoading ? <Skeleton className="h-64" /> : (
+        <pre className="whitespace-pre-wrap break-all rounded-xl bg-surface p-3 font-mono text-[11px] leading-5 text-content-2" dir="ltr">
+          {(logs.data?.lines ?? []).join("\n") || "— no log output yet —"}
+        </pre>
+      )}
+    </Drawer>
+  );
+}
 
 const stateTone = (s: string) =>
   s === "running" ? "ok" : s === "error" ? "danger" : s === "stopped" || s === "installed" ? "info" : "muted";
 
-export default function Cores() {
+function MasterCores() {
   const t = useT();
   const digits = useDigits();
   const qc = useQueryClient();
@@ -83,9 +683,6 @@ export default function Cores() {
   return (
     <div className="space-y-4 animate-fade-up">
       <div className="flex flex-wrap items-center gap-3">
-        <h1 className="me-auto flex items-center gap-2 text-lg font-bold tracking-tight">
-          <Cpu size={18} className="text-brand" />{t("nav.cores")}
-        </h1>
         <Tabs
           active={tab} onChange={setTab}
           tabs={[

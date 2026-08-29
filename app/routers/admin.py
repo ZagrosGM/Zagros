@@ -169,9 +169,6 @@ def disable_all_active_users(
     crud.disable_all_active_users(db=db, admin=dbadmin)
     startup_config = xray.config.include_db_users()
     xray.core.restart(startup_config)
-    for node_id, node in list(xray.nodes.items()):
-        if node.connected:
-            xray.operations.restart_node(node_id, startup_config)
     return {"detail": "Users successfully disabled"}
 
 
@@ -184,9 +181,6 @@ def activate_all_disabled_users(
     crud.activate_all_disabled_users(db=db, admin=dbadmin)
     startup_config = xray.config.include_db_users()
     xray.core.restart(startup_config)
-    for node_id, node in list(xray.nodes.items()):
-        if node.connected:
-            xray.operations.restart_node(node_id, startup_config)
     return {"detail": "Users successfully activated"}
 
 

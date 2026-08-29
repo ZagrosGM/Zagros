@@ -60,19 +60,99 @@ export interface User {
 
 export interface UsersResponse { users: User[]; total: number }
 
+/** A remote Zagros node (multi-core agent). Pairing: pending → connected. */
 export interface Node {
   id: number;
   name: string;
   address: string;
-  port: number;
-  api_port: number;
+  port: number;          // HTTPS control plane (signed commands)
+  api_port: number;      // read-only bootstrap/info port
   usage_coefficient: number;
   add_as_new_host: boolean;
-  status: string; // connecting | connected | error | disabled
+  status: string;        // pending | connected | error
+  agent_type: string;    // zagros_native
+  agent_identity?: string | null;
+  certificate_fingerprint?: string | null;
+  agent_version?: string | null;
+  last_seen?: string | null;
+  last_error?: string | null;
+  pending: boolean;
+  health?: {
+    healthy?: boolean;
+    uptime_seconds?: number;
+    resources?: Record<string, number | number[] | null>;
+  } | null;
+  cores?: NodeCores | null;
+}
+
+/** One node's core inventory: installed state + installable catalog. */
+export interface NodeCores {
+  installed: Record<string, NodeCoreStatus>;
+  available: string[];
+  preview: Record<string, NodeCatalogEntry>;
+  stale?: boolean;
+  error?: string | null;
+}
+
+export interface NodeCoreStatus {
+  core_id: string;
+  state: string;          // installed | running | stopped | error | ...
+  health?: string | null;
+  core_version?: string | null;
+  version_reason?: string | null;
   message?: string | null;
-  xray_version?: string | null;
-  inbound_tags?: string[];
-  certificate?: string;
+  enabled?: boolean;
+  pid?: number | null;
+  uptime_seconds?: number | null;
+  metrics?: CoreMetrics | null;
+  binary_path?: string | null;
+  settings?: Record<string, unknown>;
+}
+
+/** Catalog row for a core that is installable on a node. */
+export interface NodeCatalogEntry {
+  id: string;
+  name: string;
+  description?: string | null;
+  protocols: string[];
+  capabilities: string[];
+  config_schema?: Record<string, unknown> | null;
+  default_settings?: Record<string, unknown>;
+  security_class?: string | null;
+  homepage?: string | null;
+  installed: boolean;
+}
+
+/** What a node publishes on its info port before it is trusted. */
+export interface NodeDiscovery {
+  reachable: boolean;
+  node_id?: string | null;
+  name?: string | null;
+  agent_version?: string | null;
+  certificate_sha256?: string | null;
+  certificate_not_after?: string | null;
+  registered?: boolean | null;
+  pending_token?: boolean | null;
+  control_plane_port?: number | null;
+  already_paired?: boolean;
+  error?: string | null;
+}
+
+export interface InstallerCommand {
+  command: string;
+  panel_id: string;
+  registration_token?: string | null;
+  notes: string[];
+}
+
+export interface NodeList { nodes: Node[] }
+export interface NodeCoresResponse extends NodeCores {}
+export interface SyncResult {
+  node_id: number;
+  pushed: { core_id: string; inbound_count: number }[];
+  skipped: { core_id: string; reason: string }[];
+  hosts: string[];
+  errors: string[];
 }
 
 export interface NodesUsage { usages: { node_id: number; node_name: string; uplink: number; downlink: number }[] }

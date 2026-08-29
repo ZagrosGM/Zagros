@@ -36,14 +36,6 @@ def get_admin_by_username(username: str, db: Session = Depends(get_db)):
     return dbadmin
 
 
-def get_dbnode(node_id: int, db: Session = Depends(get_db)):
-    """Fetch a node by its ID from the database, raising a 404 error if not found."""
-    dbnode = crud.get_node_by_id(db, node_id)
-    if not dbnode:
-        raise HTTPException(status_code=404, detail="Node not found")
-    return dbnode
-
-
 def validate_dates(start: Optional[Union[str, datetime]], end: Optional[Union[str, datetime]]) -> (datetime, datetime):
     """Validate if start and end dates are correct and if end is after start."""
     try:

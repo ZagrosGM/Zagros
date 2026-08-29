@@ -101,6 +101,15 @@ class WireGuardBackend(Protocol):
         """Persist an operator-supplied server private key (0600)."""
         ...
 
+    def read_server_private_key(self) -> str | None:
+        """The persisted server key, or None when it does not exist yet.
+
+        Read-only: used to federate this host's identity to nodes. It must
+        never generate a keypair as a side effect (an unconfigured core has
+        no identity worth exporting).
+        """
+        ...
+
     # lifecycle
     def up(self, config_text: str) -> None: ...
     def sync(self, config_text: str) -> None:
@@ -251,6 +260,15 @@ class LocalWireGuardBackend:
         the generated one — next start/render uses it."""
         self._atomic_write(self.key_path, private.strip() + "\n", mode=0o600)
         logger.info("wireguard: server key file replaced (%s).", self.key_path)
+
+    def read_server_private_key(self) -> str | None:
+        """Persisted server key, or None when absent (no generation)."""
+        try:
+            with open(self.key_path, encoding="utf-8") as fh:
+                private = fh.read().strip()
+        except OSError:
+            return None
+        return private or None
 
     def ensure_server_keys(self) -> tuple[str, str]:
         if os.path.exists(self.key_path):

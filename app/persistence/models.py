@@ -140,12 +140,21 @@ class CoreHostModel(Base):
 
 
 class NodeModel(Base):
+    """A remote Zagros node (multi-core agent), or a legacy Xray-only row.
+
+    Pairing state machine: ``pending`` (token issued, not yet paired) →
+    ``connected`` (certificate pinned, signing key sealed) → ``error``.
+    """
+
     __tablename__ = "nodes"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(128), unique=True)
     address: Mapped[str] = mapped_column(String(256))
     port: Mapped[int] = mapped_column(Integer, default=62050)
+    # Read-only bootstrap/info port the panel uses to discover the node and
+    # fetch the certificate it then pins (see app/nodes/client.py).
+    api_port: Mapped[int] = mapped_column(Integer, default=62051)
     status: Mapped[str] = mapped_column(String(20), default="unhealthy")
     usage_coefficient: Mapped[float] = mapped_column(Float, default=1.0)
     settings_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -154,6 +163,16 @@ class NodeModel(Base):
     certificate_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # AES-GCM sealed signing key returned once during native registration.
     agent_credentials_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Sealed one-time registration token (destroyed the moment pairing
+    # succeeds) and its hash — the panel must be able to complete pairing
+    # without asking the operator to retype the token.
+    registration_token_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    registration_token_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    panel_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    add_as_new_host: Mapped[bool] = mapped_column(Boolean, default=False)
+    agent_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
     last_seen: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
 

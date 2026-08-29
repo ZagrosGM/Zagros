@@ -130,11 +130,6 @@ def record_user_usages():
     api_instances = {None: xray.api}
     usage_coefficient = {None: 1}  # default usage coefficient for the main api instance
 
-    for node_id, node in list(xray.nodes.items()):
-        if node.connected and node.started:
-            api_instances[node_id] = node.api
-            usage_coefficient[node_id] = node.usage_coefficient  # fetch the usage coefficient
-
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {node_id: executor.submit(get_users_stats, api) for node_id, api in api_instances.items()}
     api_params = {node_id: future.result() for node_id, future in futures.items()}
@@ -184,10 +179,6 @@ def record_user_usages():
 
 def record_node_usages():
     api_instances = {None: xray.api}
-    for node_id, node in list(xray.nodes.items()):
-        if node.connected and node.started:
-            api_instances[node_id] = node.api
-
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {node_id: executor.submit(get_outbounds_stats, api) for node_id, api in api_instances.items()}
     api_params = {node_id: future.result() for node_id, future in futures.items()}

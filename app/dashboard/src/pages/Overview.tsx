@@ -8,7 +8,7 @@ import { Badge, Card, CardHeader, Progress, Skeleton, Stat, StatusDot, cn } from
 import { api } from "../lib/api";
 import { useDigits, formatBytes, formatNumber, formatSpeed } from "../lib/format";
 import { useT } from "../lib/i18n";
-import type { CoreView, Node, Snapshot, SystemStats } from "../lib/types";
+import type { CoreView, Node, NodeList, Snapshot, SystemStats } from "../lib/types";
 
 const SAMPLES = 42;
 
@@ -36,8 +36,8 @@ export default function Overview() {
     retry: false,
   });
   const nodes = useQuery({
-    queryKey: ["nodes"],
-    queryFn: () => api.get<Node[]>("/nodes"),
+    queryKey: ["zagros", "nodes"],
+    queryFn: () => api.get<NodeList>("/zagros/nodes"),
     refetchInterval: 10000,
     retry: false,
   });
@@ -152,18 +152,18 @@ export default function Overview() {
           <CardHeader
             title={<Link to="/nodes" className="inline-flex items-center gap-2 hover:text-brand"><Wifi size={16} className="text-brand" />{t("overview.nodes")}</Link>}
             actions={<Link to="/nodes"><Badge tone="brand">manage</Badge></Link>} />
-          {nodes.isLoading ? <Skeleton className="h-20" /> : nodes.isError || !nodes.data?.length ? (
+          {nodes.isLoading ? <Skeleton className="h-20" /> : nodes.isError || !nodes.data?.nodes?.length ? (
             <p className="py-6 text-center text-xs text-content-3">Master node only — add remote nodes from the Nodes page.</p>
           ) : (
             <ul className="divide-y divide-border">
-              {nodes.data.map((n) => (
+              {(nodes.data?.nodes ?? []).map((n) => (
                 <li key={n.id} className="flex items-center justify-between gap-3 py-2.5">
                   <div className="flex min-w-0 items-center gap-2.5">
                     <StatusDot tone={n.status === "connected" ? "ok" : n.status === "disabled" ? "muted" : "danger"} pulse={n.status === "connected"} />
                     <span className="truncate font-medium">{n.name}</span>
                     <span className="truncate text-[11px] text-content-3">{n.address}:{n.port}</span>
                   </div>
-                  <span className={cn("text-[11px] tabular-nums text-content-3")}>{n.xray_version ?? ""}</span>
+                  <span className={cn("text-[11px] tabular-nums text-content-3")}>{n.agent_version ?? ""}</span>
                 </li>
               ))}
             </ul>

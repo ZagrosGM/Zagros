@@ -38,6 +38,27 @@ from typing import Any
 from fastapi import Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field, SecretStr
 
+# native Zagros multi-core nodes (see the nodes section at the bottom)
+from app.nodes.client import NodeClientError
+from app.nodes.models import LifecycleBody, NodeCreate, NodeUpdate, PairBody
+from app.nodes.service import (
+    core_lifecycle,
+    core_logs,
+    core_settings,
+    create_node,
+    delete_node,
+    discover,
+    get_node,
+    heartbeat,
+    installer_command,
+    list_nodes,
+    node_cores,
+    pair,
+    sync_node,
+    update_core_settings,
+    update_node,
+)
+
 from app.cores.capabilities import outbound_capability, validate_selectable
 from app.cores.exceptions import CoreError, CoreNotFoundError
 from app.cores.outbounds.manager import OutboundManager
@@ -1750,284 +1771,235 @@ async def certificates_remove(ident: str, runtime=Depends(get_runtime)):
 
 
 # --------------------------------------------------------------------- #
-# native Zagros multi-core nodes (separate from legacy Xray-only nodes)
+# native Zagros multi-core nodes (standalone zagros-node agents)
 # --------------------------------------------------------------------- #
-
-class NativeNodeRegisterBody(BaseModel):
-    name: str = Field(min_length=1, max_length=128)
-    address: str = Field(min_length=1, max_length=256)
-    port: int = Field(default=62050, ge=1, le=65535)
-    registration_token: SecretStr
-    certificate_fingerprint: str = Field(min_length=64, max_length=128)
-    usage_coefficient: float = Field(default=1.0, gt=0)
+# The legacy Marzban Xray-only node transport has been removed. A node is a
+# separate Docker-deployed agent that can host EVERY core the panel supports
+# (xray, sing-box, OpenVPN, WireGuard, SSH, SoftEther, PPTP). Pairing is
+# certificate-pinned and every command is HMAC-signed; the business rules
+# live in app/nodes/service.py, these routes only translate errors.
 
 
-class NativeNodeLifecycleBody(BaseModel):
-    action: str
-    settings: dict[str, Any] = Field(default_factory=dict)
-    purge: bool = False
-    force: bool = False
+class NativeNodeCreateBody(NodeCreate):
+    pass
 
 
-def _native_node_view(row) -> dict[str, Any]:
-    settings = dict(row.settings_json or {})
-    settings.pop("certificate_pem", None)
-    return {
-        "id": row.id, "name": row.name, "address": row.address,
-        "port": row.port, "status": row.status,
-        "usage_coefficient": row.usage_coefficient,
-        "agent_type": row.agent_type,
-        "agent_identity": row.agent_identity,
-        "certificate_fingerprint": row.certificate_fingerprint,
-        "last_seen": row.last_seen,
-        "health": settings.get("health"),
-        "cores": settings.get("cores"),
-    }
+class NodeUpdateBody(NodeUpdate):
+    pass
 
 
-def _native_node_client(runtime, row):
-    import base64
-
-    from app.nodes.client import ZagrosNodeClient
-
-    if row.agent_type != "zagros_native" or not row.agent_identity \
-            or not row.agent_credentials_enc:
-        raise ValueError("node is not a registered native Zagros agent")
-    credentials = runtime.cipher.decrypt_json(
-        row.agent_credentials_enc, aad=f"node-agent:{row.agent_identity}")
-    key = base64.b64decode(credentials["signing_key"])
-    cert = str((row.settings_json or {}).get("certificate_pem") or "")
-    if len(key) != 32 or not cert:
-        raise ValueError("node credentials are incomplete")
-    return ZagrosNodeClient(
-        row.address, row.port, row.agent_identity, key, cert)
+class NativeNodePairBody(PairBody):
+    pass
 
 
-def _native_node_row(runtime, node_id: int):
-    from app.persistence.models import NodeModel
+class NativeNodeLifecycleBody(LifecycleBody):
+    pass
 
-    with runtime.session_factory() as session:
-        row = session.get(NodeModel, node_id)
-        if row is None or row.agent_type != "zagros_native":
-            return None
-        session.expunge(row)
-        return row
+
+def _node_http_error(exc: Exception) -> HTTPException:
+    """Map service-layer failures onto honest HTTP codes."""
+    if isinstance(exc, KeyError):
+        return HTTPException(404, "node not found")
+    if isinstance(exc, PermissionError):
+        return HTTPException(409, str(exc))
+    if isinstance(exc, NodeClientError):
+        return HTTPException(502, str(exc))
+    if isinstance(exc, ValueError):
+        message = str(exc)
+        return HTTPException(409 if "already exists" in message else 422, message)
+    raise exc
 
 
 @zagros_admin_router.get("/nodes")
-async def native_nodes_list(runtime=Depends(get_runtime)):
-    from sqlalchemy import select
-    from app.persistence.models import NodeModel
-
-    def load():
-        with runtime.session_factory() as session:
-            rows = session.execute(select(NodeModel).where(
-                NodeModel.agent_type == "zagros_native")).scalars().all()
-            return [_native_node_view(row) for row in rows]
-    return {"nodes": await asyncio.to_thread(load)}
+async def nodes_list(runtime=Depends(get_runtime)):
+    """Every node with its last known health and core inventory."""
+    return {"nodes": [node.model_dump(mode="json")
+                      for node in await list_nodes(runtime)]}
 
 
-@zagros_admin_router.post("/nodes/register")
-async def native_node_register(body: NativeNodeRegisterBody,
-                               runtime=Depends(get_runtime)):
-    import base64
-    import hashlib
-    from datetime import datetime, timezone
+@zagros_admin_router.post("/nodes", status_code=201)
+async def nodes_create(body: NativeNodeCreateBody,
+                       runtime=Depends(get_runtime)):
+    """Create a node, issue its one-time token and return the installer command.
 
-    from sqlalchemy import select
-    from app.nodes.client import (
-        NodeClientError, ZagrosNodeClient, fetch_pinned_certificate)
-    from app.persistence.models import NodeModel
-
-    def duplicate_name() -> bool:
-        with runtime.session_factory() as session:
-            return session.scalar(select(NodeModel.id).where(
-                NodeModel.name == body.name)) is not None
-    if await asyncio.to_thread(duplicate_name):
-        raise HTTPException(409, f"node '{body.name}' already exists")
-
+    The token is returned exactly once; only its SHA-256 (plus a sealed copy
+    the panel needs to finish pairing) is stored.
+    """
     try:
-        certificate_pem, fingerprint = await asyncio.to_thread(
-            fetch_pinned_certificate, body.address, body.port,
-            body.certificate_fingerprint)
-        client = ZagrosNodeClient(
-            body.address, body.port, None, None, certificate_pem)
-        panel_id = "panel-" + hashlib.sha256(runtime.cipher._key).hexdigest()[:24]
-        registration = await asyncio.to_thread(
-            client.register, panel_id, body.registration_token.get_secret_value())
-        node_identity = str(registration["node_id"])
-        signing_key = base64.b64decode(registration["signing_key"])
-        if len(signing_key) != 32:
-            raise NodeClientError("agent returned an invalid signing key")
-    except (NodeClientError, KeyError, ValueError) as exc:
-        raise HTTPException(422, str(exc)) from exc
+        node, installer = await create_node(runtime, body)
+    except Exception as exc:  # noqa: BLE001 — mapped below
+        raise _node_http_error(exc) from exc
+    return {"node": node.model_dump(mode="json"),
+            "installer": installer.model_dump(mode="json")}
 
-    encrypted = runtime.cipher.encrypt_json(
-        {"signing_key": base64.b64encode(signing_key).decode("ascii")},
-        aad=f"node-agent:{node_identity}")
 
-    def persist():
-        with runtime.session_factory() as session:
-            if session.scalar(select(NodeModel).where(NodeModel.name == body.name)):
-                raise ValueError(f"node '{body.name}' already exists")
-            if session.scalar(select(NodeModel).where(
-                    NodeModel.agent_identity == node_identity)):
-                raise ValueError("this node identity is already registered")
-            row = NodeModel(
-                name=body.name, address=body.address, port=body.port,
-                status="connected", usage_coefficient=body.usage_coefficient,
-                agent_type="zagros_native", agent_identity=node_identity,
-                certificate_fingerprint=fingerprint,
-                agent_credentials_enc=encrypted,
-                settings_json={"certificate_pem": certificate_pem},
-                last_seen=datetime.now(timezone.utc),
-            )
-            session.add(row); session.commit(); session.refresh(row)
-            return _native_node_view(row)
+@zagros_admin_router.get("/nodes/{node_id}")
+async def nodes_get(node_id: int, runtime=Depends(get_runtime)):
+    node = await get_node(runtime, node_id)
+    if node is None:
+        raise HTTPException(404, "node not found")
+    return node.model_dump(mode="json")
+
+
+@zagros_admin_router.put("/nodes/{node_id}")
+async def nodes_update(node_id: int, body: NodeUpdateBody,
+                       runtime=Depends(get_runtime)):
+    """Rename, retarget or re-price a node.
+
+    Changing the address invalidates the pinned certificate and the sealed
+    signing key: the node goes back to ``pending`` and must be paired again.
+    """
     try:
-        return await asyncio.to_thread(persist)
-    except Exception as exc:
-        # Registration was consumed but persistence failed (duplicate race,
-        # database outage, constraint failure). Revoke the newly issued key so
-        # no orphan panel authority remains. If revocation itself fails, never
-        # claim the operation rolled back cleanly.
-        revoked = False
-        try:
-            registered = ZagrosNodeClient(
-                body.address, body.port, node_identity, signing_key,
-                certificate_pem)
-            await asyncio.to_thread(registered.revoke)
-            revoked = True
-        except Exception:  # noqa: BLE001
-            pass
-        if isinstance(exc, ValueError):
-            raise HTTPException(409, str(exc)) from exc
-        detail = ("node registration persistence failed; remote authority revoked"
-                  if revoked else
-                  "node registration persistence failed and remote revocation could not be confirmed; isolate the node")
-        raise HTTPException(500, detail) from exc
+        node = await update_node(runtime, node_id, body)
+    except Exception as exc:  # noqa: BLE001
+        raise _node_http_error(exc) from exc
+    return node.model_dump(mode="json")
+
+
+@zagros_admin_router.get("/nodes/{node_id}/installer-command")
+async def nodes_installer_command(node_id: int, rotate: bool = False,
+                                  runtime=Depends(get_runtime)):
+    """Show the installer command (``?rotate=true`` issues a fresh token)."""
+    try:
+        installer = await installer_command(runtime, node_id, rotate=rotate)
+    except Exception as exc:  # noqa: BLE001
+        raise _node_http_error(exc) from exc
+    return installer.model_dump(mode="json")
+
+
+@zagros_admin_router.post("/nodes/{node_id}/discover")
+async def nodes_discover(node_id: int, runtime=Depends(get_runtime)):
+    """Ask the node's read-only info port who it is.
+
+    Nothing is trusted yet: the returned fingerprint must be compared with
+    the one the installer printed on the node before pairing.
+    """
+    try:
+        return (await discover(runtime, node_id)).model_dump(mode="json")
+    except Exception as exc:  # noqa: BLE001
+        raise _node_http_error(exc) from exc
+
+
+@zagros_admin_router.post("/nodes/{node_id}/pair")
+async def nodes_pair(node_id: int, body: NativeNodePairBody,
+                     runtime=Depends(get_runtime)):
+    """Pin the node's certificate and exchange the signing key.
+
+    This is the trust-on-first-use step: the caller must pass the
+    fingerprint they verified (from the node's console or from
+    ``/discover``), and it is checked against the certificate the node
+    actually serves on the control plane.
+    """
+    try:
+        node = await pair(
+            runtime, node_id,
+            certificate_fingerprint=body.certificate_fingerprint,
+            registration_token=(body.registration_token.get_secret_value()
+                                if body.registration_token else None),
+            node_id_hint=body.node_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _node_http_error(exc) from exc
+    return node.model_dump(mode="json")
 
 
 @zagros_admin_router.post("/nodes/{node_id}/heartbeat")
-async def native_node_heartbeat(node_id: int, runtime=Depends(get_runtime)):
-    from datetime import datetime, timezone
-    from app.persistence.models import NodeModel
-
-    row = await asyncio.to_thread(_native_node_row, runtime, node_id)
-    if row is None:
-        raise HTTPException(404, "native node not found")
+async def nodes_heartbeat(node_id: int, runtime=Depends(get_runtime)):
+    """Verify the signing key end-to-end and refresh health + inventory."""
     try:
-        client = _native_node_client(runtime, row)
-        heartbeat, health, cores = await asyncio.gather(
-            asyncio.to_thread(client.heartbeat),
-            asyncio.to_thread(client.health),
-            asyncio.to_thread(client.cores),
-        )
-    except Exception as exc:
-        def failed():
-            with runtime.session_factory() as session:
-                current = session.get(NodeModel, node_id)
-                if current:
-                    current.status = "error"
-                    current.settings_json = {
-                        **(current.settings_json or {}),
-                        "last_error": f"{type(exc).__name__}: {str(exc)[:300]}",
-                    }
-                    session.commit()
-        await asyncio.to_thread(failed)
-        raise HTTPException(502, str(exc)) from exc
+        node = await heartbeat(runtime, node_id)
+    except Exception as exc:  # noqa: BLE001
+        raise _node_http_error(exc) from exc
+    return node.model_dump(mode="json")
 
-    def persist():
-        with runtime.session_factory() as session:
-            current = session.get(NodeModel, node_id)
-            current.status = "connected"
-            current.last_seen = datetime.now(timezone.utc)
-            current.settings_json = {
-                **(current.settings_json or {}),
-                "health": health, "cores": cores,
-            }
-            session.commit(); session.refresh(current)
-            return _native_node_view(current)
-    view = await asyncio.to_thread(persist)
-    view["heartbeat"] = heartbeat
-    return view
+
+@zagros_admin_router.get("/nodes/{node_id}/cores")
+async def nodes_cores(node_id: int, runtime=Depends(get_runtime)):
+    """Live inventory: installed cores + the catalog of installable ones."""
+    try:
+        inventory = await node_cores(runtime, node_id)
+    except Exception as exc:  # noqa: BLE001
+        raise _node_http_error(exc) from exc
+    return inventory.model_dump(mode="json")
+
+
+@zagros_admin_router.get("/nodes/{node_id}/cores/{core_id}/settings")
+async def nodes_core_settings(node_id: int, core_id: str,
+                              runtime=Depends(get_runtime)):
+    """A core's effective settings on the node (secrets masked by the node)."""
+    try:
+        return await core_settings(runtime, node_id, core_id)
+    except Exception as exc:  # noqa: BLE001
+        raise _node_http_error(exc) from exc
+
+
+@zagros_admin_router.put("/nodes/{node_id}/cores/{core_id}/settings")
+async def nodes_core_settings_update(node_id: int, core_id: str,
+                                     body: dict,
+                                     runtime=Depends(get_runtime)):
+    """Patch a core's settings on the node (validated against its schema)."""
+    try:
+        settings = body.get("settings") if isinstance(body, dict) else None
+        return await update_core_settings(runtime, node_id, core_id,
+                                          settings or {})
+    except Exception as exc:  # noqa: BLE001
+        raise _node_http_error(exc) from exc
 
 
 @zagros_admin_router.post("/nodes/{node_id}/cores/{core_id}/lifecycle")
-async def native_node_core_lifecycle(node_id: int, core_id: str,
-                                     body: NativeNodeLifecycleBody,
-                                     runtime=Depends(get_runtime)):
-    allowed = {"install", "uninstall", "start", "stop", "restart"}
-    if body.action not in allowed:
-        raise HTTPException(422, f"action must be one of {sorted(allowed)}")
-    row = await asyncio.to_thread(_native_node_row, runtime, node_id)
-    if row is None:
-        raise HTTPException(404, "native node not found")
+async def nodes_core_lifecycle(node_id: int, core_id: str,
+                               body: NativeNodeLifecycleBody,
+                               runtime=Depends(get_runtime)):
+    """install / uninstall / start / stop / restart / update a core on a node.
+
+    Long actions run as a job on the node; this call follows the job to a
+    terminal state, so a slow download cannot be cut short by a proxy.
+    """
     try:
-        return await asyncio.to_thread(
-            _native_node_client(runtime, row).lifecycle,
-            core_id, body.action, settings=body.settings,
-            purge=body.purge, force=body.force)
-    except Exception as exc:
-        raise HTTPException(502, str(exc)) from exc
+        result = await core_lifecycle(
+            runtime, node_id, core_id, action=body.action,
+            settings=body.settings, purge=body.purge, force=body.force)
+    except Exception as exc:  # noqa: BLE001
+        raise _node_http_error(exc) from exc
+    return result
 
 
 @zagros_admin_router.get("/nodes/{node_id}/cores/{core_id}/logs")
-async def native_node_core_logs(node_id: int, core_id: str, tail: int = 200,
-                                runtime=Depends(get_runtime)):
-    row = await asyncio.to_thread(_native_node_row, runtime, node_id)
-    if row is None:
-        raise HTTPException(404, "native node not found")
+async def nodes_core_logs(node_id: int, core_id: str, tail: int = 200,
+                          runtime=Depends(get_runtime)):
     try:
-        return await asyncio.to_thread(
-            _native_node_client(runtime, row).core_logs,
-            core_id, max(1, min(tail, 2000)))
-    except Exception as exc:
-        raise HTTPException(502, str(exc)) from exc
+        return await core_logs(runtime, node_id, core_id, tail)
+    except Exception as exc:  # noqa: BLE001
+        raise _node_http_error(exc) from exc
 
 
-class NativeNodeInboundBody(BaseModel):
-    document: dict[str, Any]
+@zagros_admin_router.post("/nodes/{node_id}/sync")
+async def nodes_sync(node_id: int, runtime=Depends(get_runtime)):
+    """Push the master's inbound configuration to the node and bind hosts.
 
-
-@zagros_admin_router.put("/nodes/{node_id}/cores/{core_id}/inbounds")
-async def native_node_core_inbounds(node_id: int, core_id: str,
-                                    body: NativeNodeInboundBody,
-                                    runtime=Depends(get_runtime)):
-    row = await asyncio.to_thread(_native_node_row, runtime, node_id)
-    if row is None:
-        raise HTTPException(404, "native node not found")
+    After a successful sync a client configuration whose address points at
+    the node's IP is served by the node itself.
+    """
     try:
-        return await asyncio.to_thread(
-            _native_node_client(runtime, row).apply_inbounds,
-            core_id, body.document)
-    except Exception as exc:
-        raise HTTPException(502, str(exc)) from exc
+        result = await sync_node(runtime, node_id)
+    except Exception as exc:  # noqa: BLE001
+        raise _node_http_error(exc) from exc
+    return result.model_dump(mode="json")
 
 
 @zagros_admin_router.delete("/nodes/{node_id}")
-async def native_node_delete(node_id: int, force: bool = False,
-                             runtime=Depends(get_runtime)):
-    from app.persistence.models import NodeModel
+async def nodes_delete(node_id: int, force: bool = False,
+                       runtime=Depends(get_runtime)):
+    """Revoke the panel's authority on the node, then forget it.
 
-    row = await asyncio.to_thread(_native_node_row, runtime, node_id)
-    if row is None:
-        raise HTTPException(404, "native node not found")
-    remote_revoked = False
+    Revocation is attempted first and is mandatory unless ``force=true`` is
+    passed — deleting a live node without revoking it would leave the panel's
+    signing key accepted on a server nobody manages any more.
+    """
     try:
-        await asyncio.to_thread(_native_node_client(runtime, row).revoke)
-        remote_revoked = True
-    except Exception as exc:
-        if not force:
-            raise HTTPException(
-                502, f"node key revocation failed; use force only after isolating the node: {exc}") from exc
-    def remove():
-        with runtime.session_factory() as session:
-            current = session.get(NodeModel, node_id)
-            if current:
-                session.delete(current); session.commit()
-    await asyncio.to_thread(remove)
-    return {"deleted": node_id, "remote_revoked": remote_revoked}
+        return await delete_node(runtime, node_id, force=force)
+    except Exception as exc:  # noqa: BLE001
+        raise _node_http_error(exc) from exc
 
 
 # --------------------------------------------------------------------- #

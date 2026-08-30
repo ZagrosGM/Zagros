@@ -1,13 +1,13 @@
 // Subscriptions — portal identity + subscription link plumbing management
 // (portal settings), live template info, and per-user link helpers.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, Radio, Save } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Download, ExternalLink, Radio, Save, Trash2, Upload } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "../components/feedback";
 import { Badge, Button, Card, CardHeader, Field, Input, Select, Skeleton, Switch } from "../components/ui";
 import { api, ApiError } from "../lib/api";
 import { useT } from "../lib/i18n";
-import type { CertificateInfo, PanelInfo, PortalSettings } from "../lib/types";
+import type { CertificateInfo, PanelInfo, PortalSettings, SubscriptionTemplateFile } from "../lib/types";
 
 // canonical enum values of the backend contract (ClientAuthMode); the
 // backend keeps accepting the alpha.7 shorthand "app_login" for stray
@@ -36,6 +36,49 @@ export default function Subscriptions() {
   const testConfig = useMutation({
     mutationFn: () => api.post<Record<string, unknown>>("/zagros/settings/portal/test", form),
     onSuccess: (data) => { setTestResult(data); toast.ok("URL generation is valid"); },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
+  });
+
+  // alpha.9.2 item 3 — operator-authored subscription page template
+  const fileRef = useRef<HTMLInputElement>(null);
+  const templatesQ = useQuery({
+    queryKey: ["zagros", "subscription-templates"],
+    queryFn: () => api.get<{ templates: SubscriptionTemplateFile[] }>("/zagros/subscription/templates"),
+    retry: false,
+  });
+  const uploadTemplate = useMutation({
+    mutationFn: (file: File) => {
+      const body = new FormData();
+      body.append("file", file);
+      return api.post<{ name: string }>("/zagros/subscription/templates", body);
+    },
+    onSuccess: (data) => {
+      toast.ok(`template uploaded: ${data.name}`);
+      setForm((prev) => (prev ? { ...prev, subscription_template: data.name } : prev));
+      qc.invalidateQueries({ queryKey: ["zagros", "subscription-templates"] });
+    },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
+  });
+  const downloadStarter = useMutation({
+    mutationFn: async () => {
+      const text = await api.get<string>("/zagros/subscription/templates/starter");
+      const url = URL.createObjectURL(new Blob([text], { type: "text/html" }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "subscription-starter.html";
+      anchor.click();
+      URL.revokeObjectURL(url);
+    },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
+  });
+  const deleteTemplate = useMutation({
+    mutationFn: (name: string) => api.delete(`/zagros/subscription/templates/${encodeURIComponent(name)}`),
+    onSuccess: (_data, name) => {
+      toast.ok(`template deleted: ${name}`);
+      setForm((prev) => (prev?.subscription_template === name
+        ? { ...prev, subscription_template: null } : prev));
+      qc.invalidateQueries({ queryKey: ["zagros", "subscription-templates"] });
+    },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
   });
 
@@ -113,6 +156,61 @@ export default function Subscriptions() {
                     <span className="mt-1 block text-[11px] text-content-3">{m.hint}</span>
                   </button>
                 ))}
+              </div>
+            </Card>
+
+            <Card>
+              <CardHeader
+                title="subscription page template"
+                subtitle="upload your own HTML for the page subscribers see — or keep the built-in one" />
+              <div className="space-y-3">
+                <Field label="page template" hint="built-in = the panel's own page; a template is HTML with Jinja2 variables">
+                  <Select
+                    value={form.subscription_template ?? ""}
+                    onChange={(e) => setForm({ ...form, subscription_template: e.target.value || null })}>
+                    <option value="">built-in page</option>
+                    {(templatesQ.data?.templates ?? []).map((tf) => (
+                      <option key={tf.name} value={tf.name}>{tf.name}</option>
+                    ))}
+                  </Select>
+                </Field>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    accept=".html,.htm,text/html"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) uploadTemplate.mutate(file);
+                      e.target.value = "";
+                    }} />
+                  <Button variant="secondary" loading={uploadTemplate.isPending}
+                    onClick={() => fileRef.current?.click()}>
+                    <Upload size={14} /> upload template
+                  </Button>
+                  <Button variant="ghost" loading={downloadStarter.isPending}
+                    onClick={() => downloadStarter.mutate()}>
+                    <Download size={14} /> download starter
+                  </Button>
+                  {form.subscription_template && (
+                    <Button variant="danger" loading={deleteTemplate.isPending}
+                      onClick={() => deleteTemplate.mutate(form.subscription_template as string)}>
+                      <Trash2 size={14} /> delete
+                    </Button>
+                  )}
+                </div>
+
+                <p className="text-[11px] leading-5 text-content-3">
+                  Variables: <code dir="ltr">{"{{ user.username }}"} · {"{{ links }}"} · {"{{ used_bytes }}"} · {"{{ format_bytes(used_bytes) }}"} · {"{{ expire_at }}"}</code>.
+                  A template that fails to render never breaks a subscriber's page — the built-in one is served and the reason is logged.
+                </p>
+                {form.subscription_template && !(templatesQ.data?.templates ?? []).some((t) => t.name === form.subscription_template) && (
+                  <p className="text-[11px] text-warn">
+                    this template is not on the server — upload it again or pick another, otherwise the built-in page is served.
+                  </p>
+                )}
               </div>
             </Card>
 

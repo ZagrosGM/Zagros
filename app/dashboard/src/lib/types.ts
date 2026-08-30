@@ -439,6 +439,12 @@ export interface PortalSettings {
   listener_mode?: "shared" | "dedicated" | "external_proxy";
   listen_address?: string;
   qr_base_url?: string | null;
+  // alpha.9.2 item 3: uploaded subscription page template (null = built-in)
+  subscription_template?: string | null;
+}
+
+export interface SubscriptionTemplateFile {
+  name: string; size: number; modified_at: number;
 }
 
 // Mirror of app/adminapi/dashboard.py DashboardSnapshot — flat fields,

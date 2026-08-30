@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, SecretStr
 
 # native Zagros multi-core nodes (see the nodes section at the bottom)
@@ -2110,6 +2111,74 @@ async def users_online_states(runtime=Depends(get_runtime)):
             "collect_ts": snapshot.get("ts"),
             "failed_cores": failed, "probed_cores": probed,
             "window_seconds": int(window)}
+
+
+# --------------------------------------------------------------------- #
+# subscription page templates (alpha.9.2 item 3)
+#
+# Marzban needed an env var plus shell access to point the panel at a
+# custom template. Here an operator uploads an HTML page and picks it in
+# the Subscriptions section; selection is by file name only and the
+# renderer resolves it inside the managed directory, so no settings value
+# can reach outside it. A template that fails to render degrades to the
+# built-in page — subscribers never see a broken subscription.
+# --------------------------------------------------------------------- #
+
+@zagros_admin_router.get("/subscription/templates")
+async def list_subscription_templates(runtime=Depends(get_runtime)):
+    """Uploaded subscription page templates: name, size, modified_at."""
+    from app.portal.templates_store import data_dir_for, list_templates
+
+    return {"templates": list_templates(data_dir_for(runtime))}
+
+
+@zagros_admin_router.get("/subscription/templates/starter",
+                         response_class=PlainTextResponse)
+async def starter_subscription_template():
+    """A working starting point to download, edit and upload back."""
+    from app.portal.templates_store import STARTER_TEMPLATE
+
+    return PlainTextResponse(
+        STARTER_TEMPLATE,
+        headers={"Content-Disposition":
+                 'attachment; filename="subscription-starter.html"'},
+    )
+
+
+@zagros_admin_router.post("/subscription/templates")
+async def upload_subscription_template(file: UploadFile = File(...),
+                                       runtime=Depends(get_runtime)):
+    """Store an operator-authored HTML template (max 256 KB, .html/.htm)."""
+    from app.portal.templates_store import (
+        TemplateError, data_dir_for, list_templates, save_template)
+
+    try:
+        content = await file.read()
+        name = save_template(data_dir_for(runtime), file.filename or "", content)
+    except TemplateError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    finally:
+        await file.close()
+    return {"name": name, "templates": list_templates(data_dir_for(runtime))}
+
+
+@zagros_admin_router.delete("/subscription/templates/{name}")
+async def delete_subscription_template(name: str, runtime=Depends(get_runtime)):
+    """Delete an uploaded template.
+
+    Deleting the currently selected one is allowed: the portal serves the
+    built-in page again until another template is chosen.
+    """
+    from app.portal.templates_store import (
+        TemplateError, data_dir_for, delete_template, list_templates)
+
+    try:
+        deleted = delete_template(data_dir_for(runtime), name)
+    except TemplateError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not deleted:
+        raise HTTPException(404, "template not found")
+    return {"deleted": name, "templates": list_templates(data_dir_for(runtime))}
 
 
 # --------------------------------------------------------------------- #

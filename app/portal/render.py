@@ -395,8 +395,72 @@ def _render_app_page(page: PortalPage) -> str:
 """
 
 
-def render_page_html(page: PortalPage) -> str:
-    """Render a complete, self-contained HTML document."""
+def _template_context(page: PortalPage) -> dict[str, Any]:
+    """Variables an operator-authored subscription template may use.
+
+    The context is deliberately a *summary* of :class:`PortalPage` plus the
+    page object itself: a template can reach anything the built-in page
+    shows, while the common cases stay one word long (``links``,
+    ``format_bytes``).
+    """
+    links: list[dict[str, Any]] = []
+    for section in page.sections:
+        for artifact in section.artifacts:
+            if artifact.kind is ArtifactKind.LINK and artifact.content:
+                links.append({"protocol": section.protocol, "title": section.title,
+                              "label": artifact.label, "url": artifact.content})
+    return {
+        "page": page,
+        "user": page.user,
+        "sections": page.sections,
+        "apps": page.apps,
+        "notes": page.notes,
+        "links": links,
+        "brand": page.brand,
+        "app_name": page.app_name,
+        "support_url": page.support_url,
+        "generated_at": page.generated_at,
+        "used_bytes": page.user.used_bytes,
+        "data_limit_bytes": page.user.data_limit_bytes,
+        "remaining_bytes": page.user.remaining_bytes,
+        "expire_at": page.user.expire_at,
+        "online": page.user.online,
+        "format_bytes": _fmt_bytes,
+        "format_date": lambda value: _fmt_date(value, "—"),
+    }
+
+
+def _render_with_template(page: PortalPage, template_name: str,
+                          templates_dir: str | None) -> str | None:
+    """Operator template, or ``None`` so the caller serves the built-in page.
+
+    A subscriber must never be shown a broken page because an operator
+    uploaded one: every failure here degrades to the built-in renderer.
+    """
+    if not templates_dir:
+        return None
+    try:
+        from app.portal.templates_store import render_template
+
+        return render_template(templates_dir, template_name,
+                               _template_context(page))
+    except Exception as exc:  # noqa: BLE001 — presentation must not raise
+        logger.warning("custom subscription template %r unavailable (%s) — "
+                       "serving the built-in page", template_name, exc)
+        return None
+
+
+def render_page_html(page: PortalPage, template_name: str | None = None,
+                     *, templates_dir: str | None = None) -> str:
+    """Render a complete, self-contained HTML document.
+
+    ``template_name`` selects an operator-uploaded template (Subscriptions
+    section); when it is missing or broken, the built-in page is served.
+    """
+    if template_name:
+        custom = _render_with_template(page, template_name, templates_dir)
+        if custom is not None:
+            return custom
     body = _render_portal(page) if page.kind is PageKind.PORTAL else _render_app_page(page)
     support = ""
     if page.support_url:

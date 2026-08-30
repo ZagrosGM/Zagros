@@ -38,6 +38,9 @@ CoercedClientAuthMode = Annotated[ClientAuthMode,
 
 
 _SUBSCRIPTION_PATH_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+# uploaded subscription page templates: flat file names only (never a path)
+_SUBSCRIPTION_TEMPLATE_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.(?:html|htm)$", re.IGNORECASE)
 
 
 class PageKind(str, Enum):
@@ -83,6 +86,11 @@ class PortalSettings(BaseModel):
     listener_mode: Literal["shared", "dedicated", "external_proxy"] = "shared"
     listen_address: str = "0.0.0.0"
     qr_base_url: str | None = None
+    # alpha.9.2 item 3: filename of an operator-uploaded subscription page
+    # template (see app/portal/templates_store.py). None = the built-in page.
+    # Selection is by name only — the renderer resolves it inside the managed
+    # directory, so a settings value can never reach outside it.
+    subscription_template: str | None = None
 
     def public_base_url(self) -> str | None:
         if self.public_domain:
@@ -148,10 +156,15 @@ class PortalSettings(BaseModel):
             # A reverse proxy may own the cert; selection is optional here but
             # the test/apply surface reports that distinction explicitly.
             certificate = None
+        template = (self.subscription_template or "").strip() or None
+        if template and not _SUBSCRIPTION_TEMPLATE_RE.match(template):
+            raise ValueError(
+                "subscription_template must be an uploaded .html/.htm file name")
         return self.model_copy(update={
             "app_name": (self.app_name or "Zagros").strip() or "Zagros",
             "subscription_path": path,
             "subscription_url_prefix": prefix,
+            "subscription_template": template,
             "public_domain": domain,
             "custom_subdomain": subdomain,
             "public_port": public_port,

@@ -384,7 +384,22 @@ async def _serve_subscription(runtime, user_id: int, request: Request,
             user_id, lang=lang, public_host=request.url.hostname)
         if page is None:
             raise HTTPException(404, "subscription not found")
-        return HTMLResponse(render_page_html(page))
+        # alpha.9.2 item 3: an operator may have picked an uploaded page
+        # template. A missing/broken one serves the built-in page, so a
+        # subscriber is never the one who pays for an operator's typo.
+        template_name: str | None = None
+        templates_dir: str | None = None
+        try:
+            settings = await runtime.portal_settings.get_portal_settings()
+            template_name = getattr(settings, "subscription_template", None) or None
+            if template_name:
+                from app.portal.templates_store import data_dir_for
+
+                templates_dir = data_dir_for(runtime)
+        except Exception:  # noqa: BLE001 — settings read must not break delivery
+            template_name, templates_dir = None, None
+        return HTMLResponse(render_page_html(page, template_name,
+                                             templates_dir=templates_dir))
 
     bundle = await runtime.portal.build_links(
         user_id, public_host=request.url.hostname)

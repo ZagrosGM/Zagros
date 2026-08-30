@@ -44,11 +44,35 @@ zagros_router = APIRouter(tags=["Zagros"])
 # restricted to sudo admins. If the legacy stack is not importable (bare
 # test shims), the dependency FAILS CLOSED — never open-by-default.
 # ---------------------------------------------------------------------- #
-try:
-    from app.models.admin import Admin as _LegacyAdmin
+def _resolve_sudo_deps():
+    """Resolve the sudo dependency WITHOUT depending on import order.
 
-    _SUDO_DEPS = [Depends(_LegacyAdmin.check_sudo_admin)]
-except Exception:  # pragma: no cover - import-time safety net
+    ``app.models.admin`` and ``app.db`` import each other, so the model is
+    only importable once the DB package has been initialised — importing it
+    first raises a circular ImportError. That exception used to be swallowed
+    here, which silently bound EVERY admin endpoint to a 503 dependency:
+    the whole admin API went dead with no log line, purely because some
+    other module happened to be imported first (a test file's order is
+    enough). Importing the DB package first always breaks the cycle.
+    """
+    try:
+        import app.db  # noqa: F401  — must precede the model import
+    except Exception as exc:  # noqa: BLE001 — surfaced by the caller
+        logger.warning("admin auth stack: app.db failed to import (%s: %s)",
+                       type(exc).__name__, exc)
+    from app.models.admin import Admin
+
+    return [Depends(Admin.check_sudo_admin)]
+
+
+try:
+    _SUDO_DEPS = _resolve_sudo_deps()
+except Exception as exc:  # pragma: no cover - import-time safety net
+    # Failing CLOSED is the right direction; failing SILENTLY is not: the
+    # reason has to be in the log, or the next incident starts blind.
+    logger.warning("admin authentication stack unavailable — admin endpoints "
+                   "will fail closed with 503 (%s: %s)", type(exc).__name__, exc)
+
     async def _no_admin_stack() -> None:
         raise HTTPException(503, "admin authentication stack unavailable")
 

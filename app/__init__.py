@@ -9,7 +9,7 @@ stack (fastapi/apscheduler/xray singletons) into their interpreter.
 import asyncio
 import logging
 
-__version__ = "1.0.0-alpha.9.2"  # Zagros begins a new version line after the rebrand
+__version__ = "1.0.0-alpha.9.3"  # Zagros begins a new version line after the rebrand
 
 
 _building = False

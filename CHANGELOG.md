@@ -10,6 +10,27 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.9.3] — 2026-08-30 — The admin API no longer depends on import order
+
+A latent one, found while verifying 9.2: `app.models.admin` and `app.db` import
+each other, so the admin model is only importable once the DB package has been
+initialised. The sudo dependency behind every admin endpoint was resolved at
+import time inside a silent `except Exception`, so whichever module Python
+happened to import first decided whether the admin API served real requests or
+answered 503 — with no log line and no failing test to explain it.
+
+### Fixed
+
+* **The import order no longer decides whether the admin API exists.** The DB
+  package is imported before the admin model, which always breaks the cycle.
+  It still fails *closed* when the stack genuinely is unavailable; the
+  difference is that the reason is now logged instead of swallowed.
+* One test-file ordering that produced 36 failures now produces 63 passes —
+  the full suite was always green, which is exactly why nothing caught this
+  sooner.
+
+---
+
 ## [1.0.0-alpha.9.2] — 2026-08-30 — A new user connects, the counters are honest, and the page is yours
 
 Three things reported from real use: a user created *after* the last sync was

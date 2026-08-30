@@ -74,6 +74,7 @@ class FakeClient:
             "installed": {}, "available": ["wireguard"], "preview": {}}
         self.fail = set(fail)
         self.actions: list[tuple[str, str]] = []
+        self.sent_settings: list[dict] = []
 
     def _guard(self, what):
         if what in self.fail:
@@ -93,6 +94,7 @@ class FakeClient:
     def lifecycle(self, core_id, action, settings=None, purge=False, force=False):
         self._guard("lifecycle")
         self.actions.append((core_id, action))
+        self.sent_settings.append(dict(settings or {}))
         return {"core_id": core_id, "state": "running" if action == "start" else action}
 
 
@@ -109,6 +111,7 @@ def _node(runtime, name, *, status="pending", paired=True, **extra):
         session.merge(NodeModel(
             name=name, address="198.51.100.7", port=62050, api_port=62051,
             status=status, agent_type="zagros_native",
+            panel_id=f"panel-test-{name}",
             agent_identity="node-abc" if paired else None,
             agent_credentials_enc=(_sealed_credentials(runtime) if paired else None),
             **extra))
@@ -391,3 +394,113 @@ def test_installing_a_core_converges_it_immediately(env_runtime, monkeypatch):
     seen.clear()
     asyncio.run(service.core_lifecycle(rt, node_id, "wireguard", action="stop"))
     assert seen == []          # only install/update converge
+
+
+# --------------------------------------------------------------------------- #
+# 4 — pinning a core to a release                                              #
+# --------------------------------------------------------------------------- #
+
+def test_install_can_pin_a_release(env_runtime, monkeypatch):
+    """Changing a core's version (up or down) is an install/update with a pin,
+    not a new protocol: the agent already reads it from the driver settings."""
+    from app.nodes import service
+
+    rt = env_runtime
+    node_id = _node(rt, "rr_pin", status="connected")
+    client = FakeClient()
+    monkeypatch.setattr(service, "_client", lambda runtime, row: client)
+    monkeypatch.setattr(service, "heartbeat",
+                        lambda runtime, nid: service._view(_row(runtime, nid)))
+
+    asyncio.run(service.core_lifecycle(
+        rt, node_id, "xray", action="update", version="v25.9.11",
+        settings={"keep": True}))
+
+    assert client.actions[-1] == ("xray", "update")
+    assert client.sent_settings[-1] == {"keep": True, "release_version": "v25.9.11"}
+
+
+def test_a_version_cannot_be_pinned_on_an_action_that_installs_nothing(
+        env_runtime, monkeypatch):
+    from app.nodes import service
+
+    rt = env_runtime
+    node_id = _node(rt, "rr_pin_bad", status="connected")
+    monkeypatch.setattr(service, "_client", lambda runtime, row: FakeClient())
+
+    with pytest.raises(ValueError) as excinfo:
+        asyncio.run(service.core_lifecycle(
+            rt, node_id, "xray", action="start", version="v25.9.11"))
+    assert "does not install anything" in str(excinfo.value)
+
+
+def test_core_versions_lists_what_the_node_could_install(env_runtime, monkeypatch):
+    from app.nodes import service
+
+    rt = env_runtime
+    node_id = _node(rt, "rr_versions", status="connected")
+
+    async def fake_releases(core_id, limit=10):
+        return {"core": core_id, "repo": "XTLS/Xray-core",
+                "releases": [{"tag": "v25.9.11", "prerelease": False}]}
+
+    monkeypatch.setattr("app.cores.releases.recent_releases", fake_releases)
+
+    payload = asyncio.run(service.core_versions(rt, node_id, "xray"))
+
+    assert payload["node_id"] == node_id
+    assert payload["releases"][0]["tag"] == "v25.9.11"
+
+    # a core the OS installs has no list — say so plainly instead of showing
+    # an empty picker
+    async def raises(core_id, limit=10):
+        from app.cores.releases import NoReleaseFeed
+
+        raise NoReleaseFeed("core 'openvpn' is not GitHub-release managed")
+
+    monkeypatch.setattr("app.cores.releases.recent_releases", raises)
+    with pytest.raises(ValueError, match="not GitHub-release managed"):
+        asyncio.run(service.core_versions(rt, node_id, "openvpn"))
+
+
+# --------------------------------------------------------------------------- #
+# 5 — the installer lives in zagros-scripts, at a ref that exists             #
+# --------------------------------------------------------------------------- #
+
+def test_installer_comes_from_the_scripts_repository(env_runtime, monkeypatch):
+    """Installing a node must not depend on the agent repository being
+    reachable: the script and the CLI live next to the panel's installer."""
+    from app.nodes import service
+
+    rt = env_runtime
+    node_id = _node(rt, "rr_installer", status="pending", paired=False)
+    monkeypatch.setattr(service, "_ref_cache", None)
+    monkeypatch.setenv("ZAGROS_SCRIPTS_REF", "v1.2.3")
+
+    command = service._installer_command(_row(rt, node_id), "tok").command
+
+    assert "zagros-scripts/v1.2.3/install-node.sh" in command
+    assert "zagros-node/main/scripts/install.sh" not in command
+
+
+def test_installer_prefers_a_matching_tag_else_main(env_runtime, monkeypatch):
+    """A released panel hands out the installer that shipped with it; a build
+    nobody has tagged yet must still hand out one that downloads."""
+    from app.nodes import service
+
+    monkeypatch.delenv("ZAGROS_SCRIPTS_REF", raising=False)
+    monkeypatch.setattr("app.__version__", "9.9.9")
+
+    monkeypatch.setattr(service, "_ref_cache", None)
+    monkeypatch.setattr(service, "_scripts_ref_exists",
+                        lambda ref, timeout=4.0: ref == "v9.9.9")
+    assert service.installer_scripts_ref() == "v9.9.9"
+
+    monkeypatch.setattr(service, "_ref_cache", None)
+    monkeypatch.setattr(service, "_scripts_ref_exists",
+                        lambda ref, timeout=4.0: False)
+    assert service.installer_scripts_ref() == "main"
+
+    # an explicit override always wins, even over a tag that exists
+    monkeypatch.setenv("ZAGROS_SCRIPTS_REF", "hotfix")
+    assert service.installer_scripts_ref() == "hotfix"

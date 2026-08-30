@@ -45,6 +45,7 @@ from app.nodes.service import (
     core_lifecycle,
     core_logs,
     core_settings,
+    core_versions,
     create_node,
     delete_node,
     discover,
@@ -661,36 +662,21 @@ async def cores_update(core_id: str, body: CoreUpdateBody, runtime=Depends(get_r
             "restart_required": running}
 
 
-_VERSION_CACHE: dict[str, tuple[float, list[dict]]] = {}
-_VERSION_CACHE_TTL = 600.0
-
-
 @zagros_admin_router.get("/cores/{core_id}/versions")
 async def cores_versions(core_id: str, limit: int = 10, runtime=Depends(get_runtime)):
     """Recent upstream release tags for a GitHub-managed core (drives the
     version picker in Simple install mode). Sourced from the DRIVER's own
     metadata (release_repo), never hardcoded. Cached 10 min in-process."""
-    from app.cores.github_install import fetch_recent_releases
-    from app.cores.registry import available_drivers, get_driver_class
+    from app.cores.releases import NoReleaseFeed, recent_releases
 
-    if core_id not in available_drivers():
-        raise HTTPException(404, f"unknown core '{core_id}'")
-    repo = get_driver_class(core_id).metadata.release_repo
-    if not repo:
-        raise HTTPException(
-            404, f"core '{core_id}' is not GitHub-release managed — "
-                 "no version list is available (install uses the OS package)")
-    now = time.monotonic()
-    cached = _VERSION_CACHE.get(core_id)
-    if cached and now - cached[0] < _VERSION_CACHE_TTL:
-        releases = cached[1]
-    else:
-        try:
-            releases = await asyncio.to_thread(fetch_recent_releases, repo, limit=limit)
-        except Exception as exc:
-            raise HTTPException(502, str(exc)) from exc
-        _VERSION_CACHE[core_id] = (now, releases)
-    return {"core": core_id, "repo": repo, "releases": releases[: max(1, min(limit, 30))]}
+    try:
+        return await recent_releases(core_id, limit=limit)
+    except KeyError:
+        raise HTTPException(404, f"unknown core '{core_id}'") from None
+    except NoReleaseFeed as exc:
+        raise HTTPException(404, str(exc)) from None
+    except Exception as exc:  # noqa: BLE001 - upstream is a network call
+        raise HTTPException(502, str(exc)) from exc
 
 
 @zagros_admin_router.get("/cores/{core_id}/logs")
@@ -1983,10 +1969,27 @@ async def nodes_core_lifecycle(node_id: int, core_id: str,
     try:
         result = await core_lifecycle(
             runtime, node_id, core_id, action=body.action,
-            settings=body.settings, purge=body.purge, force=body.force)
+            settings=body.settings, purge=body.purge, force=body.force,
+            version=body.version)
     except Exception as exc:  # noqa: BLE001
         raise _node_http_error(exc) from exc
     return result
+
+
+@zagros_admin_router.get("/nodes/{node_id}/cores/{core_id}/versions")
+async def nodes_core_versions(node_id: int, core_id: str, limit: int = 10,
+                              runtime=Depends(get_runtime)):
+    """Upstream releases a core on this node can be pinned to.
+
+    The node installs from the same upstream releases the master would (its
+    drivers are a vendored copy of these), so the panel can offer the list
+    without asking the node — and it can do so for cores the master itself
+    does not run.
+    """
+    try:
+        return await core_versions(runtime, node_id, core_id, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        raise _node_http_error(exc) from exc
 
 
 @zagros_admin_router.get("/nodes/{node_id}/cores/{core_id}/logs")

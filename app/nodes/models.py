@@ -94,6 +94,8 @@ class LifecycleBody(BaseModel):
     settings: dict[str, Any] = Field(default_factory=dict)
     purge: bool = False
     force: bool = False
+    # Pin the release to install/update to ('' = whatever the node defaults to).
+    version: str | None = None
 
 
 class NodeCores(BaseModel):

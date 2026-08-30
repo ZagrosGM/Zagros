@@ -761,7 +761,15 @@ class XrayDriver(BaseCoreDriver):
         await asyncio.to_thread(_install_xray, self.settings)
 
     async def update(self, version: str | None = None) -> str:
-        return await asyncio.to_thread(_install_xray, self.settings)
+        # ``version`` is the one argument that arrives at call time (the
+        # panel's version picker hands the chosen release to the node). The
+        # installer reads its pin from settings, so a version that is quietly
+        # dropped here is a version picker that does nothing.
+        settings = self.settings
+        if version:
+            settings = dict(self.settings)
+            settings["release_version"] = str(version)
+        return await asyncio.to_thread(_install_xray, settings)
 
     async def uninstall(self, purge: bool = False) -> None:
         await asyncio.to_thread(_uninstall_xray, self.settings, purge)

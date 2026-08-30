@@ -23,7 +23,9 @@ import base64
 import datetime as _dt
 import hashlib
 import json
+import os
 import secrets
+import time
 from typing import Any
 
 from sqlalchemy import select
@@ -47,9 +49,59 @@ from app.nodes.models import (
     SyncResult,
 )
 
-# Where the generated installer script is fetched from. Overridable so forks
-# and air-gapped setups can serve their own copy.
-INSTALLER_BASE = "https://raw.githubusercontent.com/ZagrosGM/zagros-node/main"
+# Where the generated installer script is fetched from. It lives in
+# zagros-scripts next to the panel's own installer, so a node is installed
+# from one repository — the agent repository builds the image and nothing
+# else. Overridable so forks and air-gapped setups can serve their own copy.
+SCRIPTS_REPO_RAW = os.environ.get(
+    "ZAGROS_SCRIPTS_REPO_RAW",
+    "https://raw.githubusercontent.com/ZagrosGM/zagros-scripts")
+NODE_INSTALLER_SCRIPT = "install-node.sh"
+# How long a "does that tag exist?" answer is trusted: tag lookups are cheap
+# but they are still a network call on the path of every installer command.
+_REF_LOOKUP_TTL = 3600.0
+_ref_cache: tuple[str, float] | None = None
+
+
+def _scripts_ref_exists(ref: str, timeout: float = 4.0) -> bool:
+    """Does ``install-node.sh`` exist in zagros-scripts at this ref?"""
+    import requests
+
+    url = f"{SCRIPTS_REPO_RAW}/{ref}/{NODE_INSTALLER_SCRIPT}"
+    try:
+        response = requests.head(url, timeout=timeout, allow_redirects=True)
+    except Exception:  # noqa: BLE001 - offline is an answer, not an error
+        return False
+    return response.status_code == 200
+
+
+def installer_scripts_ref() -> str:
+    """The zagros-scripts ref a new node should install from.
+
+    A released panel wants the installer that shipped with it — that is what
+    makes a node installed a year from now reproducible. But a development
+    build carries a version nobody has tagged yet, and a 404 on the node is a
+    far worse outcome than tracking the branch. So: the matching tag when it
+    exists, ``main`` when it does not.
+    """
+    override = (os.environ.get("ZAGROS_SCRIPTS_REF") or "").strip()
+    if override:
+        return override
+    global _ref_cache
+    now = time.monotonic()
+    if _ref_cache and now - _ref_cache[1] < _REF_LOOKUP_TTL:
+        return _ref_cache[0]
+    ref = "main"
+    try:
+        from app import __version__
+
+        tag = f"v{__version__}"
+        if _scripts_ref_exists(tag):
+            ref = tag
+    except Exception:  # noqa: BLE001 - never fail an installer for this
+        ref = "main"
+    _ref_cache = (ref, now)
+    return ref
 PANEL_ID_PREFIX = "panel-"
 # Cores whose accounts live INSIDE their config document instead of the
 # platform account table (see app/platform/provisioning.py).
@@ -204,9 +256,11 @@ async def get_node(runtime, node_id: int) -> NodeView | None:
 # --------------------------------------------------------------------------- #
 # create + installer command
 # --------------------------------------------------------------------------- #
-def _installer_command(row, token: str | None, *, rotated: bool = False) -> InstallerCommand:
+def _installer_command(row, token: str | None, *, rotated: bool = False,
+                       ref: str | None = None) -> InstallerCommand:
     command = (
-        f"curl -fsSL {INSTALLER_BASE}/scripts/install.sh | bash -s --"
+        f"curl -fsSL {SCRIPTS_REPO_RAW}/{ref or installer_scripts_ref()}/"
+        f"{NODE_INSTALLER_SCRIPT} | bash -s --"
         f" --panel-id {row.panel_id}"
         f" --token {token or '<TOKEN>'}"
         f" --name {row.name}"
@@ -252,7 +306,8 @@ async def create_node(runtime, body: NodeCreate) -> tuple[NodeView, InstallerCom
         return row
 
     row = await asyncio.to_thread(_persist(runtime, mutate))
-    return _view(row), _installer_command(row, token)
+    return _view(row), _installer_command(row, token,
+                                          ref=installer_scripts_ref())
 
 
 async def installer_command(runtime, node_id: int, *,
@@ -264,7 +319,8 @@ async def installer_command(runtime, node_id: int, *,
     if row is None:
         raise KeyError(node_id)
     if not rotate:
-        return _installer_command(row, _row_token(runtime, row))
+        ref = await asyncio.to_thread(installer_scripts_ref)
+        return _installer_command(row, _row_token(runtime, row), ref=ref)
 
     if row.status == "connected":
         raise PermissionError(
@@ -287,7 +343,8 @@ async def installer_command(runtime, node_id: int, *,
         return current
 
     row = await asyncio.to_thread(_persist(runtime, mutate))
-    return _installer_command(row, token, rotated=True)
+    ref = await asyncio.to_thread(installer_scripts_ref)
+    return _installer_command(row, token, rotated=True, ref=ref)
 
 
 # --------------------------------------------------------------------------- #
@@ -514,14 +571,24 @@ async def update_core_settings(runtime, node_id: int, core_id: str,
 
 async def core_lifecycle(runtime, node_id: int, core_id: str, *, action: str,
                          settings: dict | None = None, purge: bool = False,
-                         force: bool = False) -> dict:
+                         force: bool = False, version: str | None = None) -> dict:
     if action not in NODE_ACTIONS:
         raise ValueError(f"action must be one of {list(NODE_ACTIONS)}")
     row = await asyncio.to_thread(_get_row, runtime, node_id)
     if row is None:
         raise KeyError(node_id)
+    if version and action not in ("install", "update"):
+        raise ValueError(
+            "a version can only be pinned when installing or updating; "
+            f"'{action}' does not install anything")
+    # The agent pins a release through the driver's own settings, so a version
+    # is just one more setting — no protocol change, and cores that do not
+    # understand it simply keep their own default.
+    effective = dict(settings or {})
+    if version:
+        effective["release_version"] = str(version)
     result = await asyncio.to_thread(
-        _client(runtime, row).lifecycle, core_id, action, settings=settings,
+        _client(runtime, row).lifecycle, core_id, action, settings=effective,
         purge=purge, force=force)
     # A freshly installed core owns no listeners yet: it cannot start, and it
     # serves nothing, until this panel's configuration reaches it. Converge it
@@ -539,6 +606,31 @@ async def core_lifecycle(runtime, node_id: int, core_id: str, *, action: str,
     except Exception:  # noqa: BLE001 — the action itself already succeeded
         pass
     return result
+
+
+async def core_versions(runtime, node_id: int, core_id: str,
+                        limit: int = 10) -> dict:
+    """Upstream release tags a core on this node can be pinned to.
+
+    The node's drivers are a vendored copy of the panel's, so the panel knows
+    the release feed of every core the node can install — including ones the
+    master itself does not run. The list is advisory: applying it is a normal
+    install/update with a version pin.
+    """
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+    try:
+        from app.cores.releases import NoReleaseFeed, recent_releases
+
+        payload = await recent_releases(core_id, limit=limit)
+    except KeyError:
+        raise KeyError(f"core '{core_id}' is not known to this panel") from None
+    except NoReleaseFeed as exc:
+        raise ValueError(str(exc)) from None
+    except Exception as exc:  # noqa: BLE001 - upstream is a network call
+        raise ConnectionError(f"could not read the release list: {exc}") from exc
+    return {"node_id": node_id, **payload}
 
 
 async def core_logs(runtime, node_id: int, core_id: str, tail: int = 200) -> dict:

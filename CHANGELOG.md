@@ -32,6 +32,24 @@ started. All three are now automatic.
   an agent that has been reinstalled says the token must be *rotated*, because
   the old one is spent, instead of asking you to re-run a dead command.
 
+* **Change version** on any core, master or node: pick a published release —
+  higher or lower — or pin a tag by hand. The list comes from the core's own
+  upstream repository, the installed release is marked, and applying it keeps
+  settings, data and accounts. Cores that the OS installs instead explain why
+  they have no list rather than offering an empty picker.
+
+### Changed
+
+* The master's **upgrade** button is gone (change version says what it
+  actually does), and a node's core card no longer offers per-core
+  **settings** or **update** — a node is configured by sync, not by hand.
+* The cores/catalog tabs sit in the same place for the master and for every
+  node.
+* The node installer command now points at **zagros-scripts**
+  (`install-node.sh`), preferring the tag that matches this panel's version
+  and falling back to `main` when that tag does not exist yet. The script and
+  the `zagros-node` CLI no longer live in the agent repository.
+
 ### Fixed
 
 * **Cores now start when they are installed.** Installing or updating a core on
@@ -44,6 +62,10 @@ started. All three are now automatic.
 * Heartbeating healthy nodes is throttled (every 8th sweep) and failing nodes
   back off (45s → 90s → 3m → 5m), so a down node is not hammered and a healthy
   one is not polled to death.
+* `update(version)` used to **ignore the version**: xray and sing-box read
+  their release pin from settings and dropped the argument, so any version
+  change silently reinstalled the release the core already had. Both now
+  honour it (pptp already refused any other pin, correctly).
 
 ---
 

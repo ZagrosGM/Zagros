@@ -211,7 +211,7 @@ class LocalSingBoxBackend:
             log_buffer=self._log_buffer,
         )
 
-    def install_binary(self) -> str:
+    def install_binary(self, version: str | None = None) -> str:
         """Install sing-box; bare executable names are resolved inside
         work_dir (CWD is not on PATH, so a relative target would leave the
         process unstartable). Rebuilds the managed process afterwards so
@@ -237,7 +237,7 @@ class LocalSingBoxBackend:
         bare = os.path.basename(self.executable) == self.executable
         target = (os.path.join(os.path.abspath(self.work_dir), self.executable)
                   if bare else self.executable)
-        version = self.settings.get("release_version", "1.12.4") or None
+        version = version or self.settings.get("release_version", "1.12.4") or None
         source = "upstream"
         tag: str | None = None
         if version:

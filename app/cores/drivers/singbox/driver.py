@@ -900,7 +900,9 @@ class SingBoxDriver(BaseCoreDriver):
         self._v2ray_supported = None  # binary changed: re-probe on next render
 
     async def update(self, version: str | None = None) -> str:
-        await asyncio.to_thread(self._backend.install_binary)
+        # The chosen release has to reach the installer: it reads its pin from
+        # settings, and this is the path that is given one at call time.
+        await asyncio.to_thread(self._backend.install_binary, version)
         self._persist_backend_executable()
         self._v2ray_supported = None
         new_version = await asyncio.to_thread(self._backend.version) or "unknown"

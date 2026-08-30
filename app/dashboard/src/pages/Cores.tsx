@@ -4,8 +4,8 @@
 // upgrade/reinstall/uninstall, live CPU/RAM/uptime, logs drawer.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Cpu, Download, FileText, HardDriveDownload, Loader2, Play, PowerOff,
-  RefreshCcw, RotateCw, Server, Settings2, Square, Trash2, UploadCloud,
+  ArrowUpDown, Cpu, Download, FileText, HardDriveDownload, Loader2, Play,
+  PowerOff, RefreshCcw, RotateCw, Server, Square, Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -84,6 +84,106 @@ export default function Cores() {
 // signed API (installs run as jobs on the node, so this call can legitimately
 // take minutes; the UI says so instead of timing out silently).
 // --------------------------------------------------------------------------- //
+// Change version — the same release list the installer offers, but after the
+// fact, and for a node's core as well as the master's. Up or down: the core is
+// fetched again at the chosen release and restarted, keeping its settings,
+// data and accounts.
+function VersionDialog({ coreId, current, queryKey, fetchVersions, onApply, onClose }: {
+  coreId: string;
+  current?: string | null;
+  queryKey: (string | number)[];
+  fetchVersions: () => Promise<{ releases?: CoreRelease[]; repo?: string }>;
+  onApply: (version: string) => Promise<void>;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const [custom, setCustom] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const list = useQuery({
+    queryKey,
+    queryFn: fetchVersions,
+    retry: false,
+    staleTime: 600_000,
+  });
+
+  const strip = (value: string) => value.trim().replace(/^v/, "");
+  const apply = async (raw: string) => {
+    const version = strip(raw);
+    if (!version) return;
+    setBusy(true);
+    setError("");
+    try {
+      await onApply(version);
+      onClose();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : t("common.error"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const releases = list.data?.releases ?? [];
+  return (
+    <Dialog open onClose={onClose} title={`change version — ${coreId}`}
+      subtitle={list.data?.repo
+        ? `upstream ${list.data.repo} · installed ${current || "unknown"}`
+        : `installed ${current || "unknown"}`}
+      footer={<Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>}>
+      {list.isLoading ? (
+        <Skeleton className="h-44" />
+      ) : list.isError || !releases.length ? (
+        <p className="rounded-xl bg-warn-soft px-3 py-2.5 text-[12px] leading-5 text-warn">
+          {list.isError
+            ? (list.error instanceof ApiError ? list.error.message : t("common.error"))
+            : "no published releases are available for this core"}
+        </p>
+      ) : (
+        <div className="max-h-[46vh] space-y-1.5 overflow-y-auto pe-1">
+          {releases.map((r) => {
+            const isCurrent = strip(r.tag ?? "") === strip(current ?? "");
+            return (
+              <button key={r.tag} type="button" disabled={busy}
+                onClick={() => apply(r.tag ?? "")}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-start transition-colors",
+                  isCurrent
+                    ? "border-brand/40 bg-brand-soft/40"
+                    : "border-border hover:bg-surface-3",
+                )}>
+                <span className="font-mono text-[12px]" dir="ltr">{r.tag}</span>
+                {r.prerelease && <Badge tone="warn">pre</Badge>}
+                {isCurrent && <Badge tone="brand">installed</Badge>}
+                <span className="ms-auto truncate text-[11px] text-content-3">
+                  {r.published_at ? String(r.published_at).slice(0, 10) : ""}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="mt-3 border-t border-border pt-3">
+        <Field label="or pin a specific tag">
+          <div className="flex items-center gap-2">
+            <Input value={custom} onChange={(e) => setCustom(e.target.value)}
+              placeholder="v1.2.3" dir="ltr" className="font-mono" />
+            <Button variant="secondary" loading={busy} disabled={!custom.trim()}
+              onClick={() => apply(custom)}>pin</Button>
+          </div>
+        </Field>
+        {error && <p role="alert" className="mt-2 text-[12px] text-danger">{error}</p>}
+        <p className="mt-2 text-[11px] leading-5 text-content-3">
+          The core is downloaded again at that release and restarted. Settings,
+          data and accounts are kept — this is the same path the installer uses.
+        </p>
+      </div>
+    </Dialog>
+  );
+}
+
+// --------------------------------------------------------------------------- //
+// --------------------------------------------------------------------------- //
 function NodeCoresPanel({ node }: { node: Node }) {
   const t = useT();
   const digits = useDigits();
@@ -91,7 +191,7 @@ function NodeCoresPanel({ node }: { node: Node }) {
   const [tab, setTab] = useState("installed");
   const [installFor, setInstallFor] = useState<NodeCatalogEntry | null>(null);
   const [logsFor, setLogsFor] = useState<string | null>(null);
-  const [settingsFor, setSettingsFor] = useState<string | null>(null);
+  const [versionFor, setVersionFor] = useState<string | null>(null);
   const [uninstallFor, setUninstallFor] = useState<NodeCoreStatus | null>(null);
   const [purge, setPurge] = useState(false);
 
@@ -107,10 +207,12 @@ function NodeCoresPanel({ node }: { node: Node }) {
   };
 
   const act = useMutation({
-    mutationFn: ({ core, action, settings, purge: doPurge }: {
-      core: string; action: string; settings?: Record<string, unknown>; purge?: boolean;
+    mutationFn: ({ core, action, settings, purge: doPurge, version }: {
+      core: string; action: string; settings?: Record<string, unknown>;
+      purge?: boolean; version?: string;
     }) => api.post(`/zagros/nodes/${node.id}/cores/${encodeURIComponent(core)}/lifecycle`,
-      { action, settings: settings ?? {}, purge: Boolean(doPurge), force: false }),
+      { action, settings: settings ?? {}, purge: Boolean(doPurge), force: false,
+        ...(version ? { version } : {}) }),
     onSuccess: (_d, v) => { toast.ok(`${node.name}: ${v.core} ${v.action}`); invalidate(); },
     onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
     onSettled: invalidate,
@@ -137,9 +239,6 @@ function NodeCoresPanel({ node }: { node: Node }) {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
-        <p className="me-auto text-[11px] text-content-3" dir="ltr">
-          {node.address}:{node.port}{node.agent_version ? ` · agent ${node.agent_version}` : ""}
-        </p>
         <Tabs
           active={tab} onChange={setTab}
           tabs={[
@@ -147,6 +246,11 @@ function NodeCoresPanel({ node }: { node: Node }) {
             { id: "catalog", label: `catalog (${catalog.length})`, icon: <Download size={13} /> },
           ]}
         />
+        {/* Kept on the far side of the tabs — in the same place for the master
+            and for a node, so switching tabs does not move the controls. */}
+        <p className="ms-auto text-[11px] text-content-3" dir="ltr">
+          {node.address}:{node.port}{node.agent_version ? ` · agent ${node.agent_version}` : ""}
+        </p>
       </div>
 
       {inventory.isError && (
@@ -228,11 +332,8 @@ function NodeCoresPanel({ node }: { node: Node }) {
                   )}
                   <Button size="sm" variant="ghost" onClick={() => setLogsFor(core.core_id)}>
                     <FileText size={13} /> logs</Button>
-                  <Button size="sm" variant="ghost" onClick={() => setSettingsFor(core.core_id)}>
-                    <Settings2 size={13} /> settings</Button>
-                  <Button size="sm" variant="ghost"
-                    onClick={() => act.mutate({ core: core.core_id, action: "update" })}>
-                    <UploadCloud size={13} /> update</Button>
+                  <Button size="sm" variant="ghost" onClick={() => setVersionFor(core.core_id)}>
+                    <ArrowUpDown size={13} /> change version</Button>
                   <div className="ms-auto">
                     <Button size="sm" variant="danger"
                       onClick={() => { setPurge(false); setUninstallFor(core); }}>
@@ -317,10 +418,20 @@ function NodeCoresPanel({ node }: { node: Node }) {
       </Dialog>
 
       <NodeLogsDrawer nodeId={node.id} coreId={logsFor} onClose={() => setLogsFor(null)} />
-      <NodeSettingsDrawer
-        nodeId={node.id} coreId={settingsFor}
-        onClose={() => { setSettingsFor(null); invalidate(); }}
-      />
+      {versionFor && (
+        <VersionDialog
+          coreId={versionFor}
+          current={installed.find((c) => c.core_id === versionFor)?.core_version}
+          fetchVersions={() => api.get<{ releases: CoreRelease[]; repo?: string }>(
+            `/zagros/nodes/${node.id}/cores/${encodeURIComponent(versionFor)}/versions?limit=30`)}
+          queryKey={["zagros", "node-core-versions", node.id, versionFor]}
+          onApply={async (version) => {
+            await act.mutateAsync({ core: versionFor, action: "update", version });
+            toast.ok(`${node.name}: ${versionFor} pinned to ${version}`);
+          }}
+          onClose={() => { setVersionFor(null); invalidate(); }}
+        />
+      )}
     </div>
   );
 }
@@ -347,8 +458,9 @@ function NodeInstallDialog({ node, entry, onClose, onDone }: {
   // release repo). It is advisory only: if the list is unavailable the node
   // simply installs the latest build.
   const versions = useQuery({
-    queryKey: ["zagros", "core-versions", entry.id],
-    queryFn: () => api.get<{ releases: CoreRelease[] }>(`/zagros/cores/${entry.id}/versions`),
+    queryKey: ["zagros", "node-core-versions", node.id, entry.id],
+    queryFn: () => api.get<{ releases: CoreRelease[] }>(
+      `/zagros/nodes/${node.id}/cores/${encodeURIComponent(entry.id)}/versions`),
     retry: false, staleTime: 600000,
   });
 
@@ -498,92 +610,6 @@ function NodeInstallDialog({ node, entry, onClose, onDone }: {
   );
 }
 
-// --------------------------------------------------------------------------- //
-function NodeSettingsDrawer({ nodeId, coreId, onClose }: {
-  nodeId: number; coreId: string | null; onClose: () => void;
-}) {
-  const t = useT();
-  const [draft, setDraft] = useState<Record<string, string>>({});
-  const [error, setError] = useState("");
-
-  const settings = useQuery({
-    queryKey: ["zagros", "node-core-settings", nodeId, coreId],
-    queryFn: () => api.get<{ settings: Record<string, unknown> }>(
-      `/zagros/nodes/${nodeId}/cores/${encodeURIComponent(coreId ?? "")}/settings`),
-    enabled: !!coreId,
-  });
-
-  const current = settings.data?.settings ?? {};
-  // Values are strings here for editing; the node re-parses them against the
-  // driver's schema (so "644" becomes 644 for an integer setting).
-  const value = (key: string) =>
-    draft[key] ?? (current[key] === null || current[key] === undefined
-      ? "" : String(current[key]));
-
-  const save = useMutation({
-    mutationFn: () => {
-      const patch: Record<string, unknown> = {};
-      for (const [key, raw] of Object.entries(draft)) {
-        const before = current[key];
-        if (String(before ?? "") === raw) continue;   // only send real changes
-        patch[key] = raw === "" ? null
-          : typeof before === "number" ? Number(raw)
-          : typeof before === "boolean" ? raw === "true" : raw;
-      }
-      return api.put(`/zagros/nodes/${nodeId}/cores/${encodeURIComponent(coreId ?? "")}/settings`,
-        { settings: patch });
-    },
-    onSuccess: () => { setDraft({}); toast.ok("settings applied — restart the core to load them"); onClose(); },
-    onError: (e) => setError(e instanceof ApiError ? e.message : t("common.error")),
-  });
-
-  const entries = Object.entries(current);
-  const changed = Object.keys(draft).filter(
-    (k) => String(current[k] ?? "") !== draft[k]).length;
-
-  return (
-    <Drawer open={!!coreId} onClose={onClose} title={`settings — ${coreId ?? ""}`}
-      footer={
-        <>
-          <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
-          <Button onClick={() => save.mutate()} loading={save.isPending} disabled={!changed}>
-            save{changed ? ` (${changed})` : ""}
-          </Button>
-        </>
-      }>
-      {settings.isLoading ? <Skeleton className="h-40" /> : !entries.length ? (
-        <EmptyState title="This core has no editable settings"
-          hint="Its driver needs nothing beyond the installed binary." />
-      ) : (
-        <div className="space-y-3.5">
-          <p className="rounded-xl bg-surface-2 p-3 text-[11px] leading-5 text-content-2">
-            Secrets are masked by the node and cannot be read back. Every value is validated on the
-            node against the driver's schema before it is written.
-          </p>
-          {entries.map(([key, raw]) => (
-            <Field key={key} label={key}
-              hint={raw === null || raw === undefined ? "unset" : undefined}>
-              {typeof raw === "boolean" ? (
-                <Select value={value(key)} onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}>
-                  <option value="true">{t("common.yes")}</option>
-                  <option value="false">{t("common.no")}</option>
-                </Select>
-              ) : (
-                <Input
-                  type={typeof raw === "number" ? "number" : "text"}
-                  dir="ltr" value={value(key)}
-                  onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
-                />
-              )}
-            </Field>
-          ))}
-          {error && <p role="alert" className="rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
-        </div>
-      )}
-    </Drawer>
-  );
-}
-
 function NodeLogsDrawer({ nodeId, coreId, onClose }: {
   nodeId: number; coreId: string | null; onClose: () => void;
 }) {
@@ -628,6 +654,7 @@ function MasterCores() {
   const [logsFor, setLogsFor] = useState<string | null>(null);
   const [uninstallFor, setUninstallFor] = useState<CoreView | null>(null);
   const [reinstallFor, setReinstallFor] = useState<CoreView | null>(null);
+  const [versionFor, setVersionFor] = useState<string | null>(null);
   const [purge, setPurge] = useState(false);
 
   const registry = useQuery({
@@ -772,7 +799,8 @@ function MasterCores() {
                   <Button size="sm" variant="ghost" onClick={() => setLogsFor(c.id)}><FileText size={13} /> logs</Button>
                   {!c.builtin && (
                     <>
-                      <Button size="sm" variant="ghost" onClick={() => act.mutate({ id: c.id, action: "update" })}><UploadCloud size={13} /> {t("cores.upgrade")}</Button>
+                      <Button size="sm" variant="ghost" onClick={() => setVersionFor(c.id)}>
+                        <ArrowUpDown size={13} /> change version</Button>
                       <Button size="sm" variant="ghost" loading={false}
                         onClick={() => setReinstallFor(c)}><RefreshCcw size={13} /> {t("cores.reinstall")}</Button>
                       <div className="ms-auto">
@@ -836,6 +864,22 @@ function MasterCores() {
       />
 
       <LogsDrawer coreId={logsFor} onClose={() => setLogsFor(null)} />
+
+      {versionFor && (
+        <VersionDialog
+          coreId={versionFor}
+          current={(cores.data?.cores ?? []).find((c) => c.id === versionFor)?.core_version}
+          fetchVersions={() => api.get<{ releases: CoreRelease[]; repo?: string }>(
+            `/zagros/cores/${encodeURIComponent(versionFor)}/versions?limit=30`)}
+          queryKey={["zagros", "core-versions", versionFor]}
+          onApply={async (version) => {
+            await api.post(`/zagros/cores/${encodeURIComponent(versionFor)}/update`,
+              { version });
+            toast.ok(`${versionFor} pinned to ${version}`);
+          }}
+          onClose={() => { setVersionFor(null); invalidate(); }}
+        />
+      )}
 
       <Dialog
         open={!!uninstallFor}

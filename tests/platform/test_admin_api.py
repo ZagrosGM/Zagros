@@ -923,7 +923,9 @@ class TestOutboundsAlpha7:
 
         monkeypatch.setattr(github_install, "fetch_recent_releases", fake_fetch)
         from app.platform import admin_api
-        admin_api._VERSION_CACHE.clear()
+        from app.cores import releases as releases_mod
+
+        releases_mod.clear_cache()
         r = stack["client"].get("/api/zagros/cores/xray/versions")
         assert r.status_code == 200, r.text
         assert calls["repo"] == "XTLS/Xray-core"

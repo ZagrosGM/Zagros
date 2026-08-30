@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import secrets
+import threading
 import time
 from typing import Any
 
@@ -746,6 +747,186 @@ async def _push_identity(runtime, client, core_id: str,
     return list(applied)
 
 
+def _clients(inbound: dict) -> int:
+    """How many accounts one xray inbound carries (they live in the document)."""
+    settings = inbound.get("settings") or {}
+    return len(settings.get("clients") or inbound.get("clients") or [])
+
+
+def _accounts_digest(payload: object) -> str:
+    """Fingerprint of one core's accounts, so a push can be skipped."""
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _account_payload(runtime, core_id: str):
+    """This core's accounts as the panel has them right now.
+
+    ``None`` means *unknown*, not empty — a read failure must never be
+    mistaken for "there are no users", which would revoke everyone on the
+    node.
+    """
+    if core_id == LEGACY_CORE_ID:
+        return _xray_document_with_accounts()
+    return _core_accounts(runtime, core_id)
+
+
+async def _push_core_accounts(runtime, client, core_id: str, *,
+                              payload, apply: bool) -> tuple[int | None, str | None]:
+    """Move one core's accounts onto a node. Returns ``(count, error)``.
+
+    xray carries its users inside the configuration document; every other
+    core keeps them in the platform account table and reconciles them
+    explicitly. ``apply=False`` counts without sending (used by a full sync,
+    which has already applied the document itself).
+    """
+    if core_id == LEGACY_CORE_ID:
+        if not payload or not (payload.get("inbounds") or []):
+            return None, None
+        if apply:
+            await asyncio.to_thread(client.apply_inbounds, core_id, payload)
+        return (sum(_clients(inbound) for inbound in (payload.get("inbounds") or [])
+                    if isinstance(inbound, dict)), None)
+    if payload is None:
+        return None, ("accounts could not be read from the panel database "
+                      "— left untouched on the node")
+    if apply:
+        synced = await asyncio.to_thread(client.apply_accounts, core_id, payload)
+        return synced.get("count", len(payload)), None
+    return len(payload), None
+
+
+def _accounts_digest_map(row) -> dict[str, str]:
+    settings = dict(getattr(row, "settings_json", None) or {})
+    stored = settings.get("accounts_digest") or {}
+    return dict(stored) if isinstance(stored, dict) else {}
+
+
+def _store_accounts_digests(runtime, node_id: int, digests: dict[str, str]) -> None:
+    """Remember what a node already has, so the next pass can skip it."""
+    if not digests:
+        return
+    from app.persistence.models import NodeModel
+
+    def mutate(session):
+        current = session.get(NodeModel, node_id)
+        if current is None:
+            return
+        settings = dict(current.settings_json or {})
+        merged = dict(settings.get("accounts_digest") or {})
+        merged.update(digests)
+        settings["accounts_digest"] = merged
+        current.settings_json = settings
+        session.commit()
+
+    try:
+        _persist(runtime, mutate)()
+    except Exception as exc:  # noqa: BLE001 — bookkeeping must never fail a push
+        logger.debug("node accounts: cannot record digests: %s", exc)
+
+
+async def push_node_accounts(runtime, node_id: int, *,
+                             core_ids: list[str] | None = None,
+                             force: bool = False) -> dict:
+    """Re-send ONLY the accounts to one node.
+
+    The other half of a sync (server identity, inbound layout, hosts) does not
+    change when a user is added, edited or removed — the accounts do. Keeping
+    this separate means "a new user can connect through the node" does not
+    wait for, or pay for, a full convergence pass.
+    """
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+    client = _client(runtime, row)
+    inventory = await asyncio.to_thread(client.cores)
+    installed = dict(inventory.get("installed") or {})
+    master_cores = set(runtime.core_manager.list_cores())
+
+    result: dict[str, Any] = {"node_id": node_id, "pushed": [], "skipped": [],
+                              "errors": []}
+    wanted = sorted(installed if core_ids is None
+                    else [c for c in installed if c in set(core_ids or ())])
+    known = _accounts_digest_map(row)
+    digests: dict[str, str] = {}
+
+    for core_id in wanted:
+        if core_id not in master_cores:
+            result["skipped"].append({"core_id": core_id,
+                                      "reason": "core is not installed on the master"})
+            continue
+        payload = _account_payload(runtime, core_id)
+        if payload is None:
+            result["errors"].append(
+                f"{core_id}: accounts could not be read from the panel "
+                "database — left untouched on the node")
+            continue
+        digest = _accounts_digest(payload)
+        if not force and known.get(core_id) == digest:
+            result["skipped"].append({"core_id": core_id,
+                                      "reason": "accounts unchanged"})
+            digests[core_id] = digest
+            continue
+        try:
+            count, error = await _push_core_accounts(
+                runtime, client, core_id, payload=payload, apply=True)
+        except NodeClientError as exc:
+            result["errors"].append(f"{core_id}: {exc}")
+            continue
+        except Exception as exc:  # noqa: BLE001 — one core never blocks another
+            result["errors"].append(f"{core_id}: {exc}")
+            continue
+        if error:
+            result["errors"].append(f"{core_id}: {error}")
+            continue
+        digests[core_id] = digest
+        result["pushed"].append({"core_id": core_id, "accounts": count})
+
+    _store_accounts_digests(runtime, node_id, digests)
+    return result
+
+
+def schedule_accounts_fanout(runtime, *, core_ids: list[str] | None = None) -> None:
+    """Push accounts to the nodes in the background — never block a request.
+
+    Called right after a user was created, edited or removed so "the config
+    they just downloaded" works immediately; the periodic sweep remains the
+    safety net for every path that does not call this.
+    """
+    def _run() -> None:
+        try:
+            asyncio.run(fanout_accounts(runtime, core_ids=core_ids, force=True))
+        except Exception as exc:  # noqa: BLE001 — a fan-out must never raise
+            logger.debug("node accounts fan-out failed: %s", exc)
+
+    threading.Thread(target=_run, name="node-accounts-fanout", daemon=True).start()
+
+
+async def fanout_accounts(runtime, *, core_ids: list[str] | None = None,
+                          force: bool = False) -> dict:
+    """Send the current account set to every paired node.
+
+    Every path that can change a user — creation, edit, deletion, expiry, a
+    device limit cutting someone off — ends here, so no call site has to
+    remember to tell a node about it.
+    """
+    pushed: list[dict] = []
+    errors: list[str] = []
+    for row in paired_nodes(runtime):
+        try:
+            outcome = await push_node_accounts(
+                runtime, int(row.id), core_ids=core_ids, force=force)
+        except Exception as exc:  # noqa: BLE001 — one node never blocks another
+            errors.append(f"node {row.id}: {exc}")
+            continue
+        if outcome.get("pushed"):
+            pushed.append({"node_id": int(row.id),
+                           "pushed": outcome["pushed"]})
+        errors.extend(str(item) for item in outcome.get("errors") or [])
+    return {"pushed": pushed, "errors": errors}
+
+
 async def sync_node(runtime, node_id: int, *,
                     core_ids: list[str] | None = None) -> SyncResult:
     """Push this panel's desired inbound state to every core on the node.
@@ -774,6 +955,7 @@ async def sync_node(runtime, node_id: int, *,
     master_cores = set(runtime.core_manager.list_cores())
 
     result = SyncResult(node_id=node_id)
+    _pending_digests: dict[str, str] = {}
     wanted = sorted(installed if core_ids is None
                     else [c for c in installed if c in set(core_ids or ())])
     for core_id in wanted:
@@ -810,29 +992,20 @@ async def sync_node(runtime, node_id: int, *,
         # actually connects". xray carries its users inside the document that
         # was just applied; every other core keeps them in the platform
         # account table and needs them reconciled explicitly.
-        if core_id == LEGACY_CORE_ID:
-            def _clients(inbound: dict) -> int:
-                settings = inbound.get("settings") or {}
-                return len(settings.get("clients")
-                           or inbound.get("clients") or [])
-
-            pushed["accounts"] = sum(
-                _clients(inbound) for inbound in (document.get("inbounds") or [])
-                if isinstance(inbound, dict))
+        # xray's users travel inside the document that was just applied; every
+        # other core keeps them in the account table and reconciles them here.
+        payload = (document if core_id == LEGACY_CORE_ID
+                   else await asyncio.to_thread(_core_accounts, runtime, core_id))
+        count, account_error = await _push_core_accounts(
+            runtime, client, core_id, payload=payload,
+            apply=(core_id != LEGACY_CORE_ID))
+        if account_error:
+            result.errors.append(f"{core_id} accounts: {account_error}")
         else:
-            accounts = await asyncio.to_thread(_core_accounts, runtime, core_id)
-            if accounts is None:
-                result.errors.append(
-                    f"{core_id}: accounts could not be read from the panel "
-                    "database — left untouched on the node")
-            else:
-                try:
-                    synced = await asyncio.to_thread(
-                        client.apply_accounts, core_id, accounts)
-                except NodeClientError as exc:
-                    result.errors.append(f"{core_id} accounts: {exc}")
-                else:
-                    pushed["accounts"] = synced.get("count", len(accounts))
+            if count is not None:
+                pushed["accounts"] = count
+            if payload is not None:
+                _pending_digests[core_id] = _accounts_digest(payload)
         result.pushed.append(pushed)
 
     if row.add_as_new_host:
@@ -840,6 +1013,9 @@ async def sync_node(runtime, node_id: int, *,
             result.hosts = await _add_node_hosts(runtime, row, wanted)
         except Exception as exc:  # noqa: BLE001 — config push already succeeded
             result.errors.append(f"hosts: {exc}")
+
+    if _pending_digests:
+        _store_accounts_digests(runtime, node_id, _pending_digests)
 
     def mutate(session):
         from app.persistence.models import NodeModel

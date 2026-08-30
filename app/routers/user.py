@@ -99,6 +99,25 @@ def _bridge_grants(request: Request, username: str) -> dict | None:
     return asyncio.run(provisioning.grants_of(runtime, username))
 
 
+def _sync_nodes_after_user_change(request: Request) -> None:
+    """A user was added, edited or removed — the nodes must hear about it.
+
+    Without this a node keeps serving yesterday's accounts, so a freshly
+    created user's config (which points at the node) simply does not connect
+    while every older user keeps working. Runs after the response: the
+    dashboard must not wait on node traffic.
+    """
+    runtime = _platform_runtime(request)
+    if runtime is None:
+        return
+    from app.nodes.service import fanout_accounts
+
+    try:
+        asyncio.run(fanout_accounts(runtime, force=True))
+    except Exception as exc:  # noqa: BLE001 — a node push never fails a request
+        logger.warning("node account sync after a user change failed: %s", exc)
+
+
 def _bridge_remove(request: Request, username: str) -> None:
     runtime = _platform_runtime(request)
     if runtime is None:
@@ -161,6 +180,7 @@ def add_user(
         raise HTTPException(status_code=409, detail="User already exists")
 
     bg.add_task(xray.operations.add_user, dbuser=dbuser)
+    bg.add_task(_sync_nodes_after_user_change, request)
     try:
         platform_id = _bridge_sync(request, dbuser, new_user.core_access)
         _ensure_xray_bandwidth_identity(
@@ -268,6 +288,7 @@ def modify_user(
         bg.add_task(xray.operations.update_user, dbuser=dbuser)
     else:
         bg.add_task(xray.operations.remove_user, dbuser=dbuser)
+    bg.add_task(_sync_nodes_after_user_change, request)
 
     bg.add_task(report.user_updated, user=user, user_admin=dbuser.admin, by=admin)
 
@@ -301,6 +322,7 @@ def remove_user(
     _bridge_remove(request, dbuser.username)
     crud.remove_user(db, dbuser)
     bg.add_task(xray.operations.remove_user, dbuser=dbuser)
+    bg.add_task(_sync_nodes_after_user_change, request)
 
     bg.add_task(
         report.user_deleted, username=dbuser.username, user_admin=Admin.model_validate(dbuser.admin), by=admin

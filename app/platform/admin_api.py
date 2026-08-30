@@ -43,6 +43,7 @@ from app.nodes.client import NodeClientError
 from app.nodes.models import LifecycleBody, NodeCreate, NodeUpdate, PairBody
 from app.nodes.service import (
     core_lifecycle,
+    fanout_accounts,
     core_logs,
     core_settings,
     core_versions,
@@ -2873,6 +2874,10 @@ async def users_bulk_create(
             except Exception as exc:
                 logger.error("Failed to create bulk user #%d (%s): %s", i+1, username, exc)
 
+    if created_usernames:
+        # A node serves the accounts it was last told about; without this a
+        # whole batch of new users would connect nowhere until the next sweep.
+        asyncio.create_task(fanout_accounts(runtime, force=True))
     return {"ok": True, "created_count": len(created_usernames), "usernames": created_usernames}
 
 
@@ -2923,6 +2928,7 @@ async def users_delete_by_status(
             except Exception as exc:
                 logger.error("Failed to delete user %s by status: %s", dbuser.username, exc)
 
+        asyncio.create_task(fanout_accounts(runtime, force=True))
         return {
             "ok": True,
             "status": status_val,

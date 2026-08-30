@@ -2048,6 +2048,8 @@ async def users_online_states(runtime=Depends(get_runtime)):
       online-capable core answered at all. A core without an online API
       must never fabricate 'offline': absence of evidence is not evidence
       of absence (alpha.7.5 item 15).
+    * ``counts`` — the three buckets tallied, so an aggregate display
+      (the Overview "Online now" tile) can never disagree with the dots.
     """
     window = 90.0
     try:
@@ -2099,7 +2101,13 @@ async def users_online_states(runtime=Depends(get_runtime)):
             states[username] = "unknown"
         else:
             states[username] = "offline"
-    return {"states": states, "collect_ts": snapshot.get("ts"),
+    # counts are free here — the Overview's "Online now" tile reads them so
+    # it can never drift from the dots this endpoint paints (alpha.9.2 #2)
+    counts = {"online": 0, "offline": 0, "unknown": 0}
+    for state in states.values():
+        counts[state] = counts.get(state, 0) + 1
+    return {"states": states, "counts": counts,
+            "collect_ts": snapshot.get("ts"),
             "failed_cores": failed, "probed_cores": probed,
             "window_seconds": int(window)}
 

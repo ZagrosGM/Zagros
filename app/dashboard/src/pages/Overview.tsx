@@ -41,8 +41,33 @@ export default function Overview() {
     refetchInterval: 10000,
     retry: false,
   });
+  // "Online now" is the presence count the Users page paints as dots — not
+  // /system's legacy rollup. Same cache key as Users, so both pages share
+  // one poll instead of racing each other.
+  const onlineQ = useQuery({
+    queryKey: ["users-online"],
+    queryFn: () => api.get<{
+      states: Record<string, "online" | "offline" | "unknown">;
+      counts?: { online: number; offline: number; unknown: number };
+      failed_cores: string[];
+    }>("/zagros/users/online"),
+    refetchInterval: 15000,
+    retry: false, // sudo-only surface — non-sudo admins fall back below
+  });
 
   const sys = system.data;
+  const onlineNow = onlineQ.data?.counts?.online
+    ?? Object.values(onlineQ.data?.states ?? {}).filter((s) => s === "online").length;
+  const unknownNow = onlineQ.data?.counts?.unknown
+    ?? Object.values(onlineQ.data?.states ?? {}).filter((s) => s === "unknown").length;
+  // Presence is sudo-only, so non-sudo admins fall back to the snapshot's
+  // 90s rollup — and to "—" when neither surface answered. Never to the
+  // legacy 24h number, which counted "seen today" as "connected now".
+  const onlineValue = onlineQ.data
+    ? formatNumber(onlineNow, digits)
+    : snapshot.data
+      ? formatNumber(snapshot.data.users_online ?? 0, digits)
+      : "—";
   const last = useRef({ rx: 0, tx: 0 });
   useEffect(() => {
     if (!sys) return;
@@ -65,7 +90,10 @@ export default function Overview() {
               value={formatNumber(sys?.total_user ?? snapshot.data?.users_total ?? 0, digits)}
               sub={`${t("overview.activeUsers")}: ${formatNumber(sys?.users_active ?? snapshot.data?.users_active ?? 0, digits)}`} />
             <Stat icon={<UserCheck size={19} />} tone="ok" label={t("overview.onlineNow")}
-              value={formatNumber(sys?.online_users ?? snapshot.data?.users_online ?? 0, digits)} />
+              value={onlineValue}
+              sub={onlineQ.data && unknownNow
+                ? `${t("overview.presenceUnknown")}: ${formatNumber(unknownNow, digits)}`
+                : undefined} />
             <Stat icon={<ArrowDown size={19} />} tone="default" label={t("overview.incoming")}
               value={formatSpeed(sys?.incoming_bandwidth_speed ?? 0, digits)}
               sub={formatBytes(sys?.incoming_bandwidth ?? 0, digits)} />

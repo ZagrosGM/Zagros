@@ -78,6 +78,24 @@ def test_fresh_presence_evidence_is_online():
     assert out["states"]["bob"] == "offline"
 
 
+def test_counts_match_the_per_user_states():
+    """The Overview tile reads ``counts``; it must tally exactly what the
+    dots show, unknown included (alpha.9.2 item 2)."""
+    runtime = _runtime({"ts": 1.0, "failed_cores": [],
+                        "probed_cores": 1, "online_user_ids": [1]},
+                       usernames=("alice", "bob", "carol"))
+    out = asyncio.run(admin_api.users_online_states(runtime))
+    assert out["counts"] == {"online": 1, "offline": 2, "unknown": 0}
+    assert sum(out["counts"].values()) == len(out["states"])
+
+    # a failed read moves its users to unknown — the aggregate follows
+    runtime = _runtime({"ts": 1.0, "failed_cores": ["sing-box"],
+                        "probed_cores": 1, "online_user_ids": [1]},
+                       usernames=("alice", "bob", "carol"))
+    out = asyncio.run(admin_api.users_online_states(runtime))
+    assert out["counts"] == {"online": 1, "offline": 0, "unknown": 2}
+
+
 def test_legacy_snapshot_without_probe_count_is_honestly_unknown():
     # a kv snapshot written by an older panel version carries no count —
     # absence of the count is NOT proof that anything answered

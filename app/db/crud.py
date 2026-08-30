@@ -1525,8 +1525,15 @@ def delete_notification_reminder(db: Session, dbreminder: NotificationReminder) 
     return
 
 
-def count_online_users(db: Session, hours: int = 24):
-    twenty_four_hours_ago = datetime.utcnow() - timedelta(hours=hours)
+def count_online_users(db: Session, within_seconds: int = 90):
+    """Users whose ``online_at`` falls inside the presence window.
+
+    The window is SECONDS, not hours, and defaults to the same 90s the rest
+    of the panel uses (platform totals and the multi-core presence
+    endpoint). A 24h window answered "who connected today", which the
+    Overview then displayed under the label "Online now" (alpha.9.2 item 2).
+    """
+    cutoff = datetime.utcnow() - timedelta(seconds=within_seconds)
     query = db.query(func.count(User.id)).filter(User.online_at.isnot(
-        None), User.online_at >= twenty_four_hours_ago)
+        None), User.online_at >= cutoff)
     return query.scalar()

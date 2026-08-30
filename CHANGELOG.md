@@ -10,6 +10,55 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.9.2] — 2026-08-30 — A new user connects, the counters are honest, and the page is yours
+
+Three things reported from real use: a user created *after* the last sync was
+handed a config that looked right and never connected, the Overview's *Online
+now* tile counted everybody seen in the last 24 hours, and serving your own
+subscription page needed shell access to the server.
+
+### Fixed
+
+* **A newly created user never reached the node.** Accounts were only ever
+  pushed to a node by an explicit *sync*, so a node kept serving the account
+  list it was last handed: users who already existed connected, a user created
+  afterwards did not — and the config they were given pointed at the node, so
+  it looked correct while failing. Accounts now travel on one shared path that
+  every user-mutating operation uses (create, modify, remove, delete, expiry,
+  device-limit cut-off, and the two bulk admin operations), with a 30s sweep
+  that re-asserts until the agent confirms. Each push is digested per core so
+  a node already in sync is skipped, and every node is re-asserted every 20
+  minutes so an agent restart heals by itself. Verified live: a new user
+  connected through the node with no manual sync.
+* **"Online now" counted the last 24 hours, not this moment.** The tile read a
+  field that counted every user seen in the past day — on a live panel it
+  showed 4 of 5 while nobody was connected, and it could never agree with the
+  presence dots on the Users page. The tile now reads the same multi-core
+  presence pass those dots do; where presence is unavailable it falls back to
+  the 90s rollup, and shows a dash when nothing answered — never a fabricated
+  zero, never the 24h figure.
+
+### Added
+
+* **Your own subscription page.** Upload an HTML template in
+  *Subscriptions → subscription page template* and pick it; *download starter*
+  hands you a working template to edit. Marzban needed an environment
+  variable and shell access for the same thing. Names are sanitised into one
+  flat managed directory, the setting stores a file *name* and never a path,
+  values are escaped as they render, and — the rule that matters — a template
+  that is missing or broken serves the built-in page and logs why, so a
+  subscriber never pays for an operator's typo.
+
+### Changed
+
+* The legacy `/api/system` `online_users` field now uses the 90s window the
+  platform already used for presence, so any other consumer of it stops
+  mistaking "seen today" for "connected now".
+* `GET /api/zagros/users/online` also returns `counts`, so an aggregate can no
+  longer drift from the per-user states it summarises.
+
+---
+
 ## [1.0.0-alpha.9.1] — 2026-08-30 — A node joins without being hand-held
 
 Three ways a node used to need an operator to finish what the panel had

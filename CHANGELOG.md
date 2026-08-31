@@ -10,6 +10,22 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.9.4.3] — 2026-09-01 — the user list stays reachable
+
+9.4.2 put imported users into the panel's user list. Verifying that live
+showed the list then answered `500`: proxy settings arrive from a JSON *text*
+column, so they are a string, and the response model rejects a row whose
+settings are `'{"id": ...}'` instead of `{"id": ...}`. The import succeeded
+and the user list became unreachable — worse than before, because now it had
+338 users in it.
+
+### Fixed
+
+* Proxy settings are parsed into a mapping before they are stored, so
+  `/api/users` can serve the rows it now contains.
+
+---
+
 ## [1.0.0-alpha.9.4.2] — 2026-09-01 — Imported users now appear in the panel
 
 9.4.1 made restores run end to end. What it did not catch: they ran against

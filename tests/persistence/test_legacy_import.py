@@ -151,3 +151,25 @@ def test_dry_run_writes_nothing(panel_db):
 
         assert session.query(User).count() == 0
         assert session.query(Proxy).count() == 0
+
+
+def test_settings_stored_as_json_text_still_import(panel_db):
+    """A text column hands back a string; storing it as one breaks /api/users.
+
+    Marzban keeps proxy settings in a JSON *text* column, so the reader yields
+    '{"id": ...}' with quotes. Written through unchanged, the response model
+    rejects the row and the whole user list answers 500.
+    """
+    panel_db, import_users, _ = panel_db
+    snap = _snapshot(
+        [_user(username="textual")],
+        [{"id": 1, "user_id": 1, "type": "vless",
+          "settings": '{"id": "uuid-1", "flow": "xtls-rprx-vision"}'}],
+    )
+    assert import_users(snap, panel_db)["proxies_created"] == 1
+    with panel_db() as session:
+        from app.db.models import User
+
+        proxy = session.query(User).filter_by(username="textual").one().proxies[0]
+        assert isinstance(proxy.settings, dict), type(proxy.settings)
+        assert proxy.settings["id"] == "uuid-1"

@@ -15,8 +15,9 @@ platform-side migration: two stores, two shapes, one snapshot feeding both.
 """
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Iterable
+from typing import Any
 
 from sqlalchemy import select
 
@@ -29,6 +30,27 @@ logger = logging.getLogger(__name__)
 # else (hysteria2, tuic, …) cannot be turned into a proxy row here, and saying
 # so is better than dropping it silently.
 SUPPORTED_PROTOCOLS: frozenset[str] = frozenset(p.value for p in ProxyTypes)
+
+
+def _as_settings(value: Any) -> dict[str, Any]:
+    """Proxy settings as a mapping.
+
+    Marzban (and 3x-ui) keep settings in a JSON *text* column, so the reader
+    hands back a string. Stored as a string, the panel's response model
+    rejects the row and ``/api/users`` answers 500 — the import looks fine and
+    the user list is simply unreachable.
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", "replace")
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def protocol_supported(name: Any) -> bool:
@@ -106,7 +128,7 @@ def import_users(snapshot: Any, session_factory, *, admin_id: int | None = None,
             for proxy in usable:
                 user.proxies.append(Proxy(
                     type=proxy_types[str(proxy.get("type")).strip().lower()],
-                    settings=proxy.get("settings") or {},
+                    settings=_as_settings(proxy.get("settings")),
                 ))
                 report["proxies_created"] += 1
             session.add(user)

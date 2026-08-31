@@ -20,23 +20,24 @@ import json
 import os
 import shutil
 import sqlite3
-import tarfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from app.platform import backup_store
+from app.platform import restore_formats
 from app.platform import restore_sources
+from app.platform.restore_errors import (  # noqa: F401  (re-exported)
+    RestoreError,
+    RestoreFormatError,
+    RestoreSourceError,
+)
 
 RESTORE_DIR_NAME = "restore"
 MAX_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024  # 4 GiB — archives hold core data
 RESTART_REQUEST = "panel-restart.request.json"
 AGENT_CAPABILITIES = ".agent-capabilities"
-
-
-class RestoreError(RuntimeError):
-    """Raised when a restore cannot be carried out safely."""
 
 
 # --------------------------------------------------------------------------- #
@@ -73,12 +74,14 @@ def save_upload(source_path: str | os.PathLike[str], name: str,
 
 
 def _safe_filename(name: str) -> str:
+    """Keep the uploaded name, extension included.
+
+    The extension used to be forced to ``.tar.gz``, which is how a bare
+    ``x-ui.db`` or a ``db_backup.sql`` lost the only clue to what it was.
+    """
     base = os.path.basename(str(name or "upload.tar.gz"))
     cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in base)
-    cleaned = cleaned.lstrip(".") or "upload.tar.gz"
-    if not cleaned.endswith((".tar.gz", ".tgz", ".tar")):
-        cleaned += ".tar.gz"
-    return cleaned
+    return cleaned.lstrip(".") or "upload.tar.gz"
 
 
 def discard(staging_file: Path) -> None:
@@ -90,26 +93,19 @@ def discard(staging_file: Path) -> None:
 
 def _extract(archive: Path, dest: Path) -> list[str]:
     """Safe extraction — never writes outside *dest*, never follows links."""
-    dest.mkdir(parents=True, exist_ok=True)
-    extracted: list[str] = []
-    with tarfile.open(archive, "r:gz") as tar:
-        try:
-            tar.extractall(dest, filter="data")  # py3.12+: no traversal, no links
-        except TypeError:  # pragma: no cover - older Python
-            tar.extractall(dest)
-        extracted = tar.getnames()
-    return extracted
+    written, _skipped = restore_formats.extract(archive, dest)
+    return written
 
 
-def _extract_inner_tar(inner: Path, dest: Path) -> list[str]:
-    """Unpack ``data/panel-data.tar.gz`` into the live data directory."""
-    dest.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(inner, "r:gz") as tar:
-        try:
-            tar.extractall(dest, filter="data")
-        except TypeError:  # pragma: no cover
-            tar.extractall(dest)
-        return tar.getnames()
+def _extract_live(archive: Path, dest: Path) -> tuple[list[str], list[str]]:
+    """Unpack ``data/panel-data.tar.gz`` into the **live** data directory.
+
+    Some of those files are running right now: a core binary that is being
+    executed cannot be replaced (``ETXTBSY``), and a restore that dies half way
+    leaves the panel worse than before. So an in-use file is skipped and
+    reported — cores are re-installable, a half-restored panel is not.
+    """
+    return restore_formats.extract(archive, dest, live=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -125,6 +121,7 @@ class RestoreReport:
     warnings: list[str] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
     credentials: dict[str, str] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
     restart: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -133,6 +130,7 @@ class RestoreReport:
             "ok": self.ok, "steps": self.steps, "warnings": self.warnings,
             "counts": self.counts,
             "credentials": self.credentials,  # shown once — never logged twice
+            "notes": self.notes,
             "restart": self.restart,
         }
 
@@ -169,8 +167,7 @@ def _inspect_zagros(archive: Path, report: RestoreReport) -> RestoreReport:
     if not verification["ok"]:
         report.ok = False
         report.warnings.extend(verification["problems"][:10])
-    with tarfile.open(archive, "r:gz") as tar:
-        names = set(tar.getnames())
+    names = backup_store.archive_names(archive)
     for member, note in (("db/zagros.sqlite3", "platform database"),
                          ("data/panel-data.tar.gz", "panel data"),
                          ("config/.env", "deployment configuration")):
@@ -187,23 +184,86 @@ def _inspect_zagros(archive: Path, report: RestoreReport) -> RestoreReport:
 # --------------------------------------------------------------------------- #
 # foreign restore / import
 # --------------------------------------------------------------------------- #
+def _resolve_database(archive: Path, source: str,
+                      report: RestoreReport) -> Path:
+    """Find (or build) the SQLite database an upload carries.
+
+    Three very different uploads reach this function: a bare ``x-ui.db``, a
+    Marzban backup whose database is a **MySQL dump**, and a proper archive
+    that holds a database file. Each is turned into something readable.
+    """
+    kind = restore_formats.classify(archive)
+    if kind == "database":
+        report.steps.append(f"{archive.name}: SQLite database")
+        return archive
+    if kind == "sqldump":
+        built = restore_formats.materialize_database(archive, archive.parent)
+        report.steps.append(f"{archive.name}: SQL dump replayed into {built.name}")
+        return built
+
+    staging = archive.parent / ".extract"
+    if staging.exists():
+        shutil.rmtree(staging)
+    _extract(archive, staging)
+    report.steps.append(f"unpacked {archive.name} ({restore_formats.classify(archive)})")
+
+    databases = restore_sources.find_databases(staging)
+    if databases:
+        chosen = restore_sources.pick_database(staging, source)
+        report.steps.append(f"database: {chosen.name}")
+        return chosen
+
+    dumps = restore_sources.find_dumps(staging)
+    if dumps:
+        chosen_dump = max(dumps, key=lambda item: item.stat().st_size)
+        built = restore_formats.materialize_database(chosen_dump, staging)
+        report.steps.append(f"database: replayed SQL dump {chosen_dump.name}")
+        return built
+
+    names = sorted(item.name for item in staging.rglob("*") if item.is_file())[:10]
+    raise RestoreSourceError(
+        f"no database or SQL dump found in {archive.name}"
+        + (f" (the archive holds: {', '.join(names)})" if names else "")
+        + ". Accepted uploads: a Zagros/Marzban/3x-ui archive, an SQLite file, "
+          "or a .sql dump.")
+
+
+def _read_with_fallback(db_path: Path, source: str, report: RestoreReport):
+    """Read *db_path* as *source*, retrying as the panel it looks like.
+
+    Picking the wrong source in the UI is easy and the cost used to be silent:
+    a 3x-ui database read as Marzban imports nothing and reports success. When
+    our own reading of the selected source finds no users but the file clearly
+    belongs to another panel, that panel wins and the report says so.
+    """
+    detected = restore_sources.identify_database(db_path)
+    if (detected.get("source") and detected["source"] != source
+            and detected.get("confidence", 0) >= 0.6):
+        report.warnings.append(
+            f"this database looks like {detected['source']}, not {source} "
+            f"(evidence: {', '.join(detected['evidence'][:5])}). "
+            "Continuing with the source you selected.")
+
+    snapshot, notes = restore_sources.read_snapshot(source, db_path)
+    if not snapshot.users and detected.get("source") and detected["source"] != source:
+        other = detected["source"]
+        retry, retry_notes = restore_sources.read_snapshot(other, db_path)
+        if retry.users:
+            report.warnings.append(
+                f"reading it as {source} found no users — imported as {other} instead.")
+            return retry, retry_notes, other
+    return snapshot, notes, source
+
+
 def _inspect_foreign(archive: Path, source: str, report: RestoreReport, *,
                      session_factory=None, cipher=None, users_repo=None,
                      apply: bool = False) -> RestoreReport:
     staging = archive.parent / ".extract"
-    if staging.exists():
-        shutil.rmtree(staging)
     try:
-        _extract(archive, staging)
-        db_path = restore_sources.pick_database(staging, source)
-        detected = restore_sources.identify_database(db_path)
-        if detected["source"] and detected["source"] != source and detected["confidence"] >= 0.6:
-            report.warnings.append(
-                f"this database looks like {detected['source']}, not {source} "
-                f"(evidence: {', '.join(detected['evidence'][:5])}). "
-                "Continuing with the source you selected.")
-        snapshot, notes = restore_sources.read_snapshot(source, db_path)
-        report.steps.append(f"read {db_path.name} as {source}")
+        db_path = _resolve_database(archive, source, report)
+        snapshot, notes, used_source = _read_with_fallback(db_path, source, report)
+        report.source = used_source
+        report.steps.append(f"read {db_path.name} as {used_source}")
         report.counts = {"users": len(snapshot.users), "hosts": len(snapshot.hosts),
                          "admins": len(snapshot.admins), "nodes": len(snapshot.nodes)}
 
@@ -218,6 +278,7 @@ def _inspect_foreign(archive: Path, source: str, report: RestoreReport, *,
         report.counts.update({k: v for k, v in migration.as_dict().items()
                               if isinstance(v, int)})
         report.warnings.extend(migration.warnings[:20])
+        report.notes.extend(getattr(migration, "notes", [])[:10])
         report.steps.append("import applied" if apply else "import previewed (dry run)")
         if apply:
             report.credentials = dict(notes.get("generated_admin_passwords") or {})
@@ -247,8 +308,15 @@ def restore_foreign(archive: Path, source: str, *, session_factory, cipher,
 def restore_zagros(archive: Path, *, data_dir: str | os.PathLike[str],
                    database_url: str | None, legacy_database_url: str | None = None,
                    config_dir: str | os.PathLike[str] | None = None,
-                   allow_config: bool = True) -> RestoreReport:
-    """Restore our own archive and request a restart to pick it up."""
+                   allow_config: bool = True,
+                   session_factory=None, cipher=None, users_repo=None) -> RestoreReport:
+    """Restore our own archive and request a restart to pick it up.
+
+    The fast path swaps the database files back. That only works when this
+    panel runs the same engine the archive was taken from — a panel on MySQL
+    cannot adopt a SQLite file, so there the rows are imported through the
+    migration pipeline instead (and the report says which happened).
+    """
     archive = Path(archive)
     report = RestoreReport(source="zagros", archive=archive.name, dry_run=False)
     data_root = Path(data_dir)
@@ -268,24 +336,37 @@ def restore_zagros(archive: Path, *, data_dir: str | os.PathLike[str],
         # 2. panel data (certificates, keys, core configs, templates, ...)
         inner = staging / "data" / "panel-data.tar.gz"
         if inner.is_file():
-            restored = _extract_inner_tar(inner, data_root)
-            report.steps.append(f"restored {len(restored)} panel-data paths")
-            report.counts["data_paths"] = len(restored)
+            written, skipped = _extract_live(inner, data_root)
+            report.steps.append(f"restored {len(written)} panel-data paths")
+            report.counts["data_paths"] = len(written)
+            for item in skipped[:5]:
+                report.warnings.append(f"skipped {item} — reinstall the core "
+                                       "from Core Management if you need it")
         else:
             report.warnings.append("no data/panel-data.tar.gz — data not restored")
 
-        # 3. databases — swap the file, then let the restart reopen it
-        for member, url in (("db/zagros.sqlite3", database_url),
-                            ("db/legacy.sqlite3", legacy_database_url)):
-            dumped = staging / member
-            if not dumped.is_file() or not url:
-                continue
-            target = _target_of(url)
-            if target is None:
-                report.warnings.append(f"{member}: non-SQLite database URL — not restored")
-                continue
-            _swap_database(dumped, target)
-            report.steps.append(f"restored database → {target}")
+        # 3. databases
+        engines_match = _engine_of(database_url) == "sqlite"
+        if engines_match:
+            for member, url in (("db/zagros.sqlite3", database_url),
+                                ("db/legacy.sqlite3", legacy_database_url)):
+                dumped = staging / member
+                if not dumped.is_file() or not url:
+                    continue
+                target = _target_of(url)
+                if target is None:
+                    report.warnings.append(f"{member}: non-SQLite database URL — not restored")
+                    continue
+                _swap_database(dumped, target)
+                report.steps.append(f"restored database → {target}")
+        else:
+            imported = _import_rows(staging, report, session_factory=session_factory,
+                                    cipher=cipher, users_repo=users_repo)
+            if not imported:
+                report.warnings.append(
+                    f"this panel runs {_engine_of(database_url) or 'a non-SQLite engine'}, "
+                    "so the archive's database file cannot be copied into place and the "
+                    "row-level import was not available — the databases were left untouched.")
 
         # 4. deployment configuration (only when it came from this archive)
         if allow_config:
@@ -312,6 +393,58 @@ def restore_zagros(archive: Path, *, data_dir: str | os.PathLike[str],
         return report
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+
+def _engine_of(url: str | None) -> str | None:
+    """``sqlite`` / ``mysql`` / ``postgresql`` — or None when unknown."""
+    if not url:
+        return None
+    lowered = url.lower()
+    for engine in ("sqlite", "mysql", "mariadb", "postgresql", "postgres"):
+        if lowered.startswith(engine):
+            return "mysql" if engine == "mariadb" else (
+                "postgresql" if engine == "postgres" else engine)
+    return None
+
+
+def _import_rows(staging: Path, report: RestoreReport, *, session_factory,
+                 cipher, users_repo) -> bool:
+    """Import the archive's rows instead of copying its database file.
+
+    This is the MySQL-panel path (and the safety net whenever a database file
+    cannot be swapped in): users, their usage, admins and hosts are read from
+    the archive and written through the repositories, so the engine on this
+    side does not matter.
+    """
+    if session_factory is None or cipher is None or users_repo is None:
+        return False
+
+    from app.persistence.migration import LegacyImportService
+
+    service = LegacyImportService(session_factory, users_repo, cipher)
+    imported_any = False
+    for member in ("db/zagros.sqlite3", "db/legacy.sqlite3"):
+        dumped = staging / member
+        if not dumped.is_file():
+            continue
+        source = "zagros" if member.endswith("zagros.sqlite3") else "marzban"
+        try:
+            snapshot, notes = restore_sources.read_snapshot(source, dumped)
+        except RestoreError as exc:
+            report.warnings.append(f"{member}: {exc}")
+            continue
+        if not (snapshot.users or snapshot.admins):
+            continue
+        migration = service.migrate(snapshot, dry_run=False)
+        report.counts.update({k: v for k, v in migration.as_dict().items()
+                              if isinstance(v, int)})
+        report.credentials.update(notes.get("generated_admin_passwords") or {})
+        report.warnings.extend(migration.warnings[:10])
+        report.steps.append(
+            f"imported rows from {member} into this panel's database "
+            f"({len(snapshot.users)} users)")
+        imported_any = True
+    return imported_any
 
 
 def _target_of(url: str) -> Path | None:

@@ -84,21 +84,38 @@ def _naive_to_utc(value: Any) -> datetime | None:
     return None
 
 
+# bcrypt, as produced by passlib — the scheme Zagros itself uses, and the one
+# Marzban/Pasarguard store. Their hashes are therefore *ours*, and the admin
+# keeps the password they already had.
+_BCRYPT_PREFIXES: tuple[str, ...] = ("$2a$", "$2b$", "$2y$")
+
+
+def is_verifiable_hash(value: object) -> bool:
+    """True when the panel can check a password against this stored hash."""
+    return isinstance(value, str) and value.strip().startswith(_BCRYPT_PREFIXES)
+
+
 def _admin_hash_for(entry: dict[str, Any]) -> str:
     """The password hash to store for one imported admin.
 
-    Marzban-shaped panels already store bcrypt hashes, so those are kept behind
-    a ``legacy:`` marker the login path understands. A source whose hashing we
-    cannot verify (3x-ui) arrives with a **generated** password instead, stored
-    as a real bcrypt hash so the admin can sign in once and change it — an
-    imported credential nobody can use is not a migration, it is a lockout.
+    Marzban-shaped panels already store bcrypt — the same scheme Zagros uses —
+    so their hash is kept **as-is** and the admin signs in with the password
+    they already had. (An earlier version marked those with a ``legacy:``
+    prefix that nothing on the login path understood, which quietly locked
+    every imported admin out.)
+
+    A source whose hashing we cannot verify (3x-ui) arrives with a
+    **generated** password instead, stored as a real bcrypt hash so the admin
+    can sign in once and change it — an imported credential nobody can use is
+    not a migration, it is a lockout.
     """
     generated = entry.get("generated_password")
     if generated:
         from app.utils.passwords import hash_password
 
         return hash_password(generated)
-    return f"legacy:{entry.get('password_hash') or ''}"
+    stored = (entry.get("password_hash") or "").strip()
+    return stored if is_verifiable_hash(stored) else ""
 
 
 def build_migration_plan(snapshot: LegacySnapshot) -> MigrationPlan:
@@ -307,15 +324,34 @@ class LegacyImportService:
                         enabled=u["status"] == "active",
                         settings=acc["settings"],
                     )
-            # hosts (idempotent by (core_id, remark, address))
+            # hosts (idempotent by (core_id, remark, address, inbound_tag)).
+            # remark+address alone is NOT unique: Marzban routinely carries a
+            # dozen hosts that differ only by inbound tag, so a uniqueness
+            # check on the wider key must tolerate duplicates rather than
+            # raise — a second import has to be a no-op, not a crash.
             for h in plan.hosts:
-                exists = s.execute(
+                # The inbound tag travels inside ``extras`` (there is no column
+                # for it), so identity is (core, remark, address) and the tag
+                # only *disambiguates* between candidates. Marzban routinely
+                # carries a dozen hosts sharing remark+address, so this must
+                # never assume a single row: a second import has to match the
+                # same host again rather than duplicate it or crash.
+                tag = h.get("inbound_tag") or (h.get("extras") or {}).get("inbound_tag")
+                candidates = s.execute(
                     select(CoreHostModel).where(
                         CoreHostModel.core_id == h["core_id"],
                         CoreHostModel.remark == h["remark"],
                         CoreHostModel.address == h["address"],
                     )
-                ).scalar_one_or_none()
+                ).scalars().all()
+                exists = next(
+                    (row for row in candidates
+                     if (row.extras or {}).get("inbound_tag") == tag),
+                    # a row written before inbound tags were recorded
+                    next((row for row in candidates
+                          if not (row.extras or {}).get("inbound_tag")), None))
+                if exists is None and candidates:
+                    exists = candidates[0]
                 values = dict(
                     port=h["port"], sni=h["sni"], host_header=h["host_header"],
                     path=h["path"], security=h["security"], alpn=h["alpn"],
@@ -331,8 +367,8 @@ class LegacyImportService:
             # nodes (idempotent by name)
             for n in plan.nodes:
                 exists = s.execute(
-                    select(NodeModel).where(NodeModel.name == n["name"])
-                ).scalar_one_or_none()
+                    select(NodeModel).where(NodeModel.name == n["name"]).limit(1)
+                ).scalars().first()
                 if exists is None:
                     s.add(NodeModel(name=n["name"], address=n["address"], port=n["port"],
                                     status=n["status"],
@@ -344,8 +380,8 @@ class LegacyImportService:
             # admins (idempotent by username)
             for a in plan.admins:
                 exists = s.execute(
-                    select(AdminModel).where(AdminModel.username == a["username"])
-                ).scalar_one_or_none()
+                    select(AdminModel).where(AdminModel.username == a["username"]).limit(1)
+                ).scalars().first()
                 if exists is None:
                     s.add(AdminModel(username=a["username"],
                                      password_hash=_admin_hash_for(a),

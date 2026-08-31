@@ -29,6 +29,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from app.persistence.legacy_reader import LegacySnapshot
+from app.platform.restore_errors import (  # noqa: F401  (re-exported)
+    RestoreError,
+    RestoreSourceError,
+)
 
 SOURCES: tuple[str, ...] = ("zagros", "marzban", "pasarguard", "3x-ui")
 FOREIGN_SOURCES: tuple[str, ...] = ("marzban", "pasarguard", "3x-ui")
@@ -39,13 +43,11 @@ _USERNAME_MIN = 3
 _USERNAME_MAX = 32
 
 _DB_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".sqlitedb")
+_DUMP_SUFFIXES = (".sql",)
+_DUMP_NAMES = {"db_backup.sql", "backup.sql", "marzban.sql"}
 # Names that betray a 3x-ui archive rather than a Marzban-shaped one.
 _3XUI_TABLES = {"inbounds", "client_traffics"}
 _MARZBAN_TABLES = {"users", "admins", "proxies"}
-
-
-class RestoreSourceError(RuntimeError):
-    """Raised when an archive cannot be attributed to a supported source."""
 
 
 # --------------------------------------------------------------------------- #
@@ -84,6 +86,17 @@ def find_databases(root: Path) -> list[Path]:
         if not path.is_file():
             continue
         if path.suffix.lower() in _DB_SUFFIXES or path.name in {"x-ui.db", "db.sqlite3"}:
+            found.append(path)
+    return found
+
+
+def find_dumps(root: Path) -> list[Path]:
+    """SQL dumps inside an extracted archive (Marzban's backup format)."""
+    found: list[Path] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() in _DUMP_SUFFIXES or path.name.lower() in _DUMP_NAMES:
             found.append(path)
     return found
 
@@ -312,10 +325,13 @@ def read_marzban_like(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
     snapshot = reader(db_path)
     tables = _table_names(db_path)
     notes = {"tables": sorted(tables), "skipped": [], "generated_admin_passwords": {}}
+    from app.persistence.migration import is_verifiable_hash
+
     for admin in snapshot.admins:
         # A hash we cannot verify is worse than a password we issue: replace it
-        # and hand the operator the new one.
-        if not admin.get("hashed_password"):
+        # and hand the operator the new one. (bcrypt — Marzban's own scheme —
+        # is kept, so those admins keep their existing password.)
+        if not is_verifiable_hash(admin.get("hashed_password")):
             password = _generated_password()
             admin["generated_password"] = password
             notes["generated_admin_passwords"][admin.get("username", "")] = password
@@ -327,4 +343,101 @@ def read_snapshot(source: str, db_path: Path) -> tuple[LegacySnapshot, dict[str,
         return read_3x_ui(db_path)
     if source in ("marzban", "pasarguard"):
         return read_marzban_like(db_path)
+    if source == "zagros":
+        # An engine the archive's files cannot simply replace (MySQL): the
+        # rows are imported instead of the file being copied.
+        return read_zagros_platform(db_path)
     raise RestoreSourceError(f"unsupported restore source: {source}")
+
+
+# --------------------------------------------------------------------------- #
+# Zagros platform database
+# --------------------------------------------------------------------------- #
+def read_zagros_platform(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
+    """Read a Zagros *platform* database (``db/zagros.sqlite3``).
+
+    Used when the archive's database cannot simply be copied into place —
+    a panel running MySQL, most of all. The rows are read out and pushed
+    through the same migration pipeline a foreign panel goes through, so the
+    result is a working panel on whatever engine it happens to run.
+    """
+    from app.persistence.migration import is_verifiable_hash
+
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30)
+    snapshot = LegacySnapshot()
+    notes: dict[str, Any] = {"generated_admin_passwords": {}, "skipped": [],
+                             "source_tables": []}
+    try:
+        tables = {row[0] for row in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        notes["source_tables"] = sorted(tables)
+        if "users" not in tables and "admins" not in tables:
+            raise RestoreSourceError(
+                "this is not a Zagros platform database (no users/admins table)")
+
+        usage = {}
+        if "user_usage" in tables:
+            for row in _rows(con, "user_usage"):
+                usage[int(row.get("user_id") or 0)] = (
+                    int(row.get("uplink_bytes") or 0)
+                    + int(row.get("downlink_bytes") or 0))
+
+        taken: set[str] = set()
+        for row in (_rows(con, "users") if "users" in tables else []):
+            username, note = sanitize_username(row.get("username") or "", taken)
+            if note:
+                notes["skipped"].append(f"{username}: {note}")
+            expire = row.get("expire_at")
+            snapshot.users.append({
+                "id": row.get("id"),
+                "username": username,
+                "status": row.get("status") or "active",
+                "note": row.get("note") or f"imported from a Zagros archive",
+                "data_limit": row.get("data_limit_bytes"),
+                "download_limit_mbps": row.get("download_limit_mbps") or 0,
+                "upload_limit_mbps": row.get("upload_limit_mbps") or 0,
+                "expire": expire,
+                "created_at": row.get("created_at"),
+                "used_traffic": usage.get(int(row.get("id") or 0), 0),
+                "data_limit_reset_strategy": row.get("data_limit_reset_strategy")
+                                            or "no_reset",
+                "device_limit": row.get("device_limit"),
+            })
+
+        for row in (_rows(con, "admins") if "admins" in tables else []):
+            username = (row.get("username") or "").strip()
+            if not username:
+                continue
+            entry = {
+                "username": username,
+                "hashed_password": row.get("password_hash") or "",
+                "is_sudo": bool(row.get("is_sudo")),
+                "telegram_id": row.get("telegram_id"),
+            }
+            if not is_verifiable_hash(entry["hashed_password"]):
+                password = _generated_password()
+                entry["generated_password"] = password
+                notes["generated_admin_passwords"][username] = password
+            snapshot.admins.append(entry)
+
+        if "core_hosts" in tables:
+            for row in _rows(con, "core_hosts"):
+                snapshot.hosts.append({
+                    "remark": row.get("remark") or "",
+                    "address": row.get("address"),
+                    "port": row.get("port"),
+                    "sni": row.get("sni"),
+                    "host": row.get("host_header"),
+                    "path": row.get("path"),
+                    "security": row.get("security"),
+                    "alpn": row.get("alpn"),
+                    "fingerprint": row.get("fingerprint"),
+                    "inbound_tag": row.get("inbound_tag"),
+                    "allowinsecure": False,
+                    "is_disabled": False,
+                    "mux_enable": False,
+                    "random_user_agent": False,
+                })
+    finally:
+        con.close()
+    return snapshot, notes

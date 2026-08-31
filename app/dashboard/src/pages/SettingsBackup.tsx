@@ -290,14 +290,18 @@ export default function SettingsBackup() {
           <input
             ref={fileInput}
             type="file"
-            accept=".tar.gz,.tgz"
+            accept=".tar.gz,.tgz,.tar,.zip,.db,.sqlite,.sqlite3,.sql"
             className="hidden"
             onChange={(e) => { const file = e.target.files?.[0]; if (file) upload.mutate(file); e.target.value = ""; }}
           />
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="secondary" onClick={() => fileInput.current?.click()} loading={upload.isPending}>
-              <Upload size={14} />choose archive
+              <Upload size={14} />choose backup
             </Button>
+            <p className="text-[11px] text-content-3">
+              a Zagros/Marzban archive (.tar.gz or .zip), a bare database (.db/.sqlite),
+              or a SQL dump (.sql) — Marzban&apos;s own backup is a .sql inside a .zip.
+            </p>
             <Button variant="secondary" onClick={() => inspect.mutate()} disabled={!staged} loading={inspect.isPending}>
               inspect
             </Button>

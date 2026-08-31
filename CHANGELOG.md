@@ -10,6 +10,59 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.9.4.1] — 2026-08-31 — Restores that accept what operators actually have
+
+9.4 shipped backup and restore, and the first real archives an operator tried
+showed how narrow "restore" had been: three uploads, three refusals, and one
+of them was our own. Every failure came from assuming the upload would look
+like the archive we write.
+
+### Fixed
+
+* **Other formats are accepted.** Marzban's own backup is a **zip holding a
+  MySQL dump** (`db_backup.sql`), not a database file; 3x-ui exports are often
+  a **bare `x-ui.db`**. Uploads are now classified by their bytes rather than
+  their name, so a zip, a bare database or a `.sql` dump all restore. The SQL
+  dump is replayed into a throwaway database first (MySQL string escapes and
+  `ENUM('a','b')` translated), so Marzban's 338 users import with their
+  traffic, hosts and admin intact.
+* **Restores no longer die on a running binary.** Unpacking panel data over a
+  core that is executing raises `Text file busy`, which used to abort the
+  restore half way through — leaving the panel worse than before. An in-use
+  file is now skipped and named in the report; everything else still lands.
+* **Refusals are answered, not crashed.** "No database found in this archive"
+  reached the operator as an opaque `request failed (500)`. Every refusal is
+  now one exception family the API translates into a message that says what to
+  do.
+* **Imported admins can sign in.** Hashes from Marzban and Pasarguard were
+  stored behind a `legacy:` prefix that nothing on the login path understood,
+  so every imported admin was quietly locked out. Those hashes are bcrypt —
+  the same scheme we use — and are now kept as-is, so the admin keeps the
+  password they already had. Sources we genuinely cannot verify (3x-ui) still
+  get a fresh password, shown once.
+* **A second import is a no-op again.** Marzban routinely carries a dozen
+  hosts sharing remark and address; the idempotency check assumed one row and
+  crashed on the second run.
+* **Cross-engine restore.** A panel running MySQL cannot adopt a SQLite file,
+  so in that case the archive's rows are imported through the migration
+  pipeline instead of the file being copied — and the report says which
+  happened.
+* **Change version is offered for the master's xray.** The button was hidden
+  behind the same flag that forbids *uninstalling* the panel's built-in
+  engine; version updates were never blocked.
+* **The SSH accounting message named a command that does not exist on a
+  node.** It now says the collector has to run on the host that runs the core,
+  and `install-node.sh` installs it — previously only the panel's installer
+  did, so a node's SSH core was permanently degraded.
+
+### Notes
+
+* Fixes to the host CLI and node installer ship in `zagros-scripts`; an
+  existing node picks up the SSH accounting collector when its installer is
+  re-run.
+
+---
+
 ## [1.0.0-alpha.9.4] — 2026-08-31 — Settings becomes a real section: backup, restore, security
 
 Settings was one page with three cards, and the two things an operator reaches

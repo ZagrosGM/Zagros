@@ -33,6 +33,7 @@ import re
 import shutil
 import sqlite3
 import tarfile
+import zipfile
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -453,20 +454,60 @@ def list_artifacts(data_dir: str | os.PathLike[str] | None = None) -> list[Backu
     return artifacts
 
 
+# --------------------------------------------------------------------------- #
+# reading an archive we did not necessarily write
+# --------------------------------------------------------------------------- #
+def _is_zip(path: Path) -> bool:
+    try:
+        return zipfile.is_zipfile(path)
+    except OSError:  # pragma: no cover - unreadable file
+        return False
+
+
+def archive_names(path: Path | str) -> set[str]:
+    """Member names of a Zagros archive — tar.gz as written, or a zip.
+
+    Operators rename and re-container backups (a ``.zip`` holding the very
+    same layout is a supported restore), so reading must follow the container,
+    not the extension we happened to write.
+    """
+    target = Path(path)
+    if _is_zip(target):
+        with zipfile.ZipFile(target) as zf:
+            return set(zf.namelist())
+    with tarfile.open(target, "r:*") as tar:
+        return set(tar.getnames())
+
+
+def read_member(path: Path | str, name: str) -> bytes:
+    """Read one member out of a tar.gz or zip archive."""
+    target = Path(path)
+    if _is_zip(target):
+        with zipfile.ZipFile(target) as zf:
+            try:
+                return zf.read(name)
+            except KeyError as exc:
+                raise BackupError(f"{target.name}: no {name} in the archive") from exc
+    with tarfile.open(target, "r:*") as tar:
+        try:
+            member = tar.getmember(name)
+        except KeyError as exc:
+            raise BackupError(f"{target.name}: no {name} in the archive") from exc
+        handle = tar.extractfile(member)
+        if handle is None:  # pragma: no cover - defensive
+            raise BackupError(f"{target.name}: unreadable {name}")
+        return handle.read()
+
+
 def meta_of(archive: Path | str) -> dict[str, str]:
     """Parse ``manifest.meta`` (key=value lines) from an archive."""
     path = Path(archive)
     if not path.is_file():
         raise BackupError(f"backup archive not found: {path}")
-    with tarfile.open(path, "r:gz") as tar:
-        try:
-            member = tar.getmember("manifest.meta")
-        except KeyError as exc:
-            raise BackupError(f"{path.name}: not a Zagros backup (no manifest.meta)") from exc
-        handle = tar.extractfile(member)
-        if handle is None:  # pragma: no cover - defensive
-            raise BackupError(f"{path.name}: unreadable manifest.meta")
-        text = handle.read().decode("utf-8", errors="replace")
+    try:
+        text = read_member(path, "manifest.meta").decode("utf-8", errors="replace")
+    except BackupError as exc:
+        raise BackupError(f"{path.name}: not a Zagros backup (no manifest.meta)") from exc
     meta: dict[str, str] = {}
     for line in text.splitlines():
         if "=" in line:
@@ -478,15 +519,7 @@ def meta_of(archive: Path | str) -> dict[str, str]:
 def manifest_of(archive: Path | str) -> dict[str, Any]:
     """Parse ``manifest.json`` (the file index with checksums)."""
     path = Path(archive)
-    with tarfile.open(path, "r:gz") as tar:
-        try:
-            member = tar.getmember("manifest.json")
-        except KeyError as exc:
-            raise BackupError(f"{path.name}: no manifest.json") from exc
-        handle = tar.extractfile(member)
-        if handle is None:  # pragma: no cover - defensive
-            raise BackupError(f"{path.name}: unreadable manifest.json")
-        return json.loads(handle.read().decode("utf-8"))
+    return json.loads(read_member(path, "manifest.json").decode("utf-8"))
 
 
 def verify(archive: Path | str) -> dict[str, Any]:
@@ -494,11 +527,10 @@ def verify(archive: Path | str) -> dict[str, Any]:
     path = Path(archive)
     manifest = manifest_of(path)
     problems: list[str] = []
-    with tarfile.open(path, "r:gz") as tar:
-        names = set(tar.getnames())
-        for entry in manifest.get("files", []):
-            if entry["path"] not in names:
-                problems.append(f"missing: {entry['path']}")
+    names = archive_names(path)
+    for entry in manifest.get("files", []):
+        if entry["path"] not in names:
+            problems.append(f"missing: {entry['path']}")
     return {"ok": not problems, "problems": problems,
             "files": len(manifest.get("files", [])), "archive": path.name}
 

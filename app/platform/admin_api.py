@@ -3228,7 +3228,7 @@ async def upload_restore_archive(file: UploadFile = File(...),
 @zagros_admin_router.post("/restore/inspect")
 async def inspect_restore_archive(body: dict, runtime=Depends(get_runtime)):
     """Report what a restore would do. Writes nothing."""
-    from app.platform import restore_service, restore_sources
+    from app.platform import backup_store, restore_service, restore_sources
 
     source = str((body or {}).get("source") or "zagros")
     staged = str((body or {}).get("staged") or "")
@@ -3242,7 +3242,9 @@ async def inspect_restore_archive(body: dict, runtime=Depends(get_runtime)):
             restore_service.inspect, path, source,
             session_factory=runtime.session_factory, cipher=runtime.cipher,
             users_repo=runtime.users)
-    except restore_service.RestoreError as exc:
+    except (restore_service.RestoreError, backup_store.BackupError) as exc:
+        # A refusal to restore is an answer, not a crash: say what is wrong
+        # with the upload instead of handing the UI a 500 to render.
         raise HTTPException(400, str(exc)) from exc
     return report.to_dict()
 
@@ -3251,7 +3253,7 @@ async def inspect_restore_archive(body: dict, runtime=Depends(get_runtime)):
 async def apply_restore_archive(body: dict, request: Request,
                                 runtime=Depends(get_runtime)):
     """Carry the restore out. Our own archive also restarts the panel."""
-    from app.platform import restore_service, restore_sources
+    from app.platform import backup_store, restore_service, restore_sources
 
     source = str((body or {}).get("source") or "zagros")
     staged = str((body or {}).get("staged") or "")
@@ -3261,16 +3263,21 @@ async def apply_restore_archive(body: dict, request: Request,
     if not path.is_file():
         raise HTTPException(404, "staged archive not found — upload it again")
 
-    if source == "zagros":
-        report = await asyncio.to_thread(
-            restore_service.restore_zagros, path, data_dir=_backup_data_dir(runtime),
-            database_url=getattr(runtime, "database_url", None),
-            legacy_database_url=os.environ.get("SQLALCHEMY_DATABASE_URL"))
-    else:
-        report = await asyncio.to_thread(
-            restore_service.restore_foreign, path, source,
-            session_factory=runtime.session_factory, cipher=runtime.cipher,
-            users_repo=runtime.users)
+    try:
+        if source == "zagros":
+            report = await asyncio.to_thread(
+                restore_service.restore_zagros, path, data_dir=_backup_data_dir(runtime),
+                database_url=getattr(runtime, "database_url", None),
+                legacy_database_url=os.environ.get("SQLALCHEMY_DATABASE_URL"),
+                session_factory=runtime.session_factory, cipher=runtime.cipher,
+                users_repo=runtime.users)
+        else:
+            report = await asyncio.to_thread(
+                restore_service.restore_foreign, path, source,
+                session_factory=runtime.session_factory, cipher=runtime.cipher,
+                users_repo=runtime.users)
+    except (restore_service.RestoreError, backup_store.BackupError) as exc:
+        raise HTTPException(400, str(exc)) from exc
     _audit(runtime, f"restore.applied.{source}", path.name, request=request)
     # The archive is staging-only once applied; keep nothing behind.
     await asyncio.to_thread(restore_service.discard, path)

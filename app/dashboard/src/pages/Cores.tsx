@@ -797,10 +797,14 @@ function MasterCores() {
                     <Button size="sm" onClick={() => act.mutate({ id: c.id, action: "start" })} disabled={!c.enabled}><Play size={13} /> start</Button>
                   )}
                   <Button size="sm" variant="ghost" onClick={() => setLogsFor(c.id)}><FileText size={13} /> logs</Button>
+                  {/* Version change is offered for a built-in engine too: xray
+                      cannot be uninstalled or disabled here (it is the panel's
+                      own engine), but its release is managed exactly like any
+                      other core's, and the backend updates it in place. */}
+                  <Button size="sm" variant="ghost" onClick={() => setVersionFor(c.id)}>
+                    <ArrowUpDown size={13} /> change version</Button>
                   {!c.builtin && (
                     <>
-                      <Button size="sm" variant="ghost" onClick={() => setVersionFor(c.id)}>
-                        <ArrowUpDown size={13} /> change version</Button>
                       <Button size="sm" variant="ghost" loading={false}
                         onClick={() => setReinstallFor(c)}><RefreshCcw size={13} /> {t("cores.reinstall")}</Button>
                       <div className="ms-auto">

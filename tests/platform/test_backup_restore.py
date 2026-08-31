@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import zipfile
 import tarfile
 from pathlib import Path
 
@@ -29,7 +30,11 @@ from app.persistence.migration import LegacyImportService  # noqa: E402
 from app.persistence.models import AdminModel, UserModel  # noqa: E402
 from app.persistence import repositories as repos  # noqa: E402
 from app.platform import backup_service, backup_store, restore_service  # noqa: E402
-from app.platform import restore_sources  # noqa: E402
+from app.platform import restore_formats, restore_sources  # noqa: E402
+from app.platform.restore_errors import (  # noqa: E402
+    RestoreError,
+    RestoreFormatError,
+)
 from app.utils.passwords import verify_password  # noqa: E402
 
 
@@ -313,3 +318,146 @@ def test_restart_requires_a_capable_agent(tmp_path):
         '{"version":2,"actions":["apply-network","restart-panel"]}')
     assert restore_service.request_restart(root)["accepted"] is True
     assert (root / "host-actions" / "panel-restart.request.json").is_file()
+
+
+# --------------------------------------------------------------------------- #
+# upload formats (what operators actually hand us)
+# --------------------------------------------------------------------------- #
+class TestFormats:
+    """A backup arrives in whatever shape the other panel happened to write."""
+
+    def test_classify_by_content_not_extension(self, tmp_path):
+        """The bytes decide: people rename archives, and Marzban writes zips."""
+        bare = tmp_path / "backup.dat"
+        bare.write_bytes(b"SQLite format 3\x00" + b"\x00" * 60)
+        assert restore_formats.classify(bare) == "database"
+
+        zipped = tmp_path / "backup.tar.gz"          # named .tar.gz, is a zip
+        with zipfile.ZipFile(zipped, "w") as zf:
+            zf.writestr("x-ui.db", b"SQLite format 3\x00")
+        assert restore_formats.classify(zipped) == "archive"
+
+        dump = tmp_path / "db_backup.sql"
+        dump.write_text("-- MySQL dump 10.13\nCREATE TABLE `t` (`i` int);\n")
+        assert restore_formats.classify(dump) == "sqldump"
+
+        mystery = tmp_path / "notes.bin"
+        mystery.write_bytes(b"\x00\x01\x02\x03")
+        with pytest.raises(RestoreFormatError):
+            restore_formats.classify(mystery)
+
+    def test_mysql_dump_becomes_a_readable_database(self, tmp_path):
+        """Marzban backs up as a mysqldump, not a database file.
+
+        The dialect has to survive the trip: backslash escapes (or every value
+        containing a quote is corrupted), ``ENUM('a','b')`` (a syntax error in
+        SQLite, which only accepts numbers in a type name) and the ENGINE/KEY
+        clauses.
+        """
+        dump = tmp_path / "db_backup.sql"
+        dump.write_text(
+            "-- MySQL dump 10.13  Distrib 8.4.10\n"
+            "/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;\n"
+            "DROP TABLE IF EXISTS `users`;\n"
+            "CREATE TABLE `users` (\n"
+            "  `id` int NOT NULL AUTO_INCREMENT,\n"
+            "  `username` varchar(34) DEFAULT NULL,\n"
+            "  `status` enum('active','disabled') NOT NULL DEFAULT 'active',\n"
+            "  `used_traffic` bigint DEFAULT NULL,\n"
+            "  PRIMARY KEY (`id`),\n"
+            "  KEY `ix_users_username` (`username`)\n"
+            ") ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4;\n"
+            "LOCK TABLES `users` WRITE;\n"
+            "INSERT INTO `users` VALUES (1,'Ali\\'s','active',42),(2,'bob','disabled',0);\n"
+            "UNLOCK TABLES;\n",
+            encoding="utf-8")
+        built = restore_formats.materialize_database(dump, tmp_path)
+        con = sqlite3.connect(built)
+        try:
+            rows = con.execute(
+                "SELECT username, status, used_traffic FROM users ORDER BY id").fetchall()
+        finally:
+            con.close()
+        # the backslash escape was decoded, not stored literally
+        assert rows == [("Ali's", "active", 42), ("bob", "disabled", 0)]
+
+    def test_a_dump_without_data_is_refused_loudly(self, tmp_path):
+        dump = tmp_path / "empty.sql"
+        dump.write_text("CREATE TABLE `t` (`i` int);\n", encoding="utf-8")
+        with pytest.raises(RestoreFormatError):
+            restore_formats.materialize_database(dump, tmp_path)
+
+    def test_bare_database_upload(self, tmp_path, session_factory):
+        """3x-ui exports are often just the database file, zipped or not."""
+        from app.persistence.cipher import SecretsCipher
+
+        db = tmp_path / "x-ui.db"
+        con = sqlite3.connect(db)
+        con.executescript(
+            "CREATE TABLE inbounds (id integer PRIMARY KEY, remark text, enable numeric,"
+            " listen text, port integer, protocol text, settings text, stream_settings text,"
+            " tag text);"
+            "CREATE TABLE client_traffics (id integer PRIMARY KEY, inbound_id integer,"
+            " enable numeric, email text, up integer, down integer, expiry_time integer,"
+            " total integer, reset integer);"
+            "CREATE TABLE users (id integer PRIMARY KEY, username text, password text);")
+        con.execute("INSERT INTO inbounds VALUES (1,'Main',1,'0.0.0.0',443,'vless',?,?,?)",
+                    ('{"clients":[{"id":"c1","email":"zoe@example.com","limitIp":2}]}',
+                     '{"security":"tls"}', 'in-1'))
+        con.execute("INSERT INTO client_traffics VALUES (1,1,1,'zoe@example.com',10,20,0,0,0)")
+        con.execute("INSERT INTO users VALUES (1,'root','x')")
+        con.commit(); con.close()
+
+        cipher = SecretsCipher.from_master_secret("f" * 32)
+        users_repo = repos.UserRepository(session_factory, cipher)
+        report = restore_service.restore_foreign(
+            db, "3x-ui", session_factory=session_factory, cipher=cipher,
+            users_repo=users_repo)
+        assert report.counts["users_migrated"] == 1
+        # the email becomes a legal, unique username; the IP limit survives
+        imported = _usernames(session_factory)
+        assert [u.username for u in imported] == ["zoe_example_com"]
+        assert imported[0].device_limit == 2
+        # the imported admin got a password we can actually verify
+        assert report.credentials, "3x-ui hashes are unusable — a password must be issued"
+
+    def test_in_use_file_is_skipped_not_fatal(self, tmp_path):
+        """A restore unpacks over running cores; overwriting one fails.
+
+        The restore must carry on and report the file, instead of dying half
+        way through (which is what left the panel worse than before).
+        """
+        data = tmp_path / "data"
+        (data / "cores" / "x").mkdir(parents=True)
+        protected = data / "cores" / "x" / "binary"
+        protected.write_bytes(b"old")
+        protected.chmod(0o444)          # unwritable, like a busy executable
+
+        payload = tmp_path / "payload"
+        (payload / "cores" / "x").mkdir(parents=True)
+        (payload / "cores" / "x" / "binary").write_bytes(b"new")
+        (payload / "config.json").write_text("{}")
+        archive = tmp_path / "panel-data.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(payload / "cores", arcname="cores")
+            tar.add(payload / "config.json", arcname="config.json")
+
+        written, skipped = restore_formats.extract(archive, data, live=True)
+        assert "config.json" in written
+        assert any("binary" in item for item in skipped)
+        assert (data / "config.json").read_text() == "{}"
+        protected.chmod(0o644)
+
+    def test_a_refusal_is_an_error_the_api_can_explain(self):
+        """The endpoint catches RestoreError — every refusal must be one."""
+        assert issubclass(restore_sources.RestoreSourceError, RestoreError)
+        assert issubclass(RestoreFormatError, RestoreError)
+
+
+def _usernames(session_factory):
+    from sqlalchemy import select
+
+    from app.persistence.models import UserModel
+
+    with session_factory() as session:
+        return list(session.scalars(select(UserModel)).all())

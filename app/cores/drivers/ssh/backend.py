@@ -221,8 +221,10 @@ class LocalSystemSSHBackend:
                 raw = json.loads(open(
                     self._host_transport_state_path, encoding="utf-8").read())
             except FileNotFoundError:
-                return ("host SSH accounting snapshot is missing; run "
-                        "'zagros install-host-agent' and verify "
+                return ("host SSH accounting snapshot is missing; on the host "
+                        "that RUNS this core install the collector — panel: "
+                        "'zagros install-host-agent', node: re-run "
+                        "install-node.sh — then verify "
                         "zagros-ssh-accounting.service")
             except PermissionError:
                 return ("Panel cannot read the host SSH accounting snapshot; "

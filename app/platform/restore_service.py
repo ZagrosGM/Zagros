@@ -139,7 +139,8 @@ class RestoreReport:
 # inspection (no writes)
 # --------------------------------------------------------------------------- #
 def inspect(archive: Path, source: str, *,
-            session_factory=None, cipher=None, users_repo=None) -> RestoreReport:
+            session_factory=None, cipher=None, users_repo=None,
+            legacy_session_factory=None) -> RestoreReport:
     """Report what a restore would do; writes nothing (except staging)."""
     report = RestoreReport(source=source, archive=Path(archive).name, dry_run=True)
     if source == "zagros":
@@ -148,7 +149,9 @@ def inspect(archive: Path, source: str, *,
         raise RestoreError(f"unsupported restore source: {source}")
     return _inspect_foreign(Path(archive), source, report,
                             session_factory=session_factory, cipher=cipher,
-                            users_repo=users_repo, apply=False)
+                            users_repo=users_repo,
+                            legacy_session_factory=legacy_session_factory,
+                            apply=False)
 
 
 def _inspect_zagros(archive: Path, report: RestoreReport) -> RestoreReport:
@@ -228,6 +231,12 @@ def _resolve_database(archive: Path, source: str,
           "or a .sql dump.")
 
 
+def _legacy_import(snapshot, legacy_session_factory, dry_run: bool):
+    from app.persistence.legacy_import import import_users
+
+    return import_users(snapshot, legacy_session_factory, dry_run=dry_run)
+
+
 def _read_with_fallback(db_path: Path, source: str, report: RestoreReport):
     """Read *db_path* as *source*, retrying as the panel it looks like.
 
@@ -257,7 +266,7 @@ def _read_with_fallback(db_path: Path, source: str, report: RestoreReport):
 
 def _inspect_foreign(archive: Path, source: str, report: RestoreReport, *,
                      session_factory=None, cipher=None, users_repo=None,
-                     apply: bool = False) -> RestoreReport:
+                     legacy_session_factory=None, apply: bool = False) -> RestoreReport:
     staging = archive.parent / ".extract"
     try:
         db_path = _resolve_database(archive, source, report)
@@ -279,6 +288,26 @@ def _inspect_foreign(archive: Path, source: str, report: RestoreReport, *,
                               if isinstance(v, int)})
         report.warnings.extend(migration.warnings[:20])
         report.notes.extend(getattr(migration, "notes", [])[:10])
+
+        # The platform side is not the panel's user list. Without this the
+        # import reports hundreds of users and the operator sees none of them.
+        if legacy_session_factory is None:
+            report.warnings.append(
+                "users were NOT written to the panel's user list — the legacy "
+                "store is not reachable from here")
+        else:
+            panel = _legacy_import(snapshot, legacy_session_factory, not apply)
+            report.counts.update({"panel_users": panel["created"],
+                                  "panel_proxies": panel["proxies_created"],
+                                  "panel_users_already_present": panel["skipped_existing"]})
+            report.warnings.extend(panel["warnings"])
+            report.steps.append(
+                f"{panel['created']} user(s) written to the panel's user list "
+                f"({panel['proxies_created']} proxies)"
+                if apply else
+                f"{panel['created']} user(s) would appear in the user list "
+                f"({panel['proxies_created']} proxies)")
+
         report.steps.append("import applied" if apply else "import previewed (dry run)")
         if apply:
             report.credentials = dict(notes.get("generated_admin_passwords") or {})
@@ -293,10 +322,11 @@ def _inspect_foreign(archive: Path, source: str, report: RestoreReport, *,
 
 
 def restore_foreign(archive: Path, source: str, *, session_factory, cipher,
-                    users_repo) -> RestoreReport:
+                    users_repo, legacy_session_factory=None) -> RestoreReport:
     report = RestoreReport(source=source, archive=Path(archive).name, dry_run=False)
     result = _inspect_foreign(Path(archive), source, report, session_factory=session_factory,
-                              cipher=cipher, users_repo=users_repo, apply=True)
+                              cipher=cipher, users_repo=users_repo,
+                              legacy_session_factory=legacy_session_factory, apply=True)
     result.restart = {"required": False,
                       "reason": "an import changes rows, not the deployment"}
     return result
@@ -309,7 +339,8 @@ def restore_zagros(archive: Path, *, data_dir: str | os.PathLike[str],
                    database_url: str | None, legacy_database_url: str | None = None,
                    config_dir: str | os.PathLike[str] | None = None,
                    allow_config: bool = True,
-                   session_factory=None, cipher=None, users_repo=None) -> RestoreReport:
+                   session_factory=None, cipher=None, users_repo=None,
+                   legacy_session_factory=None) -> RestoreReport:
     """Restore our own archive and request a restart to pick it up.
 
     The fast path swaps the database files back. That only works when this
@@ -361,7 +392,8 @@ def restore_zagros(archive: Path, *, data_dir: str | os.PathLike[str],
                 report.steps.append(f"restored database → {target}")
         else:
             imported = _import_rows(staging, report, session_factory=session_factory,
-                                    cipher=cipher, users_repo=users_repo)
+                                    cipher=cipher, users_repo=users_repo,
+                                    legacy_session_factory=legacy_session_factory)
             if not imported:
                 report.warnings.append(
                     f"this panel runs {_engine_of(database_url) or 'a non-SQLite engine'}, "
@@ -408,7 +440,7 @@ def _engine_of(url: str | None) -> str | None:
 
 
 def _import_rows(staging: Path, report: RestoreReport, *, session_factory,
-                 cipher, users_repo) -> bool:
+                 cipher, users_repo, legacy_session_factory=None) -> bool:
     """Import the archive's rows instead of copying its database file.
 
     This is the MySQL-panel path (and the safety net whenever a database file
@@ -440,6 +472,11 @@ def _import_rows(staging: Path, report: RestoreReport, *, session_factory,
                               if isinstance(v, int)})
         report.credentials.update(notes.get("generated_admin_passwords") or {})
         report.warnings.extend(migration.warnings[:10])
+        if legacy_session_factory is not None and snapshot.users:
+            panel = _legacy_import(snapshot, legacy_session_factory, False)
+            report.counts.update({"panel_users": panel["created"],
+                                  "panel_proxies": panel["proxies_created"]})
+            report.warnings.extend(panel["warnings"])
         report.steps.append(
             f"imported rows from {member} into this panel's database "
             f"({len(snapshot.users)} users)")

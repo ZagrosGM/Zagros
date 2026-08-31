@@ -10,6 +10,42 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.9.4.2] — 2026-09-01 — Imported users now appear in the panel
+
+9.4.1 made restores run end to end. What it did not catch: they ran against
+the wrong half of the panel's storage.
+
+The panel keeps users where Marzban kept them — the legacy store — and that
+is what ``/api/users`` and every user-facing feature reads. The migration
+pipeline wrote the *platform* store instead. So a Marzban restore reported
+``users_migrated: 338``, wrote 338 rows, and the user list did not change.
+The operator saw "successful" and got nodes.
+
+### Fixed
+
+* **Imported users are written to the panel's user list.** Each imported user
+  becomes a real panel user carrying its data limit, used traffic, expiry,
+  device limit, status and proxies — so it can be listed, edited and served.
+  Hosts and nodes were never the problem; the users were.
+* **3x-ui clients keep their protocol.** Newer 3x-ui exports link clients to
+  inbounds through ``client_inbounds``, not a column on ``clients``. Reading
+  the link the old way left every client protocol-less, so users imported
+  with no configuration at all.
+* **One configuration per protocol.** A client attached to three inbounds
+  produced three identical rows; it now produces one, as the model expects.
+* **Unsupported protocols are named.** The panel's store holds vmess, vless,
+  trojan and shadowsocks. A client on anything else is imported as a user and
+  reported, instead of being dropped without a word.
+
+### Notes
+
+* Inbound definitions, outbound rules and routing belong to a core's own
+  configuration, not to a panel's user database, so they are not part of a
+  migration. Marzban's inbound **host** rows are imported (71 in the sample
+  backup).
+
+---
+
 ## [1.0.0-alpha.9.4.1] — 2026-08-31 — Restores that accept what operators actually have
 
 9.4 shipped backup and restore, and the first real archives an operator tried

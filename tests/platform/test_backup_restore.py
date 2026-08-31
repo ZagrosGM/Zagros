@@ -461,3 +461,71 @@ def _usernames(session_factory):
 
     with session_factory() as session:
         return list(session.scalars(select(UserModel)).all())
+
+
+# --------------------------------------------------------------------------- #
+# 3x-ui: the client → inbound link
+# --------------------------------------------------------------------------- #
+class Test3xUiInboundLink:
+    """Newer 3x-ui exports link clients to inbounds in ``client_inbounds``.
+
+    Reading the link from a column ``clients.inbound_id`` (which those builds
+    do not have) left every client without a protocol, so the users imported
+    with no proxy at all — "the users did not import".
+    """
+
+    @staticmethod
+    def _db(tmp_path: Path) -> Path:
+        con = sqlite3.connect(tmp_path / "x-ui.db")
+        con.executescript(
+            "CREATE TABLE inbounds (id integer PRIMARY KEY, remark text, enable numeric,"
+            " listen text, port integer, protocol text, settings text,"
+            " stream_settings text, tag text);"
+            "CREATE TABLE clients (id integer PRIMARY KEY, email text, uuid text,"
+            " password text, flow text, security text, limit_ip integer, total_gb real,"
+            " expiry_time integer, enable numeric, sub_id text);"
+            "CREATE TABLE client_inbounds (client_id integer, inbound_id integer,"
+            " flow_override text, created_at integer);"
+            "CREATE TABLE client_traffics (id integer PRIMARY KEY, inbound_id integer,"
+            " enable numeric, email text, up integer, down integer, expiry_time integer,"
+            " total integer, reset integer);"
+            "CREATE TABLE users (id integer PRIMARY KEY, username text, password text);")
+        con.execute("INSERT INTO inbounds VALUES (1,'DE',1,'0.0.0.0',443,'vless',?,?,?)",
+                    ('{"clients":[]}', '{"security":"tls"}', 'in-1'))
+        con.execute("INSERT INTO clients VALUES (1,'zoe@example.com','uuid-zoe','',"
+                    "'xtls-rprx-vision','tls',2,0,0,1,'sub1')")
+        con.execute("INSERT INTO client_inbounds VALUES (1,1,'',1788187804492)")
+        con.execute("INSERT INTO client_traffics VALUES (1,1,1,'zoe@example.com',"
+                    "10485760,20971520,0,0,0)")
+        con.execute("INSERT INTO users VALUES (1,'root','x')")
+        con.commit(); con.close()
+        return tmp_path / "x-ui.db"
+
+    def test_protocol_comes_from_the_inbound(self, tmp_path):
+        snapshot, _notes = restore_sources.read_3x_ui(self._db(tmp_path))
+        assert [p["type"] for p in snapshot.proxies] == ["vless"]
+        # the credential is rebuilt for the protocol, not copied blindly
+        assert snapshot.proxies[0]["settings"]["id"] == "uuid-zoe"
+        assert snapshot.proxies[0]["settings"]["flow"] == "xtls-rprx-vision"
+
+    def test_one_proxy_per_protocol_not_per_inbound(self, tmp_path):
+        """Three inbounds do not mean three identical configurations."""
+        path = self._db(tmp_path)
+        con = sqlite3.connect(path)
+        con.execute("INSERT INTO inbounds VALUES (2,'FI',1,'0.0.0.0',444,'vless',?,?,?)",
+                    ('{"clients":[]}', '{}', 'in-2'))
+        con.execute("INSERT INTO inbounds VALUES (3,'US',1,'0.0.0.0',445,'vless',?,?,?)",
+                    ('{"clients":[]}', '{}', 'in-3'))
+        con.execute("INSERT INTO client_inbounds VALUES (1,2,'',1788187804492)")
+        con.execute("INSERT INTO client_inbounds VALUES (1,3,'',1788187804492)")
+        con.commit(); con.close()
+        snapshot, _notes = restore_sources.read_3x_ui(path)
+        mine = [p for p in snapshot.proxies if p["user_id"] == 1]
+        assert len(mine) == 1, f"one vless configuration, not three: {mine}"
+        assert len(snapshot.hosts) == 3
+
+    def test_traffic_and_device_limit_survive(self, tmp_path):
+        snapshot, _notes = restore_sources.read_3x_ui(self._db(tmp_path))
+        user = snapshot.users[0]
+        assert user["used_traffic"] == 10485760 + 20971520
+        assert user["device_limit"] == 2

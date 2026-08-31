@@ -1,0 +1,128 @@
+"""Write imported users into the store the panel actually manages.
+
+The migration pipeline imported users into the *platform* database, reported
+``users_migrated: 338``, and the operator saw an unchanged user list. Both
+sides were telling the truth: the rows existed — just not in the database the
+panel's user management runs on.
+
+The panel still keeps users where Marzban kept them (``app.db``: ``users`` +
+``proxies``, the tables behind ``/api/users``, subscriptions and config
+generation). An import that only writes the platform side produces a user that
+cannot be listed, edited, delivered or billed — a success that yields nothing.
+
+So this module writes that half. It is deliberately separate from the
+platform-side migration: two stores, two shapes, one snapshot feeding both.
+"""
+from __future__ import annotations
+
+import logging
+from typing import Any, Iterable
+
+from sqlalchemy import select
+
+from app.models.proxy import ProxyTypes
+from app.models.user import UserStatus
+
+logger = logging.getLogger(__name__)
+
+# Protocols the legacy store can represent. A Marzban/3x-ui client on anything
+# else (hysteria2, tuic, …) cannot be turned into a proxy row here, and saying
+# so is better than dropping it silently.
+SUPPORTED_PROTOCOLS: frozenset[str] = frozenset(p.value for p in ProxyTypes)
+
+
+def protocol_supported(name: Any) -> bool:
+    return str(name or "").strip().lower() in SUPPORTED_PROTOCOLS
+
+
+def _coerce_status(raw: Any) -> UserStatus:
+    try:
+        return UserStatus(str(raw or "active").strip().lower())
+    except ValueError:
+        return UserStatus.active
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def import_users(snapshot: Any, session_factory, *, admin_id: int | None = None,
+                 dry_run: bool = False) -> dict[str, Any]:
+    """Create one panel user per imported user, carrying its proxies over.
+
+    Idempotent by username: importing the same archive twice must not create
+    duplicates. Returns counts plus the warnings the operator needs — most
+    importantly which protocols could not be represented.
+    """
+    from app.db.models import Proxy, User  # legacy store
+
+    report: dict[str, Any] = {
+        "created": 0, "skipped_existing": 0, "proxies_created": 0,
+        "proxies_unsupported": 0, "unsupported_protocols": [], "warnings": [],
+    }
+    proxy_types = {p.value: p for p in ProxyTypes}
+
+    with session_factory() as session:
+        existing = {name for (name,) in session.execute(select(User.username)).all()}
+        for entry in snapshot.users:
+            username = str(entry.get("username") or "").strip()
+            if not username:
+                continue
+            if username in existing:
+                report["skipped_existing"] += 1
+                continue
+
+            proxies = [p for p in (snapshot.proxies or [])
+                       if str(p.get("user_id")) == str(entry.get("id"))]
+            usable = [p for p in proxies if protocol_supported(p.get("type"))]
+            for skipped in (p for p in proxies if not protocol_supported(p.get("type"))):
+                report["proxies_unsupported"] += 1
+                name = str(skipped.get("type") or "unknown")
+                if name not in report["unsupported_protocols"]:
+                    report["unsupported_protocols"].append(name)
+
+            if dry_run:
+                report["created"] += 1
+                report["proxies_created"] += len(usable)
+                existing.add(username)
+                continue
+
+            user = User(
+                username=username,
+                status=_coerce_status(entry.get("status")),
+                used_traffic=_as_int(entry.get("used_traffic")) or 0,
+                data_limit=_as_int(entry.get("data_limit")),
+                data_limit_reset_strategy=entry.get("data_limit_reset_strategy") or "no_reset",
+                expire=_as_int(entry.get("expire")),
+                device_limit=_as_int(entry.get("device_limit")),
+                download_limit_mbps=_as_int(entry.get("download_limit_mbps")) or 0,
+                upload_limit_mbps=_as_int(entry.get("upload_limit_mbps")) or 0,
+                note=(entry.get("note") or "")[:500] or None,
+                admin_id=admin_id,
+            )
+            for proxy in usable:
+                user.proxies.append(Proxy(
+                    type=proxy_types[str(proxy.get("type")).strip().lower()],
+                    settings=proxy.get("settings") or {},
+                ))
+                report["proxies_created"] += 1
+            session.add(user)
+            existing.add(username)
+            report["created"] += 1
+
+        if not dry_run:
+            session.commit()
+
+    if report["proxies_unsupported"]:
+        report["warnings"].append(
+            f"{report['proxies_unsupported']} client(s) used protocols this panel "
+            f"cannot store ({', '.join(report['unsupported_protocols'][:6])}); those "
+            "users were imported without a proxy.")
+    if report["skipped_existing"]:
+        report["warnings"].append(
+            f"{report['skipped_existing']} user(s) already existed and were left alone.")
+    logger.info("legacy import: %s", {k: v for k, v in report.items() if isinstance(v, int)})
+    return report

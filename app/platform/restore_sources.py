@@ -185,6 +185,55 @@ def _clients_from_settings(inbounds: list[dict[str, Any]]) -> list[dict[str, Any
     return clients
 
 
+def _client_inbound_index(con: sqlite3.Connection) -> dict[Any, list[dict[str, Any]]]:
+    """client id -> the inbounds it belongs to.
+
+    Newer 3x-ui builds moved the link into ``client_inbounds``; older ones kept
+    the clients inside ``inbounds.settings``. Both are handled, because an
+    export that silently loses its protocol produces users with no proxy —
+    which is exactly what "the users did not import" looked like.
+    """
+    tables = {row[0] for row in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    index: dict[Any, list[dict[str, Any]]] = {}
+    if "client_inbounds" in tables:
+        inbounds = {row.get("id"): row for row in _rows(con, "inbounds")}
+        for link in _rows(con, "client_inbounds"):
+            inbound = inbounds.get(link.get("inbound_id"))
+            if inbound is None:
+                continue
+            entry = dict(inbound)
+            override = (link.get("flow_override") or "").strip()
+            if override:
+                entry["_flow_override"] = override
+            index.setdefault(link.get("client_id"), []).append(entry)
+    return index
+
+
+def _settings_for(protocol: str, client: dict[str, Any],
+                  inbound: dict[str, Any] | None) -> dict[str, Any]:
+    """The credential this panel stores for the protocol.
+
+    3x-ui spreads the credential across columns (``uuid``/``password``/
+    ``flow``/``security``) instead of the settings JSON Marzban uses, so the
+    proxy settings have to be rebuilt per protocol.
+    """
+    proto = (protocol or "").strip().lower()
+    uuid = client.get("uuid") or client.get("password") or ""
+    flow = ((inbound or {}).get("_flow_override")
+            or client.get("flow") or "").strip()
+    if proto == "vless":
+        return {"id": uuid, "flow": flow}
+    if proto == "vmess":
+        return {"id": uuid}
+    if proto == "trojan":
+        return {"password": client.get("password") or uuid}
+    if proto == "shadowsocks":
+        return {"password": client.get("password") or uuid,
+                "method": (client.get("security") or "").strip() or "chacha20-poly1305"}
+    return {"id": uuid}
+
+
 def read_3x_ui(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
     """Map an ``x-ui.db`` onto a :class:`LegacySnapshot` + an import report."""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30)
@@ -196,16 +245,22 @@ def read_3x_ui(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
             "SELECT name FROM sqlite_master WHERE type='table'")}
         inbounds = _rows(con, "inbounds")
         traffic = {row.get("email"): row for row in _rows(con, "client_traffics")}
+        if not traffic and "client_global_traffics" in tables:
+            traffic = {row.get("email"): row
+                       for row in _rows(con, "client_global_traffics")}
         limits_ip = {row.get("client_email"): row.get("ips")
                      for row in (_rows(con, "inbound_client_ips")
                                  if "inbound_client_ips" in tables else [])}
 
+        link_index = _client_inbound_index(con)
         clients: list[dict[str, Any]]
         if "clients" in tables:
             clients = _rows(con, "clients")
-            _assign_inbound_metadata(clients, inbounds)
+            _assign_inbound_metadata(clients, inbounds, link_index)
         else:
             clients = _clients_from_settings(inbounds)
+            for client in clients:
+                client.setdefault("_links", [])
 
         taken: set[str] = set()
         for index, client in enumerate(clients, start=1):
@@ -218,12 +273,16 @@ def read_3x_ui(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
                 notes["renamed_users"].append({"username": username, "note": note})
             traffic_row = traffic.get(email) or {}
             used = int(traffic_row.get("up") or 0) + int(traffic_row.get("down") or 0)
-            total = int(traffic_row.get("total") or client.get("totalGB") or 0)
+            # newer builds keep the cap on the client row, in gigabytes
+            total_gb = client.get("total_gb") or client.get("totalGB") or 0
+            total = int(traffic_row.get("total") or 0) or int(
+                float(total_gb or 0) * 1024 ** 3)
             expiry_ms = int(traffic_row.get("expiry_time")
-                            or client.get("expiryTime")
-                            or client.get("expiry_time") or 0)
+                            or client.get("expiry_time")
+                            or client.get("expiryTime") or 0)
             enabled = bool(traffic_row.get("enable", client.get("enable", True)))
-            limit_ip = client.get("limitIp") or client.get("limit_ip") or 0
+            limit_ip = (client.get("limit_ip") if client.get("limit_ip") is not None
+                        else client.get("limitIp") or 0)
             ips = limits_ip.get(email)
             device_limit = int(limit_ip) if str(limit_ip).isdigit() and int(limit_ip) > 0 else None
 
@@ -243,16 +302,26 @@ def read_3x_ui(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
                 "data_limit_reset_strategy": "no_reset",
                 "device_limit": device_limit,
             })
-            protocol = (client.get("_protocol") or "").lower()
-            settings = {k: v for k, v in client.items()
-                        if not k.startswith("_") and k not in
-                        {"enable", "email", "totalGB", "expiryTime", "limitIp"}}
-            snapshot.proxies.append({
-                "id": index,
-                "user_id": user_id,
-                "type": protocol,
-                "settings": settings,
-            })
+
+            # One proxy per protocol, not per inbound: the panel stores the
+            # credential once and selects inbounds by excluding them. Three
+            # identical vless rows (one per inbound) would be three identical
+            # entries in the user's configuration.
+            links = client.get("_links") or []
+            if not links and client.get("_protocol"):
+                links = [client]
+            seen: set[str] = set()
+            for link in links:
+                protocol = (link.get("protocol") or client.get("_protocol") or "").lower()
+                if not protocol or protocol in seen:
+                    continue
+                seen.add(protocol)
+                snapshot.proxies.append({
+                    "id": len(snapshot.proxies) + 1,
+                    "user_id": user_id,
+                    "type": protocol,
+                    "settings": _settings_for(protocol, client, link),
+                })
 
         # hosts: one per inbound, so restored links point at the same entry points
         for inbound in inbounds:
@@ -298,14 +367,27 @@ def read_3x_ui(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
 
 
 def _assign_inbound_metadata(clients: list[dict[str, Any]],
-                             inbounds: list[dict[str, Any]]) -> None:
-    """Attach protocol/remark to clients read from the newer ``clients`` table."""
+                             inbounds: list[dict[str, Any]],
+                             link_index: dict[Any, list[dict[str, Any]]] | None = None
+                             ) -> None:
+    """Attach each client to the inbound(s) that serve it.
+
+    Newer 3x-ui builds drop the ``inbound_id`` column from ``clients`` and keep
+    the link in ``client_inbounds``; looking only for the column (as we did)
+    left every client without a protocol.
+    """
     by_id = {row.get("id"): row for row in inbounds}
     for client in clients:
-        inbound = by_id.get(client.get("inbound_id"))
-        if inbound:
-            client["_protocol"] = inbound.get("protocol")
-            client["_remark"] = inbound.get("remark") or inbound.get("tag")
+        links = (link_index or {}).get(client.get("id")) or []
+        if not links:
+            inbound = by_id.get(client.get("inbound_id"))
+            links = [inbound] if inbound else []
+        client["_links"] = [dict(link) for link in links]
+        for link in links:
+            if link.get("protocol"):
+                client["_protocol"] = link.get("protocol")
+            if link.get("remark") or link.get("tag"):
+                client["_remark"] = link.get("remark") or link.get("tag")
 
 
 # --------------------------------------------------------------------------- #

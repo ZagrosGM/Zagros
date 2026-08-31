@@ -3228,6 +3228,7 @@ async def upload_restore_archive(file: UploadFile = File(...),
 @zagros_admin_router.post("/restore/inspect")
 async def inspect_restore_archive(body: dict, runtime=Depends(get_runtime)):
     """Report what a restore would do. Writes nothing."""
+    from app.db import GetDB
     from app.platform import backup_store, restore_service, restore_sources
 
     source = str((body or {}).get("source") or "zagros")
@@ -3241,7 +3242,7 @@ async def inspect_restore_archive(body: dict, runtime=Depends(get_runtime)):
         report = await asyncio.to_thread(
             restore_service.inspect, path, source,
             session_factory=runtime.session_factory, cipher=runtime.cipher,
-            users_repo=runtime.users)
+            users_repo=runtime.users, legacy_session_factory=GetDB)
     except (restore_service.RestoreError, backup_store.BackupError) as exc:
         # A refusal to restore is an answer, not a crash: say what is wrong
         # with the upload instead of handing the UI a 500 to render.
@@ -3253,6 +3254,7 @@ async def inspect_restore_archive(body: dict, runtime=Depends(get_runtime)):
 async def apply_restore_archive(body: dict, request: Request,
                                 runtime=Depends(get_runtime)):
     """Carry the restore out. Our own archive also restarts the panel."""
+    from app.db import GetDB
     from app.platform import backup_store, restore_service, restore_sources
 
     source = str((body or {}).get("source") or "zagros")
@@ -3270,12 +3272,12 @@ async def apply_restore_archive(body: dict, request: Request,
                 database_url=getattr(runtime, "database_url", None),
                 legacy_database_url=os.environ.get("SQLALCHEMY_DATABASE_URL"),
                 session_factory=runtime.session_factory, cipher=runtime.cipher,
-                users_repo=runtime.users)
+                users_repo=runtime.users, legacy_session_factory=GetDB)
         else:
             report = await asyncio.to_thread(
                 restore_service.restore_foreign, path, source,
                 session_factory=runtime.session_factory, cipher=runtime.cipher,
-                users_repo=runtime.users)
+                users_repo=runtime.users, legacy_session_factory=GetDB)
     except (restore_service.RestoreError, backup_store.BackupError) as exc:
         raise HTTPException(400, str(exc)) from exc
     _audit(runtime, f"restore.applied.{source}", path.name, request=request)

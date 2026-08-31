@@ -23,6 +23,9 @@ const Sessions = lazy(() => import("./pages/Sessions"));
 const Devices = lazy(() => import("./pages/Devices"));
 const Logs = lazy(() => import("./pages/Logs"));
 const Settings = lazy(() => import("./pages/Settings"));
+const SettingsGeneral = lazy(() => import("./pages/SettingsGeneral"));
+const SettingsSecurity = lazy(() => import("./pages/SettingsSecurity"));
+const SettingsBackup = lazy(() => import("./pages/SettingsBackup"));
 const Advanced = lazy(() => import("./pages/Advanced"));
 
 function PageFallback() {
@@ -60,7 +63,12 @@ export default function App() {
           <Route path="devices" element={<Suspense fallback={<PageFallback />}><Devices /></Suspense>} />
           <Route path="logs" element={<Suspense fallback={<PageFallback />}><Logs /></Suspense>} />
           <Route path="support" element={<Suspense fallback={<PageFallback />}><Support /></Suspense>} />
-          <Route path="settings" element={<Suspense fallback={<PageFallback />}><Settings /></Suspense>} />
+          {/* Settings is a section with three linkable tabs */}
+          <Route path="settings" element={<Suspense fallback={<PageFallback />}><Settings /></Suspense>}>
+            <Route index element={<Suspense fallback={<PageFallback />}><SettingsGeneral /></Suspense>} />
+            <Route path="security" element={<Suspense fallback={<PageFallback />}><SettingsSecurity /></Suspense>} />
+            <Route path="backup" element={<Suspense fallback={<PageFallback />}><SettingsBackup /></Suspense>} />
+          </Route>
           <Route path="advanced" element={<Suspense fallback={<PageFallback />}><Advanced /></Suspense>} />
           <Route path="*" element={<Suspense fallback={<PageFallback />}><Overview /></Suspense>} />
         </Route>

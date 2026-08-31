@@ -28,10 +28,36 @@ def get_secret_key():
     return secret
 
 
+def _effective_expire_minutes() -> int:
+    """Token lifetime: the database override wins over the environment.
+
+    Settings -> Security can change this without editing ``.env`` (which would
+    need a restart). The override lives in the *platform* database, so this
+    resolves the running runtime exactly like the scheduler jobs do; if the
+    runtime is not up yet, the environment value applies.
+    """
+    try:
+        import app as _app
+
+        runtime = getattr(getattr(_app, "app", None), "state", None)
+        runtime = getattr(runtime, "zagros", None)
+        if runtime is not None:
+            from app.platform.settings_kv import load
+
+            with runtime.session_factory() as session:
+                override = load(session, "security", {}).get("token_expire_minutes")
+            if override is not None:
+                return int(override)
+    except Exception:  # noqa: BLE001 - never break token creation
+        pass
+    return int(JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
+
+
 def create_admin_token(username: str, is_sudo=False) -> str:
     data = {"sub": username, "access": "sudo" if is_sudo else "admin", "iat": datetime.utcnow()}
-    if JWT_ACCESS_TOKEN_EXPIRE_MINUTES > 0:
-        expire = datetime.utcnow() + timedelta(minutes=JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
+    minutes = _effective_expire_minutes()
+    if minutes > 0:
+        expire = datetime.utcnow() + timedelta(minutes=minutes)
         data["exp"] = expire
     encoded_jwt = jwt.encode(data, get_secret_key(), algorithm="HS256")
     return encoded_jwt

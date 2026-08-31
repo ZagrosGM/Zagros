@@ -77,6 +77,10 @@ class PlatformRuntime:
         self.sessions_store = SQLSessionStore(self.session_factory)
         self.refresh_tokens = SQLRefreshTokenStore(self.session_factory)
         self.portal_settings = SQLPortalSettingsStore(self.session_factory)
+        from app.platform.backup_service import SQLBackupServiceStore
+
+        self.backup_service = SQLBackupServiceStore(self.session_factory,
+                                                    self.cipher)
         self.studio_store = SQLStudioStore(self.session_factory)
         # item 13: cross-core Host Settings entries (delivery expansion)
         from app.persistence.repositories import SQLCoreHostStore

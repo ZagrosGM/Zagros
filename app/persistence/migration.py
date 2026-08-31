@@ -84,6 +84,23 @@ def _naive_to_utc(value: Any) -> datetime | None:
     return None
 
 
+def _admin_hash_for(entry: dict[str, Any]) -> str:
+    """The password hash to store for one imported admin.
+
+    Marzban-shaped panels already store bcrypt hashes, so those are kept behind
+    a ``legacy:`` marker the login path understands. A source whose hashing we
+    cannot verify (3x-ui) arrives with a **generated** password instead, stored
+    as a real bcrypt hash so the admin can sign in once and change it — an
+    imported credential nobody can use is not a migration, it is a lockout.
+    """
+    generated = entry.get("generated_password")
+    if generated:
+        from app.utils.passwords import hash_password
+
+        return hash_password(generated)
+    return f"legacy:{entry.get('password_hash') or ''}"
+
+
 def build_migration_plan(snapshot: LegacySnapshot) -> MigrationPlan:
     """Pure mapping: legacy rows → Zagros rows + an honest report."""
     plan = MigrationPlan()
@@ -114,6 +131,11 @@ def build_migration_plan(snapshot: LegacySnapshot) -> MigrationPlan:
             "expire_at": _epoch_to_dt(user.get("expire")),
             "data_limit_reset_strategy": user.get("data_limit_reset_strategy") or "no_reset",
             "created_at": _naive_to_utc(user.get("created_at")),
+            # 3x-ui carries a per-client IP limit; Marzban-shaped panels do not
+            # (None keeps whatever the user already had on upsert).
+            "device_limit": (int(user["device_limit"])
+                             if str(user.get("device_limit") or "").isdigit()
+                             and int(user["device_limit"]) > 0 else None),
         })
         plan.usage.append({
             "username": username,
@@ -220,6 +242,9 @@ def build_migration_plan(snapshot: LegacySnapshot) -> MigrationPlan:
             "password_hash": admin.get("hashed_password") or "",
             "is_sudo": bool(admin.get("is_sudo")),
             "telegram_id": admin.get("telegram_id"),
+            # carried through so a source whose hashes we cannot verify gets a
+            # freshly generated password instead of an unusable one
+            "generated_password": admin.get("generated_password"),
         })
         report.admins_migrated += 1
     if snapshot.system:
@@ -262,6 +287,7 @@ class LegacyImportService:
                 user_id = self._users.upsert_user(
                     username=u["username"], status=u["status"],
                     data_limit_bytes=u["data_limit_bytes"], expire_at=u["expire_at"],
+                    device_limit=u.get("device_limit"),
                     download_limit_mbps=u.get("download_limit_mbps", 0),
                     upload_limit_mbps=u.get("upload_limit_mbps", 0),
                     note=u["note"],
@@ -322,7 +348,7 @@ class LegacyImportService:
                 ).scalar_one_or_none()
                 if exists is None:
                     s.add(AdminModel(username=a["username"],
-                                     password_hash=f"legacy:{a['password_hash']}",
+                                     password_hash=_admin_hash_for(a),
                                      is_sudo=a["is_sudo"],
                                      telegram_id=a["telegram_id"]))
             # audit (append-only but deduplicated for idempotency)

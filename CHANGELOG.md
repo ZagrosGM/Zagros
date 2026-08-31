@@ -10,6 +10,52 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.9.4] — 2026-08-31 — Settings becomes a real section: backup, restore, security
+
+Settings was one page with three cards, and the two things an operator reaches
+for after a bad evening — "do I have a backup?" and "can I get it back?" — were
+not in it at all. Backups lived on the host behind a CLI command, and there was
+no way to come back from another panel.
+
+Settings is now three sections: **General** (unchanged), **Security**, and
+**Backup & Restore**.
+
+### Added
+
+* **Backups on demand and on a schedule.** One button archives the database,
+  configuration, certificates, core state and templates into a single
+  `tar.gz`. The same archive can be produced hourly, daily, weekly or on a
+  custom cron and delivered to a Telegram chat; the bot token is stored
+  encrypted and never sent back to the browser. Copies beyond the retention
+  count are pruned.
+* **Restore, from this panel or another one.** An archive is uploaded,
+  inspected and only then applied — preview first, so nothing is written
+  before the operator has seen what it contains. Archives from **Marzban**,
+  **Pasarguard** and **3x-ui** are imported rather than restored: users,
+  their traffic and device limits, hosts rebuilt from inbounds, and admins.
+* **The panel restarts itself after a restore.** A restore replaces the
+  database under a running container, so it is only finished once the panel
+  comes back up. The panel cannot restart itself, so it asks the host agent to
+  do it, and reports honestly when no agent is installed instead of implying
+  the work is done.
+* **Security section.** An operator can change their own username and
+  password (verified against the current one), see client sessions and revoke
+  any of them, and set the admin token lifetime from the panel.
+
+### Fixed
+
+* Two backups started in the same second overwrote each other silently: the
+  archive name had one-second resolution. Names are now unique.
+
+### Notes
+
+* Passwords from 3x-ui and Pasarguard are stored in formats Zagros cannot
+  verify, so imported admins are issued a fresh random password which the
+  restore report shows exactly once. Importing a panel you cannot read the
+  logs of is a lockout waiting to happen otherwise.
+
+---
+
 ## [1.0.0-alpha.9.3] — 2026-08-30 — The admin API no longer depends on import order
 
 A latent one, found while verifying 9.2: `app.models.admin` and `app.db` import

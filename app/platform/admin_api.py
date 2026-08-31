@@ -25,6 +25,7 @@ platform) with the surfaces the unified dashboard needs:
 from __future__ import annotations
 
 import asyncio
+import os
 import json
 import logging
 import secrets
@@ -35,7 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, File, Form, HTTPException, UploadFile
+from fastapi import Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, SecretStr
 
@@ -3013,3 +3014,449 @@ async def users_delete_by_status(
             "usernames": deleted_usernames,
         }
 
+
+# --------------------------------------------------------------------- #
+# audit helper
+# --------------------------------------------------------------------- #
+def _audit(runtime, action: str, target: str = "", *, detail: dict | None = None,
+           request: Request | None = None) -> None:
+    """Best-effort audit entry — a failed write must never fail the request.
+
+    The actor is taken from the bearer token when the endpoint has the request
+    at hand; otherwise the entry is attributed to ``admin`` (the whole router
+    is sudo-only, so it is always *some* admin).
+    """
+    actor = "admin"
+    if request is not None:
+        try:
+            header = request.headers.get("authorization", "")
+            token = header.split(" ", 1)[1].strip() if " " in header else ""
+            if token:
+                from app.utils.jwt import get_admin_payload
+
+                payload = get_admin_payload(token) or {}
+                actor = str(payload.get("username") or "admin")
+        except Exception:  # noqa: BLE001
+            actor = "admin"
+    try:
+        from app.persistence.models import AuditLogModel
+
+        with runtime.session_factory() as session:
+            session.add(AuditLogModel(actor=actor[:64], action=action[:64],
+                                      target=(target or None),
+                                      detail_json=detail))
+            session.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.error(f"audit write failed ({action}): {exc}")
+
+
+# --------------------------------------------------------------------- #
+# Backup & Restore — on-demand archives, scheduled delivery, and imports
+# from other panels (Zagros / Marzban / Pasarguard / 3x-ui)
+# --------------------------------------------------------------------- #
+def _backup_data_dir(runtime) -> str:
+    url = getattr(runtime, "database_url", "") or ""
+    if url.startswith("sqlite:///"):
+        from pathlib import Path
+
+        return str(Path(url[10:]).parent)
+    return "/var/lib/zagros"
+
+
+@zagros_admin_router.get("/backup/artifacts")
+async def list_backup_artifacts(runtime=Depends(get_runtime)):
+    """Archives already on the server, newest first."""
+    from app.platform import backup_store
+
+    data_dir = _backup_data_dir(runtime)
+    artifacts = await asyncio.to_thread(backup_store.list_artifacts, data_dir)
+    return {"artifacts": [item.to_dict() for item in artifacts],
+            "directory": str(backup_store.directory(data_dir))}
+
+
+@zagros_admin_router.post("/backup/create")
+async def create_backup(body: dict | None = None, runtime=Depends(get_runtime)):
+    """Build an archive now (databases + config + panel data)."""
+    from app.platform import backup_store
+
+    include_logs = bool((body or {}).get("include_logs", False))
+    data_dir = _backup_data_dir(runtime)
+
+    def _build():
+        return backup_store.create(
+            data_dir=data_dir,
+            database_url=getattr(runtime, "database_url", None),
+            legacy_database_url=os.environ.get("SQLALCHEMY_DATABASE_URL"),
+            panel_version=getattr(runtime, "version", "") or "",
+            include_logs=include_logs)
+
+    try:
+        artifact = await asyncio.to_thread(_build)
+    except backup_store.BackupError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    _audit(runtime, "backup.created", artifact.name)
+    return {"artifact": artifact.to_dict(),
+            "artifacts": [a.to_dict() for a in
+                          await asyncio.to_thread(backup_store.list_artifacts, data_dir)]}
+
+
+@zagros_admin_router.get("/backup/artifacts/{name}")
+async def download_backup_artifact(name: str, runtime=Depends(get_runtime)):
+    """Download one archive (0600 on disk — it holds secrets)."""
+    from fastapi.responses import FileResponse
+
+    from app.platform import backup_store
+
+    try:
+        path = backup_store.path_for(name, _backup_data_dir(runtime))
+    except backup_store.BackupError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not path.is_file():
+        raise HTTPException(404, "archive not found")
+    return FileResponse(path, media_type="application/gzip", filename=path.name)
+
+
+@zagros_admin_router.delete("/backup/artifacts/{name}")
+async def delete_backup_artifact(name: str, runtime=Depends(get_runtime)):
+    from app.platform import backup_store
+
+    try:
+        deleted = backup_store.delete(name, _backup_data_dir(runtime))
+    except backup_store.BackupError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not deleted:
+        raise HTTPException(404, "archive not found")
+    _audit(runtime, "backup.deleted", name)
+    return {"deleted": name}
+
+
+@zagros_admin_router.get("/backup/service")
+async def get_backup_service(runtime=Depends(get_runtime)):
+    """Scheduled-backup configuration + the outcome of the last run."""
+    store = getattr(runtime, "backup_service", None)
+    if store is None:
+        raise HTTPException(503, "backup service is not initialised")
+    settings, state = await asyncio.to_thread(store.load)
+    return {"settings": settings.public_dict(), "state": state.to_dict()}
+
+
+@zagros_admin_router.put("/backup/service")
+async def put_backup_service(body: dict, runtime=Depends(get_runtime)):
+    """Save the schedule. An empty ``bot_token`` keeps the stored one."""
+    from app.platform.backup_service import BackupServiceSettings
+
+    store = getattr(runtime, "backup_service", None)
+    if store is None:
+        raise HTTPException(503, "backup service is not initialised")
+    data = dict(body or {})
+    data.pop("has_token", None)
+    settings = BackupServiceSettings(**{
+        k: v for k, v in data.items()
+        if k in BackupServiceSettings().__dict__})
+    problems = settings.validate()
+    if problems:
+        raise HTTPException(422, "; ".join(problems))
+    saved = await asyncio.to_thread(store.save, settings)
+    _audit(runtime, "backup.service.updated",
+           f"enabled={saved.enabled} schedule={saved.cron_expression()}")
+    return {"settings": saved.public_dict()}
+
+
+@zagros_admin_router.post("/backup/service/test")
+async def test_backup_service(runtime=Depends(get_runtime)):
+    """Send a probe message so a wrong chat id is found now, not at 3 AM."""
+    from app.platform.backup_service import test_token
+
+    store = getattr(runtime, "backup_service", None)
+    if store is None:
+        raise HTTPException(503, "backup service is not initialised")
+    settings, _state = await asyncio.to_thread(store.load)
+    try:
+        result = await asyncio.to_thread(test_token, settings.bot_token,
+                                         settings.chat_id)
+    except Exception as exc:  # noqa: BLE001 - network + API errors
+        raise HTTPException(400, str(exc)) from exc
+    return result
+
+
+@zagros_admin_router.post("/backup/service/run")
+async def run_backup_service(runtime=Depends(get_runtime)):
+    """Build and deliver a backup right now, ignoring the schedule."""
+    from app.platform.backup_service import run_once
+
+    try:
+        result = await asyncio.to_thread(run_once, runtime)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(exc)) from exc
+    _audit(runtime, "backup.service.run", str(result.get("archive", "")))
+    return result
+
+
+# ----------------------------------------------------------------- restore --
+@zagros_admin_router.post("/restore/upload")
+async def upload_restore_archive(file: UploadFile = File(...),
+                                 source: str = Form("zagros"),
+                                 runtime=Depends(get_runtime)):
+    """Stage an uploaded archive. Nothing is restored yet — inspect first."""
+    from app.platform import restore_service, restore_sources
+
+    if source not in restore_sources.SOURCES:
+        raise HTTPException(400, f"unsupported source: {source}")
+    data_dir = _backup_data_dir(runtime)
+    suffix = ".tar.gz"
+    tmp_dir = restore_service.staging_root(data_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = tmp_dir / f".upload-{os.getpid()}-{int(time.time())}{suffix}"
+    try:
+        written = 0
+        with tmp_path.open("wb") as handle:
+            while chunk := await file.read(1024 * 1024):
+                written += len(chunk)
+                if written > restore_service.MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, "archive is too large")
+                handle.write(chunk)
+    finally:
+        await file.close()
+    if written == 0:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(400, "uploaded file is empty")
+    staged = restore_service.save_upload(tmp_path, file.filename or "upload.tar.gz",
+                                         data_dir=data_dir)
+    return {"staged": str(staged), "source": source, "bytes": written}
+
+
+@zagros_admin_router.post("/restore/inspect")
+async def inspect_restore_archive(body: dict, runtime=Depends(get_runtime)):
+    """Report what a restore would do. Writes nothing."""
+    from app.platform import restore_service, restore_sources
+
+    source = str((body or {}).get("source") or "zagros")
+    staged = str((body or {}).get("staged") or "")
+    if source not in restore_sources.SOURCES:
+        raise HTTPException(400, f"unsupported source: {source}")
+    path = Path(staged)
+    if not path.is_file():
+        raise HTTPException(404, "staged archive not found — upload it again")
+    try:
+        report = await asyncio.to_thread(
+            restore_service.inspect, path, source,
+            session_factory=runtime.session_factory, cipher=runtime.cipher,
+            users_repo=runtime.users)
+    except restore_service.RestoreError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return report.to_dict()
+
+
+@zagros_admin_router.post("/restore/apply")
+async def apply_restore_archive(body: dict, request: Request,
+                                runtime=Depends(get_runtime)):
+    """Carry the restore out. Our own archive also restarts the panel."""
+    from app.platform import restore_service, restore_sources
+
+    source = str((body or {}).get("source") or "zagros")
+    staged = str((body or {}).get("staged") or "")
+    if source not in restore_sources.SOURCES:
+        raise HTTPException(400, f"unsupported source: {source}")
+    path = Path(staged)
+    if not path.is_file():
+        raise HTTPException(404, "staged archive not found — upload it again")
+
+    if source == "zagros":
+        report = await asyncio.to_thread(
+            restore_service.restore_zagros, path, data_dir=_backup_data_dir(runtime),
+            database_url=getattr(runtime, "database_url", None),
+            legacy_database_url=os.environ.get("SQLALCHEMY_DATABASE_URL"))
+    else:
+        report = await asyncio.to_thread(
+            restore_service.restore_foreign, path, source,
+            session_factory=runtime.session_factory, cipher=runtime.cipher,
+            users_repo=runtime.users)
+    _audit(runtime, f"restore.applied.{source}", path.name, request=request)
+    # The archive is staging-only once applied; keep nothing behind.
+    await asyncio.to_thread(restore_service.discard, path)
+    return report.to_dict()
+
+
+# --------------------------------------------------------------------- #
+# Security — the operator's own credentials, live sessions, token lifetime
+# --------------------------------------------------------------------- #
+SECURITY_SETTINGS_KEY = "security"
+
+
+def _current_admin_username(request: Request) -> str:
+    """Username carried by the bearer token (the router is sudo-only)."""
+    header = request.headers.get("authorization", "")
+    token = header.split(" ", 1)[1].strip() if " " in header else ""
+    if not token:
+        raise HTTPException(401, "missing credentials")
+    from app.utils.jwt import get_admin_payload
+
+    payload = get_admin_payload(token) or {}
+    username = str(payload.get("username") or "")
+    if not username:
+        raise HTTPException(401, "invalid or expired token")
+    return username
+
+
+def _legacy_session():
+    from app.db import GetDB
+
+    return GetDB()
+
+
+@zagros_admin_router.get("/security")
+async def security_overview(request: Request, runtime=Depends(get_runtime)):
+    """Who you are, how long tokens live, and where you are signed in."""
+    import config
+
+    from app.platform.settings_kv import load as kv_load
+
+    username = _current_admin_username(request)
+    override = kv_load(runtime.session_factory, SECURITY_SETTINGS_KEY, {})
+    lifetime = override.get("token_expire_minutes")
+    sessions = await asyncio.to_thread(_list_sessions, runtime)
+    return {
+        "admin": {"username": username},
+        "token": {
+            "expire_minutes": int(config.JWT_ACCESS_TOKEN_EXPIRE_MINUTES),
+            "override_minutes": lifetime,
+            "effective_minutes": (lifetime if lifetime is not None
+                                  else int(config.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)),
+            "source": "database" if lifetime is not None else "environment",
+            "env_var": "JWT_ACCESS_TOKEN_EXPIRE_MINUTES",
+        },
+        "sessions": sessions,
+    }
+
+
+@zagros_admin_router.post("/security/credentials")
+async def change_own_credentials(body: dict, request: Request,
+                                 runtime=Depends(get_runtime)):
+    """Change your own username and/or password.
+
+    The current password is required: a stolen session must not be enough to
+    lock the real owner out of their own panel.
+    """
+    from app.db import crud
+    from app.models.admin import AdminModify
+
+    username = _current_admin_username(request)
+    data = dict(body or {})
+    current = str(data.get("current_password") or "")
+    new_username = (data.get("username") or "").strip() or None
+    new_password = (data.get("password") or "").strip() or None
+    if not current:
+        raise HTTPException(400, "the current password is required")
+    if not new_username and not new_password:
+        raise HTTPException(400, "nothing to change")
+
+    def _apply() -> dict:
+        with _legacy_session() as db:
+            admin = crud.get_admin(db, username)
+            if admin is None:
+                raise HTTPException(404, "admin not found")
+            if not admin.verify_password(current):
+                raise HTTPException(403, "the current password is incorrect")
+            if new_username and new_username != admin.username:
+                if crud.get_admin(db, new_username) is not None:
+                    raise HTTPException(409, "that username is already taken")
+                if len(new_username) < 3:
+                    raise HTTPException(400, "username must be at least 3 characters")
+            modified = AdminModify(
+                **({"username": new_username} if new_username else {}),
+                **({"password": new_password} if new_password else {}),
+                is_sudo=admin.is_sudo,
+            )
+            updated = crud.update_admin(db, admin, modified)
+            return {"username": updated.username,
+                    "password_changed": bool(new_password),
+                    "username_changed": bool(new_username)}
+
+    result = await asyncio.to_thread(_apply)
+    _audit(runtime, "security.credentials.changed", result["username"], request=request)
+    # Anything already issued now describes a username that no longer exists.
+    return {**result,
+            "note": "other sessions keep working until their token expires"}
+
+
+@zagros_admin_router.get("/security/sessions")
+async def list_security_sessions(runtime=Depends(get_runtime)):
+    sessions = await asyncio.to_thread(_list_sessions, runtime)
+    return {"sessions": sessions}
+
+
+@zagros_admin_router.delete("/security/sessions/{token_hash}")
+async def revoke_security_session(token_hash: str, request: Request,
+                                  runtime=Depends(get_runtime)):
+    """Revoke one client session immediately."""
+    record = await runtime.refresh_tokens.get(token_hash)
+    if record is None:
+        raise HTTPException(404, "session not found")
+    await runtime.refresh_tokens.revoke(token_hash)
+    _audit(runtime, "security.session.revoked", token_hash, request=request)
+    return {"revoked": token_hash}
+
+
+@zagros_admin_router.put("/security/token-lifetime")
+async def set_token_lifetime(body: dict, request: Request,
+                             runtime=Depends(get_runtime)):
+    """Override ``JWT_ACCESS_TOKEN_EXPIRE_MINUTES`` without editing .env.
+
+    ``null`` (or a missing value) removes the override and falls back to the
+    environment. ``0`` means tokens never expire.
+    """
+    from app.platform.settings_kv import save as kv_save
+
+    value = (body or {}).get("expire_minutes", None)
+    if value is None:
+        minutes = None
+    else:
+        try:
+            minutes = int(value)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(422, "expire_minutes must be an integer") from exc
+        if minutes < 0:
+            raise HTTPException(422, "expire_minutes cannot be negative")
+    saved = await asyncio.to_thread(kv_save, runtime.session_factory,
+                                    SECURITY_SETTINGS_KEY,
+                                    {"token_expire_minutes": minutes})
+    _audit(runtime, "security.token_lifetime", str(minutes), request=request)
+    return {"override_minutes": saved.get("token_expire_minutes"),
+            "source": "database" if minutes is not None else "environment"}
+
+
+def _list_sessions(runtime) -> list[dict]:
+    """Live subscriber sessions — the revocable credentials the panel holds.
+
+    Admin sign-ins are stateless JWTs (nothing to revoke server-side), so what
+    the Security tab can actually end is a client session.
+    """
+    from sqlalchemy import desc, select
+
+    from app.persistence.models import RefreshTokenModel, UserModel
+
+    def _sync() -> list[dict]:
+        with runtime.session_factory() as session:
+            rows = session.execute(
+                select(RefreshTokenModel, UserModel.username)
+                .join(UserModel, UserModel.id == RefreshTokenModel.user_id)
+                .order_by(desc(RefreshTokenModel.created_at)).limit(200)).all()
+            return [{
+                "token_hash": row.RefreshTokenModel.token_hash,
+                "user_id": row.RefreshTokenModel.user_id,
+                "username": row.username,
+                "created_at": _iso(row.RefreshTokenModel.created_at),
+                "expires_at": _iso(row.RefreshTokenModel.expires_at),
+                "revoked": bool(getattr(row.RefreshTokenModel, "revoked", False)),
+                "user_agent": getattr(row.RefreshTokenModel, "user_agent", None),
+            } for row in rows]
+
+    try:
+        return _sync()
+    except Exception as exc:  # noqa: BLE001 - the panel must still answer
+        logger.error(f"security: could not list sessions - {exc}")
+        return []
+
+
+def _iso(value) -> str | None:
+    return value.isoformat() if value is not None else None

@@ -3,14 +3,12 @@ from typing import Optional
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from passlib.context import CryptContext
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from app.db import Session, crud, get_db
 from app.utils.jwt import get_admin_payload
+from app.utils.passwords import pwd_context  # noqa: F401  (re-exported)
 from config import SUDOERS
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/admin/token")  # Admin view url
 
 

@@ -20,6 +20,7 @@ import logging
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.models.proxy import ProxyTypes
 from app.models.user import UserStatus
@@ -64,6 +65,15 @@ def _coerce_status(raw: Any) -> UserStatus:
         return UserStatus.active
 
 
+VALID_RESET_STRATEGIES = frozenset({"no_reset", "day", "week", "month", "year"})
+
+
+def _coerce_strategy(raw: Any) -> str:
+    """An unrecognised reset strategy must not become a failed INSERT."""
+    value = str(raw or "no_reset").strip().lower()
+    return value if value in VALID_RESET_STRATEGIES else "no_reset"
+
+
 def _as_int(value: Any) -> int | None:
     try:
         return int(value) if value is not None else None
@@ -83,17 +93,23 @@ def import_users(snapshot: Any, session_factory, *, admin_id: int | None = None,
 
     report: dict[str, Any] = {
         "created": 0, "skipped_existing": 0, "proxies_created": 0,
-        "proxies_unsupported": 0, "unsupported_protocols": [], "warnings": [],
+        "proxies_unsupported": 0, "unsupported_protocols": [], "conflicts": [],
+        "warnings": [],
     }
     proxy_types = {p.value: p for p in ProxyTypes}
 
     with session_factory() as session:
-        existing = {name for (name,) in session.execute(select(User.username)).all()}
+        # The username column is NOCASE-unique, so "Admin" and "admin" are the
+        # same name here. Comparing case-sensitively let a 3x-ui "admin" through
+        # on top of a Marzban "Admin" and the INSERT failed with a UNIQUE
+        # violation — which aborted the whole import with a 500.
+        existing = {str(name).lower() for (name,)
+                    in session.execute(select(User.username)).all()}
         for entry in snapshot.users:
             username = str(entry.get("username") or "").strip()
             if not username:
                 continue
-            if username in existing:
+            if username.lower() in existing:
                 report["skipped_existing"] += 1
                 continue
 
@@ -109,7 +125,7 @@ def import_users(snapshot: Any, session_factory, *, admin_id: int | None = None,
             if dry_run:
                 report["created"] += 1
                 report["proxies_created"] += len(usable)
-                existing.add(username)
+                existing.add(username.lower())
                 continue
 
             user = User(
@@ -117,7 +133,8 @@ def import_users(snapshot: Any, session_factory, *, admin_id: int | None = None,
                 status=_coerce_status(entry.get("status")),
                 used_traffic=_as_int(entry.get("used_traffic")) or 0,
                 data_limit=_as_int(entry.get("data_limit")),
-                data_limit_reset_strategy=entry.get("data_limit_reset_strategy") or "no_reset",
+                data_limit_reset_strategy=_coerce_strategy(
+                    entry.get("data_limit_reset_strategy")),
                 expire=_as_int(entry.get("expire")),
                 device_limit=_as_int(entry.get("device_limit")),
                 download_limit_mbps=_as_int(entry.get("download_limit_mbps")) or 0,
@@ -132,11 +149,16 @@ def import_users(snapshot: Any, session_factory, *, admin_id: int | None = None,
                 ))
                 report["proxies_created"] += 1
             session.add(user)
-            existing.add(username)
-            report["created"] += 1
-
-        if not dry_run:
-            session.commit()
+            try:
+                # One row per commit: a single rejected username must not take
+                # the other three hundred down with it.
+                session.commit()
+                existing.add(username.lower())
+                report["created"] += 1
+            except IntegrityError:
+                session.rollback()
+                report["skipped_existing"] += 1
+                report["conflicts"].append(username)
 
     if report["proxies_unsupported"]:
         report["warnings"].append(
@@ -146,5 +168,9 @@ def import_users(snapshot: Any, session_factory, *, admin_id: int | None = None,
     if report["skipped_existing"]:
         report["warnings"].append(
             f"{report['skipped_existing']} user(s) already existed and were left alone.")
+    if report["conflicts"]:
+        report["warnings"].append(
+            f"{len(report['conflicts'])} user(s) could not be stored "
+            f"({', '.join(report['conflicts'][:6])}) — the rest were imported.")
     logger.info("legacy import: %s", {k: v for k, v in report.items() if isinstance(v, int)})
     return report

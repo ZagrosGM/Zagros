@@ -10,6 +10,25 @@ multi-core platform line.
 
 ---
 
+## [1.0.0-alpha.9.4.4] — 2026-09-01 — one bad name must not cost 338 users
+
+Importing 3x-ui on top of Marzban failed with a UNIQUE violation and a 500.
+The username column is NOCASE-unique, so the 3x-ui client `Admin` (which
+normalises to `admin`) is the same name as the Marzban user `Admin` — but the
+duplicate check compared names case-sensitively, and the INSERT was inside one
+batch commit, so the single rejected row took the whole import down with it.
+
+### Fixed
+
+* Usernames are compared the way the database compares them (case-insensitive),
+  against both the existing rows and the batch being imported.
+* Each user is committed on its own: a name that cannot be stored costs that
+  one user and is reported, instead of aborting the other three hundred.
+* An unrecognised data-limit reset strategy falls back to `no_reset` rather
+  than failing the insert.
+
+---
+
 ## [1.0.0-alpha.9.4.3] — 2026-09-01 — the user list stays reachable
 
 9.4.2 put imported users into the panel's user list. Verifying that live

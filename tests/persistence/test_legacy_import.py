@@ -173,3 +173,37 @@ def test_settings_stored_as_json_text_still_import(panel_db):
         proxy = session.query(User).filter_by(username="textual").one().proxies[0]
         assert isinstance(proxy.settings, dict), type(proxy.settings)
         assert proxy.settings["id"] == "uuid-1"
+
+
+def test_a_username_that_differs_only_in_case_is_not_duplicated(panel_db):
+    """The username column is NOCASE-unique; the check has to be too.
+
+    A Marzban 'Admin' followed by a 3x-ui 'admin' is the same user. Inserting
+    the second raised UNIQUE and aborted the entire import with a 500 — so
+    338 imported users were lost over one name.
+    """
+    panel_db, import_users, _ = panel_db
+    import_users(_snapshot([_user(username="Admin")]), panel_db)
+    second = import_users(_snapshot([_user(username="admin")]), panel_db)
+    assert second["created"] == 0
+    assert second["skipped_existing"] == 1
+    with panel_db() as session:
+        from app.db.models import User
+
+        assert session.query(User).count() == 1
+
+
+def test_one_rejected_user_does_not_abort_the_rest(panel_db):
+    """A conflict costs that user, not the whole import."""
+    panel_db, import_users, _ = panel_db
+    import_users(_snapshot([_user(username="twin")]), panel_db)
+    report = import_users(
+        _snapshot([_user(id=1, username="twin"), _user(id=2, username="second"),
+                   _user(id=3, username="third")]), panel_db)
+    assert report["created"] == 2
+    assert report["skipped_existing"] == 1
+    with panel_db() as session:
+        from app.db.models import User
+
+        assert {u.username for u in session.query(User).all()} == {
+            "twin", "second", "third"}

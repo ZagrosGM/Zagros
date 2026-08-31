@@ -14,8 +14,18 @@ from config import JWT_ACCESS_TOKEN_EXPIRE_MINUTES
 @lru_cache(maxsize=None)
 def get_secret_key():
     from app.db import GetDB, get_jwt_secret_key
+
     with GetDB() as db:
-        return get_jwt_secret_key(db)
+        secret = get_jwt_secret_key(db)
+    if not secret:
+        # The init_jwt_table migration seeds this row. Inventing a secret
+        # here would silently invalidate every token already issued, so the
+        # honest move is to say what is wrong and how to fix it.
+        raise RuntimeError(
+            "JWT secret is missing from the database — run the migrations "
+            "(revision 'init_jwt_table' seeds it) before issuing or "
+            "verifying tokens")
+    return secret
 
 
 def create_admin_token(username: str, is_sudo=False) -> str:

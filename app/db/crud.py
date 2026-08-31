@@ -1058,7 +1058,7 @@ def get_system_usage(db: Session) -> System:
     return db.query(System).first()
 
 
-def get_jwt_secret_key(db: Session) -> str:
+def get_jwt_secret_key(db: Session) -> str | None:
     """
     Retrieves the JWT secret key.
 
@@ -1066,9 +1066,13 @@ def get_jwt_secret_key(db: Session) -> str:
         db (Session): Database session.
 
     Returns:
-        str: JWT secret key.
+        str | None: JWT secret key, or ``None`` when the row has not been
+        seeded yet (the ``init_jwt_table`` migration inserts it). Returning
+        ``None`` instead of dereferencing it lets the caller explain what to
+        do, instead of dying on an 'NoneType has no attribute' traceback.
     """
-    return db.query(JWT).first().secret_key
+    row = db.query(JWT).first()
+    return None if row is None else row.secret_key
 
 
 def get_tls_certificate(db: Session) -> TLS:

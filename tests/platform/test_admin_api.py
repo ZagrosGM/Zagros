@@ -52,6 +52,24 @@ def _migrate(env: dict[str, str]) -> None:
     assert r.returncode == 0, f"alembic upgrade failed:\n{r.stderr}"
 
 
+def _ensure_jwt_secret() -> None:
+    """Seed the legacy JWT row the way the ``init_jwt_table`` migration does.
+
+    This fixture runs the PLATFORM migration set only, so the legacy store can
+    come up without the row that production always has. Anything that issues
+    or verifies a token then failed — first as an 'NoneType has no attribute
+    secret_key' traceback, and now as an explicit error. Seed it here so the
+    fixture matches a migrated deployment.
+    """
+    from app.db import SessionLocal
+    from app.db.models import JWT
+
+    with SessionLocal() as db:
+        if db.query(JWT).first() is None:
+            db.add(JWT(id=1, secret_key=os.urandom(32).hex()))
+            db.commit()
+
+
 def _register_fake_drivers() -> tuple[str, str]:
     """Two minimal REAL drivers through the real registry: a plain core and
     one with routing + a pure translator (for dry-preview tests)."""
@@ -148,6 +166,7 @@ def stack(tmp_path_factory):
     _app_warm.app  # noqa: B018 - deliberate attribute touch to force warm-up
 
     plain_id, routing_id = _register_fake_drivers()
+    _ensure_jwt_secret()
 
     from app.models.admin import Admin
     from app.platform import admin_api  # noqa: F401 - registers endpoints

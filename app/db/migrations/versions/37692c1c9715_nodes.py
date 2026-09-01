@@ -21,7 +21,9 @@ def upgrade() -> None:
     op.create_table('nodes',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('name', sa.String(length=256, collation=(
-        'NOCASE' if op.get_bind().engine.name == 'sqlite' else ''
+        # Only SQLite understands NOCASE; an empty string would render as a
+        # bare "COLLATE" clause, so the other dialects must get None.
+        'NOCASE' if op.get_bind().engine.name == 'sqlite' else None
         )), nullable=True),
     sa.Column('address', sa.String(length=256), nullable=False),
     sa.Column('port', sa.Integer(), nullable=False),

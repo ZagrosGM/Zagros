@@ -23,6 +23,20 @@ from sqlalchemy.sql.expression import select, text
 from app import xray
 from app.db.base import Base
 from app.models.node import NodeStatus
+
+
+def case_insensitive_string(length: int) -> String:
+    """A VARCHAR that compares case-insensitively on every supported backend.
+
+    SQLite needs an explicit COLLATE NOCASE. MySQL and MariaDB already default
+    to a case-insensitive collation (utf8mb4_..._ci), and PostgreSQL rejects
+    NOCASE outright, so those dialects take a plain VARCHAR -- emitting the
+    SQLite spelling against them fails with "Unknown collation: 'NOCASE'".
+    """
+    return String(length, collation="NOCASE").with_variant(
+        String(length), "mysql", "mariadb", "postgresql",
+    )
+
 from app.models.proxy import (
     ProxyHostALPN,
     ProxyHostFingerprint,
@@ -78,7 +92,7 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True)
-    username = Column(String(34, collation='NOCASE'), unique=True, index=True)
+    username = Column(case_insensitive_string(34), unique=True, index=True)
     proxies = relationship("Proxy", back_populates="user", cascade="all, delete-orphan")
     status = Column(Enum(UserStatus), nullable=False, default=UserStatus.active)
     used_traffic = Column(BigInteger, default=0)
@@ -330,7 +344,7 @@ class Node(Base):
     __tablename__ = "nodes"
 
     id = Column(Integer, primary_key=True)
-    name = Column(String(256, collation='NOCASE'), unique=True)
+    name = Column(case_insensitive_string(256), unique=True)
     address = Column(String(256), unique=False, nullable=False)
     port = Column(Integer, unique=False, nullable=False)
     api_port = Column(Integer, unique=False, nullable=False)

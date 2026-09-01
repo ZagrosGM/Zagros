@@ -96,7 +96,7 @@ export default function Inbounds() {
         <h1 className="me-auto flex items-center gap-2 text-lg font-bold tracking-tight">
           <Waypoints size={18} className="text-brand" />{t("nav.inbounds")}
         </h1>
-        <Field label="core">
+        <Field label={t("core")}>
           <Select value={effectiveCore} onChange={(e) => setCoreId(e.target.value)} className="w-40">
             {(cores.data?.cores ?? []).map((c) => <option key={c.id} value={c.id}>{c.id}</option>)}
             {!cores.data?.cores?.length && <option value="">—</option>}
@@ -105,21 +105,21 @@ export default function Inbounds() {
         <Button size="sm" onClick={() => setWizard({ mode: "create" })}
           disabled={!effectiveCore || !wizardCapable}
           title={wizardCapable ? undefined : "this core does not expose studio inbounds — the wizard is unavailable for it"}>
-          <Wand2 size={13} /> add inbound</Button>
+          <Wand2 size={13} />{t("add inbound")}</Button>
       </div>
 
       {!effectiveCore ? (
-        <Card><EmptyState title="Install a core first" hint="Inbounds live inside a core's configuration document." /></Card>
+        <Card><EmptyState title={t("Install a core first")} hint={t("Inbounds live inside a core's configuration document.")} /></Card>
       ) : raw.isLoading ? (
         <Skeleton className="h-64" />
       ) : inbounds.length === 0 ? (
         <Card>
-          <EmptyState title="No inbounds on this core"
+          <EmptyState title={t("No inbounds on this core")}
             hint={wizardCapable
               ? "Run the wizard for a protocol-specific, validated creation flow — no hand-written config."
               : "This core does not expose studio inbounds, so no wizard is offered for it."}
             action={wizardCapable
-              ? <Button size="sm" onClick={() => setWizard({ mode: "create" })}><Wand2 size={13} /> launch wizard</Button>
+              ? <Button size="sm" onClick={() => setWizard({ mode: "create" })}><Wand2 size={13} />{t("launch wizard")}</Button>
               : undefined} />
         </Card>
       ) : (
@@ -140,19 +140,19 @@ export default function Inbounds() {
               <div className="flex shrink-0 flex-col gap-0.5">
                 {wizardCapable && (
                   <>
-                    <Button variant="ghost" size="icon" aria-label={`edit ${ib.tag}`}
-                      title="edit this inbound through the wizard"
+                    <Button variant="ghost" size="icon" aria-label={t("edit {tag}", { tag: ib.tag })}
+                      title={t("edit this inbound through the wizard")}
                       onClick={() => setWizard({ mode: "edit", row: ib })}>
                       <Pencil size={13} />
                     </Button>
-                    <Button variant="ghost" size="icon" aria-label={`clone ${ib.tag}`}
-                      title="clone into a new inbound"
+                    <Button variant="ghost" size="icon" aria-label={t("clone {tag}", { tag: ib.tag })}
+                      title={t("clone into a new inbound")}
                       onClick={() => setWizard({ mode: "clone", row: ib })}>
                       <Copy size={13} />
                     </Button>
                   </>
                 )}
-                <Button variant="ghost" size="icon" aria-label={`remove ${ib.tag}`} onClick={() => setDeleteFor(ib)}>
+                <Button variant="ghost" size="icon" aria-label={t("remove {tag}", { tag: ib.tag })} onClick={() => setDeleteFor(ib)}>
                   <Trash2 size={14} />
                 </Button>
               </div>
@@ -161,7 +161,7 @@ export default function Inbounds() {
           {wizardCapable && (
             <button onClick={() => setWizard({ mode: "create" })}
               className="grid min-h-[92px] place-items-center rounded-2xl border border-dashed border-border-strong text-content-3 transition-colors hover:border-brand hover:text-brand">
-              <span className="flex items-center gap-2 text-sm"><Plus size={16} /> add inbound</span>
+              <span className="flex items-center gap-2 text-sm"><Plus size={16} />{t("add inbound")}</span>
             </button>
           )}
         </div>
@@ -496,7 +496,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
           {/* the «import from URL» path is gone — the
               wizard is authored from the blueprint alone (the endpoint and
               its module were removed server-side too). */}
-          <div className="flex overflow-hidden rounded-lg border border-border" role="group" aria-label="wizard mode">
+          <div className="flex overflow-hidden rounded-lg border border-border" role="group" aria-label={t("wizard mode")}>
             {(["simple", "advanced"] as const).map((m) => (
               <button key={m} onClick={() => setAdvanced(m === "advanced")}
                 className={`px-2.5 py-1 text-[11px] font-medium transition-colors ${
@@ -540,8 +540,8 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
         <div className="space-y-4">
           {effProto?.security_class === "legacy_insecure" && (
             <div className="rounded-xl border border-danger/40 bg-danger-soft p-3 text-xs text-danger">
-              <p className="font-semibold">Legacy / Insecure</p>
-              <p className="mt-1">PPTP has known cryptographic weaknesses. Both risk acceptance and Internet-exposure confirmation are required and validated again by the backend.</p>
+              <p className="font-semibold">{t("Legacy / Insecure")}</p>
+              <p className="mt-1">{t("PPTP has known cryptographic weaknesses. Both risk acceptance and Internet-exposure confirmation are required and validated again by the backend.")}</p>
             </div>
           )}
           <div className="flex flex-wrap items-center gap-1.5 text-[11.5px] text-content-2">
@@ -615,22 +615,22 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
               className="grid gap-4 rounded-xl border border-border p-3.5 sm:grid-cols-3">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-content-3 sm:col-span-3">
                 {titles[sec]}
-                {!advanced && sec !== "general" && <span className="ms-1.5 normal-case tracking-normal">(showing only what needs a decision — switch to advanced for the rest)</span>}
+                {!advanced && sec !== "general" && <span className="ms-1.5 normal-case tracking-normal">{t("(showing only what needs a decision — switch to advanced for the rest)")}</span>}
               </p>
               {sec === "certificate" && (
-                <Field label="certificate source" required
-                  hint="exactly ONE source is applied — stored pairs and paths are validated (PEM + match + expiry) server-side">
+                <Field label={t("certificate source")} required
+                  hint={t("exactly ONE source is applied — stored pairs and paths are validated (PEM + match + expiry) server-side")}>
                   <Select value={certMode}
                     onChange={(e) => setCertMode(e.target.value as "ref" | "paste" | "path" | "auto")}>
-                    <option value="auto">auto-generate (self-signed, runtime-only — not added to Certificates)</option>
-                    <option value="ref">stored certificate (from the Certificates registry)</option>
-                    <option value="paste">paste PEM content</option>
-                    <option value="path">file paths on this server</option>
+                    <option value="auto">{t("auto-generate (self-signed, runtime-only — not added to Certificates)")}</option>
+                    <option value="ref">{t("stored certificate (from the Certificates registry)")}</option>
+                    <option value="paste">{t("paste PEM content")}</option>
+                    <option value="path">{t("file paths on this server")}</option>
                   </Select>
                 </Field>
               )}
               {sec === "certificate" && certMode === "ref" && (
-                <Field label="stored certificate" required
+                <Field label={t("stored certificate")} required
                   hint={!certRef ? "pick a managed certificate (or switch the source mode)" : undefined}>
                   <Select value={certRef} onChange={(e) => setCertRef(e.target.value)}>
                     <option value="">— choose a managed certificate —</option>
@@ -681,9 +681,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
                               rd.onload = () => setFields((cur) => ({ ...cur, [f.key]: String(rd.result ?? "") }));
                               rd.readAsText(file);
                               e.target.value = "";
-                            }} />
-                          or choose a file to paste its content
-                        </label>
+                            }} />{t("or choose a file to paste its content")}</label>
                       )}
                     </div>
                   ) : f.type === "multiselect" ? (
@@ -708,8 +706,8 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
                         onChange={(e) => setFields({ ...fields, [f.key]: e.target.value })}
                         onBlur={mark} dir="ltr" invalid={showErr} />
                       <Button type="button" variant="secondary" size="icon"
-                        aria-label="copy IPsec pre-shared key"
-                        title="copy IPsec pre-shared key"
+                        aria-label={t("copy IPsec pre-shared key")}
+                        title={t("copy IPsec pre-shared key")}
                         onClick={async () => {
                           const value = String(fields[f.key] ?? f.default ?? "");
                           (await copyText(value)) ? toast.ok("pre-shared key copied") : toast.error(t("common.error"));
@@ -736,8 +734,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
               <b>{effProto?.label}</b> over <b>{effTransport?.label}</b> with <b>{effSecurity?.label}</b> — inbound{" "}
               <code className="font-mono text-[11px]" dir="ltr">{spec.tag}</code> on{" "}
               <code className="font-mono text-[11px]" dir="ltr">{listen}:{port}</code> will be validated against the{" "}
-              <b>{coreId}</b> schema and materialized into its configuration. New users need it granted in their core access.
-            </p>
+              <b>{coreId}</b>{t("schema and materialized into its configuration. New users need it granted in their core access.")}</p>
           </div>
           {/* item 6 Preview — authoritative server-side verdict on the EXACT
               patch create would apply; the button stays enabled until the
@@ -748,8 +745,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
             </p>
           ) : preview.isPending ? (
             <p className="flex items-center gap-1.5 rounded-xl border border-border px-3 py-2 text-[11.5px] text-content-3">
-              <Loader2 size={13} className="animate-spin" /> server-side preview of the exact patch…
-            </p>
+              <Loader2 size={13} className="animate-spin" />{t("server-side preview of the exact patch…")}</p>
           ) : preview.isError ? (
             <div className="flex items-center justify-between gap-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-[11.5px] text-danger">
               <span>{preview.error instanceof ApiError ? preview.error.message : "preview request failed"}</span>
@@ -758,8 +754,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
           ) : preview.data?.valid ? (
             <div className="rounded-xl border border-ok/30 bg-ok-soft px-3 py-2 text-[11.5px]">
               <p className="flex items-center gap-1.5 font-medium text-ok">
-                <CheckCircle2 size={13} /> server validation passed — this exact patch will be applied:
-              </p>
+                <CheckCircle2 size={13} />{t("server validation passed — this exact patch will be applied:")}</p>
               {preview.data.diff && (
                 <details className="mt-1.5">
                   <summary className="cursor-pointer text-content-3 hover:text-content-2">view diff</summary>
@@ -769,7 +764,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
             </div>
           ) : preview.data ? (
             <div className="rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-[11.5px] text-danger">
-              <p className="flex items-center gap-1.5 font-medium"><XCircle size={13} /> server validation rejected this inbound:</p>
+              <p className="flex items-center gap-1.5 font-medium"><XCircle size={13} />{t("server validation rejected this inbound:")}</p>
               <ul className="mt-1 list-inside list-disc font-mono text-[10.5px]" dir="ltr">
                 {preview.data.errors.map((e) => <li key={e}>{e}</li>)}
               </ul>

@@ -60,18 +60,15 @@ export default function Support() {
         <h1 className="flex items-center gap-2 text-xl font-bold tracking-tight">
           <LifeBuoy size={22} className="text-brand" /> {t("nav.support")}
         </h1>
-        <p className="mt-1 text-xs text-content-3">
-          Submit bug reports or feature requests directly to support.
-        </p>
+        <p className="mt-1 text-xs text-content-3">{t("Submit bug reports or feature requests directly to support.")}</p>
       </div>
 
       {successTicketId && (
         <Card className="p-4 border-ok/40 bg-ok-soft/30 flex items-start gap-3">
           <CheckCircle2 size={20} className="text-ok shrink-0 mt-0.5" />
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-semibold text-content">Ticket Submitted Successfully</h3>
-            <p className="text-xs text-content-2 mt-1">
-              Your ticket ID is <code className="font-mono font-bold text-ok">{successTicketId}</code>.
+            <h3 className="text-sm font-semibold text-content">{t("Ticket Submitted Successfully")}</h3>
+            <p className="text-xs text-content-2 mt-1">{t("Your ticket ID is")}<code className="font-mono font-bold text-ok">{successTicketId}</code>.
               Our support team has been notified.
             </p>
           </div>
@@ -83,9 +80,7 @@ export default function Support() {
 
       <Card className="p-6 space-y-5">
         <div>
-          <label className="block text-xs font-semibold uppercase tracking-wider text-content-3 mb-2">
-            Select Request Type *
-          </label>
+          <label className="block text-xs font-semibold uppercase tracking-wider text-content-3 mb-2">{t("Select Request Type *")}</label>
           <div className="grid grid-cols-2 gap-3">
             <button
               type="button"
@@ -99,8 +94,8 @@ export default function Support() {
             >
               <Bug size={20} className={ticketType === "bug" ? "text-brand" : "text-content-3"} />
               <div>
-                <span className="block text-sm font-medium">Bug Report</span>
-                <span className="text-[11px] text-content-3">Report an issue or unexpected error</span>
+                <span className="block text-sm font-medium">{t("Bug Report")}</span>
+                <span className="text-[11px] text-content-3">{t("Report an issue or unexpected error")}</span>
               </div>
             </button>
 
@@ -116,35 +111,35 @@ export default function Support() {
             >
               <Lightbulb size={20} className={ticketType === "feature" ? "text-brand" : "text-content-3"} />
               <div>
-                <span className="block text-sm font-medium">Feature Request</span>
-                <span className="text-[11px] text-content-3">Suggest an improvement or new feature</span>
+                <span className="block text-sm font-medium">{t("Feature Request")}</span>
+                <span className="text-[11px] text-content-3">{t("Suggest an improvement or new feature")}</span>
               </div>
             </button>
           </div>
         </div>
 
-        <Field label="Subject" required hint="Brief summary of your request">
+        <Field label={t("Subject")} required hint={t("Brief summary of your request")}>
           <Input
             value={subject}
             onChange={(e) => setSubject(e.target.value)}
-            placeholder={ticketType === "bug" ? "e.g., Connection fails on WireGuard inbound" : "e.g., Add Dark Mode toggle for client portal"}
+            placeholder={ticketType === "bug" ? t("e.g., Connection fails on WireGuard inbound") : t("e.g., Add Dark Mode toggle for client portal")}
           />
         </Field>
 
-        <Field label="Message" required hint="Provide detailed explanation and steps if applicable">
+        <Field label={t("Message")} required hint={t("Provide detailed explanation and steps if applicable")}>
           <Textarea
             rows={6}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
-            placeholder={ticketType === "bug" ? "Describe what happened, what was expected, and error messages if any..." : "Describe the feature and how it would help..."}
+            placeholder={ticketType === "bug" ? t("Describe what happened, what was expected, and error messages if any...") : t("Describe the feature and how it would help...")}
           />
         </Field>
 
-        <Field label="Attachments (Optional)" hint="Images, log files, or documents (max 10MB)">
+        <Field label={t("Attachments (Optional)")} hint={t("Images, log files, or documents (max 10MB)")}>
           <div className="flex items-center gap-3">
             <label className="cursor-pointer inline-flex items-center gap-2 rounded-xl border border-border bg-surface-2 px-3.5 py-2 text-xs font-medium text-content-2 transition-colors hover:bg-surface-3 hover:text-content">
               <Paperclip size={15} />
-              <span>{attachment ? "Change File" : "Choose File"}</span>
+              <span>{attachment ? t("Change File") : t("Choose File")}</span>
               <input
                 type="file"
                 className="hidden"
@@ -166,7 +161,7 @@ export default function Support() {
                 </button>
               </div>
             ) : (
-              <span className="text-xs text-content-3">No file selected</span>
+              <span className="text-xs text-content-3">{t("No file selected")}</span>
             )}
           </div>
         </Field>
@@ -174,7 +169,7 @@ export default function Support() {
         <div className="pt-2 flex items-center justify-between">
           <div className="flex items-center gap-1.5 text-[11px] text-content-3">
             <ShieldAlert size={14} className="text-ok" />
-            <span>Only your submitted ticket details are sent. No user lists or secrets are shared.</span>
+            <span>{t("Only your submitted ticket details are sent. No user lists or secrets are shared.")}</span>
           </div>
 
           <Button
@@ -183,8 +178,7 @@ export default function Support() {
             disabled={!subject.trim() || !message.trim()}
             className="min-w-[140px]"
           >
-            <Send size={15} /> Submit Ticket
-          </Button>
+            <Send size={15} />{t("Submit Ticket")}</Button>
         </div>
       </Card>
     </div>

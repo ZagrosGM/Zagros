@@ -114,8 +114,8 @@ export default function Admins() {
         return (
           <div className="w-full">
             <div className="mb-1 flex justify-between gap-2 text-[11px] tabular-nums">
-              <span title="consumed">{formatBytes(used, digits)}</span>
-              <span className="text-content-3" title="consumption cap">
+              <span title={t("consumed")}>{formatBytes(used, digits)}</span>
+              <span className="text-content-3" title={t("consumption cap")}>
                 {a.traffic_consume_limit ? formatBytes(a.traffic_consume_limit, digits) : "∞"}
               </span>
             </div>
@@ -138,7 +138,7 @@ export default function Admins() {
       id: "actions", header: "", width: "44px",
       cell: (a) => (
         <div className="relative" onClick={(e) => e.stopPropagation()}>
-          <button aria-label="actions"
+          <button aria-label={t("actions")}
             onClick={(e) => setMenu((m) => (m?.admin.username === a.username ? null : { admin: a, anchor: e.currentTarget }))}
             className="rounded-lg p-1.5 text-content-3 hover:bg-surface-3 hover:text-content">
             <MoreHorizontal size={16} />
@@ -156,9 +156,9 @@ export default function Admins() {
       {ma && (
         <>
           <MenuItem icon={<Pencil size={14} />} label={t("common.edit")} onClick={() => { setMenu(null); setDialog({ mode: "edit", admin: ma }); }} />
-          <MenuItem icon={<Ban size={14} />} label="disable all users" onClick={() => { setMenu(null); usersAction.mutate({ username: ma.username, action: "disable" }); }} />
-          <MenuItem icon={<Check size={14} />} label="activate all users" onClick={() => { setMenu(null); usersAction.mutate({ username: ma.username, action: "activate" }); }} />
-          <MenuItem icon={<Eraser size={14} />} label="reset usage counter" onClick={() => { setMenu(null); resetUsage.mutate(ma.username); }} />
+          <MenuItem icon={<Ban size={14} />} label={t("disable all users")} onClick={() => { setMenu(null); usersAction.mutate({ username: ma.username, action: "disable" }); }} />
+          <MenuItem icon={<Check size={14} />} label={t("activate all users")} onClick={() => { setMenu(null); usersAction.mutate({ username: ma.username, action: "activate" }); }} />
+          <MenuItem icon={<Eraser size={14} />} label={t("reset usage counter")} onClick={() => { setMenu(null); resetUsage.mutate(ma.username); }} />
           {!ma.is_sudo && (
             <>
               <div className="my-1 border-t border-border" />
@@ -196,8 +196,8 @@ export default function Admins() {
           loading={false}
           onRowClick={(a) => setDialog({ mode: "edit", admin: a })}
           empty={<EmptyState
-            title="No admins yet"
-            hint="Panel operators beyond the CLI bootstrap admin appear here."
+            title={t("No admins yet")}
+            hint={t("Panel operators beyond the CLI bootstrap admin appear here.")}
             action={<Button size="sm" onClick={() => setDialog({ mode: "create" })}><Plus size={14} />{t("admins.new")}</Button>} />}
         />
       )}
@@ -299,7 +299,7 @@ function AdminDialog({ mode, admin, onClose, onSaved }: {
     <Dialog
       open onClose={onClose}
       title={mode === "create" ? t("admins.new") : `${t("common.edit")} — ${admin?.username}`}
-      subtitle="governance caps are enforced instantly on the server — login, user creation and edits all respect them"
+      subtitle={t("governance caps are enforced instantly on the server — login, user creation and edits all respect them")}
       wide
       footer={
         <>
@@ -324,29 +324,29 @@ function AdminDialog({ mode, admin, onClose, onSaved }: {
           <Input type="number" value={form.telegram_id}
             onChange={(e) => setForm({ ...form, telegram_id: e.target.value })} />
         </Field>
-        <Field label="discord webhook">
+        <Field label={t("discord webhook")}>
           <Input value={form.discord_webhook} dir="ltr" placeholder="https://discord.com/api/webhooks/…"
             onChange={(e) => setForm({ ...form, discord_webhook: e.target.value })} />
         </Field>
 
         <div className="sm:col-span-2 mt-1 rounded-xl border border-border p-3.5">
-          <p className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-content-3">governance limits</p>
+          <p className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-content-3">{t("governance limits")}</p>
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label={t("admins.maxUsers")} hint="empty = unlimited — the admin can't create users past this cap">
+            <Field label={t("admins.maxUsers")} hint={t("empty = unlimited — the admin can't create users past this cap")}>
               <Input type="number" min="0" value={form.max_users}
                 onChange={(e) => setForm({ ...form, max_users: e.target.value })} />
             </Field>
-            <Field label={t("admins.expireAt")} hint="empty = never — after this date the admin can't log in or manage anything">
+            <Field label={t("admins.expireAt")} hint={t("empty = never — after this date the admin can't log in or manage anything")}>
               <Input type="date" value={form.expire_at}
                 onChange={(e) => setForm({ ...form, expire_at: e.target.value })} />
             </Field>
             <Field label={`${t("admins.allocLimit")} (GB)`}
-              hint="cap on the SUM of data limits this admin can grant (empty = unlimited)">
+              hint={t("cap on the SUM of data limits this admin can grant (empty = unlimited)")}>
               <Input type="number" min="0" step="0.1" value={form.traffic_alloc_limit_gb}
                 onChange={(e) => setForm({ ...form, traffic_alloc_limit_gb: e.target.value })} />
             </Field>
             <Field label={`${t("admins.consumeLimit")} (GB)`}
-              hint="cap on REAL consumed traffic — crossing it suspends all of the admin's users (never deletes)">
+              hint={t("cap on REAL consumed traffic — crossing it suspends all of the admin's users (never deletes)")}>
               <Input type="number" min="0" step="0.1" value={form.traffic_consume_limit_gb}
                 onChange={(e) => setForm({ ...form, traffic_consume_limit_gb: e.target.value })} />
             </Field>
@@ -354,9 +354,7 @@ function AdminDialog({ mode, admin, onClose, onSaved }: {
         </div>
 
         <label className="flex items-center gap-2.5 text-sm text-content-2">
-          <Switch checked={form.is_sudo} onChange={(v) => setForm({ ...form, is_sudo: v })} label="sudo" />
-          sudo — full panel access
-        </label>
+          <Switch checked={form.is_sudo} onChange={(v) => setForm({ ...form, is_sudo: v })} label="sudo" />{t("sudo — full panel access")}</label>
       </div>
       {error && <p role="alert" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
     </Dialog>

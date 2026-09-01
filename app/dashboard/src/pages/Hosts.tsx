@@ -189,7 +189,7 @@ export default function Hosts() {
           <ServerCog size={18} className="text-brand" />{t("hosts.title")}
         </h1>
         <Select value={effectiveCore} onChange={(e) => { setCoreId(e.target.value); setEdited(null); setDirty({}); }}
-          className="w-48" aria-label="core">
+          className="w-48" aria-label={t("core")}>
           {groups.map((g) => (
             <option key={g.core_id} value={g.core_id}>
               {g.name} ({g.core_id})
@@ -250,12 +250,12 @@ export default function Hosts() {
                           #{idx + 1} · {t("hosts.priority")}{idx === 0 ? ` — ${t("hosts.highest")}` : ""}
                         </span>
                         <div className="flex items-center gap-0.5">
-                          <Button variant="ghost" size="icon" aria-label="move up"
+                          <Button variant="ghost" size="icon" aria-label={t("move up")}
                             disabled={idx === 0}
                             onClick={() => move(tag, idx, -1)}>
                             <ChevronUp size={14} />
                           </Button>
-                          <Button variant="ghost" size="icon" aria-label="move down"
+                          <Button variant="ghost" size="icon" aria-label={t("move down")}
                             disabled={idx === rows.length - 1}
                             onClick={() => move(tag, idx, 1)}>
                             <ChevronDown size={14} />
@@ -308,7 +308,7 @@ export default function Hosts() {
                             onChange={(e) => update(tag, idx, { path: e.target.value })} />
                         </Field>)}
                         {ok.has("alpn") && (
-                        <Field label="ALPN">
+                        <Field label={t("ALPN")}>
                           <Select value={row.alpn}
                             onChange={(e) => update(tag, idx, { alpn: e.target.value })}>
                             {ALPN_OPTIONS.map((s) => <option key={s} value={s}>{s || "—"}</option>)}
@@ -344,11 +344,11 @@ export default function Hosts() {
                           onChange={(v) => update(tag, idx, { mux_enable: v })} />
                         <span className="-ms-3 text-[11.5px] text-content-2">mux</span></>)}
                         {ok.has("random_user_agent") && (<>
-                        <Switch checked={row.random_user_agent} label="random user-agent"
+                        <Switch checked={row.random_user_agent} label={t("random user-agent")}
                           onChange={(v) => update(tag, idx, { random_user_agent: v })} />
-                        <span className="-ms-3 text-[11.5px] text-content-2">random UA</span></>)}
+                        <span className="-ms-3 text-[11.5px] text-content-2">{t("random UA")}</span></>)}
                         {ok.has("use_sni_as_host") && (<>
-                        <Switch checked={row.use_sni_as_host} label="use sni as host"
+                        <Switch checked={row.use_sni_as_host} label={t("use sni as host")}
                           onChange={(v) => update(tag, idx, { use_sni_as_host: v })} />
                         <span className="-ms-3 text-[11.5px] text-content-2">SNI→Host</span></>)}
                         <Switch checked={row.is_disabled} label="disabled"

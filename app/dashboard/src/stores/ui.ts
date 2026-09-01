@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { setFormatLocale } from "../lib/format";
 
 export type Theme = "dark" | "light";
 export type Locale = "en" | "fa";
@@ -37,6 +38,7 @@ export const useUI = create<UiState>()(
 );
 
 export function applyUiState(theme: Theme, locale: Locale) {
+  setFormatLocale(locale);
   const root = document.documentElement;
   root.classList.toggle("dark", theme === "dark");
   root.classList.toggle("light", theme === "light");

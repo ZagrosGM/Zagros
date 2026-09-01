@@ -93,7 +93,7 @@ export default function AppLayout() {
           </div>
         )}
       </div>
-      <nav aria-label="Primary" className="flex-1 space-y-4 overflow-y-auto p-2.5">
+      <nav aria-label={t("Primary")} className="flex-1 space-y-4 overflow-y-auto p-2.5">
         {NAV.map((group) => (
           <div key={group.section}>
             {!sidebarCollapsed && (
@@ -164,7 +164,7 @@ export default function AppLayout() {
       <div className="flex min-w-0 flex-1 flex-col">
         {/* topbar */}
         <header className="glass z-20 flex h-16 shrink-0 items-center gap-3 border-b border-border px-4">
-          <button className="rounded-lg p-2 text-content-2 hover:bg-surface-2 lg:hidden" onClick={() => setMobileNav(true)} aria-label="Menu">
+          <button className="rounded-lg p-2 text-content-2 hover:bg-surface-2 lg:hidden" onClick={() => setMobileNav(true)} aria-label={t("Menu")}>
             <Menu size={18} />
           </button>
           <button

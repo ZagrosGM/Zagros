@@ -1,5 +1,6 @@
 // Command palette — Ctrl/⌘+K: jump anywhere, quick actions, searchable.
 import { AnimatePresence, motion } from "framer-motion";
+import { useT } from "../lib/i18n";
 import { ArrowRight, CornerDownLeft, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -30,6 +31,7 @@ export function useCommands(extra: Command[]): Command[] {
 export function CommandPalette({ open, onClose, commands }: {
   open: boolean; onClose: () => void; commands: Command[];
 }) {
+  const t = useT();
   const [q, setQ] = useState("");
   const [cursor, setCursor] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -76,7 +78,7 @@ export function CommandPalette({ open, onClose, commands }: {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -8, scale: 0.98, transition: { duration: 0.14 } }}
             className="glass relative w-full max-w-lg overflow-hidden rounded-2xl border border-border-strong shadow-pop"
-            role="dialog" aria-label="Command palette"
+            role="dialog" aria-label={t("Command palette")}
           >
             <div className="flex items-center gap-2.5 border-b border-border px-4">
               <Search size={16} className="shrink-0 text-content-3" />
@@ -84,13 +86,13 @@ export function CommandPalette({ open, onClose, commands }: {
                 ref={inputRef}
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
-                placeholder="Search everywhere…"
+                placeholder={t("Search everywhere…")}
                 className="h-12 w-full bg-transparent text-sm outline-none placeholder:text-content-3"
               />
               <span className="kbd">esc</span>
             </div>
             <div ref={listRef} className="max-h-[46vh] overflow-y-auto p-1.5">
-              {results.length === 0 && <p className="px-3 py-8 text-center text-xs text-content-3">No matches.</p>}
+              {results.length === 0 && <p className="px-3 py-8 text-center text-xs text-content-3">{t("No matches.")}</p>}
               {results.map((c, i) => {
                 const header = c.section && c.section !== lastSection ? (lastSection = c.section) : null;
                 return (

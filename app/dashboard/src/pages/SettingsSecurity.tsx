@@ -117,16 +117,16 @@ export default function SettingsSecurity() {
           subtitle={`signed in as ${state?.admin.username ?? "…"}`}
         />
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="current password" hint="required to change anything">
+          <Field label={t("current password")} hint={t("required to change anything")}>
             <Input type="password" value={current} onChange={(e) => setCurrent(e.target.value)} autoComplete="current-password" />
           </Field>
-          <Field label="new username" hint="leave empty to keep it">
+          <Field label={t("new username")} hint={t("leave empty to keep it")}>
             <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder={state?.admin.username} dir="ltr" autoComplete="username" />
           </Field>
-          <Field label="new password" hint="leave empty to keep it">
+          <Field label={t("new password")} hint={t("leave empty to keep it")}>
             <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
           </Field>
-          <Field label="repeat new password" hint={mismatch ? "passwords do not match" : undefined}>
+          <Field label={t("repeat new password")} hint={mismatch ? "passwords do not match" : undefined}>
             <Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
           </Field>
           <div className="sm:col-span-2">
@@ -135,8 +135,7 @@ export default function SettingsSecurity() {
               loading={changeCredentials.isPending}
               disabled={!current || mismatch || (!username.trim() && !password)}
             >
-              <Save size={14} />save changes
-            </Button>
+              <Save size={14} />{t("save changes")}</Button>
           </div>
         </div>
       </Card>
@@ -149,10 +148,10 @@ export default function SettingsSecurity() {
         {overview.isLoading ? <Skeleton className="h-32" /> : (
           <div className="space-y-3">
             <div className="flex items-center gap-2.5">
-              <Switch checked={overrideEnabled} onChange={setOverrideEnabled} label="override the environment value" />
-              <span className="text-sm text-content-2">override from the panel</span>
+              <Switch checked={overrideEnabled} onChange={setOverrideEnabled} label={t("override the environment value")} />
+              <span className="text-sm text-content-2">{t("override from the panel")}</span>
             </div>
-            <Field label="minutes (0 = never expires)" hint={overrideEnabled ? undefined : "environment value applies"}>
+            <Field label={t("minutes (0 = never expires)")} hint={overrideEnabled ? undefined : "environment value applies"}>
               <Input
                 type="number"
                 min={0}
@@ -167,22 +166,21 @@ export default function SettingsSecurity() {
               <Badge tone={state?.token.source === "database" ? "brand" : "muted"}>{state?.token.source}</Badge>
             </p>
             <Button variant="secondary" onClick={() => saveLifetime.mutate()} loading={saveLifetime.isPending}>
-              <Save size={14} />save token lifetime
-            </Button>
+              <Save size={14} />{t("save token lifetime")}</Button>
           </div>
         )}
       </Card>
 
       <Card className="lg:col-span-2">
-        <CardHeader title={t("settings.security.sessions")} subtitle="client sessions — revoking one ends it immediately" />
+        <CardHeader title={t("settings.security.sessions")} subtitle={t("client sessions — revoking one ends it immediately")} />
         {overview.isLoading ? <Skeleton className="h-40" /> : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-[12.5px]">
               <thead className="text-[10.5px] uppercase tracking-wide text-content-3">
                 <tr>
-                  <th className="py-2 pr-3">user</th>
+                  <th className="py-2 pr-3">{t("user")}</th>
                   <th className="py-2 pr-3">created</th>
-                  <th className="py-2 pr-3">last seen</th>
+                  <th className="py-2 pr-3">{t("last seen")}</th>
                   <th className="py-2 pr-3">user agent</th>
                   <th className="py-2 pr-3" />
                 </tr>

@@ -30,17 +30,17 @@ export default function Devices() {
 
   const cols = [
     {
-      id: "dev", header: "device", cell: (d: Device) => (
+      id: "dev", header: t("device"), cell: (d: Device) => (
         <div>
           <span className="font-medium">{d.name || d.device_id}</span>
           <span className="ms-2 text-[11px] text-content-3">{d.platform ?? ""}{d.app_version ? ` · v${d.app_version}` : ""}</span>
         </div>
       ),
     },
-    { id: "user", header: "user", cell: (d: Device) => <Badge tone="brand">{d.username ?? `#${d.user_id}`}</Badge> },
-    { id: "ip", header: "last ip", cell: (d: Device) => <code className="font-mono text-[11px]" dir="ltr">{d.last_ip ?? "—"}</code> },
-    { id: "core", header: "core", cell: (d: Device) => <span className="text-[12px] text-content-2">{d.current_core ?? (d.cores ?? []).join(", ") ?? "—"}</span> },
-    { id: "seen", header: "last seen", width: "130px", cell: (d: Device) => <span className="text-[12px] text-content-3">{formatRelative(d.last_seen, digits)}</span> },
+    { id: "user", header: t("user"), cell: (d: Device) => <Badge tone="brand">{d.username ?? `#${d.user_id}`}</Badge> },
+    { id: "ip", header: t("last ip"), cell: (d: Device) => <code className="font-mono text-[11px]" dir="ltr">{d.last_ip ?? "—"}</code> },
+    { id: "core", header: t("core"), cell: (d: Device) => <span className="text-[12px] text-content-2">{d.current_core ?? (d.cores ?? []).join(", ") ?? "—"}</span> },
+    { id: "seen", header: t("last seen"), width: "130px", cell: (d: Device) => <span className="text-[12px] text-content-3">{formatRelative(d.last_seen, digits)}</span> },
     {
       id: "act", header: "", width: "96px",
       cell: (d: Device) => <Button variant="danger" size="sm" onClick={() => setForgetFor(d)}><Trash2 size={12} /> forget</Button>,
@@ -58,7 +58,7 @@ export default function Devices() {
 
       {list.isLoading ? <Skeleton className="h-72" /> : (
         <DataTable columns={cols as never} rows={list.data?.devices ?? []} rowKey={(d: Device) => d.device_id} height={560}
-          empty={<EmptyState title="No devices yet" hint="Devices register themselves the first time the Zagros app signs in on them." />} />
+          empty={<EmptyState title={t("No devices yet")} hint={t("Devices register themselves the first time the Zagros app signs in on them.")} />} />
       )}
 
       <ConfirmDialog open={!!forgetFor} onClose={() => setForgetFor(null)}

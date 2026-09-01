@@ -17,7 +17,7 @@ import { toast } from "../components/feedback";
 import { ConfirmDialog, Dialog } from "../components/overlays";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, StatusDot, Switch, Textarea, cn } from "../components/ui";
 import { api, ApiError, getToken } from "../lib/api";
-import { useT } from "../lib/i18n";
+import { useT , useTDynamic } from "../lib/i18n";
 import type { Outbound, OutboundKindSchema, OutboundSchemas, OutboundTest, ParsedShareURL } from "../lib/types";
 
 interface TestState { [name: string]: { loading: boolean; result?: OutboundTest } }
@@ -121,20 +121,19 @@ export default function Outbounds() {
           <Network size={18} className="text-brand" />{t("nav.outbounds")}
           {dirty && <Badge tone="warn" dot>unsaved</Badge>}
         </h1>
-        <Button variant="ghost" size="sm" onClick={testAll} disabled={!items.length}><Activity size={13} /> test all</Button>
+        <Button variant="ghost" size="sm" onClick={testAll} disabled={!items.length}><Activity size={13} />{t("test all")}</Button>
         <Button variant="secondary" size="sm" onClick={() => save.mutate()} loading={save.isPending} disabled={!dirty}><Save size={13} /> {t("common.save")}</Button>
         <Button size="sm" onClick={() => deploy.mutate()} loading={deploy.isPending} disabled={!items.length}><Rocket size={13} /> {t("common.deploy")}</Button>
         <Button size="sm" variant="secondary" onClick={() => setDialog({ ob: { name: "", kind: "direct", settings: {}, enabled: true }, index: null })}>
-          <Plus size={13} /> outbound
-        </Button>
+          <Plus size={13} />{t("outbound")}</Button>
       </div>
 
       {load.isLoading ? null : items.length === 0 ? (
         <Card>
           <EmptyState
-            title="No outbounds configured"
-            hint="Routing rules target these — e.g. a WARP socks5 chain, an imported VLESS upstream, direct egress, or a block sink."
-            action={<Button size="sm" onClick={() => setDialog({ ob: { name: "", kind: "vless", settings: { server: "", server_port: 443 }, enabled: true }, index: null })}><Plus size={13} /> create outbound</Button>}
+            title={t("No outbounds configured")}
+            hint={t("Routing rules target these — e.g. a WARP socks5 chain, an imported VLESS upstream, direct egress, or a block sink.")}
+            action={<Button size="sm" onClick={() => setDialog({ ob: { name: "", kind: "vless", settings: { server: "", server_port: 443 }, enabled: true }, index: null })}><Plus size={13} />{t("create outbound")}</Button>}
           />
         </Card>
       ) : (
@@ -182,7 +181,7 @@ export default function Outbounds() {
                     <Button variant="ghost" size="sm" onClick={() => exportOvpn(ob.name)} title={t("outbounds.export")}><Download size={13} /></Button>
                   )}
                   <div className="ms-auto flex items-center gap-1">
-                    {!legacySoftEther && <Switch checked={ob.enabled} label="enabled" onChange={(v) => markDirty(items.map((x, i) => i === idx ? { ...x, enabled: v } : x))} />}
+                    {!legacySoftEther && <Switch checked={ob.enabled} label={t("enabled")} onChange={(v) => markDirty(items.map((x, i) => i === idx ? { ...x, enabled: v } : x))} />}
                     <Button variant="ghost" size="icon" onClick={() => setDeleteFor(ob.name)} aria-label="delete"><Trash2 size={14} /></Button>
                   </div>
                 </div>
@@ -226,6 +225,7 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
   onClose: () => void; onSave: (ob: Outbound) => void;
 }) {
   const t = useT();
+  const td = useTDynamic();
   const [ob, setOb] = useState<Outbound>(structuredClone(outbound));
   const [error, setError] = useState("");
   const [importUrl, setImportUrl] = useState("");
@@ -369,7 +369,7 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
 
   return (
     <Dialog open onClose={onClose} title={isNew ? "new outbound" : `edit — ${outbound.name}`}
-      subtitle={schema?.description}
+      subtitle={td(schema?.description)}
       wide
       footer={
         <>
@@ -400,10 +400,9 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
 
       {ob.kind === "openvpn" && (
         <div className="mb-4 flex items-center justify-between gap-2 rounded-xl border border-border bg-surface-2 px-3 py-2.5">
-          <span className="text-[12px] text-content-2">have a ready profile? upload the .ovpn file — it wins over individual fields</span>
+          <span className="text-[12px] text-content-2">{t("have a ready profile? upload the .ovpn file — it wins over individual fields")}</span>
           <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-surface-3 px-3 py-1.5 text-[12px] font-medium text-content hover:bg-border-strong">
-            <Upload size={13} /> upload .ovpn
-            <input type="file" accept=".ovpn,.conf,.txt" className="hidden"
+            <Upload size={13} />{t("upload .ovpn")}<input type="file" accept=".ovpn,.conf,.txt" className="hidden"
               onChange={(e) => e.target.files?.[0] && uploadOvpn(e.target.files[0])} />
           </label>
         </div>
@@ -411,7 +410,7 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
 
       {ob.kind === "wireguard" && (
         <div className="mb-4 flex items-center justify-between gap-2 rounded-xl border border-brand/30 bg-brand-soft/30 px-3 py-2.5">
-          <span className="text-[12px] text-content-2">upload a WireGuard client .conf to import Endpoint, Address, DNS, MTU and all keys</span>
+          <span className="text-[12px] text-content-2">{t("upload a WireGuard client .conf to import Endpoint, Address, DNS, MTU and all keys")}</span>
           <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-[12px] font-medium text-white hover:opacity-90">
             <Upload size={13} /> {importing ? "importing…" : "upload .conf"}
             <input type="file" accept=".conf,.txt" className="hidden" disabled={importing}
@@ -429,7 +428,7 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
         <Field label="name" required>
           <Input value={ob.name} onChange={(e) => setOb({ ...ob, name: e.target.value })} placeholder="Warp-EU" dir="ltr" />
         </Field>
-        <Field label="protocol" required>
+        <Field label={t("protocol")} required>
           <Select value={ob.kind} onChange={(e) => setOb({
             ...ob, kind: e.target.value as Outbound["kind"], settings: {},
             secret_state: {}, clear_secret_keys: [], sealed_credentials: null,
@@ -468,7 +467,7 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
                   const value = s[key];
                   if (ob.kind === "core" && key === "core_id") {
                     return (
-                      <Field key={key} label={f.title ?? key} hint={f.description} required>
+                      <Field key={key} label={td(f.title ?? key)} hint={td(f.description)} required>
                         <Select value={String(value ?? "")} onChange={(e) => setS({ core_id: e.target.value })}>
                           <option value="">— choose —</option>
                           {(coresQ.data?.cores ?? []).map((c) => <option key={c.id} value={c.id}>{c.id}</option>)}
@@ -485,7 +484,7 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
                     );
                   }
                   return (
-                    <Field key={key} label={f.title ?? key} hint={f.description} required={required.has(key)}>
+                    <Field key={key} label={td(f.title ?? key)} hint={td(f.description)} required={required.has(key)}>
                       {f.enum ? (
                         <Select value={String(value ?? f.default ?? "")} onChange={(e) => setS({ [key]: e.target.value })}>
                           {f.enum.map((o) => <option key={o} value={o}>{o === "" ? "—" : o}</option>)}
@@ -497,9 +496,7 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
                             value={String(value ?? "")} onChange={(e) => setS({ [key]: e.target.value })} />
                           {f["x-secret"] && ob.secret_state?.[key] && !(ob.clear_secret_keys ?? []).includes(key) && (
                             <button type="button" className="text-[10.5px] text-content-3 underline hover:text-danger"
-                              onClick={() => clearStoredSecret(key)}>
-                              clear stored credential
-                            </button>
+                              onClick={() => clearStoredSecret(key)}>{t("clear stored credential")}</button>
                           )}
                         </div>
                       ) : widget === "password" ? (
@@ -512,9 +509,7 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
                           />
                           {ob.secret_state?.[key] && !(ob.clear_secret_keys ?? []).includes(key) && (
                             <button type="button" className="text-[10.5px] text-content-3 underline hover:text-danger"
-                              onClick={() => clearStoredSecret(key)}>
-                              clear stored credential
-                            </button>
+                              onClick={() => clearStoredSecret(key)}>{t("clear stored credential")}</button>
                           )}
                         </div>
                       ) : (
@@ -536,9 +531,7 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
         })}
 
         <label className="flex items-center gap-2.5 text-sm text-content-2">
-          <Switch checked={ob.enabled} onChange={(v) => setOb({ ...ob, enabled: v })} label="enabled" />
-          enabled
-        </label>
+          <Switch checked={ob.enabled} onChange={(v) => setOb({ ...ob, enabled: v })} label={t("enabled")} />{t("enabled")}</label>
       </div>
       {error && <p role="alert" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
     </Dialog>

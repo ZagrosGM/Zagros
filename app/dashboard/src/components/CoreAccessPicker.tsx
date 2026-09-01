@@ -11,6 +11,7 @@
 //     (xrayValue/xrayValueChange), the other rows edit core_access
 //     (value/ onChange). The pure mapping lives in lib/inboundTree.ts.
 import { Box, MoreHorizontal } from "lucide-react";
+import { useT } from "../lib/i18n";
 import { useEffect, useRef, useState } from "react";
 import {
   XRAY_CORE_ID, allLegacySelected, legacyFromTags, legacySelectedTags, tagsOf,
@@ -54,6 +55,7 @@ function TriCheck({ state, onToggle, disabled, label }: {
 }
 
 export default function CoreAccessPicker({ groups, value, onChange, xrayValue, onXrayChange, xrayWildcardAll, disabled }: Props) {
+  const t = useT();
   const [menu, setMenu] = useState<{ core: string; anchor: HTMLElement } | null>(null);
 
   const selectedFor = (g: InboundCatalogGroup): string[] => {
@@ -85,14 +87,11 @@ export default function CoreAccessPicker({ groups, value, onChange, xrayValue, o
   return (
     <div className="space-y-2.5">
       <div className="flex items-center justify-between">
-        <p className="text-[12px] font-medium text-content-2">inbound tree — every core</p>
+        <p className="text-[12px] font-medium text-content-2">{t("inbound tree — every core")}</p>
         {totalInbounds > 0 && <Badge tone="brand">{totalSelected}/{totalInbounds} selected</Badge>}
       </div>
       {!groups.length && (
-        <p className="rounded-xl bg-surface-2 p-3 text-[11.5px] leading-5 text-content-3">
-          no cores are installed yet — install cores (sing-box, WireGuard, OpenVPN,
-          SoftEther, SSH…) from <b>Cores → catalog</b> and their inbounds appear here.
-        </p>
+        <p className="rounded-xl bg-surface-2 p-3 text-[11.5px] leading-5 text-content-3">{t("no cores are installed yet — install cores (sing-box, WireGuard, OpenVPN, SoftEther, SSH…) from")}<b>{t("Cores → catalog")}</b>{t("and their inbounds appear here.")}</p>
       )}
       {!!groups.length && (
         <div className="overflow-hidden rounded-xl border border-border">
@@ -118,7 +117,7 @@ export default function CoreAccessPicker({ groups, value, onChange, xrayValue, o
                 <span className="text-[10.5px] tabular-nums text-content-3">
                   {g.inbounds.length ? `${selected.length}/${g.inbounds.length}` : "no inbounds"}
                 </span>
-                <button type="button" aria-label={`choose ${g.name} inbounds`}
+                <button type="button" aria-label={t("choose {name} inbounds", { name: g.name })}
                   disabled={disabled || !g.inbounds.length}
                   onClick={(e) => setMenu((m) => (m?.core === g.core_id ? null : { core: g.core_id, anchor: e.currentTarget }))}
                   className="rounded-lg p-1.5 text-content-3 hover:bg-surface-3 hover:text-content disabled:opacity-40">
@@ -140,7 +139,7 @@ export default function CoreAccessPicker({ groups, value, onChange, xrayValue, o
                 <button type="button" className="text-[11px] font-medium text-brand hover:underline"
                   onClick={() => applySelection(menuGroup, tagsOf(menuGroup))}>all</button>
                 <button type="button" className="text-[11px] font-medium text-content-3 hover:underline"
-                  onClick={() => applySelection(menuGroup, [])}>none</button>
+                  onClick={() => applySelection(menuGroup, [])}>{t("none")}</button>
               </span>
             </div>
             <div className="max-h-60 overflow-y-auto">

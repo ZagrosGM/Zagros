@@ -14,7 +14,7 @@ import { ConfirmDialog, Dialog, Drawer } from "../components/overlays";
 import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Select, Skeleton, StatusDot, Switch, Tabs, cn } from "../components/ui";
 import { api, ApiError } from "../lib/api";
 import { useDigits, formatBytes, formatDuration, formatNumber } from "../lib/format";
-import { useT } from "../lib/i18n";
+import { useT , useTDynamic } from "../lib/i18n";
 import type {
   CoreRegistryEntry, CoreRelease, CoreView, Node, NodeCatalogEntry,
   NodeCores, NodeCoreStatus, NodeList,
@@ -164,7 +164,7 @@ function VersionDialog({ coreId, current, queryKey, fetchVersions, onApply, onCl
       )}
 
       <div className="mt-3 border-t border-border pt-3">
-        <Field label="or pin a specific tag">
+        <Field label={t("or pin a specific tag")}>
           <div className="flex items-center gap-2">
             <Input value={custom} onChange={(e) => setCustom(e.target.value)}
               placeholder="v1.2.3" dir="ltr" className="font-mono" />
@@ -173,10 +173,7 @@ function VersionDialog({ coreId, current, queryKey, fetchVersions, onApply, onCl
           </div>
         </Field>
         {error && <p role="alert" className="mt-2 text-[12px] text-danger">{error}</p>}
-        <p className="mt-2 text-[11px] leading-5 text-content-3">
-          The core is downloaded again at that release and restarted. Settings,
-          data and accounts are kept — this is the same path the installer uses.
-        </p>
+        <p className="mt-2 text-[11px] leading-5 text-content-3">{t("The core is downloaded again at that release and restarted. Settings, data and accounts are kept — this is the same path the installer uses.")}</p>
       </div>
     </Dialog>
   );
@@ -230,7 +227,7 @@ function NodeCoresPanel({ node }: { node: Node }) {
       <Card>
         <EmptyState
           title={`${node.name} is not paired`}
-          hint="Finish pairing from the Nodes page (confirm the certificate fingerprint) before managing its cores."
+          hint={t("Finish pairing from the Nodes page (confirm the certificate fingerprint) before managing its cores.")}
         />
       </Card>
     );
@@ -277,9 +274,9 @@ function NodeCoresPanel({ node }: { node: Node }) {
         ) : !installed.length ? (
           <Card>
             <EmptyState
-              title="No cores installed on this node"
-              hint="Install one from the catalog — the node downloads and verifies the official release itself."
-              action={<Button size="sm" onClick={() => setTab("catalog")}><Download size={14} /> open catalog</Button>}
+              title={t("No cores installed on this node")}
+              hint={t("Install one from the catalog — the node downloads and verifies the official release itself.")}
+              action={<Button size="sm" onClick={() => setTab("catalog")}><Download size={14} />{t("open catalog")}</Button>}
             />
           </Card>
         ) : (
@@ -320,10 +317,10 @@ function NodeCoresPanel({ node }: { node: Node }) {
                     <>
                       <Button size="sm" variant="secondary"
                         onClick={() => act.mutate({ core: core.core_id, action: "stop" })}>
-                        <Square size={13} /> stop</Button>
+                        <Square size={13} />{t("stop")}</Button>
                       <Button size="sm" variant="secondary"
                         onClick={() => act.mutate({ core: core.core_id, action: "restart" })}>
-                        <RotateCw size={13} /> restart</Button>
+                        <RotateCw size={13} />{t("restart")}</Button>
                     </>
                   ) : (
                     <Button size="sm"
@@ -331,9 +328,9 @@ function NodeCoresPanel({ node }: { node: Node }) {
                       <Play size={13} /> start</Button>
                   )}
                   <Button size="sm" variant="ghost" onClick={() => setLogsFor(core.core_id)}>
-                    <FileText size={13} /> logs</Button>
+                    <FileText size={13} />{t("logs")}</Button>
                   <Button size="sm" variant="ghost" onClick={() => setVersionFor(core.core_id)}>
-                    <ArrowUpDown size={13} /> change version</Button>
+                    <ArrowUpDown size={13} />{t("change version")}</Button>
                   <div className="ms-auto">
                     <Button size="sm" variant="danger"
                       onClick={() => { setPurge(false); setUninstallFor(core); }}>
@@ -353,7 +350,7 @@ function NodeCoresPanel({ node }: { node: Node }) {
             {[1, 2, 3].map((i) => <Skeleton key={i} className="h-44" />)}
           </div>
         ) : !catalog.length ? (
-          <Card><EmptyState title="Every available core is installed on this node" /></Card>
+          <Card><EmptyState title={t("Every available core is installed on this node")} /></Card>
         ) : (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {catalog.map((entry) => (
@@ -371,7 +368,7 @@ function NodeCoresPanel({ node }: { node: Node }) {
                   {(entry.protocols ?? []).slice(0, 6).map((p) => <Badge key={p} tone="info">{p}</Badge>)}
                 </div>
                 <div className="mt-4 flex items-center justify-between border-t border-border pt-3.5">
-                  <span className="text-[10.5px] text-content-3">installed on the node</span>
+                  <span className="text-[10.5px] text-content-3">{t("installed on the node")}</span>
                   <Button size="sm" onClick={() => setInstallFor(entry)}>
                     <HardDriveDownload size={13} /> install
                   </Button>
@@ -411,9 +408,7 @@ function NodeCoresPanel({ node }: { node: Node }) {
             being served there.
           </p>
           <label className="flex items-center gap-2.5 text-sm text-content-2">
-            <Switch checked={purge} onChange={setPurge} label="purge" />
-            also delete the core's data directory on the node
-          </label>
+            <Switch checked={purge} onChange={setPurge} label="purge" />{t("also delete the core's data directory on the node")}</label>
         </div>
       </Dialog>
 
@@ -441,6 +436,7 @@ function NodeInstallDialog({ node, entry, onClose, onDone }: {
   node: Node; entry: NodeCatalogEntry; onClose: () => void; onDone: () => void;
 }) {
   const t = useT();
+  const td = useTDynamic();
   const schema = entry.config_schema as
     { properties?: Record<string, { type?: string; title?: string; description?: string; default?: unknown; enum?: unknown[] }>;
       required?: string[] } | null | undefined;
@@ -536,16 +532,14 @@ function NodeInstallDialog({ node, entry, onClose, onDone }: {
                     ))}
                   </Select>
                   {!versions.data?.releases?.length && (
-                    <p className="mt-1 text-[11px] text-content-3">
-                      version list unavailable — the latest build will be installed
-                    </p>
+                    <p className="mt-1 text-[11px] text-content-3">{t("version list unavailable — the latest build will be installed")}</p>
                   )}
                 </>
               )}
             </Field>
-            <Field label="custom tag (optional)" hint="e.g. 1.8.23 — overrides the picker">
+            <Field label={t("custom tag (optional)")} hint="e.g. 1.8.23 — overrides the picker">
               <Input value={customVersion} onChange={(e) => setCustomVersion(e.target.value)}
-                dir="ltr" placeholder="leave empty" />
+                dir="ltr" placeholder={t("leave empty")} />
             </Field>
           </>
         )}
@@ -559,7 +553,7 @@ function NodeInstallDialog({ node, entry, onClose, onDone }: {
               </p>
             )}
             {fields.map(([key, meta]) => (
-              <Field key={key} label={meta?.title ?? key} hint={meta?.description}
+              <Field key={key} label={td(meta?.title ?? key)} hint={td(meta?.description)}
                 required={required.has(key)}>
                 {meta?.enum ? (
                   <Select value={values[key] ?? String(meta.default ?? "")}
@@ -729,9 +723,9 @@ function MasterCores() {
         ) : !cores.data?.cores?.length ? (
           <Card>
             <EmptyState
-              title="No cores installed"
-              hint="Install an official core binary from the catalog — the panel downloads and manages it, no CLI needed."
-              action={<Button size="sm" onClick={() => setTab("catalog")}><Download size={14} /> open catalog</Button>}
+              title={t("No cores installed")}
+              hint={t("Install an official core binary from the catalog — the panel downloads and manages it, no CLI needed.")}
+              action={<Button size="sm" onClick={() => setTab("catalog")}><Download size={14} />{t("open catalog")}</Button>}
             />
           </Card>
         ) : (
@@ -747,7 +741,7 @@ function MasterCores() {
                       <div className="flex items-center gap-2">
                         <h3 className="truncate text-[15px] font-semibold">{c.id}</h3>
                         {c.security_class === "legacy_insecure" && (
-                          <Badge tone="danger">Legacy / Insecure</Badge>
+                          <Badge tone="danger">{t("Legacy / Insecure")}</Badge>
                         )}
                         {c.builtin && (
                           <span className="rounded-md bg-brand-soft px-1.5 py-0.5 text-[10px] font-semibold text-brand" title={t("cores.builtinHint")}>
@@ -763,7 +757,7 @@ function MasterCores() {
                   </div>
                   <Switch
                     checked={c.enabled}
-                    label="enabled"
+                    label={t("enabled")}
                     disabled={!!c.builtin}
                     onChange={() => act.mutate({ id: c.id, action: c.enabled ? "disable" : "enable" })}
                   />
@@ -771,38 +765,38 @@ function MasterCores() {
 
                 <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2.5 text-[12px] sm:grid-cols-3">
                   <Meta k={t("common.status")} v={<Badge tone={stateTone(c.state) as never} dot>{c.state}{c.health ? ` · ${c.health}` : ""}</Badge>} />
-                  <Meta k="version" v={<span className="tabular-nums">{c.core_version ?? "—"}</span>} />
-                  <Meta k="uptime" v={formatDuration(c.uptime_seconds, digits)} />
-                  <Meta k="cpu" v={<span className="tabular-nums">{(c.metrics?.cpu_percent ?? 0).toFixed(1)}%</span>} />
-                  <Meta k="ram" v={formatBytes(c.metrics?.memory_bytes ?? 0, digits)} />
-                  <Meta k="accounts" v={formatNumber(c.metrics?.active_accounts ?? 0, digits)} />
-                  <Meta k="traffic" v={(() => {
+                  <Meta k={t("version")} v={<span className="tabular-nums">{c.core_version ?? "—"}</span>} />
+                  <Meta k={t("uptime")} v={formatDuration(c.uptime_seconds, digits)} />
+                  <Meta k={t("cpu")} v={<span className="tabular-nums">{(c.metrics?.cpu_percent ?? 0).toFixed(1)}%</span>} />
+                  <Meta k={t("ram")} v={formatBytes(c.metrics?.memory_bytes ?? 0, digits)} />
+                  <Meta k={t("accounts")} v={formatNumber(c.metrics?.active_accounts ?? 0, digits)} />
+                  <Meta k={t("traffic")} v={(() => {
                     const tot = traffic.data?.totals?.[c.id];
                     return tot
                       ? <span title={`user traffic: ${formatBytes(tot.uplink_bytes, digits)} ↑ + ${formatBytes(tot.downlink_bytes, digits)} ↓`}>{formatBytes(tot.total_bytes, digits)}</span>
                       : "—";
                   })()} />
-                  <Meta k="binary" v={<code className="block max-w-full truncate font-mono text-[10.5px]" dir="ltr" title={c.binary_path ?? ""}>{c.binary_path ?? "—"}</code>} />
-                  <Meta k="config" v={<code className="block max-w-full truncate font-mono text-[10.5px]" dir="ltr" title={String(c.settings?.config_path ?? "")}>{c.settings?.config_path ? String(c.settings.config_path) : "—"}</code>} />
+                  <Meta k={t("binary")} v={<code className="block max-w-full truncate font-mono text-[10.5px]" dir="ltr" title={c.binary_path ?? ""}>{c.binary_path ?? "—"}</code>} />
+                  <Meta k={t("config")} v={<code className="block max-w-full truncate font-mono text-[10.5px]" dir="ltr" title={String(c.settings?.config_path ?? "")}>{c.settings?.config_path ? String(c.settings.config_path) : "—"}</code>} />
                 </div>
                 {c.message && <p className="mt-2 rounded-lg bg-warn-soft px-2.5 py-1.5 text-[11px] text-warn">{c.message}</p>}
 
                 <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t border-border pt-3.5">
                   {c.state === "running" ? (
                     <>
-                      <Button size="sm" variant="secondary" onClick={() => act.mutate({ id: c.id, action: "stop" })}><Square size={13} /> stop</Button>
-                      <Button size="sm" variant="secondary" onClick={() => act.mutate({ id: c.id, action: "restart" })}><RotateCw size={13} /> restart</Button>
+                      <Button size="sm" variant="secondary" onClick={() => act.mutate({ id: c.id, action: "stop" })}><Square size={13} />{t("stop")}</Button>
+                      <Button size="sm" variant="secondary" onClick={() => act.mutate({ id: c.id, action: "restart" })}><RotateCw size={13} />{t("restart")}</Button>
                     </>
                   ) : (
                     <Button size="sm" onClick={() => act.mutate({ id: c.id, action: "start" })} disabled={!c.enabled}><Play size={13} /> start</Button>
                   )}
-                  <Button size="sm" variant="ghost" onClick={() => setLogsFor(c.id)}><FileText size={13} /> logs</Button>
+                  <Button size="sm" variant="ghost" onClick={() => setLogsFor(c.id)}><FileText size={13} />{t("logs")}</Button>
                   {/* Version change is offered for a built-in engine too: xray
                       cannot be uninstalled or disabled here (it is the panel's
                       own engine), but its release is managed exactly like any
                       other core's, and the backend updates it in place. */}
                   <Button size="sm" variant="ghost" onClick={() => setVersionFor(c.id)}>
-                    <ArrowUpDown size={13} /> change version</Button>
+                    <ArrowUpDown size={13} />{t("change version")}</Button>
                   {!c.builtin && (
                     <>
                       <Button size="sm" variant="ghost" loading={false}
@@ -823,7 +817,7 @@ function MasterCores() {
         registry.isLoading ? (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{[1, 2, 3].map((i) => <Skeleton key={i} className="h-44" />)}</div>
         ) : !catalog.length ? (
-          <Card><EmptyState title="Every available core is installed" /></Card>
+          <Card><EmptyState title={t("Every available core is installed")} /></Card>
         ) : (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {catalog.map((r) => (
@@ -900,13 +894,9 @@ function MasterCores() {
         }
       >
         <div className="space-y-3">
-          <p className="text-sm text-content-2">
-            The core binary is removed from the panel. Accounts and routing stay configured.
-          </p>
+          <p className="text-sm text-content-2">{t("The core binary is removed from the panel. Accounts and routing stay configured.")}</p>
           <label className="flex items-center gap-2.5 text-sm text-content-2">
-            <Switch checked={purge} onChange={setPurge} label="purge" />
-            also delete the core's data directory (certs/keys stored there)
-          </label>
+            <Switch checked={purge} onChange={setPurge} label="purge" />{t("also delete the core's data directory (certs/keys stored there)")}</label>
         </div>
       </Dialog>
     </div>
@@ -929,6 +919,7 @@ type SchemaProps = Record<string, { type?: string; title?: string; description?:
 
 function InstallDialog({ entry, onClose, onDone }: { entry: CoreRegistryEntry; onClose: () => void; onDone: () => void }) {
   const t = useT();
+  const td = useTDynamic();
   const schema = entry.config_schema as { properties?: SchemaProps; required?: string[] } | null | undefined;
   const props = schema?.properties ?? {};
   const required = new Set(schema?.required ?? []);
@@ -1012,17 +1003,17 @@ function InstallDialog({ entry, onClose, onDone }: { entry: CoreRegistryEntry; o
       <div className="mt-4 space-y-3.5">
         {legacyInsecure && (
           <div className="space-y-3 rounded-xl border border-danger/40 bg-danger-soft p-3 text-xs text-danger">
-            <p className="font-semibold">Legacy / Insecure</p>
-            <p>PPTP uses MS-CHAPv2 and MPPE128, which have known cryptographic weaknesses. Use it only for legacy clients with no modern VPN option.</p>
+            <p className="font-semibold">{t("Legacy / Insecure")}</p>
+            <p>{t("PPTP uses MS-CHAPv2 and MPPE128, which have known cryptographic weaknesses. Use it only for legacy clients with no modern VPN option.")}</p>
             <label className="flex items-start gap-2">
               <input type="checkbox" checked={legacyRiskAck} onChange={(e) => setLegacyRiskAck(e.target.checked)} />
-              <span>I accept the Legacy / Insecure risk.</span>
+              <span>{t("I accept the Legacy / Insecure risk.")}</span>
             </label>
             <label className="flex items-start gap-2">
               <input type="checkbox" checked={internetExposureAck} onChange={(e) => setInternetExposureAck(e.target.checked)} />
-              <span>I explicitly allow Internet exposure on TCP/1723 and GRE/47.</span>
+              <span>{t("I explicitly allow Internet exposure on TCP/1723 and GRE/47.")}</span>
             </label>
-            <p>The provider will be installed disabled and will not start automatically.</p>
+            <p>{t("The provider will be installed disabled and will not start automatically.")}</p>
           </div>
         )}
         {mode === "simple" && (
@@ -1044,15 +1035,13 @@ function InstallDialog({ entry, onClose, onDone }: { entry: CoreRegistryEntry; o
                     ))}
                   </Select>
                   {(!versions.data?.releases?.length) && (
-                    <p className="mt-1 text-[11px] text-content-3">
-                      version list unavailable for this core/host — the latest build will be installed
-                    </p>
+                    <p className="mt-1 text-[11px] text-content-3">{t("version list unavailable for this core/host — the latest build will be installed")}</p>
                   )}
                 </>
               )}
             </Field>
-            <Field label="custom tag (optional)" hint="e.g. 1.8.23 — overrides the picker">
-              <Input value={customVersion} onChange={(e) => setCustomVersion(e.target.value)} dir="ltr" placeholder="leave empty" />
+            <Field label={t("custom tag (optional)")} hint="e.g. 1.8.23 — overrides the picker">
+              <Input value={customVersion} onChange={(e) => setCustomVersion(e.target.value)} dir="ltr" placeholder={t("leave empty")} />
             </Field>
           </>
         )}
@@ -1060,12 +1049,10 @@ function InstallDialog({ entry, onClose, onDone }: { entry: CoreRegistryEntry; o
         {mode === "advanced" && (
           <>
             {fields.length === 0 && (
-              <p className="rounded-xl bg-surface-2 p-3 text-xs text-content-2">
-                This core needs no settings — the official binary is downloaded and verified automatically.
-              </p>
+              <p className="rounded-xl bg-surface-2 p-3 text-xs text-content-2">{t("This core needs no settings — the official binary is downloaded and verified automatically.")}</p>
             )}
             {fields.map(([key, meta]) => (
-              <Field key={key} label={meta?.title ?? key} hint={meta?.description} required={required.has(key)}>
+              <Field key={key} label={td(meta?.title ?? key)} hint={td(meta?.description)} required={required.has(key)}>
                 {meta?.enum ? (
                   <Select value={values[key] ?? String(meta.default ?? "")} onChange={(e) => setValues({ ...values, [key]: e.target.value })}>
                     {(meta.enum as string[]).map((o) => <option key={o} value={String(o)}>{String(o)}</option>)}

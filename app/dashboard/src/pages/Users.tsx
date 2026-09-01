@@ -17,7 +17,7 @@ import { copyText } from "../lib/clipboard";
 import { XRAY_CORE_ID, allCoreAccess, allLegacySelected } from "../lib/inboundTree";
 import { randomUsername } from "../lib/username";
 import { useDigits, formatBytes, formatDate, formatRelative, usagePercent } from "../lib/format";
-import { useT } from "../lib/i18n";
+import { useT , useTDynamic } from "../lib/i18n";
 import type { User, UsersResponse, UserStatus, UserTemplate , InboundCatalogGroup } from "../lib/types";
 
 const STATUS_TONE: Record<UserStatus, "ok" | "muted" | "warn" | "danger" | "info"> = {
@@ -109,6 +109,7 @@ function CopySubButton({ u, copySub }: { u: User; copySub: (u: User) => void }) 
 
 export default function Users() {
   const t = useT();
+  const td = useTDynamic();
   const digits = useDigits();
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
@@ -234,11 +235,11 @@ export default function Users() {
   const columns: Column<User>[] = [
     {
       id: "sel", width: "38px", header: (
-        <input type="checkbox" aria-label="Select all" checked={allChecked}
+        <input type="checkbox" aria-label={t("Select all")} checked={allChecked}
           onChange={(e) => setSelected(e.target.checked ? new Set(users.map((u) => u.username)) : new Set())} />
       ),
       cell: (u) => (
-        <input type="checkbox" aria-label={`select ${u.username}`} checked={selected.has(u.username)}
+        <input type="checkbox" aria-label={t("select {username}", { username: u.username })} checked={selected.has(u.username)}
           onClick={(e) => e.stopPropagation()}
           onChange={(e) => {
             const next = new Set(selected);
@@ -271,7 +272,7 @@ export default function Users() {
             <span
               role="img"
               data-presence={onlineMap[u.username] ?? "unknown"}
-              aria-label={`presence ${onlineMap[u.username] ?? "unknown"}`}
+              aria-label={t("presence {state}", { state: onlineMap[u.username] ?? "unknown" })}
               title={onlineMap[u.username] === "online"
                 ? "online (session on ≥1 core)"
                 : onlineMap[u.username] === "offline"
@@ -291,7 +292,7 @@ export default function Users() {
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
                 <span className="truncate font-medium">{u.username}</span>
-                {u.app_username && <Badge tone="info">app</Badge>}
+                {u.app_username && <Badge tone="info">{t("app")}</Badge>}
               </div>
               {Object.keys(coreGrants).length > 0 && (
                 <div className="mt-0.5 flex flex-wrap gap-1">
@@ -311,10 +312,10 @@ export default function Users() {
       cell: (u) => (
         <button
           className="inline-flex items-center gap-1"
-          title="toggle active/disabled"
+          title={t("toggle active/disabled")}
           onClick={(e) => { e.stopPropagation(); setStatus.mutate({ username: u.username, status: u.status === "active" ? "disabled" : "active" }); }}
         >
-          <Badge tone={STATUS_TONE[u.status]} dot>{u.status}</Badge>
+          <Badge tone={STATUS_TONE[u.status]} dot>{td(u.status)}</Badge>
           <ChevronDown size={12} className="text-content-3" />
         </button>
       ),
@@ -345,7 +346,7 @@ export default function Users() {
       cell: (u) => (
         <div className="relative flex items-center justify-end gap-0.5" onClick={(e) => e.stopPropagation()}>
           <CopySubButton u={u} copySub={copySub} />
-          <button aria-label="actions"
+          <button aria-label={t("actions")}
             onClick={(e) => setMenu((m) => (m?.user.username === u.username ? null : { user: u, anchor: e.currentTarget }))}
             className="rounded-lg p-1.5 text-content-3 hover:bg-surface-3 hover:text-content">
             <MoreHorizontal size={16} />
@@ -382,10 +383,10 @@ export default function Users() {
         <div className="relative">
           <Search size={14} className="absolute start-3 top-1/2 -translate-y-1/2 text-content-3" />
           <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={t("common.search")}
-            className="w-52 ps-8" aria-label="search users" />
+            className="w-52 ps-8" aria-label={t("search users")} />
         </div>
         <Button variant={showFilters ? "secondary" : "ghost"} size="sm" onClick={() => setShowFilters((v) => !v)}>
-          <Filter size={14} /> <span className="hidden sm:inline">filters</span>
+          <Filter size={14} /> <span className="hidden sm:inline">{t("filters")}</span>
         </Button>
         <Button variant="ghost" size="icon" onClick={() => refetch()} aria-label={t("common.refresh")}>
           <RefreshCcw size={15} className={cn(isFetching && "animate-spin")} />
@@ -393,11 +394,11 @@ export default function Users() {
         <Button size="sm" onClick={() => setDialog({ mode: "create" })}><UserPlus size={14} />{t("users.new")}</Button>
         <div className="relative">
           <Button variant="secondary" size="sm" onClick={(e) => setMoreAnchor(e.currentTarget)}>
-            <MoreHorizontal size={14} /> <span className="hidden sm:inline">More</span>
+            <MoreHorizontal size={14} /> <span className="hidden sm:inline">{t("More")}</span>
           </Button>
           <RowMenu open={!!moreAnchor} anchor={moreAnchor} onClose={() => setMoreAnchor(null)}>
-            <MenuItem icon={<UserPlus size={14} />} label="Add Bulk" onClick={() => { setMoreAnchor(null); setBulkDialog(true); }} />
-            <MenuItem icon={<Trash2 size={14} />} label="Delete by Status" danger onClick={() => { setMoreAnchor(null); setStatusDeleteDialog(true); }} />
+            <MenuItem icon={<UserPlus size={14} />} label={t("Add Bulk")} onClick={() => { setMoreAnchor(null); setBulkDialog(true); }} />
+            <MenuItem icon={<Trash2 size={14} />} label={t("Delete by Status")} danger onClick={() => { setMoreAnchor(null); setStatusDeleteDialog(true); }} />
           </RowMenu>
         </div>
       </div>
@@ -710,12 +711,12 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
               onChange={(e) => setForm({ ...form, username: e.target.value })} />
             {mode === "create" && (
               <>
-                <Input type="number" min={4} max={32} value={genLen} aria-label="username length"
-                  title="generated username length (4–32)"
+                <Input type="number" min={4} max={32} value={genLen} aria-label={t("username length")}
+                  title={t("generated username length (4–32)")}
                   className="w-16"
                   onChange={(e) => setGenLen(Math.max(4, Math.min(32, parseInt(e.target.value, 10) || 8)))} />
                 <Button type="button" variant="secondary" size="sm" onClick={generateUsername}
-                  loading={genBusy} title="generate a unique random username">
+                  loading={genBusy} title={t("generate a unique random username")}>
                   <Dices size={14} /> generate
                 </Button>
               </>
@@ -727,7 +728,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
             {ALL_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
           </Select>
         </Field>
-        <Field label={`${t("users.limit")} (GB)`} hint="empty = unlimited">
+        <Field label={`${t("users.limit")} (GB)`} hint={t("empty = unlimited")}>
           <Input id="dataLimit" type="number" min="0" step="0.1" value={form.dataLimitGB}
             onChange={(e) => setForm({ ...form, dataLimitGB: e.target.value })} />
         </Field>
@@ -735,17 +736,17 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
           <Input id="deviceLimit" type="number" min="0" step="1" value={form.deviceLimit}
             onChange={(e) => setForm({ ...form, deviceLimit: e.target.value })} />
         </Field>
-        <Field label="Download Limit (Mbps)" hint="0 = Unlimited · aggregate across all cores">
+        <Field label={t("Download Limit (Mbps)")} hint={t("0 = Unlimited · aggregate across all cores")}>
           <Input id="downloadLimitMbps" type="number" min="0" max="100000" step="1"
             value={form.downloadLimitMbps}
             onChange={(e) => setForm({ ...form, downloadLimitMbps: e.target.value })} />
         </Field>
-        <Field label="Upload Limit (Mbps)" hint="0 = Unlimited · aggregate across all cores">
+        <Field label={t("Upload Limit (Mbps)")} hint={t("0 = Unlimited · aggregate across all cores")}>
           <Input id="uploadLimitMbps" type="number" min="0" max="100000" step="1"
             value={form.uploadLimitMbps}
             onChange={(e) => setForm({ ...form, uploadLimitMbps: e.target.value })} />
         </Field>
-        <Field label={t("users.expire")} hint="empty = never">
+        <Field label={t("users.expire")} hint={t("empty = never")}>
           <Input type="date" value={form.expireDate}
             onChange={(e) => setForm({ ...form, expireDate: e.target.value })} />
         </Field>
@@ -906,25 +907,25 @@ function BulkUserDialog({
     <Dialog
       open={open}
       onClose={onClose}
-      title="Create Bulk Users"
+      title={t("Create Bulk Users")}
       wide
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
-          <Button onClick={createBulk} loading={busy}>Create Users</Button>
+          <Button onClick={createBulk} loading={busy}>{t("Create Users")}</Button>
         </>
       }
     >
       <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="Count (1–100)" required>
+        <Field label={t("Count (1–100)")} required>
           <Input type="number" min={1} max={100} value={count} onChange={(e) => setCount(e.target.value)} />
         </Field>
-        <Field label="Username Prefix" required hint="e.g. user -> user_a1b2">
+        <Field label={t("Username Prefix")} required hint={t("e.g. user -> user_a1b2")}>
           <Input value={prefix} onChange={(e) => setPrefix(e.target.value)} />
         </Field>
         {templates.length > 0 && (
           <div className="sm:col-span-2">
-            <Field label="Use Template (Optional)">
+            <Field label={t("Use Template (Optional)")}>
               <Select value={templateId ?? ""} onChange={(e) => applyTemplate(e.target.value ? Number(e.target.value) : null)}>
                 <option value="">— none —</option>
                 {templates.map((tp) => (
@@ -936,20 +937,20 @@ function BulkUserDialog({
             </Field>
           </div>
         )}
-        <Field label="Data Limit (GB)" hint="0 = unlimited">
+        <Field label={t("Data Limit (GB)")} hint={t("0 = unlimited")}>
           <Input type="number" step="0.1" value={dataLimitGB} onChange={(e) => setDataLimitGB(e.target.value)} />
         </Field>
-        <Field label="Expiration (Days)" hint="empty = no expiration">
+        <Field label={t("Expiration (Days)")} hint={t("empty = no expiration")}>
           <Input type="number" value={expireDays} onChange={(e) => setExpireDays(e.target.value)} />
         </Field>
-        <Field label="Download Limit (Mbps)" hint="0 = unlimited">
+        <Field label={t("Download Limit (Mbps)")} hint={t("0 = unlimited")}>
           <Input type="number" value={downloadMbps} onChange={(e) => setDownloadMbps(e.target.value)} />
         </Field>
-        <Field label="Upload Limit (Mbps)" hint="0 = unlimited">
+        <Field label={t("Upload Limit (Mbps)")} hint={t("0 = unlimited")}>
           <Input type="number" value={uploadMbps} onChange={(e) => setUploadMbps(e.target.value)} />
         </Field>
         <div className="sm:col-span-2">
-          <Field label="Core Access & Inbounds">
+          <Field label={t("Core Access & Inbounds")}>
             <CoreAccessPicker
               groups={catalog}
               value={coreAccess}
@@ -1024,7 +1025,7 @@ function DeleteByStatusDialog({
     <Dialog
       open={open}
       onClose={onClose}
-      title="Delete Users by Status"
+      title={t("Delete Users by Status")}
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
@@ -1040,7 +1041,7 @@ function DeleteByStatusDialog({
       }
     >
       <div className="space-y-4">
-        <Field label="Select Status">
+        <Field label={t("Select Status")}>
           <Select value={selectedStatus} onChange={(e) => setSelectedStatus(e.target.value)}>
             {ALL_STATUSES.map((s) => (
               <option key={s} value={s}>{s}</option>
@@ -1050,7 +1051,7 @@ function DeleteByStatusDialog({
 
         <Card className="p-4 bg-surface-2 border-border">
           {loadingPreview ? (
-            <p className="text-xs text-content-3">Checking matching users…</p>
+            <p className="text-xs text-content-3">{t("Checking matching users…")}</p>
           ) : matchingCount !== null ? (
             matchingCount > 0 ? (
               <p className="text-sm font-medium text-danger">

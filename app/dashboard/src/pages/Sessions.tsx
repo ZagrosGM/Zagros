@@ -37,20 +37,20 @@ export default function Sessions() {
   });
 
   const liveCols = [
-    { id: "user", header: "user", cell: (s: SessionRecord) => <span className="font-medium">#{s.user_id}</span> },
-    { id: "core", header: "core", cell: (s: SessionRecord) => <Badge tone="brand">{s.core_id}</Badge> },
+    { id: "user", header: t("user"), cell: (s: SessionRecord) => <span className="font-medium">#{s.user_id}</span> },
+    { id: "core", header: t("core"), cell: (s: SessionRecord) => <Badge tone="brand">{s.core_id}</Badge> },
     { id: "ip", header: "ip", cell: (s: SessionRecord) => <code className="font-mono text-[11px]" dir="ltr">{s.ip ?? "—"}</code> },
-    { id: "started", header: "started", cell: (s: SessionRecord) => <span className="text-[12px] tabular-nums text-content-2">{formatDate(s.started_at, digits)}</span> },
-    { id: "dur", header: "duration", cell: (s: SessionRecord) => <span className="text-[12px] tabular-nums text-content-2">{formatDuration(s.duration_seconds, digits)}</span> },
-    { id: "traffic", header: "traffic", cell: (s: SessionRecord) => <span className="text-[12px] tabular-nums">{formatBytes(s.rx_bytes, digits)} ↓ / {formatBytes(s.tx_bytes, digits)} ↑</span> },
+    { id: "started", header: t("started"), cell: (s: SessionRecord) => <span className="text-[12px] tabular-nums text-content-2">{formatDate(s.started_at, digits)}</span> },
+    { id: "dur", header: t("duration"), cell: (s: SessionRecord) => <span className="text-[12px] tabular-nums text-content-2">{formatDuration(s.duration_seconds, digits)}</span> },
+    { id: "traffic", header: t("traffic"), cell: (s: SessionRecord) => <span className="text-[12px] tabular-nums">{formatBytes(s.rx_bytes, digits)} ↓ / {formatBytes(s.tx_bytes, digits)} ↑</span> },
     { id: "state", header: "", width: "90px", cell: (s: SessionRecord) => s.ended_at ? <Badge tone="muted">ended</Badge> : <Badge tone="ok" dot>live</Badge> },
   ];
   const clientCols = [
-    { id: "user", header: "user", cell: (s: ClientSession) => <div><span className="font-medium">{s.username ?? `#${s.user_id}`}</span></div> },
+    { id: "user", header: t("user"), cell: (s: ClientSession) => <div><span className="font-medium">{s.username ?? `#${s.user_id}`}</span></div> },
     { id: "ua", header: "client", cell: (s: ClientSession) => <span className="block max-w-[220px] truncate text-[11px] text-content-3" title={s.user_agent ?? ""}>{s.user_agent ?? "—"}</span> },
-    { id: "created", header: "issued", cell: (s: ClientSession) => <span className="text-[12px] tabular-nums text-content-2">{formatDate(s.created_at, digits)}</span> },
-    { id: "expires", header: "expires", cell: (s: ClientSession) => <span className="text-[12px] tabular-nums text-content-2">{formatDate(s.expires_at, digits)}</span> },
-    { id: "state", header: "state", width: "110px", cell: (s: ClientSession) => s.revoked ? <Badge tone="danger">revoked</Badge> : <Badge tone="ok" dot>active</Badge> },
+    { id: "created", header: t("issued"), cell: (s: ClientSession) => <span className="text-[12px] tabular-nums text-content-2">{formatDate(s.created_at, digits)}</span> },
+    { id: "expires", header: t("expires"), cell: (s: ClientSession) => <span className="text-[12px] tabular-nums text-content-2">{formatDate(s.expires_at, digits)}</span> },
+    { id: "state", header: "state", width: "110px", cell: (s: ClientSession) => s.revoked ? <Badge tone="danger">revoked</Badge> : <Badge tone="ok" dot>{t("active")}</Badge> },
     {
       id: "act", header: "", width: "100px",
       cell: (s: ClientSession) => !s.revoked && (
@@ -66,8 +66,8 @@ export default function Sessions() {
           <Activity size={18} className="text-brand" />{t("nav.sessions")}
         </h1>
         <Tabs active={tab} onChange={setTab} tabs={[
-          { id: "live", label: "live core sessions", icon: <Activity size={13} /> },
-          { id: "clients", label: "app sign-ins", icon: <MonitorSmartphone size={13} /> },
+          { id: "live", label: t("live core sessions"), icon: <Activity size={13} /> },
+          { id: "clients", label: t("app sign-ins"), icon: <MonitorSmartphone size={13} /> },
         ]} />
         <Button variant="ghost" size="sm" onClick={() => tab === "live" ? live.refetch() : clients.refetch()}><RefreshCcw size={13} /></Button>
       </div>
@@ -76,13 +76,13 @@ export default function Sessions() {
         live.isLoading ? <Skeleton className="h-72" /> : (
           <DataTable columns={liveCols as never} rows={live.data?.sessions ?? []} rowKey={(s: SessionRecord) => s.key}
             height={560}
-            empty={<EmptyState title="No live sessions" hint="Sessions appear as users connect through cores — this is real data, not a placeholder." />} />
+            empty={<EmptyState title={t("No live sessions")} hint={t("Sessions appear as users connect through cores — this is real data, not a placeholder.")} />} />
         )
       ) : (
         clients.isLoading ? <Skeleton className="h-72" /> : (
           <DataTable columns={clientCols as never} rows={(clients.data?.sessions ?? []).filter((s) => !s.revoked)} rowKey={(s: ClientSession) => s.token_hash}
             height={560}
-            empty={<EmptyState title="No active app sign-ins" hint="Zagros app sessions (refresh tokens) appear here after a device signs in." />} />
+            empty={<EmptyState title={t("No active app sign-ins")} hint={t("Zagros app sessions (refresh tokens) appear here after a device signs in.")} />} />
         )
       )}
 

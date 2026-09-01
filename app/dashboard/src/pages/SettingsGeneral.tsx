@@ -105,39 +105,39 @@ export default function SettingsGeneral() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
-          <CardHeader title="panel" subtitle="identity & runtime (read-only, .env is the source of truth)" />
+          <CardHeader title={t("panel")} subtitle={t("identity & runtime (read-only, .env is the source of truth)")} />
           {info.isLoading ? <Skeleton className="h-40" /> : info.isError ? (
-            <p className="py-4 text-xs text-content-3">requires sudo admin</p>
+            <p className="py-4 text-xs text-content-3">{t("requires sudo admin")}</p>
           ) : (
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-[12.5px]">
-              <Meta k="version" v={<Badge tone="brand">{info.data!.version}</Badge>} />
-              <Meta k="app" v={info.data!.app_name} />
-              <Meta k="domain" v={info.data!.domain || "—"} />
-              <Meta k="tls mode" v={info.data!.tls_mode} />
-              <Meta k="database" v={info.data!.database_driver} />
-              <Meta k="uptime" v={formatDuration(info.data!.uptime_seconds, digits)} />
-              <Meta k="panel url" v={<span className="break-all" dir="ltr">{info.data!.panel_base_url || "—"}</span>} />
-              <Meta k="auth mode" v={info.data!.client_auth_mode} />
+              <Meta k={t("version")} v={<Badge tone="brand">{info.data!.version}</Badge>} />
+              <Meta k={t("app")} v={info.data!.app_name} />
+              <Meta k={t("domain")} v={info.data!.domain || "—"} />
+              <Meta k={t("tls mode")} v={info.data!.tls_mode} />
+              <Meta k={t("database")} v={info.data!.database_driver} />
+              <Meta k={t("uptime")} v={formatDuration(info.data!.uptime_seconds, digits)} />
+              <Meta k={t("panel url")} v={<span className="break-all" dir="ltr">{info.data!.panel_base_url || "—"}</span>} />
+              <Meta k={t("auth mode")} v={info.data!.client_auth_mode} />
             </dl>
           )}
         </Card>
 
         <Card className="lg:col-span-2">
-          <CardHeader title="Panel Network" subtitle="validated host binding and managed TLS certificate" />
+          <CardHeader title={t("Panel Network")} subtitle={t("validated host binding and managed TLS certificate")} />
           {!network ? <Skeleton className="h-56" /> : (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              <Field label="panel domain"><Input value={network.domain ?? ""} onChange={(e) => setNetwork({ ...network, domain: e.target.value || null })} dir="ltr" placeholder="panel.example.com" /></Field>
-              <Field label="public port"><Input type="number" min={1} max={65535} value={network.port} onChange={(e) => setNetwork({ ...network, port: Number(e.target.value) || 8000 })} dir="ltr" /></Field>
-              <Field label="protocol"><Select value={network.scheme} onChange={(e) => setNetwork({ ...network, scheme: e.target.value as "http" | "https" })}><option value="http">HTTP</option><option value="https">HTTPS</option></Select></Field>
-              <Field label="bind address"><Input value={network.bind_address} onChange={(e) => setNetwork({ ...network, bind_address: e.target.value })} dir="ltr" /></Field>
-              <Field label="trusted proxies" hint="comma-separated CIDRs"><Input value={network.trusted_proxies.join(", ")} onChange={(e) => setNetwork({ ...network, trusted_proxies: e.target.value.split(",").map((v) => v.trim()).filter(Boolean) })} dir="ltr" placeholder="10.0.0.0/8" /></Field>
-              <Field label="TLS certificate" hint="required for HTTPS"><Select value={network.tls_certificate_id ?? ""} onChange={(e) => setNetwork({ ...network, tls_certificate_id: e.target.value || null })}><option value="">None (HTTP only)</option>{(certsQ.data?.certificates ?? []).filter((c) => c.has_key && !c.expired).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</Select></Field>
-              <label className="flex items-center gap-2.5 text-sm text-content-2"><Switch checked={network.hsts} onChange={(v) => setNetwork({ ...network, hsts: v })} label="HSTS" />HSTS</label>
-              <label className="flex items-center gap-2.5 text-sm text-content-2"><Switch checked={network.redirect_http_to_https} onChange={(v) => setNetwork({ ...network, redirect_http_to_https: v })} label="redirect HTTP to HTTPS" />Redirect HTTP → HTTPS</label>
+              <Field label={t("panel domain")}><Input value={network.domain ?? ""} onChange={(e) => setNetwork({ ...network, domain: e.target.value || null })} dir="ltr" placeholder="panel.example.com" /></Field>
+              <Field label={t("public port")}><Input type="number" min={1} max={65535} value={network.port} onChange={(e) => setNetwork({ ...network, port: Number(e.target.value) || 8000 })} dir="ltr" /></Field>
+              <Field label={t("protocol")}><Select value={network.scheme} onChange={(e) => setNetwork({ ...network, scheme: e.target.value as "http" | "https" })}><option value="http">HTTP</option><option value="https">HTTPS</option></Select></Field>
+              <Field label={t("bind address")}><Input value={network.bind_address} onChange={(e) => setNetwork({ ...network, bind_address: e.target.value })} dir="ltr" /></Field>
+              <Field label={t("trusted proxies")} hint={t("comma-separated CIDRs")}><Input value={network.trusted_proxies.join(", ")} onChange={(e) => setNetwork({ ...network, trusted_proxies: e.target.value.split(",").map((v) => v.trim()).filter(Boolean) })} dir="ltr" placeholder="10.0.0.0/8" /></Field>
+              <Field label={t("TLS certificate")} hint={t("required for HTTPS")}><Select value={network.tls_certificate_id ?? ""} onChange={(e) => setNetwork({ ...network, tls_certificate_id: e.target.value || null })}><option value="">{t("None (HTTP only)")}</option>{(certsQ.data?.certificates ?? []).filter((c) => c.has_key && !c.expired).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</Select></Field>
+              <label className="flex items-center gap-2.5 text-sm text-content-2"><Switch checked={network.hsts} onChange={(v) => setNetwork({ ...network, hsts: v })} label={t("HSTS")} />{t("HSTS")}</label>
+              <label className="flex items-center gap-2.5 text-sm text-content-2"><Switch checked={network.redirect_http_to_https} onChange={(v) => setNetwork({ ...network, redirect_http_to_https: v })} label={t("redirect HTTP to HTTPS")} />{t("Redirect HTTP → HTTPS")}</label>
               <div className="flex flex-wrap items-end gap-2 sm:col-span-2 lg:col-span-3">
-                <Button variant="secondary" onClick={() => testNetwork.mutate()} loading={testNetwork.isPending}>test configuration</Button>
-                <Button variant="secondary" onClick={() => saveNetwork.mutate()} loading={saveNetwork.isPending}><Save size={14} />save desired state</Button>
-                <Button onClick={() => applyNetwork.mutate()} loading={applyNetwork.isPending}>apply with rollback</Button>
+                <Button variant="secondary" onClick={() => testNetwork.mutate()} loading={testNetwork.isPending}>{t("test configuration")}</Button>
+                <Button variant="secondary" onClick={() => saveNetwork.mutate()} loading={saveNetwork.isPending}><Save size={14} />{t("save desired state")}</Button>
+                <Button onClick={() => applyNetwork.mutate()} loading={applyNetwork.isPending}>{t("apply with rollback")}</Button>
               </div>
               {networkTransition && <p role="status" className="rounded-xl border border-brand/30 bg-brand-soft px-3 py-2 text-xs text-content-2 sm:col-span-2 lg:col-span-3">{networkTransition}</p>}
               {networkTest && <pre className="max-h-48 overflow-auto rounded-xl bg-surface p-3 text-[10px] text-content-2 sm:col-span-2 lg:col-span-3" dir="ltr">{JSON.stringify(networkTest, null, 2)}</pre>}
@@ -147,16 +147,11 @@ export default function SettingsGeneral() {
 
         <Card>
           <CardHeader title={<span className="inline-flex items-center gap-2"><TerminalSquare size={16} className="text-brand" /> Advanced Mode</span>} />
-          <p className="text-[12.5px] leading-6 text-content-2">
-            Advanced Mode unlocks the in-panel <b>Config Studio</b> raw document editor
-            (schema validation + diff preview) and shows the <b>{t("nav.advanced")}</b> entry
-            in the sidebar. Everything outside it stays graphical — regular operators
-            never touch JSON.
-          </p>
+          <p className="text-[12.5px] leading-6 text-content-2">{t("Advanced Mode unlocks the in-panel")}<b>{t("Config Studio")}</b>{t("raw document editor (schema validation + diff preview) and shows the")}<b>{t("nav.advanced")}</b>{t("entry in the sidebar. Everything outside it stays graphical — regular operators never touch JSON.")}</p>
           <div className="mt-4 flex items-center gap-2.5">
-            <Switch checked={advancedMode} onChange={(v) => { setAdvancedMode(v); applyUiState(theme, locale); }} label="advanced mode" />
+            <Switch checked={advancedMode} onChange={(v) => { setAdvancedMode(v); applyUiState(theme, locale); }} label={t("advanced mode")} />
             <span className="text-sm">{advancedMode ? "enabled" : "disabled"}</span>
-            {advancedMode && <Badge tone="warn" dot>JSON exposed in Advanced page only</Badge>}
+            {advancedMode && <Badge tone="warn" dot>{t("JSON exposed in Advanced page only")}</Badge>}
           </div>
         </Card>
       </div>

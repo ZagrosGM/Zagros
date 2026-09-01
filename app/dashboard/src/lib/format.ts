@@ -2,8 +2,23 @@
 import { useUI } from "../stores/ui";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
+import "dayjs/locale/fa";
 
 dayjs.extend(relativeTime);
+
+// dayjs formats relative times ("2 days ago") from its own locale data, so the
+// UI locale has to be pushed into it — otherwise Persian pages render English
+// time phrases. applyUiState() calls this on boot and on every locale switch.
+let current: "en" | "fa" = "en";
+export function setFormatLocale(locale: "en" | "fa") {
+  current = locale;
+  dayjs.locale(locale);
+}
+
+const UNITS: Record<"en" | "fa", { d: string; h: string; m: string; s: string; now: string }> = {
+  en: { d: "d", h: "h", m: "m", s: "s", now: "just now" },
+  fa: { d: " روز", h: " ساعت", m: " دقیقه", s: " ثانیه", now: "هم‌اکنون" },
+};
 
 const FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
 export const faDigits = (s: string) => s.replace(/\d/g, (d) => FA_DIGITS[+d]);
@@ -53,7 +68,7 @@ export function formatRelative(ts: number | string | null | undefined, digits = 
   const d = typeof parseInput === "number" ? dayjs.unix(parseInput) : dayjs(parseInput);
   if (!d.isValid()) return "—";
   const diffSec = Math.abs(dayjs().diff(d, "second"));
-  if (diffSec < 60) return digits("just now");
+  if (diffSec < 60) return UNITS[current].now;
   return digits(d.fromNow());
 }
 
@@ -61,10 +76,11 @@ export function formatDuration(seconds: number | null | undefined, digits = digi
   if (seconds === null || seconds === undefined) return "—";
   const s = Math.floor(seconds);
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
-  if (d > 0) return digits(`${d}d ${h}h`);
-  if (h > 0) return digits(`${h}h ${m}m`);
-  if (m > 0) return digits(`${m}m ${s % 60}s`);
-  return digits(`${s}s`);
+  const u = UNITS[current];
+  if (d > 0) return digits(`${d}${u.d} ${h}${u.h}`);
+  if (h > 0) return digits(`${h}${u.h} ${m}${u.m}`);
+  if (m > 0) return digits(`${m}${u.m} ${s % 60}${u.s}`);
+  return digits(`${s}${u.s}`);
 }
 
 export function usagePercent(user: { used_traffic: number; data_limit: number | null }): number {

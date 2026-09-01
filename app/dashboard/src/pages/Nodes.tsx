@@ -29,7 +29,7 @@ import {
 import { api, ApiError } from "../lib/api";
 import { copyText } from "../lib/clipboard";
 import { useDigits, formatBytes } from "../lib/format";
-import { useT } from "../lib/i18n";
+import { useT, useTDynamic } from "../lib/i18n";
 import type {
   InstallerCommand, Node, NodeDiscovery, NodeList, SyncResult,
 } from "../lib/types";
@@ -53,6 +53,7 @@ function CommandBlock({ value }: { value: string }) {
 
 export default function Nodes() {
   const t = useT();
+  const td = useTDynamic();
   const digits = useDigits();
   const qc = useQueryClient();
   const [addOpen, setAddOpen] = useState(false);
@@ -116,13 +117,10 @@ export default function Nodes() {
         <Button variant="ghost" size="sm" onClick={() => list.refetch()}>
           <RefreshCcw size={13} />
         </Button>
-        <Button size="sm" onClick={() => setAddOpen(true)}><Plus size={13} /> add node</Button>
+        <Button size="sm" onClick={() => setAddOpen(true)}><Plus size={13} />{t("add node")}</Button>
       </div>
 
-      <p className="rounded-xl border border-brand/30 bg-brand-soft px-3 py-2 text-[11px] leading-5 text-content-2">
-        Nodes use certificate-pinned HTTPS, a one-time registration token and HMAC-signed commands
-        with replay protection. No Docker socket or shell endpoint is exposed. Core management for a
-        paired node lives on the <Link to="/cores" className="text-brand underline">Cores</Link> page.
+      <p className="rounded-xl border border-brand/30 bg-brand-soft px-3 py-2 text-[11px] leading-5 text-content-2">{t("Nodes use certificate-pinned HTTPS, a one-time registration token and HMAC-signed commands with replay protection. No Docker socket or shell endpoint is exposed. Core management for a paired node lives on the")}<Link to="/cores" className="text-brand underline">Cores</Link> page.
       </p>
 
       {list.isError && (
@@ -132,9 +130,9 @@ export default function Nodes() {
       {list.isLoading ? <Skeleton className="h-40" /> : !nodes.length ? (
         <Card>
           <EmptyState
-            title="No nodes yet"
-            hint="Add a node, generate its installer command, run it on the remote server and confirm the certificate fingerprint."
-            action={<Button size="sm" onClick={() => setAddOpen(true)}><Plus size={13} /> add node</Button>}
+            title={t("No nodes yet")}
+            hint={t("Add a node, generate its installer command, run it on the remote server and confirm the certificate fingerprint.")}
+            action={<Button size="sm" onClick={() => setAddOpen(true)}><Plus size={13} />{t("add node")}</Button>}
           />
         </Card>
       ) : (
@@ -150,7 +148,7 @@ export default function Nodes() {
                     <div className="flex items-center gap-2">
                       <StatusDot tone={statusTone(node.status) as never} pulse={node.status === "connected"} />
                       <h3 className="truncate text-sm font-semibold">{node.name}</h3>
-                      <Badge tone="brand">Zagros Node</Badge>
+                      <Badge tone="brand">{t("Zagros Node")}</Badge>
                     </div>
                     <p className="mt-1 font-mono text-[11px] text-content-3" dir="ltr">
                       {node.address}:{node.port}
@@ -158,12 +156,12 @@ export default function Nodes() {
                       {node.agent_version ? ` · agent ${node.agent_version}` : ""}
                     </p>
                   </div>
-                  <Badge tone={statusTone(node.status) as never} dot>{node.status}</Badge>
+                  <Badge tone={statusTone(node.status) as never} dot>{td(node.status)}</Badge>
                 </div>
 
                 <div className="mt-3 grid grid-cols-3 gap-2 text-[11px] text-content-3">
-                  <span>cores <b className="text-content">{installed.length}</b></span>
-                  <span>memory <b className="text-content">
+                  <span>{t("cores")}<b className="text-content">{installed.length}</b></span>
+                  <span>{t("memory")}<b className="text-content">
                     {typeof resources.memory_used === "number" ? formatBytes(resources.memory_used, digits) : "—"}
                   </b></span>
                   <span>CPU <b className="text-content">
@@ -189,22 +187,17 @@ export default function Nodes() {
                   </p>
                 )}
                 {pending && !node.last_error && (
-                  <p className="mt-2 rounded-lg bg-brand-soft px-2.5 py-1.5 text-[11px] text-content-2">
-                    Not paired yet — run the installer command on the node. The panel
-                    checks every 45s and pairs it automatically; use reconnect to try now.
-                  </p>
+                  <p className="mt-2 rounded-lg bg-brand-soft px-2.5 py-1.5 text-[11px] text-content-2">{t("Not paired yet — run the installer command on the node. The panel checks every 45s and pairs it automatically; use reconnect to try now.")}</p>
                 )}
 
                 <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-border pt-3">
                   {pending ? (
                     <>
                       <Button variant="secondary" size="sm" onClick={() => setInstallerFor(node.id)}>
-                        <Terminal size={13} /> installer command
-                      </Button>
+                        <Terminal size={13} />{t("installer command")}</Button>
                       <Button size="sm" onClick={() => reconnect.mutate(node.id)}
                         loading={reconnect.isPending}>
-                        <RefreshCcw size={13} /> reconnect
-                      </Button>
+                        <RefreshCcw size={13} />{t("reconnect")}</Button>
                       <Button variant="ghost" size="sm" onClick={() => setPairFor(node)}>
                         <KeyRound size={13} /> pair manual
                       </Button>
@@ -213,26 +206,21 @@ export default function Nodes() {
                     <>
                       <Button variant="ghost" size="sm" onClick={() => reconnect.mutate(node.id)}
                         loading={reconnect.isPending}>
-                        <RefreshCcw size={13} /> reconnect
-                      </Button>
+                        <RefreshCcw size={13} />{t("reconnect")}</Button>
                       <Button variant="ghost" size="sm" onClick={() => heartbeat.mutate(node.id)}
                         loading={heartbeat.isPending}>
-                        <Activity size={13} /> verify
-                      </Button>
+                        <Activity size={13} />{t("verify")}</Button>
                       <Button variant="ghost" size="sm" onClick={() => sync.mutate(node.id)}
                         loading={sync.isPending}>
-                        <Wifi size={13} /> sync config
-                      </Button>
+                        <Wifi size={13} />{t("sync config")}</Button>
                       <Button variant="ghost" size="sm" onClick={() => setInstallerFor(node.id)}>
-                        <Terminal size={13} /> installer
-                      </Button>
+                        <Terminal size={13} />{t("installer")}</Button>
                     </>
                   )}
                   <Link to={`/cores?node=${node.id}`}
                     className="inline-flex h-8 select-none items-center gap-1.5 rounded-xl px-3 text-xs font-medium text-content-2 transition-colors hover:bg-surface-3 hover:text-content">
-                    <Server size={13} /> cores
-                  </Link>
-                  <Button variant="ghost" size="icon" className="ms-auto" aria-label="delete node"
+                    <Server size={13} />{t("cores")}</Link>
+                  <Button variant="ghost" size="icon" className="ms-auto" aria-label={t("delete node")}
                     onClick={() => setDeleteFor(node)}><Trash2 size={14} /></Button>
                 </div>
               </Card>
@@ -291,8 +279,8 @@ function AddNodeDialog({ onClose, onCreated }: {
     && form.port !== form.api_port);
 
   return (
-    <Dialog open onClose={onClose} title="add Zagros node"
-      subtitle="The panel issues a one-time token and builds the installer command."
+    <Dialog open onClose={onClose} title={t("add Zagros node")}
+      subtitle={t("The panel issues a one-time token and builds the installer command.")}
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
@@ -305,29 +293,29 @@ function AddNodeDialog({ onClose, onCreated }: {
         <Field label="name" required>
           <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
         </Field>
-        <Field label="address" required hint="IP or DNS name the panel reaches the node on">
+        <Field label="address" required hint={t("IP or DNS name the panel reaches the node on")}>
           <Input dir="ltr" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })}
             placeholder="203.0.113.10" />
         </Field>
-        <Field label="control-plane port" hint="HTTPS, signed commands">
+        <Field label={t("control-plane port")} hint={t("HTTPS, signed commands")}>
           <Input type="number" min={1} max={65535} value={form.port}
             onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} />
         </Field>
-        <Field label="api port" hint="read-only bootstrap/info endpoint">
+        <Field label={t("api port")} hint={t("read-only bootstrap/info endpoint")}>
           <Input type="number" min={1} max={65535} value={form.api_port}
             onChange={(e) => setForm({ ...form, api_port: Number(e.target.value) })} />
         </Field>
-        <Field label="usage coefficient">
+        <Field label={t("usage coefficient")}>
           <Input type="number" min="0.1" step="0.1" value={form.usage_coefficient}
             onChange={(e) => setForm({ ...form, usage_coefficient: Number(e.target.value) })} />
         </Field>
-        <Field label="add as host" hint="bind the node address as a Host on sync, so configs can target it">
-          <Switch checked={form.add_as_new_host} label="add as new host"
+        <Field label={t("add as host")} hint={t("bind the node address as a Host on sync, so configs can target it")}>
+          <Switch checked={form.add_as_new_host} label={t("add as new host")}
             onChange={(v) => setForm({ ...form, add_as_new_host: v })} />
         </Field>
       </div>
       {form.port === form.api_port && (
-        <p className="mt-3 text-[11px] text-danger">control-plane port and api port must differ.</p>
+        <p className="mt-3 text-[11px] text-danger">{t("control-plane port and api port must differ.")}</p>
       )}
       {error && <p role="alert" className="mt-3 rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
     </Dialog>
@@ -367,8 +355,8 @@ function InstallerDialog({ nodeId, preset, onClose, onPair }: {
   const current = preset?.node ?? node.data;
 
   return (
-    <Dialog open wide onClose={onClose} title="installer command"
-      subtitle="Run this once, as root, on the node server."
+    <Dialog open wide onClose={onClose} title={t("installer command")}
+      subtitle={t("Run this once, as root, on the node server.")}
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
@@ -388,19 +376,16 @@ function InstallerDialog({ nodeId, preset, onClose, onPair }: {
             </Button>
             {!preset && current?.status !== "connected" && (
               <Button size="sm" variant="ghost" onClick={() => rotate.mutate()} loading={rotate.isPending}>
-                <RefreshCcw size={13} /> rotate token
-              </Button>
+                <RefreshCcw size={13} />{t("rotate token")}</Button>
             )}
           </div>
           {installer.registration_token && (
             <div className="rounded-xl border border-warn/40 bg-warn-soft p-3">
-              <p className="text-[11px] font-semibold text-warn">one-time registration token</p>
+              <p className="text-[11px] font-semibold text-warn">{t("one-time registration token")}</p>
               <code className="mt-1 block break-all font-mono text-[11px]" dir="ltr">
                 {installer.registration_token}
               </code>
-              <p className="mt-1.5 text-[11px] text-content-2">
-                Shown once. The panel keeps it sealed only until pairing completes.
-              </p>
+              <p className="mt-1.5 text-[11px] text-content-2">{t("Shown once. The panel keeps it sealed only until pairing completes.")}</p>
             </div>
           )}
           <ul className="space-y-1 text-[11px] text-content-3">
@@ -445,7 +430,7 @@ function PairDialog({ node, onClose }: { node: Node; onClose: () => void }) {
 
   return (
     <Dialog open wide onClose={onClose} title={`pair — ${node.name}`}
-      subtitle="Confirm the certificate the node actually serves. This is the trust-on-first-use step, the same as accepting an SSH host key."
+      subtitle={t("Confirm the certificate the node actually serves. This is the trust-on-first-use step, the same as accepting an SSH host key.")}
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
@@ -460,20 +445,18 @@ function PairDialog({ node, onClose }: { node: Node; onClose: () => void }) {
           <Button size="sm" variant="secondary" onClick={() => discover.mutate()} loading={discover.isPending}>
             <Wifi size={13} /> discover ({node.address}:{node.api_port})
           </Button>
-          <span className="text-[11px] text-content-3">
-            or paste the values the installer printed on the node
-          </span>
+          <span className="text-[11px] text-content-3">{t("or paste the values the installer printed on the node")}</span>
         </div>
-        <Field label="TLS SHA-256 fingerprint" required
-          hint="64 hex characters — printed by the installer as “SHA-256 pin”">
+        <Field label={t("TLS SHA-256 fingerprint")} required
+          hint={t("64 hex characters — printed by the installer as “SHA-256 pin”")}>
           <Input dir="ltr" value={fingerprint} onChange={(e) => setFingerprint(e.target.value)}
             placeholder="9e338246aa505395…" className="font-mono" />
         </Field>
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="node id" hint="optional — reject if the node answers with another id">
+          <Field label={t("node id")} hint={t("optional — reject if the node answers with another id")}>
             <Input dir="ltr" value={nodeIdHint} onChange={(e) => setNodeIdHint(e.target.value)} className="font-mono" />
           </Field>
-          <Field label="registration token" hint="optional — only if the node was installed with its own token">
+          <Field label={t("registration token")} hint={t("optional — only if the node was installed with its own token")}>
             <Input type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} />
           </Field>
         </div>

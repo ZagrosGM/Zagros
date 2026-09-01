@@ -75,8 +75,8 @@ export default function Templates() {
       ) : rows.length === 0 ? (
         <Card>
           <EmptyState
-            title="No templates yet"
-            hint="Templates pre-fill data limit, expiry and inbound sets when creating users."
+            title={t("No templates yet")}
+            hint={t("Templates pre-fill data limit, expiry and inbound sets when creating users.")}
             action={<Button size="sm" onClick={() => setDialog({ mode: "create" })}><Plus size={14} />{t("templates.new")}</Button>}
           />
         </Card>
@@ -98,7 +98,7 @@ export default function Templates() {
                     </p>
                   </div>
                   <div className="relative" onClick={(e) => e.stopPropagation()}>
-                    <button aria-label="actions"
+                    <button aria-label={t("actions")}
                       onClick={(e) => setMenu((m) => (m?.template.id === tp.id ? null : { template: tp, anchor: e.currentTarget }))}
                       className="rounded-lg p-1.5 text-content-3 hover:bg-surface-3 hover:text-content">
                       <MoreHorizontal size={16} />
@@ -107,7 +107,7 @@ export default function Templates() {
                 </div>
                 <div className="mt-3 flex flex-wrap gap-1.5">
                   {protocols.length === 0 ? (
-                    <Badge tone="muted">all inbounds</Badge>
+                    <Badge tone="muted">{t("all inbounds")}</Badge>
                   ) : protocols.slice(0, 6).map((p) => {
                     const tags = tp.inbounds[p];
                     return <Badge key={p} tone="info">{tags.length ? `${p} (${tags.length})` : p}</Badge>;
@@ -221,7 +221,7 @@ function TemplateDialog({ mode, template, catalog, onClose, onSaved }: {
     <Dialog
       open onClose={onClose}
       title={mode === "create" ? t("templates.new") : `${t("common.edit")} — ${template?.name}`}
-      subtitle="data limits, expiry and the inbound tree pre-fill every user created from this template"
+      subtitle={t("data limits, expiry and the inbound tree pre-fill every user created from this template")}
       wide
       footer={
         <>
@@ -235,7 +235,7 @@ function TemplateDialog({ mode, template, catalog, onClose, onSaved }: {
           <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
         </Field>
         <div className="grid grid-cols-2 gap-4">
-          <Field label={`${t("templates.dataLimit")} (GB)`} hint="0 = unlimited">
+          <Field label={`${t("templates.dataLimit")} (GB)`} hint={t("0 = unlimited")}>
             <Input type="number" min="0" step="0.1" value={form.dataLimitGB}
               onChange={(e) => setForm({ ...form, dataLimitGB: e.target.value })} />
           </Field>
@@ -244,16 +244,16 @@ function TemplateDialog({ mode, template, catalog, onClose, onSaved }: {
               onChange={(e) => setForm({ ...form, expireDays: e.target.value })} />
           </Field>
         </div>
-        <Field label="username prefix">
+        <Field label={t("username prefix")}>
           <Input value={form.username_prefix} onChange={(e) => setForm({ ...form, username_prefix: e.target.value })} />
         </Field>
-        <Field label="username suffix">
+        <Field label={t("username suffix")}>
           <Input value={form.username_suffix} onChange={(e) => setForm({ ...form, username_suffix: e.target.value })} />
         </Field>
 
         <div className="sm:col-span-2">
           <Field label={t("users.protocols")}
-            hint="pick inbounds from ANY core — users created from this template get real accounts on every selected core; an untouched xray branch means all xray inbounds">
+            hint={t("pick inbounds from ANY core — users created from this template get real accounts on every selected core; an untouched xray branch means all xray inbounds")}>
             <CoreAccessPicker
               groups={catalog}
               value={form.coreAccess}

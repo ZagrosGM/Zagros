@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "../components/feedback";
 import { Badge, Button, Card, CardHeader, EmptyState, Field, Input, Select, Skeleton, Switch } from "../components/ui";
 import { api, ApiError } from "../lib/api";
-import { useT } from "../lib/i18n";
+import { useT , useTDynamic } from "../lib/i18n";
 import type { CoreView } from "../lib/types";
 
 interface DnsServer { address: string; domains?: string; detour?: string }
@@ -40,6 +40,7 @@ const STRATEGIES = ["ipv4_only", "ipv6_only", "prefer_ipv4", "prefer_ipv6"];
 
 export default function Dns() {
   const t = useT();
+  const td = useTDynamic();
   const qc = useQueryClient();
   const [coreId, setCoreId] = useState("");
   const [model, setModel] = useState<DnsModel | null>(null);
@@ -110,7 +111,7 @@ export default function Dns() {
           <Globe size={18} className="text-brand" />{t("nav.dns")}
           {dirty && <Badge tone="warn" dot>unsaved</Badge>}
         </h1>
-        <Field label="core">
+        <Field label={t("core")}>
           <Select value={effectiveCore} onChange={(e) => setCoreId(e.target.value)} className="w-40">
             {(cores.data?.cores ?? []).map((c) => <option key={c.id} value={c.id}>{c.id}</option>)}
             {!cores.data?.cores?.length && <option value="">—</option>}
@@ -122,14 +123,14 @@ export default function Dns() {
       </div>
 
       {!effectiveCore ? (
-        <Card><EmptyState title="Install a core first" /></Card>
+        <Card><EmptyState title={t("Install a core first")} /></Card>
       ) : raw.isLoading || !model ? (
         <Skeleton className="h-72" />
       ) : (
         <div className="grid gap-4 lg:grid-cols-3">
           <Card className="lg:col-span-2">
-            <CardHeader title="resolvers" subtitle="queried top-down; optionally pinned to domains"
-              actions={<Button size="sm" variant="secondary" onClick={() => { setModel({ ...model, servers: [...model.servers, { address: "" }] }); setDirty(true); }}><Plus size={13} /> resolver</Button>} />
+            <CardHeader title={t("resolvers")} subtitle={t("queried top-down; optionally pinned to domains")}
+              actions={<Button size="sm" variant="secondary" onClick={() => { setModel({ ...model, servers: [...model.servers, { address: "" }] }); setDirty(true); }}><Plus size={13} />{t("resolver")}</Button>} />
             <div className="space-y-2.5">
               {model.servers.map((s, i) => (
                 <div key={i} className="grid gap-2 rounded-xl border border-border p-3 sm:grid-cols-[1fr_200px_36px]">
@@ -137,28 +138,28 @@ export default function Dns() {
                     onChange={(e) => { const servers = [...model.servers]; servers[i] = { ...s, address: e.target.value }; setModel({ ...model, servers }); setDirty(true); }} />
                   <Input value={s.domains ?? ""} dir="ltr" placeholder="domains (optional) geosite:ir"
                     onChange={(e) => { const servers = [...model.servers]; servers[i] = { ...s, domains: e.target.value }; setModel({ ...model, servers }); setDirty(true); }} />
-                  <Button variant="ghost" size="icon" aria-label="remove resolver"
+                  <Button variant="ghost" size="icon" aria-label={t("remove resolver")}
                     onClick={() => { setModel({ ...model, servers: model.servers.filter((_, xi) => xi !== i) }); setDirty(true); }}>
                     <Trash2 size={14} />
                   </Button>
                 </div>
               ))}
-              {model.servers.length === 0 && <p className="py-4 text-center text-xs text-content-3">no resolvers — add one or apply a template</p>}
+              {model.servers.length === 0 && <p className="py-4 text-center text-xs text-content-3">{t("no resolvers — add one or apply a template")}</p>}
             </div>
 
             <div className="mt-5 grid gap-4 border-t border-border pt-4 sm:grid-cols-3">
-              <Field label="fallback resolver" hint="used when all others time out">
+              <Field label={t("fallback resolver")} hint={t("used when all others time out")}>
                 <Input value={model.fallback} dir="ltr" placeholder="1.1.1.1"
                   onChange={(e) => { setModel({ ...model, fallback: e.target.value }); setDirty(true); }} />
               </Field>
-              <Field label="resolution strategy">
+              <Field label={t("resolution strategy")}>
                 <Select value={model.strategy} onChange={(e) => { setModel({ ...model, strategy: e.target.value }); setDirty(true); }}>
                   {STRATEGIES.map((s) => <option key={s} value={s}>{s}</option>)}
                 </Select>
               </Field>
-              <Field label="cache" hint="core-side answer cache">
+              <Field label={t("cache")} hint={t("core-side answer cache")}>
                 <div className="flex h-9 items-center gap-2.5">
-                  <Switch checked={!model.disable_cache} onChange={(v) => { setModel({ ...model, disable_cache: !v }); setDirty(true); }} label="cache" />
+                  <Switch checked={!model.disable_cache} onChange={(v) => { setModel({ ...model, disable_cache: !v }); setDirty(true); }} label={t("cache")} />
                   <span className="text-xs text-content-2">{model.disable_cache ? "off" : "on"}</span>
                 </div>
               </Field>
@@ -167,28 +168,28 @@ export default function Dns() {
 
           <div className="space-y-4">
             <Card>
-              <CardHeader title="health" subtitle="shape of the resolver set" />
+              <CardHeader title={t("health")} subtitle={t("shape of the resolver set")} />
               <div className="space-y-2.5 text-[13px]">
                 <HealthRow ok={health!.encrypted > 0}
-                  label={`${health!.doh} DoH + ${health!.dot} DoT encrypted`}
-                  detail={health!.encrypted > 0 ? "plaintext spoofing resistant" : "all resolvers are plaintext"} />
+                  label={t("{doh} DoH + {dot} DoT encrypted", { doh: health!.doh, dot: health!.dot })}
+                  detail={health!.encrypted > 0 ? t("plaintext spoofing resistant") : t("all resolvers are plaintext")} />
                 <HealthRow ok={model.servers.length >= 2}
-                  label={`${model.servers.length} resolver(s)`}
-                  detail={model.servers.length >= 2 ? "redundant" : "single point of failure"} />
-                <HealthRow ok={!model.servers.some((s) => !s.address.trim())} label="no empty entries" detail="" />
+                  label={t("{count} resolver(s)", { count: model.servers.length })}
+                  detail={model.servers.length >= 2 ? t("redundant") : t("single point of failure")} />
+                <HealthRow ok={!model.servers.some((s) => !s.address.trim())} label={t("no empty entries")} detail="" />
               </div>
             </Card>
             <Card>
-              <CardHeader title="templates" subtitle="replace the resolver set" />
+              <CardHeader title={t("templates")} subtitle={t("replace the resolver set")} />
               <div className="grid gap-2">
                 {(Object.keys(TEMPLATES) as (keyof typeof TEMPLATES)[]).map((k) => (
                   <button key={k} onClick={() => { setModel(structuredClone(TEMPLATES[k])); setDirty(true); }}
                     className="rounded-xl border border-border p-3 text-start transition-colors hover:border-brand">
-                    <p className="text-[13px] font-semibold capitalize">{k}</p>
+                    <p className="text-[13px] font-semibold capitalize">{td(k)}</p>
                     <p className="mt-0.5 text-[11px] text-content-3">
-                      {k === "clean" ? "Google DoH + Cloudflare DoT — sane default"
-                        : k === "iran" ? "Shecan (403) fallback for IR split-routing"
-                        : "Quad9 filtering, cache disabled"}
+                      {k === "clean" ? t("Google DoH + Cloudflare DoT — sane default")
+                        : k === "iran" ? t("Shecan (403) fallback for IR split-routing")
+                        : t("Quad9 filtering, cache disabled")}
                     </p>
                   </button>
                 ))}

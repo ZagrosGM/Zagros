@@ -3,6 +3,7 @@
 // ops — zero raw JSON in Normal mode. Changes write back a JSON document
 // that the Studio's validate/diff/apply pipeline consumes unchanged.
 import { Braces, Brackets, ChevronDown, ChevronRight, Hash, Plus, ToggleLeft, Trash2, Type } from "lucide-react";
+import { useT } from "../lib/i18n";
 import { useState } from "react";
 import { Button, Input, Select, cn } from "./ui";
 
@@ -73,6 +74,7 @@ interface NodeProps {
 }
 
 function Node({ value, onChange, depth, label, onDelete }: NodeProps) {
+  const t = useT();
   const [open, setOpen] = useState(depth < 2);
   const [adding, setAdding] = useState(false);
   const [newKey, setNewKey] = useState("");
@@ -131,14 +133,14 @@ function Node({ value, onChange, depth, label, onDelete }: NodeProps) {
         )}
         <TypeConvert current={type} onPick={(t) => onChange(EMPTY_OF[t])} />
         {composite && (
-          <Button variant="ghost" size="icon" aria-label="add child"
+          <Button variant="ghost" size="icon" aria-label={t("add child")}
             className="h-6 w-6 opacity-0 transition-opacity group-hover:opacity-100"
             onClick={() => setAdding(!adding)}>
             <Plus size={12} />
           </Button>
         )}
         {onDelete && (
-          <Button variant="ghost" size="icon" aria-label="delete node"
+          <Button variant="ghost" size="icon" aria-label={t("delete node")}
             className="h-6 w-6 opacity-0 transition-opacity group-hover:opacity-100 hover:text-danger"
             onClick={onDelete}>
             <Trash2 size={12} />

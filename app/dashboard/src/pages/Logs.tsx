@@ -43,18 +43,18 @@ export default function Logs() {
           <FileTerminal size={18} className="text-brand" />{t("nav.logs")}
           {effectiveCore && <Badge tone="brand">{effectiveCore}</Badge>}
         </h1>
-        <Select value={effectiveCore} onChange={(e) => setCoreId(e.target.value)} className="w-40" aria-label="core">
+        <Select value={effectiveCore} onChange={(e) => setCoreId(e.target.value)} className="w-40" aria-label={t("core")}>
           {(cores.data?.cores ?? []).map((c) => <option key={c.id} value={c.id}>{c.id}</option>)}
-          {!cores.data?.cores?.length && <option value="">— install a core —</option>}
+          {!cores.data?.cores?.length && <option value="">{t("— install a core —")}</option>}
         </Select>
-        <Select value={String(lines)} onChange={(e) => setLines(Number(e.target.value))} className="w-28" aria-label="lines">
+        <Select value={String(lines)} onChange={(e) => setLines(Number(e.target.value))} className="w-28" aria-label={t("lines")}>
           {[100, 300, 500, 1000].map((n) => <option key={n} value={n}>{n}</option>)}
         </Select>
         <div className="relative">
           <Search size={13} className="absolute start-2.5 top-1/2 -translate-y-1/2 text-content-3" />
-          <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="filter…" className="w-44 ps-7" aria-label="filter logs" />
+          <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder={t("filter…")} className="w-44 ps-7" aria-label={t("filter logs")} />
         </div>
-        <Button variant={follow ? "secondary" : "ghost"} size="sm" onClick={() => setFollow((v) => !v)}>follow</Button>
+        <Button variant={follow ? "secondary" : "ghost"} size="sm" onClick={() => setFollow((v) => !v)}>{t("follow")}</Button>
         <Button variant="ghost" size="sm" onClick={() => logs.refetch()}><RefreshCcw size={13} /></Button>
       </div>
 

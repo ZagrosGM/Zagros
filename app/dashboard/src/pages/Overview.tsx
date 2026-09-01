@@ -150,11 +150,11 @@ export default function Overview() {
         <Card>
           <CardHeader
             title={<Link to="/cores" className="inline-flex items-center gap-2 hover:text-brand"><Cpu size={16} className="text-brand" />{t("overview.cores")}</Link>}
-            actions={<Link to="/cores"><Badge tone="brand">manage</Badge></Link>} />
+            actions={<Link to="/cores"><Badge tone="brand">{t("manage")}</Badge></Link>} />
           {cores.isLoading ? <Skeleton className="h-20" /> : cores.isError ? (
-            <p className="py-6 text-center text-xs text-content-3">Core inventory requires a sudo admin.</p>
+            <p className="py-6 text-center text-xs text-content-3">{t("Core inventory requires a sudo admin.")}</p>
           ) : !cores.data?.cores?.length ? (
-            <p className="py-6 text-center text-xs text-content-3">No cores installed — install one from the Cores page.</p>
+            <p className="py-6 text-center text-xs text-content-3">{t("No cores installed — install one from the Cores page.")}</p>
           ) : (
             <ul className="divide-y divide-border">
               {cores.data.cores.map((c) => (
@@ -179,9 +179,9 @@ export default function Overview() {
         <Card>
           <CardHeader
             title={<Link to="/nodes" className="inline-flex items-center gap-2 hover:text-brand"><Wifi size={16} className="text-brand" />{t("overview.nodes")}</Link>}
-            actions={<Link to="/nodes"><Badge tone="brand">manage</Badge></Link>} />
+            actions={<Link to="/nodes"><Badge tone="brand">{t("manage")}</Badge></Link>} />
           {nodes.isLoading ? <Skeleton className="h-20" /> : nodes.isError || !nodes.data?.nodes?.length ? (
-            <p className="py-6 text-center text-xs text-content-3">Master node only — add remote nodes from the Nodes page.</p>
+            <p className="py-6 text-center text-xs text-content-3">{t("Master node only — add remote nodes from the Nodes page.")}</p>
           ) : (
             <ul className="divide-y divide-border">
               {(nodes.data?.nodes ?? []).map((n) => (

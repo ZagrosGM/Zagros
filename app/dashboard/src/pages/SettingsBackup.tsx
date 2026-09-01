@@ -161,41 +161,35 @@ export default function SettingsBackup() {
       <Card>
         <CardHeader
           title={<span className="inline-flex items-center gap-2"><DatabaseBackup size={16} className="text-brand" />{t("settings.backup.now")}</span>}
-          subtitle="database + configuration + certificates + core state"
+          subtitle={t("database + configuration + certificates + core state")}
         />
         <div className="flex flex-wrap items-center gap-2">
           <Button onClick={() => create.mutate()} loading={create.isPending}>
             <DatabaseBackup size={14} />take backup
           </Button>
           <Button variant="secondary" onClick={() => runService.mutate()} loading={runService.isPending}>
-            <Send size={14} />run scheduled job now
-          </Button>
+            <Send size={14} />{t("run scheduled job now")}</Button>
         </div>
-        <p className="mt-3 text-[11.5px] leading-5 text-content-3">
-          Core binaries and the backup folder itself are excluded — they are
-          re-installable, and an archive must never contain itself.
-        </p>
+        <p className="mt-3 text-[11.5px] leading-5 text-content-3">{t("Core binaries and the backup folder itself are excluded — they are re-installable, and an archive must never contain itself.")}</p>
       </Card>
 
       <Card>
-        <CardHeader title={t("settings.backup.service")} subtitle="build an archive on a schedule and send it to Telegram" />
+        <CardHeader title={t("settings.backup.service")} subtitle={t("build an archive on a schedule and send it to Telegram")} />
         {service.isLoading || !settings ? <Skeleton className="h-56" /> : (
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="flex items-center gap-2.5 text-sm text-content-2 sm:col-span-2">
-              <Switch checked={settings.enabled} onChange={(v) => setForm({ ...settings, enabled: v })} label="enabled" />
-              enabled
-            </label>
+              <Switch checked={settings.enabled} onChange={(v) => setForm({ ...settings, enabled: v })} label={t("enabled")} />{t("enabled")}</label>
             <Field label="schedule">
               <Select value={settings.schedule} onChange={(e) => setForm({ ...settings, schedule: e.target.value })}>
                 {SCHEDULES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
               </Select>
             </Field>
             {settings.schedule === "cron" ? (
-              <Field label="cron (UTC)" hint="minute hour day month weekday">
+              <Field label={t("cron (UTC)")} hint={t("minute hour day month weekday")}>
                 <Input value={settings.cron} onChange={(e) => setForm({ ...settings, cron: e.target.value })} dir="ltr" placeholder="0 3 * * *" />
               </Field>
             ) : (
-              <Field label="at (UTC)">
+              <Field label={t("at (UTC)")}>
                 <div className="flex items-center gap-2">
                   <Input type="number" min={0} max={23} value={settings.at_hour} onChange={(e) => setForm({ ...settings, at_hour: Number(e.target.value) })} dir="ltr" />
                   <span className="text-content-3">:</span>
@@ -210,19 +204,17 @@ export default function SettingsBackup() {
                 </Select>
               </Field>
             )}
-            <Field label="Telegram chat id" hint="numeric — e.g. -1001234567890">
+            <Field label={t("Telegram chat id")} hint={t("numeric — e.g. -1001234567890")}>
               <Input value={settings.chat_id} onChange={(e) => setForm({ ...settings, chat_id: e.target.value })} dir="ltr" />
             </Field>
-            <Field label="bot token" hint={settings.has_token ? "stored encrypted — leave blank to keep it" : "from @BotFather"}>
+            <Field label={t("bot token")} hint={settings.has_token ? "stored encrypted — leave blank to keep it" : "from @BotFather"}>
               <Input type="password" value={""} onChange={(e) => setForm({ ...settings, bot_token: e.target.value })} placeholder={settings.has_token ? "••••••••" : ""} dir="ltr" autoComplete="new-password" />
             </Field>
-            <Field label="archives kept" hint="older ones are pruned">
+            <Field label={t("archives kept")} hint={t("older ones are pruned")}>
               <Input type="number" min={0} value={settings.keep} onChange={(e) => setForm({ ...settings, keep: Number(e.target.value) })} dir="ltr" />
             </Field>
             <label className="flex items-center gap-2.5 text-sm text-content-2">
-              <Switch checked={settings.include_logs} onChange={(v) => setForm({ ...settings, include_logs: v })} label="include logs" />
-              include logs
-            </label>
+              <Switch checked={settings.include_logs} onChange={(v) => setForm({ ...settings, include_logs: v })} label={t("include logs")} />{t("include logs")}</label>
             {settings.enabled && (
               <p className="text-[11.5px] text-content-3 sm:col-span-2">
                 next run: {when(settings.next_run_at)} · effective schedule:{" "}
@@ -231,7 +223,7 @@ export default function SettingsBackup() {
             )}
             <div className="flex flex-wrap gap-2 sm:col-span-2">
               <Button variant="secondary" onClick={() => saveService.mutate()} loading={saveService.isPending}>save</Button>
-              <Button variant="ghost" onClick={() => testService.mutate()} loading={testService.isPending}>send test message</Button>
+              <Button variant="ghost" onClick={() => testService.mutate()} loading={testService.isPending}>{t("send test message")}</Button>
             </div>
             {service.data?.state?.last_status && (
               <p className="text-[11.5px] text-content-3 sm:col-span-2">
@@ -270,7 +262,7 @@ export default function SettingsBackup() {
               </li>
             ))}
             {(artifacts.data?.artifacts ?? []).length === 0 && (
-              <li className="py-6 text-center text-[12px] text-content-3">no archives yet</li>
+              <li className="py-6 text-center text-[12px] text-content-3">{t("no archives yet")}</li>
             )}
           </ul>
         )}
@@ -279,10 +271,10 @@ export default function SettingsBackup() {
       <Card>
         <CardHeader
           title={<span className="inline-flex items-center gap-2"><ArchiveRestore size={16} className="text-brand" />{t("settings.backup.restore")}</span>}
-          subtitle="upload an archive, inspect it, then restore"
+          subtitle={t("upload an archive, inspect it, then restore")}
         />
         <div className="grid gap-3">
-          <Field label="backup source" hint="Zagros archives restore as-is; others are imported">
+          <Field label={t("backup source")} hint={t("Zagros archives restore as-is; others are imported")}>
             <Select value={source} onChange={(e) => { setSource(e.target.value); setReport(null); }}>
               {SOURCES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
             </Select>
@@ -306,7 +298,7 @@ export default function SettingsBackup() {
               inspect
             </Button>
             {source !== "zagros" && report?.dry_run === false && (
-              <Button disabled className="opacity-50">already restored</Button>
+              <Button disabled className="opacity-50">{t("already restored")}</Button>
             )}
             {source !== "zagros" && report?.dry_run !== false && (
               <Button onClick={() => apply.mutate()} disabled={!staged} loading={apply.isPending}>
@@ -340,7 +332,7 @@ export default function SettingsBackup() {
               )}
               {Object.keys(report.credentials ?? {}).length > 0 && (
                 <div className="rounded-lg border border-warn/40 bg-warn-soft p-2 text-[11.5px]">
-                  <p className="font-medium">New passwords — shown once:</p>
+                  <p className="font-medium">{t("New passwords — shown once:")}</p>
                   {Object.entries(report.credentials).map(([user, password]) => (
                     <p key={user} dir="ltr">{user}: <b>{password}</b></p>
                   ))}

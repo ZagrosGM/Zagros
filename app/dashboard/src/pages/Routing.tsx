@@ -107,20 +107,17 @@ export default function Routing() {
           <Rocket size={13} /> {t("common.deploy")}
         </Button>
         <Button size="sm" variant="secondary" onClick={() => setEditIdx(-1) /* -1 = new */}>
-          <Plus size={13} /> rule
-        </Button>
+          <Plus size={13} />{t("rule")}</Button>
       </div>
 
-      <p className="text-xs text-content-3">
-        Rules are evaluated by priority, first match wins. Drag cards to reorder — priorities renumber automatically (10, 20, 30…). Target compatibility is evaluated from the selected source inbounds and network.
-      </p>
+      <p className="text-xs text-content-3">{t("Rules are evaluated by priority, first match wins. Drag cards to reorder — priorities renumber automatically (10, 20, 30…). Target compatibility is evaluated from the selected source inbounds and network.")}</p>
 
       {load.isLoading ? null : rules.length === 0 ? (
         <Card>
           <EmptyState
-            title="No routing rules"
+            title={t("No routing rules")}
             hint={'Example: IF inbound is "reality-in" AND country is IR THEN route through "warp-up" outbound.'}
-            action={<Button size="sm" onClick={() => setEditIdx(-1)}><Plus size={13} /> create rule</Button>}
+            action={<Button size="sm" onClick={() => setEditIdx(-1)}><Plus size={13} />{t("create rule")}</Button>}
           />
         </Card>
       ) : (
@@ -143,7 +140,7 @@ export default function Routing() {
 
       {preview && (
         <Card>
-          <CardHeader title="Dry preview — what every core would accept" subtitle="nothing was sent to the cores" />
+          <CardHeader title={t("Dry preview — what every core would accept")} subtitle={t("nothing was sent to the cores")} />
           <div className="space-y-3">
             {Object.entries(preview.results ?? {}).map(([core, res]) => (
               <div key={core} className="rounded-xl border border-border p-3.5">
@@ -162,7 +159,7 @@ export default function Routing() {
               </div>
             ))}
             {Object.keys(preview.results ?? {}).length === 0 && (
-              <p className="text-xs text-content-3">No routing-capable core is installed — the matrix is empty.</p>
+              <p className="text-xs text-content-3">{t("No routing-capable core is installed — the matrix is empty.")}</p>
             )}
           </div>
         </Card>
@@ -188,6 +185,7 @@ export default function Routing() {
 function RuleCard({ rule, onEdit, onToggle, onDelete }: {
   rule: RoutingRule; onEdit: () => void; onToggle: (v: boolean) => void; onDelete: () => void;
 }) {
+  const t = useT();
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: rule.name });
   return (
     <div
@@ -195,7 +193,7 @@ function RuleCard({ rule, onEdit, onToggle, onDelete }: {
       style={{ transform: CSS.Transform.toString(transform), transition }}
       className={cn("card flex items-center gap-3 p-3.5", isDragging && "z-10 shadow-pop border-brand", !rule.enabled && "opacity-60")}
     >
-      <button {...attributes} {...listeners} aria-label="drag to reorder"
+      <button {...attributes} {...listeners} aria-label={t("drag to reorder")}
         className="cursor-grab touch-none rounded-lg p-1.5 text-content-3 hover:bg-surface-2 hover:text-content active:cursor-grabbing">
         <GripVertical size={15} />
       </button>
@@ -209,9 +207,9 @@ function RuleCard({ rule, onEdit, onToggle, onDelete }: {
         </div>
         <MatcherSummary rule={rule} />
       </div>
-      <Switch checked={rule.enabled} onChange={onToggle} label="enabled" />
+      <Switch checked={rule.enabled} onChange={onToggle} label={t("enabled")} />
       <Button variant="ghost" size="sm" onClick={onEdit}>edit</Button>
-      <Button variant="ghost" size="icon" onClick={onDelete} aria-label="delete rule"><Trash2 size={14} /></Button>
+      <Button variant="ghost" size="icon" onClick={onDelete} aria-label={t("delete rule")}><Trash2 size={14} /></Button>
     </div>
   );
 }
@@ -240,6 +238,7 @@ function ChipField({ label, values, onChange, placeholder, datalist, preserveCas
   label: string; values: string[]; onChange: (v: string[]) => void; placeholder?: string;
   datalist?: string[]; preserveCase?: boolean;
 }) {
+  const t = useT();
   const [text, setText] = useState("");
   const id = `dl-${label.replace(/\W+/g, "-")}`;
   const add = () => {
@@ -254,7 +253,7 @@ function ChipField({ label, values, onChange, placeholder, datalist, preserveCas
         {values.map((v) => (
           <span key={v} className="inline-flex items-center gap-1 rounded-lg bg-surface-3 px-2 py-1 text-[11px]">
             {v}
-            <button type="button" aria-label={`remove ${v}`} onClick={() => onChange(values.filter((x) => x !== v))}
+            <button type="button" aria-label={t("remove {value}", { value: v })} onClick={() => onChange(values.filter((x) => x !== v))}
               className="text-content-3 hover:text-danger">×</button>
           </span>
         ))}
@@ -276,6 +275,7 @@ function ChipField({ label, values, onChange, placeholder, datalist, preserveCas
 function InboundTagSelector({ groups, values, onChange }: {
   groups: InboundCatalogGroup[]; values: string[]; onChange: (values: string[]) => void;
 }) {
+  const t = useT();
   const rows = groups.flatMap((group) => group.inbounds.map((inbound) => ({
     ...inbound, coreId: group.core_id, coreName: group.name,
   })));
@@ -290,7 +290,7 @@ function InboundTagSelector({ groups, values, onChange }: {
     checked ? [...new Set([...values, tag])] : values.filter((value) => value !== tag),
   );
   return (
-    <Field label="inbound tags" hint="Select one or more live inbounds. Core ownership is validated again by the backend.">
+    <Field label={t("inbound tags")} hint={t("Select one or more live inbounds. Core ownership is validated again by the backend.")}>
       <div data-testid="inbound-tag-selector" className="space-y-2 rounded-xl border border-border bg-surface-2 p-3">
         {groups.map((group) => (
           <div key={group.core_id} className="rounded-lg border border-border/70 bg-surface-1 p-2.5">
@@ -443,25 +443,25 @@ function RuleDialog({ rule, targets, inboundGroups, existingNames, onClose, onSa
         </>
       }>
       <div className="grid gap-4 sm:grid-cols-2">
-        <Field label="rule name" required>
+        <Field label={t("rule name")} required>
           <Input value={r.name} onChange={(e) => setR({ ...r, name: e.target.value })} placeholder="iran-via-warp" />
         </Field>
-        <Field label="priority" hint="lower = evaluated earlier (Dragging cards renumbers)">
+        <Field label="priority" hint={t("lower = evaluated earlier (Dragging cards renumbers)")}>
           <Input type="number" value={r.priority} onChange={(e) => setR({ ...r, priority: Number(e.target.value) || 100 })} />
         </Field>
 
         <div className="sm:col-span-2 grid gap-4 rounded-xl border border-border p-3.5">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-content-3">IF — matchers (all must match)</p>
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-content-3">{t("IF — matchers (all must match)")}</p>
           <InboundTagSelector groups={inboundGroups} values={m.inbounds ?? []}
             onChange={(v) => setMatcher({ inbounds: v })} />
-          <ChipField label="domains / geosites" values={m.domains ?? []} onChange={(v) => setMatcher({ domains: v })}
+          <ChipField label={t("domains / geosites")} values={m.domains ?? []} onChange={(v) => setMatcher({ domains: v })}
             placeholder="geosite:category-ir / example.com" />
           <div className="grid gap-4 sm:grid-cols-2">
-            <ChipField label="country (GeoIP)" values={m.geoips ?? []} onChange={(v) => setMatcher({ geoips: v })}
+            <ChipField label={t("country (GeoIP)")} values={m.geoips ?? []} onChange={(v) => setMatcher({ geoips: v })}
               datalist={GEO_DEFAULT} placeholder="ir" />
-            <ChipField label="protocol" values={m.protocols ?? []} onChange={(v) => setMatcher({ protocols: v })}
+            <ChipField label={t("protocol")} values={m.protocols ?? []} onChange={(v) => setMatcher({ protocols: v })}
               datalist={PROTOCOL_HINT} placeholder="bittorrent" />
-            <ChipField label="target CIDR" values={m.ciders ?? []} onChange={(v) => setMatcher({ ciders: v })}
+            <ChipField label={t("target CIDR")} values={m.ciders ?? []} onChange={(v) => setMatcher({ ciders: v })}
               placeholder="geoip:private / 1.2.3.0/24" />
             <ChipField label="ports" values={m.ports ?? []} onChange={(v) => setMatcher({ ports: v })}
               placeholder="53 / 1000-2000" />
@@ -471,20 +471,20 @@ function RuleDialog({ rule, targets, inboundGroups, existingNames, onClose, onSa
                 {NETWORKS.map((n) => <option key={n} value={n}>{n}</option>)}
               </Select>
             </Field>
-            <ChipField label="process names" values={m.process_names ?? []} onChange={(v) => setMatcher({ process_names: v })}
+            <ChipField label={t("process names")} values={m.process_names ?? []} onChange={(v) => setMatcher({ process_names: v })}
               placeholder="chrome.exe (sing-box only)" />
           </div>
         </div>
 
         <div className="sm:col-span-2 grid gap-4 rounded-xl border border-border p-3.5 sm:grid-cols-2">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-content-3 sm:col-span-2">THEN — action</p>
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-content-3 sm:col-span-2">{t("THEN — action")}</p>
           <Field label="action" required>
             <Select value={r.action} onChange={(e) => setR({ ...r, action: e.target.value as RoutingRule["action"] })}>
               {ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
             </Select>
           </Field>
           {needsOutbound && (
-            <Field label="target outbound" required hint="Targets are evaluated from source core, dataplane and TCP/UDP. SSH becomes selectable only for an Xray/sing-box source explicitly limited to TCP.">
+            <Field label={t("target outbound")} required hint={t("Targets are evaluated from source core, dataplane and TCP/UDP. SSH becomes selectable only for an Xray/sing-box source explicitly limited to TCP.")}>
               <Select value={r.outbound ?? ""} onChange={(e) => setR({ ...r, outbound: e.target.value || null })}>
                 <option value="">— choose —</option>
                 {targetVerdicts.map((target) => (
@@ -496,17 +496,17 @@ function RuleDialog({ rule, targets, inboundGroups, existingNames, onClose, onSa
             </Field>
           )}
           {needsRedirect && (
-            <Field label="redirect to" required>
+            <Field label={t("redirect to")} required>
               <Input value={r.redirect_to ?? ""} onChange={(e) => setR({ ...r, redirect_to: e.target.value || null })} placeholder="127.0.0.1:8080" dir="ltr" />
             </Field>
           )}
           {needsDns && (
-            <Field label="dns server" required>
+            <Field label={t("dns server")} required>
               <Input value={r.dns_server ?? ""} onChange={(e) => setR({ ...r, dns_server: e.target.value || null })} placeholder="https://dns.google/dns-query" dir="ltr" />
             </Field>
           )}
           <label className="flex items-center gap-2.5 text-sm text-content-2">
-            <Switch checked={r.enabled} onChange={(v) => setR({ ...r, enabled: v })} label="enabled" />
+            <Switch checked={r.enabled} onChange={(v) => setR({ ...r, enabled: v })} label={t("enabled")} />
             rule active
           </label>
         </div>

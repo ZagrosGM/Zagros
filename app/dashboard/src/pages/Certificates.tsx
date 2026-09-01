@@ -10,7 +10,7 @@ import { ConfirmDialog, Dialog } from "../components/overlays";
 import { Badge, Button, Card, CardHeader, EmptyState, Field, Input, Select, Skeleton, Switch, Textarea, cn } from "../components/ui";
 import { api, ApiError } from "../lib/api";
 import { useDigits, formatDate } from "../lib/format";
-import { useT } from "../lib/i18n";
+import { useT , useTDynamic } from "../lib/i18n";
 import type { CertificateInfo } from "../lib/types";
 
 const expiryTone = (c: CertificateInfo) => c.expired ? "danger" : c.days_left <= 14 ? "warn" : "ok";
@@ -62,8 +62,8 @@ export default function Certificates() {
           <ShieldCheck size={18} className="text-brand" />{t("nav.certificates")}
         </h1>
         <Button variant="ghost" size="sm" onClick={() => list.refetch()}><RefreshCcw size={13} /> {t("common.refresh")}</Button>
-        <Button variant="secondary" size="sm" onClick={() => setDialog("import")}><Upload size={13} /> import PEM</Button>
-        <Button size="sm" onClick={() => setDialog("selfsigned")}><KeyRound size={13} /> self-signed</Button>
+        <Button variant="secondary" size="sm" onClick={() => setDialog("import")}><Upload size={13} />{t("import PEM")}</Button>
+        <Button size="sm" onClick={() => setDialog("selfsigned")}><KeyRound size={13} />{t("self-signed")}</Button>
       </div>
 
       <AcmeSection state={acme.data} loading={acme.isLoading} />
@@ -72,11 +72,11 @@ export default function Certificates() {
         <div className="grid gap-3 md:grid-cols-2">{[1, 2].map((i) => <Skeleton key={i} className="h-36" />)}</div>
       ) : certs.length === 0 ? (
         <Card>
-          <EmptyState title="No certificates"
-            hint="Import an existing PEM pair or generate a self-signed certificate for LAN/test setups."
+          <EmptyState title={t("No certificates")}
+            hint={t("Import an existing PEM pair or generate a self-signed certificate for LAN/test setups.")}
             action={<div className="flex gap-2">
               <Button size="sm" variant="secondary" onClick={() => setDialog("import")}><Upload size={13} /> import</Button>
-              <Button size="sm" onClick={() => setDialog("selfsigned")}><KeyRound size={13} /> self-signed</Button>
+              <Button size="sm" onClick={() => setDialog("selfsigned")}><KeyRound size={13} />{t("self-signed")}</Button>
             </div>} />
         </Card>
       ) : (
@@ -88,18 +88,18 @@ export default function Certificates() {
                   <div className="flex items-center gap-2">
                     <h3 className="truncate text-sm font-semibold">{c.name}</h3>
                     {acmeNames.has(c.name) && <Badge tone="info">ACME</Badge>}
-                    {c.self_signed && <Badge tone="warn">self-signed</Badge>}
+                    {c.self_signed && <Badge tone="warn">{t("self-signed")}</Badge>}
                     {!c.has_key && <Badge tone="danger">cert only</Badge>}
                   </div>
                   <p className="mt-1 truncate text-[11px] text-content-3">CN: {c.subject || "—"} · issuer: {c.issuer || "—"}</p>
                 </div>
                 <Badge tone={expiryTone(c) as never} dot>
-                  {c.expired ? "expired" : `${c.days_left}d left`}
+                  {c.expired ? t("expired") : t("{days}d left", { days: c.days_left })}
                 </Badge>
               </div>
               <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-content-3">
-                <span>issued {formatDate(c.not_before, digits)}</span>
-                <span>expires {formatDate(c.not_after, digits)}</span>
+                <span>{t("issued {date}", { date: formatDate(c.not_before, digits) })}</span>
+                <span>{t("expires {date}", { date: formatDate(c.not_after, digits) })}</span>
               </div>
               <div className="mt-3 flex items-center justify-between border-t border-border pt-3">
                 <code className="font-mono text-[10px] text-content-3" dir="ltr">{c.serial ? `serial ${c.serial.slice(0, 18)}…` : ""}</code>
@@ -107,9 +107,9 @@ export default function Certificates() {
                   // ACME-managed: bare store delete is refused by the API
                   // (409) — deletion belongs to the ACME section so provider
                   // cleanup runs and is reported
-                  <span className="text-[10px] text-content-3">managed by ACME — delete below</span>
+                  <span className="text-[10px] text-content-3">{t("managed by ACME — delete below")}</span>
                 ) : (
-                  <Button variant="ghost" size="icon" aria-label={`delete ${c.name}`} onClick={() => setDeleteFor(c)}><Trash2 size={14} /></Button>
+                  <Button variant="ghost" size="icon" aria-label={t("delete {name}", { name: c.name })} onClick={() => setDeleteFor(c)}><Trash2 size={14} /></Button>
                 )}
               </div>
             </Card>
@@ -139,8 +139,8 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState("");
   const missing = !(name.trim() && certPem.includes("BEGIN CERTIFICATE") && keyPem.includes("PRIVATE KEY"));
   return (
-    <Dialog open onClose={onClose} title="import certificate" wide
-      subtitle="the pair is validated — a mismatched key is refused before anything lands on disk"
+    <Dialog open onClose={onClose} title={t("import certificate")} wide
+      subtitle={t("the pair is validated — a mismatched key is refused before anything lands on disk")}
       footer={<>
         <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
         <Button loading={busy} disabled={missing} onClick={async () => {
@@ -157,11 +157,11 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
         <Field label="name" required hint="stored under <data>/certs/&lt;name&gt;/ as fullchain.pem + key.pem">
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="panel.example.com" dir="ltr" />
         </Field>
-        <Field label="certificate chain (PEM)" required>
+        <Field label={t("certificate chain (PEM)")} required>
           <Textarea rows={6} value={certPem} onChange={(e) => setCertPem(e.target.value)} dir="ltr" className="font-mono text-[11px]"
             placeholder="-----BEGIN CERTIFICATE-----&#10;…(fullchain.pem, leaf first)…" />
         </Field>
-        <Field label="private key (PEM)" required>
+        <Field label={t("private key (PEM)")} required>
           <Textarea rows={5} value={keyPem} onChange={(e) => setKeyPem(e.target.value)} dir="ltr" className="font-mono text-[11px]"
             placeholder="-----BEGIN PRIVATE KEY-----" />
         </Field>
@@ -181,8 +181,8 @@ function SelfSignedDialog({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   return (
-    <Dialog open onClose={onClose} title="generate self-signed certificate"
-      subtitle="RSA-2048 with SANs — for LAN/testing; browsers will warn (expected)"
+    <Dialog open onClose={onClose} title={t("generate self-signed certificate")}
+      subtitle={t("RSA-2048 with SANs — for LAN/testing; browsers will warn (expected)")}
       footer={<>
         <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
         <Button loading={busy} disabled={!name.trim() || !cn.trim()} onClick={async () => {
@@ -200,9 +200,9 @@ function SelfSignedDialog({ onClose }: { onClose: () => void }) {
       </>}>
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="name" required><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="lab-cert" dir="ltr" /></Field>
-        <Field label="common name (CN)" required><Input value={cn} onChange={(e) => setCn(e.target.value)} placeholder="panel.lan" dir="ltr" /></Field>
-        <Field label="validity (days)"><Input type="number" min={1} max={3650} value={days} onChange={(e) => setDays(Number(e.target.value))} /></Field>
-        <Field label="extra SAN hostnames" hint="comma separated">
+        <Field label={t("common name (CN)")} required><Input value={cn} onChange={(e) => setCn(e.target.value)} placeholder="panel.lan" dir="ltr" /></Field>
+        <Field label={t("validity (days)")}><Input type="number" min={1} max={3650} value={days} onChange={(e) => setDays(Number(e.target.value))} /></Field>
+        <Field label={t("extra SAN hostnames")} hint={t("comma separated")}>
           <Input value={sans} onChange={(e) => setSans(e.target.value)} placeholder="panel.lan, 192.168.1.10" dir="ltr" />
         </Field>
       </div>
@@ -213,6 +213,7 @@ function SelfSignedDialog({ onClose }: { onClose: () => void }) {
 
 function AcmeSection({ state, loading }: { state?: AcmeState; loading: boolean }) {
   const t = useT();
+  const td = useTDynamic();
   const qc = useQueryClient();
   const digits = useDigits();
   const [issueOpen, setIssueOpen] = useState(false);
@@ -242,26 +243,19 @@ function AcmeSection({ state, loading }: { state?: AcmeState; loading: boolean }
       <div className="flex flex-wrap items-center gap-3">
         <div className="grid h-10 w-10 place-items-center rounded-xl bg-info-soft text-info"><FileKey2 size={17} /></div>
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium">ACME / Let's Encrypt</p>
-          <p className="text-[11px] text-content-3">{state?.status}</p>
+          <p className="text-sm font-medium">{t("ACME / Let's Encrypt")}</p>
+          <p className="text-[11px] text-content-3">{td(state?.status)}</p>
         </div>
-        <Badge tone={(available ? "ok" : "muted") as never} dot>{available ? "operational" : "unavailable"}</Badge>
-        {available && <Button size="sm" onClick={() => setIssueOpen(true)}><Globe size={13} /> issue certificate</Button>}
+        <Badge tone={(available ? "ok" : "muted") as never} dot>{available ? t("operational") : t("unavailable")}</Badge>
+        {available && <Button size="sm" onClick={() => setIssueOpen(true)}><Globe size={13} />{t("issue certificate")}</Button>}
       </div>
 
       {!available && (
-        <p className="rounded-xl border border-border px-3 py-2 text-[11px] leading-relaxed text-content-3">
-          automatic issuance needs an ACME client on this host (certbot, acme.sh or lego). The official panel image ships
-          certbot; on a manual install run <code className="font-mono" dir="ltr">apt install certbot</code> and reopen this page.
-          PEM import and self-signed certificates work regardless.
-        </p>
+        <p className="rounded-xl border border-border px-3 py-2 text-[11px] leading-relaxed text-content-3">{t("automatic issuance needs an ACME client on this host (certbot, acme.sh or lego). The official panel image ships certbot; on a manual install run")}<code className="font-mono" dir="ltr">apt install certbot</code>{t("and reopen this page. PEM import and self-signed certificates work regardless.")}</p>
       )}
 
       {available && entries.length === 0 && (
-        <p className="text-[11px] text-content-3">
-          no ACME-managed certificates yet — issuance deploys into the managed store below, and a background job renews
-          entries within 30 days of expiry.
-        </p>
+        <p className="text-[11px] text-content-3">{t("no ACME-managed certificates yet — issuance deploys into the managed store below, and a background job renews entries within 30 days of expiry.")}</p>
       )}
 
       {entries.length > 0 && (
@@ -273,18 +267,18 @@ function AcmeSection({ state, loading }: { state?: AcmeState; loading: boolean }
                   <span className="truncate text-xs font-semibold" dir="ltr">{e.domain}</span>
                   {e.provider && <Badge tone="info">{e.provider}</Badge>}
                   <Badge tone={(e.expired ? "danger" : e.renew_due ? "warn" : "ok") as never} dot>
-                    {e.expired ? "expired" : e.days_left != null ? `${e.days_left}d left` : "status unknown"}
+                    {e.expired ? t("expired") : e.days_left != null ? t("{days}d left", { days: e.days_left }) : t("status unknown")}
                   </Badge>
                   {!e.expired && !!e.renew_due && <Badge tone="warn">renewal due</Badge>}
                 </div>
                 <p className="mt-0.5 truncate font-mono text-[10px] text-content-3" dir="ltr">
                   {e.cert_path}
-                  {e.renewed_at ? ` · renewed ${formatDate(e.renewed_at, digits)}` : e.issued_at ? ` · issued ${formatDate(e.issued_at, digits)}` : ""}
+                  {e.renewed_at ? ` · ${t("renewed {date}", { date: formatDate(e.renewed_at, digits) })}` : e.issued_at ? ` · ${t("issued {date}", { date: formatDate(e.issued_at, digits) })}` : ""}
                 </p>
               </div>
               <Button variant="ghost" size="sm" loading={renew.isPending && renew.variables === e.domain}
-                onClick={() => renew.mutate(e.domain)}><RotateCw size={12} /> renew</Button>
-              <Button variant="ghost" size="icon" aria-label={`delete ACME ${e.domain}`} onClick={() => setDeleteFor(e)}><Trash2 size={13} /></Button>
+                onClick={() => renew.mutate(e.domain)}><RotateCw size={12} />{t("renew")}</Button>
+              <Button variant="ghost" size="icon" aria-label={t("delete ACME {domain}", { domain: e.domain })} onClick={() => setDeleteFor(e)}><Trash2 size={13} /></Button>
             </div>
           ))}
         </div>
@@ -314,8 +308,8 @@ function AcmeIssueDialog({ providers, onClose }: { providers: AcmeProvider[]; on
   // wildcard/IP refusal, duplicate entries, the lego email requirement)
   const invalid = !d || d.includes("*") || !d.includes(".") || d.includes("/") || d.includes(" ");
   return (
-    <Dialog open onClose={busy ? () => {} : onClose} title="issue certificate (ACME)"
-      subtitle="standalone HTTP-01: DNS for this domain must resolve to THIS host and port 80 must be free. A failed run returns the client's own error tail — nothing is green-lit unless the CA really issued."
+    <Dialog open onClose={busy ? () => {} : onClose} title={t("issue certificate (ACME)")}
+      subtitle={t("standalone HTTP-01: DNS for this domain must resolve to THIS host and port 80 must be free. A failed run returns the client's own error tail — nothing is green-lit unless the CA really issued.")}
       footer={<>
         <Button variant="ghost" disabled={busy} onClick={onClose}>{t("common.cancel")}</Button>
         <Button loading={busy} disabled={invalid} onClick={async () => {
@@ -332,20 +326,20 @@ function AcmeIssueDialog({ providers, onClose }: { providers: AcmeProvider[]; on
       </>}>
       <div className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="domain" required hint="a public hostname pointing at this server — wildcards need DNS-01 and are refused here">
+          <Field label={t("domain")} required hint={t("a public hostname pointing at this server — wildcards need DNS-01 and are refused here")}>
             <Input value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="panel.example.com" dir="ltr" autoFocus />
           </Field>
-          <Field label="contact email" hint="expiry notices from Let's Encrypt; required when the provider is lego">
+          <Field label={t("contact email")} hint={t("expiry notices from Let's Encrypt; required when the provider is lego")}>
             <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="admin@example.com" dir="ltr" />
           </Field>
         </div>
-        <Field label="ACME client" hint="auto = first detected on this host">
+        <Field label="ACME client" hint={t("auto = first detected on this host")}>
           <Select value={provider} onChange={(e) => setProvider(e.target.value)}>
             <option value="auto">auto detect</option>
             {providers.map((p) => <option key={p.id} value={p.id}>{p.name} — {p.path}</option>)}
           </Select>
         </Field>
-        <Switch checked={force} onChange={setForce} label="re-issue even if this domain is already ACME-managed (converges onto the same entry — no duplicates)" />
+        <Switch checked={force} onChange={setForce} label={t("re-issue even if this domain is already ACME-managed (converges onto the same entry — no duplicates)")} />
         {error && <p role="alert" className="max-h-36 overflow-auto whitespace-pre-wrap rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 font-mono text-[11px] text-danger">{error}</p>}
       </div>
     </Dialog>

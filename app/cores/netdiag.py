@@ -1,4 +1,4 @@
-"""Structured host network diagnosis (alpha.7.2) — shared by the OS-level
+"""Structured host network diagnosis — shared by the OS-level
 cores (OpenVPN, WireGuard, …).
 
 The field failures this replaces:

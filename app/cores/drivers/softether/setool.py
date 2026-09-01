@@ -62,7 +62,7 @@ class SessionStatistics:
 
 @dataclass(frozen=True, slots=True)
 class IPsecServices:
-    """Server IPsec service state per `IPsecGet` (alpha.7.5 item 7)."""
+    """Server IPsec service state per `IPsecGet`."""
 
     l2tp: bool                          # L2TP over IPsec server function
     l2tp_raw: bool                      # Raw L2TP (without IPsec)

@@ -691,7 +691,7 @@ class SoftEtherDriver(BaseCoreDriver):
                 "interface": f"tap_{spec['tap_device']}",
             }
         else:
-            # Backward-compatible in-memory state from alpha.8.4 did not carry
+            # Backward-compatible in-memory state did not carry
             # hub/device fields; enrich it from validated persisted settings.
             source.setdefault("hub", str(spec["hub"]))
             source.setdefault("tap_device", str(spec["tap_device"]))
@@ -1099,7 +1099,7 @@ class SoftEtherDriver(BaseCoreDriver):
             raise CoreError(f"SoftEther account '{account.account_id}' needs settings.password.")
 
     def _provision_credentials(self, account: UserAccount) -> None:
-        """alpha.7.2 (item 10): a password-less SoftEther account must NEVER
+        """ (item 10): a password-less SoftEther account must NEVER
         fail provisioning — mint a secure random password in place (the
         apply_grants registry persists it like SSH/OpenVPN)."""
         if not account.settings.get("password"):

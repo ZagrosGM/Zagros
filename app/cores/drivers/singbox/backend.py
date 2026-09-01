@@ -90,7 +90,7 @@ class TrafficStatsSource(Protocol):
 class V2RayStatsSource:
     """Production TrafficStatsSource over gRPC (lazy-imports xray_api).
 
-    DIALECT NEGOTIATION (alpha.7.4 — the field «unknown service
+    DIALECT NEGOTIATION (— the field «unknown service
     xray.app.stats.command.StatsService»): sing-box ≥ 1.12 registers its
     StatsService as ``v2ray.core.app.stats.command.StatsService`` (see
     ``experimental/v2rayapi/stats.go`` at every tag 1.12.x–1.13.x: the init()
@@ -221,7 +221,7 @@ class LocalSingBoxBackend:
         default below) — reproducible and immune to GitHub API rate limits;
         set it empty to track the latest release instead.
 
-        Binary source (alpha.7.1): NO official sing-box build (verified
+        Binary source: NO official sing-box build (verified
         1.9.7→1.13.16) ships the ``with_v2ray_api`` tag, so per-user
         accounting is impossible on upstream binaries. Zagros therefore
         vendors its own build of the SAME upstream tag compiled with the

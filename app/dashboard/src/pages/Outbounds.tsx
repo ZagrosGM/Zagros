@@ -1,7 +1,7 @@
 // Outbounds — graphical management: cards with health/latency, test, clone,
 // edit, delete, save + deploy. No JSON.
 //
-// alpha.7: the editor is SCHEMA-DRIVEN (fields come from
+//: the editor is SCHEMA-DRIVEN (fields come from
 // /zagros/outbounds/schema — every transport and security option the core
 // translation layer understands, incl. ws/gRPC/HTTP/HTTPUpgrade/KCP/
 // SplitHTTP/QUIC + TLS/REALITY), names accept uppercase (validation bug

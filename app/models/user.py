@@ -400,7 +400,7 @@ class UserResponse(User):
             salt = secrets.token_hex(8)
             url_prefix = (XRAY_SUBSCRIPTION_URL_PREFIX).replace('*', salt)
             token = create_subscription_token(self.username)
-            # alpha.7.2 (item 14): the legacy /<XRAY_SUBSCRIPTION_PATH>/
+            # (item 14): the legacy /<XRAY_SUBSCRIPTION_PATH>/
             # Canonical public subscription route. /zagros/sub/<token> remains
             # a server-side legacy alias only; no newly generated/copied/QR URL
             # may carry the old dashboard namespace.

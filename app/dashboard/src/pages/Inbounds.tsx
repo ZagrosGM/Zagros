@@ -15,12 +15,12 @@ import type { CoreView } from "../lib/types";
 // Dynamic wizard blueprint — fetched per core from the backend
 // (GET /zagros/cores/{id}/wizard-schema): protocols × transports × securities
 // × fields. NOTHING is hardcoded here anymore; switching cores changes the
-// entire flow (the alpha.7 fixed-list complaint, fixed at the source).
+// entire flow (the fixed-list complaint, fixed at the source).
 interface WizardField {
   key: string; label: string; type: "string" | "int" | "bool" | "select" | "multiselect" | "password" | "textarea" | "file";
   required?: boolean; default?: string | number | boolean | string[];
   options?: string[]; placeholder?: string; help?: string;
-  /** schema-driven UX grouping (alpha.7.4 item 8 + alpha.7.5 item 4): which
+  /** schema-driven UX grouping: which
    *  panel the field belongs to — the stepper renders groups, not a flat
    *  wall. "headers" joins for the transport verb/header depth. */
   section?: "general" | "transport" | "headers" | "tls" | "reality" | "certificate" | "advanced";
@@ -73,7 +73,7 @@ export default function Inbounds() {
     } catch { return []; }
   }, [raw.data]);
 
-  // alpha.7.5 item 5: delete by STABLE IDENTITY (the tag) via the dedicated
+  //: delete by STABLE IDENTITY (the tag) via the dedicated
   // endpoint — the old flow computed an INDEX off a possibly-stale snapshot
   // and removed a positional patch, which could delete the WRONG inbound
   // (or several, after concurrent edits shifted the list).
@@ -212,7 +212,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
   const [security, setSecurity] = useState<WizardSecurity | null>(null);
   const [tag, setTag] = useState("");
   const [listen, setListen] = useState("0.0.0.0");
-  // alpha.7.5 item 3: the port starts EMPTY and fills from a host-aware
+  //: the port starts EMPTY and fills from a host-aware
   // random five-digit suggestion (never a famous 443) — fully clearable and
   // overridable; "" is a valid in-progress state, validation catches intent.
   const [port, setPort] = useState<number | "">("");
@@ -225,7 +225,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
   const [touched, setTouched] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  // alpha.7.5 item 6: TLS certificate source — stored (managed registry),
+  //: TLS certificate source — stored (managed registry),
   // pasted PEM content, server-side file paths, or runtime self-signed
   // (auto; runtime-only, NEVER registered as a managed certificate).
   const [certMode, setCertMode] = useState<"ref" | "paste" | "path" | "auto">("auto");
@@ -243,7 +243,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
   });
   const [certRef, setCertRef] = useState("");
 
-  // alpha.7.5 item 3: host-aware random port suggestion — re-keyed per
+  //: host-aware random port suggestion — re-keyed per
   // protocol (fresh suggestion per selection) and per dialog lifetime
   // (dialogSeed: the deterministic-per-open contract). Edit mode never
   // touches the inbound's real port.
@@ -310,7 +310,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
 
   // certificate material keys — included in the spec ONLY for the active
   // cert mode, so a stale field from another mode can never leak into the
-  // payload (alpha.7.5 item 6: exactly one certificate contract per spec).
+  // payload.
   const CERT_KEYS = new Set(["certificate", "certificate_key", "certificate_path", "certificate_key_path"]);
 
   const pickProto = (p: WizardProtocol) => {
@@ -414,7 +414,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
     retry: false,
   });
 
-  // alpha.7.5 item 5: hard double-submit guard — a synchronous in-flight
+  //: hard double-submit guard — a synchronous in-flight
   // ref (state lags one render; two fast clicks would both pass a
   // `if (busy)` check). Combined with the server-side idempotent create,
   // a double click CANNOT fork a duplicate inbound anymore.
@@ -469,7 +469,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
             className={`rounded-xl border p-3 text-start transition-colors ${unavailable ? "cursor-not-allowed border-border opacity-60" : active ? "border-brand bg-brand-soft" : "border-border hover:border-border-strong"}`}>
             <p className="text-[13px] font-semibold">{o.label}</p>
             {unavailable && <p className="mt-1 text-[10.5px] text-warn">{o.availability?.replace(/_/g, " ")} — {o.reason}</p>}
-            {/* alpha.7.5 items 2+7: NO port line on initial protocol cards —
+            {/* items 2+7: NO port line on initial protocol cards —
                 neither a fabricated number nor a misleading placeholder. The
                 real port is the suggested editable value in the review
                 step, nothing before it. */}
@@ -493,7 +493,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
       subtitle={`step ${step + 1} of 4 — ${stepNames[step]}${advanced ? "" : " · simple"}`}
       headerActions={
         <div className="flex items-center gap-1.5">
-          {/* alpha.7.5 item 1: the «import from URL» path is gone — the
+          {/* the «import from URL» path is gone — the
               wizard is authored from the blueprint alone (the endpoint and
               its module were removed server-side too). */}
           <div className="flex overflow-hidden rounded-lg border border-border" role="group" aria-label="wizard mode">
@@ -522,7 +522,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
       {schema.isLoading && <div className="space-y-2"><Skeleton className="h-10" /><Skeleton className="h-24" /></div>}
       {schema.isError && (
         <div role="alert" className="flex items-center justify-between gap-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">
-          {/* the REAL backend error, not a canned sentence (alpha.7.2):
+          {/* the REAL backend error, not a canned sentence:
               e.g. a 404 when the core exposes no wizard blueprint, or the
               panel's actual 5xx detail — actionable feedback for the user */}
           <span>
@@ -586,7 +586,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
                 invalid={!port || port < 1 || port > 65535} />
             </Field>
           </div>
-          {/* items 8+10 + alpha.7.5 item 4: schema-driven GROUPS instead of a
+          {/* items 8+10 +: schema-driven GROUPS instead of a
              flat field wall — General / Transport / Headers / TLS / REALITY /
              Certificate / Advanced. A protocol renders only the groups its
              cell actually carries; certificate fields follow the chosen

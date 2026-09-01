@@ -216,7 +216,7 @@ async def panel_network_transition_probe(operation_id: str):
 # ---------------------------------------------------------------------- #
 
 async def _legacy_sub_user_id(token: str) -> int | None:
-    """Validate a LEGACY username token (pre-alpha.7.2
+    """Validate a LEGACY username token (pre-
     `create_subscription_token`) under the legacy rules (issued before the
     user's created_at is invalid; `sub_revoked_at` revokes). Returns the
     platform user id, or None when the token is not a valid legacy token.
@@ -264,7 +264,7 @@ async def _verify_and_serve(token, request, runtime,
         if current_jti is not None and payload.get("jti") == current_jti:
             user_id = candidate
     if user_id is None:
-        # legacy username token (issued pre-alpha.7.2) — same portal, one
+        # legacy username token (issued pre-) — same portal, one
         # multi-core subscription surface, legacy revocation rules honored
         user_id = await _legacy_sub_user_id(token)
     if user_id is None:
@@ -278,7 +278,7 @@ async def subscription_portal_canonical(token: str, request: Request,
                                         runtime=Depends(get_runtime),
                                         accept_language: str | None = Header(default=None),
                                         user_agent: str | None = Header(default=None)):
-    """Canonical multi-core subscription URL — /sub/<token> (alpha.7.4 item
+    """Canonical multi-core subscription URL — /sub/<token> (item
     12). One user → one link → every core."""
     return await _verify_and_serve(token, request, runtime,
                                    accept_language, user_agent)
@@ -378,7 +378,7 @@ async def _serve_subscription(runtime, user_id: int, request: Request,
     if accept_language:
         lang = accept_language.split(",")[0].strip()[:5]
 
-    # legacy-continuity bookkeeping (alpha.7.2, item 14): the removed /sub/
+    # legacy-continuity bookkeeping: the removed /sub/
     # endpoint tracked every fetch and sent real quota headers — the portal
     # is THE subscription surface now, so it owns the same duties.
     username: str | None = None
@@ -408,7 +408,7 @@ async def _serve_subscription(runtime, user_id: int, request: Request,
             user_id, lang=lang, public_host=request.url.hostname)
         if page is None:
             raise HTTPException(404, "subscription not found")
-        # alpha.9.2 item 3: an operator may have picked an uploaded page
+        # an operator may have picked an uploaded page
         # template. A missing/broken one serves the built-in page, so a
         # subscriber is never the one who pays for an operator's typo.
         template_name: str | None = None
@@ -576,7 +576,7 @@ async def core_wizard_schema(core_id: str, runtime=Depends(get_runtime)):
 
 @zagros_admin_router.get("/cores/{core_id}/suggest-port")
 async def core_suggest_port(core_id: str, runtime=Depends(get_runtime)):
-    """alpha.7.5 item 3 — a fresh RANDOM five-digit listen-port suggestion
+    """ — a fresh RANDOM five-digit listen-port suggestion
     for the wizard: never a famous default, never one the host or a managed
     core already binds (best-effort collision avoidance)."""
     _driver_or_404(runtime, core_id)
@@ -600,8 +600,8 @@ async def studio_preview(core_id: str, body: StudioPatchBody,
 
 async def _materialize_studio(runtime, core_id: str, driver, doc) -> str | None:
     """Push the CANDIDATE studio document INTO the core (every driver
-    implements apply_studio_document since alpha.7.1) — BEFORE it is
-    persisted (alpha.7.5 item 5: stage → materialize → persist, so a core
+    implements apply_studio_document) — BEFORE it is
+    persisted (: stage → materialize → persist, so a core
     that refuses the document fails the request WITHOUT moving the stored
     document to a state the engine rejected; the field-reported split where
     the API answered an opaque 5xx while the inbound HAD been persisted is
@@ -645,7 +645,7 @@ async def _cascade_grants(runtime, core_id: str) -> None:
 
 def _studio_error(exc: StudioError) -> HTTPException:
     """Map staged-mutation identity errors to honest HTTP statuses
-    (alpha.7.5 item 5): ghost tag → 404, identity clash → 409, anything
+: ghost tag → 404, identity clash → 409, anything
     else is a client-correctable 422 — an opaque 500 is NEVER right for
     lifecycle conflicts."""
     if isinstance(exc, StudioNotFoundError):
@@ -756,7 +756,7 @@ def _resolve_certificate_ref(runtime, spec: InboundSpec) -> None:
 @zagros_admin_router.post("/studio/{core_id}/wizard/inbound")
 async def studio_wizard_inbound(core_id: str, spec: InboundSpec,
                                 runtime=Depends(get_runtime)):
-    """Create — atomic + idempotent (alpha.7.5 item 5): staged under the
+    """Create — atomic + idempotent: staged under the
     per-core lock, materialized BEFORE persisted; an identical replay is a
     success without a duplicate; a conflicting tag is a 409."""
     driver = _driver_or_404(runtime, core_id)
@@ -791,7 +791,7 @@ async def studio_wizard_update_inbound(core_id: str, tag: str, spec: InboundSpec
 @zagros_admin_router.delete("/studio/{core_id}/wizard/inbound/{tag}")
 async def studio_wizard_delete_inbound(core_id: str, tag: str,
                                        runtime=Depends(get_runtime)):
-    """Delete ONE inbound by its stable identity — the tag (alpha.7.5 item
+    """Delete ONE inbound by its stable identity — the tag (item
     5; replaces the index-based frontend patch that could remove the WRONG
     listener off a stale snapshot). Ghost tag → 404; duplicate tags (broken
     document) → 409; success removes exactly one entry, cascades grants."""

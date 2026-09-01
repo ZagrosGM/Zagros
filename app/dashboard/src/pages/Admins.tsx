@@ -1,4 +1,4 @@
-// Admins — first-class management page (moved out of Settings in alpha.7).
+// Admins — first-class management page (moved out of Settings).
 // Full CRUD + governance caps per admin: max users, account expiry,
 // traffic-allocation budget and traffic-consumption cap (the backend
 // enforces all four transaction-safely; this page is their control room).

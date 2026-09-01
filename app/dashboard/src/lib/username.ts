@@ -1,4 +1,4 @@
-// Random username generator (alpha.7.2, item 12): letters + digits,
+// Random username generator: letters + digits,
 // cryptographically uniform, configurable length. Crypto.getRandomValues is
 // available in EVERY context (unlike crypto.subtle it is not secure-context
 // gated), which matters for plain-HTTP panels.

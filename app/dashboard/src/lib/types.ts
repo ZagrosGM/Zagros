@@ -4,7 +4,7 @@ export interface Token { access_token: string; token_type: string }
 
 export interface Admin { username: string; is_sudo: boolean }
 
-// alpha.7 governance fields ride the same /admin(s) models.
+// governance fields ride the same /admin(s) models.
 export interface AdminUser {
   username: string;
   is_sudo: boolean;
@@ -54,7 +54,7 @@ export interface User {
   proxies?: Record<string, Record<string, unknown>>;
   inbounds?: Record<string, string[]>;
   excluded_inbounds?: Record<string, string[]>;
-  /** multi-core grants: core_id → inbound tags (alpha.7) */
+  /** multi-core grants: core_id → inbound tags */
   core_access?: Record<string, string[]> | null;
 }
 
@@ -183,7 +183,7 @@ export interface UserTemplate {
   username_prefix: string | null;
   username_suffix: string | null;
   inbounds: Record<string, string[]>;
-  /** multi-core grants: core_id → inbound tags (alpha.7) */
+  /** multi-core grants: core_id → inbound tags */
   core_access?: Record<string, string[]> | null;
 }
 
@@ -345,7 +345,7 @@ export interface RoutingTarget {
   reason?: string | null;
 }
 
-// alpha.7: schema-driven outbound forms (/zagros/outbounds/schema)
+//: schema-driven outbound forms (/zagros/outbounds/schema)
 export interface OutboundField {
   type?: string;
   title?: string;
@@ -439,7 +439,7 @@ export interface PortalSettings {
   listener_mode?: "shared" | "dedicated" | "external_proxy";
   listen_address?: string;
   qr_base_url?: string | null;
-  // alpha.9.2 item 3: uploaded subscription page template (null = built-in)
+  //: uploaded subscription page template (null = built-in)
   subscription_template?: string | null;
 }
 

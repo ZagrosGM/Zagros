@@ -244,7 +244,7 @@ def _build_app_inner():
             "Zagros product layer unavailable: %s", exc)
 
     # NOTE: the Zagros ops UI and Config Studio were separate pages in
-    # earlier alphas (/zagros/dashboard, /zagros/studio). As of 1.0.0-alpha.5
+    # earlier alphas (/zagros/dashboard, /zagros/studio).
     # there is exactly ONE management UI: the unified dashboard SPA served
     # at /dashboard (Config Studio lives inside it as "Advanced Mode").
 
@@ -254,7 +254,7 @@ def _build_app_inner():
 
     @app.on_event("startup")
     def on_startup():
-        # alpha.7.2: the legacy xray-only subscription endpoint (/<XRAY_SUBSCRIPTION_PATH>/<token>)
+        # the legacy xray-only subscription endpoint (/<XRAY_SUBSCRIPTION_PATH>/<token>)
         # was REMOVED — the multi-core portal (/zagros/sub/<token>) is the
         # only subscription surface; no reserved-path guard is needed here.
         scheduler.start()

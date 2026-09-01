@@ -5,7 +5,7 @@
     prefixed so panel users can never collide with system users).
 
   * :const:`ACCT_CHAIN` + :func:`parse_acct_counters` — per-UID byte
-    accounting through an iptables owner-match chain (alpha.7.4, item 5).
+    accounting through an iptables owner-match chain.
 
 Accounting design — REAL bytes, no fabrication: the production backend reads
 the accepted encrypted SSH transport's kernel ``bytes_received`` and

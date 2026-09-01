@@ -1,4 +1,4 @@
-"""HTTP header parsing for the wizard's Headers section (alpha.7.5 item 4).
+"""HTTP header parsing for the wizard's Headers section.
 
 The wizard UI offers headers as one-per-line text (``Name: value``) or a
 JSON-ish dict from structured callers; translators (xray ws/tcp-camouflage,

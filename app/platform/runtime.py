@@ -269,7 +269,7 @@ class PlatformRuntime:
         await self._attach_builtin_xray()
         # Xray is attached after add-on auto-start so CoreManager never starts
         # it twice. Its SQL Studio document must nevertheless be replayed: in
-        # alpha.7.7 XRAY_JSON lived in the replaceable image layer, while the
+        # XRAY_JSON lived in the replaceable image layer, while the
         # complete accepted document already survived in SQL.
         if "xray" in self.core_manager.list_cores():
             studio_deferred |= await self._hydrate_studio_documents({"xray"})
@@ -298,8 +298,8 @@ class PlatformRuntime:
     async def _hydrate_network_policy(self) -> set[str]:
         """Replay persisted outbounds + rules into native and kernel runtimes.
 
-        The KV documents remain the compatibility source for alpha.7.9,
-        alpha.8 and alpha.8.1.  Deployment is deliberately after core boot:
+        The KV documents remain the compatibility source for,
+ and. Deployment is deliberately after core boot:
         OpenVPN/WireGuard source interfaces and the sing-box binary must exist
         before policy domains/classifiers can be validated.
         """
@@ -375,7 +375,7 @@ class PlatformRuntime:
     ) -> set[str]:
         """Re-apply persisted studio documents into drivers BEFORE they start.
 
-        Root fix (alpha.7.1): Studio documents live in SQL and drivers keep
+        Root fix: Studio documents live in SQL and drivers keep
         the applied result IN MEMORY — so a panel restart silently dropped
         every wizard-created listener the next time a core started (the old
         doc was re-applied only when somebody pressed Apply again). Xray is

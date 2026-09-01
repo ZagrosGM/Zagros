@@ -1,4 +1,4 @@
-// Host Settings (alpha.7.2, item 13) — Marzban-parity, panel-native.
+// Host Settings — Marzban-parity, panel-native.
 //
 // One page, one API surface for EVERY core: GET/PUT /zagros/cores/{id}/hosts.
 // The server keeps the honest split (xray → legacy hosts table, byte-parity;

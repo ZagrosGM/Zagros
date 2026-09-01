@@ -39,7 +39,7 @@ class PreviewResult(BaseModel):
     errors: list[str] = Field(default_factory=list)
     diff: str = ""
     document: dict[str, Any] | None = None
-    # alpha.7.5 item 5: ``changed=False`` marks an IDEMPOTENT REPLAY — the
+    # changed=False marks an IDEMPOTENT REPLAY — the
     # desired state already exists exactly, so no mutation/materialize is
     # required (a double-click or a retry-after-timeout stays harmless).
     changed: bool = True
@@ -99,14 +99,14 @@ class InboundSpec(BaseModel):
 
 def _entry_fingerprint(entry: Any) -> str:
     """Stable deep-compare token for an inbound entry (order-insensitive) —
-    the idempotency check for create retries (alpha.7.5 item 5)."""
+    the idempotency check for create retries."""
     return json.dumps(entry, sort_keys=True, ensure_ascii=False, default=str)
 
 
 class ConfigStudioService:
     """Graphical-first config management; Advanced Mode = raw + diff.
 
-    Mutation lifecycle (alpha.7.5 item 5): create/update/delete STAGE a
+    Mutation lifecycle: create/update/delete STAGE a
     validated candidate under a per-core lock (dup-identity + concurrency
     rules enforced here); the ROUTE then materializes the candidate into
     the core and only persists on success — a failed live apply never moves
@@ -190,7 +190,7 @@ class ConfigStudioService:
 
     async def stage_apply(self, driver: BaseCoreDriver,
                           operations: list[PatchOperation]) -> PreviewResult:
-        """Atomic lifecycle (alpha.7.5 item 5): a VALIDATED CANDIDATE under
+        """Atomic lifecycle: a VALIDATED CANDIDATE under
         the per-core mutation lock — nothing persisted yet. The caller
         materializes ``result.document`` into the core and only then calls
         :meth:`persist`."""
@@ -366,7 +366,7 @@ class ConfigStudioService:
 
     async def _wizard_execute(self, driver: BaseCoreDriver, stage,
                               materialize=None) -> PreviewResult:
-        """THE atomic wizard transaction (alpha.7.5 item 5): the per-core
+        """THE atomic wizard transaction: the per-core
         lock covers candidate-build → core-materialize → persist, so
         concurrent lifecycle calls fully serialize; a failure inside
         ``materialize`` propagates WITHOUT persisting (the 'request failed
@@ -415,7 +415,7 @@ class ConfigStudioService:
                                   spec: InboundSpec) -> PreviewResult:
         """Stage a wizard CREATE (candidate only — no materialize/persist).
 
-        Rules (alpha.7.5 item 5 — the field-reported duplicate/500 storm):
+        Rules:
 
         * STABLE IDENTITY = the tag. An identical create replay (double
           click / retry after a timed-out request that actually succeeded)

@@ -77,7 +77,7 @@ def _fragment_name(parsed) -> str:
     return unquote(parsed.fragment).strip() if parsed.fragment else ""
 
 
-# alpha.7.2 (item 13): v2rayN/sing-box share-link client hints that Host
+# (item 13): v2rayN/sing-box share-link client hints that Host
 # Settings can inject. Named-key passthrough ONLY — the format boundary
 # stays strict; anything else is still dropped on parse.
 _EXTRA_HINTS = ("fragment", "noise", "xmux")

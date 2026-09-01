@@ -277,7 +277,7 @@ class LocalSoftEtherBackend:
     # ------------------------------------------------------------------ #
     # IPsec server functions (L2TP/IPsec, raw L2TP, EtherIP)
     #
-    # alpha.7.4 bug (field report "vpncmd 'IPsecEnable /L2TP:no ...
+    # bug (field report "vpncmd 'IPsecEnable /L2TP:no...
     # /DEFAULTHUB:DEFAULT' failed (rc=38)"): upstream PsIPsecEnable
     # declares ALL FIVE arguments — including /PSK: — with CmdEvalNotEmpty,
     # so a missing/empty PSK fails vpncmd's LOCAL validation and the tool
@@ -286,7 +286,7 @@ class LocalSoftEtherBackend:
     # interactive stdin parser, so embedded whitespace still needs real
     # quoting. Every IPsecEnable issued by this backend therefore carries the
     # full 5-argument form with a non-empty PSK + hub, validated locally first
-    # so a bad value never half-commands the server. (alpha.7.5 item 7)
+    # so a bad value never half-commands the server.
     # ------------------------------------------------------------------ #
 
     def ipsec_get(self) -> IPsecServices:
@@ -542,7 +542,7 @@ class LocalSoftEtherBackend:
         return self.reachable()
 
     # ------------------------------------------------------------------ #
-    # setup — real SELF_INSTALL (3-stage chain, alpha.7.2)
+    # setup — real SELF_INSTALL (3-stage chain)
     # ------------------------------------------------------------------ #
     # Every package manager present on the host gets an honest attempt —
     # "didn't try dnf" was a field failure pattern. Candidates that do not
@@ -559,7 +559,7 @@ class LocalSoftEtherBackend:
     # toolchain for the source-build stage, per manager (best effort; the
     # exact package names of the mainstream distros). pkg-config/pkgconf is
     # REQUIRED — SoftEther's cmake locates OpenSSL through it and dies with
-    # "Could NOT find PkgConfig" otherwise (field report alpha.7.3).
+    # "Could NOT find PkgConfig" otherwise (field report).
     _BUILD_DEPS: dict[str, tuple[list[str] | None, list[str]]] = {
         "apt-get": (["apt-get", "update"],
                     ["apt-get", "install", "-y", "build-essential", "cmake",
@@ -648,7 +648,7 @@ class LocalSoftEtherBackend:
             )
 
     def _link_on_path(self, root: str) -> None:
-        # WRAPPER scripts, not symlinks (field failure alpha.7.4): SoftEther
+        # WRAPPER scripts, not symlinks (field failure): SoftEther
         # locates hamcore.se2/lang.config relative to its own argv[0] path —
         # started through a symlink in /usr/local/bin it dies with
         # 'hamcore.se2 is missing or broken'. A wrapper exec's the REAL path,
@@ -854,7 +854,7 @@ class LocalSoftEtherBackend:
             "(need: c/c++ compiler, cmake, openssl+zlib+readline+ncurses dev)."
         )
 
-    # alpha.7.5 item 10 — the source build must be CONTROLLED, CACHED and
+    # the source build must be CONTROLLED, CACHED and
     # OBSERVABLE (field report: install pinned the host at 100% CPU with
     # zero visible progress and re-downloaded/re-compiled everything on
     # every retry):
@@ -1042,7 +1042,7 @@ class LocalSoftEtherBackend:
         """Last-resort: compile the latest STABLE tag from source. The tag
         is resolved live from GitHub (no version is ever hardcoded).
 
-        alpha.7.5 item 10 controls:
+         controls:
           * build deps are ensured exactly once BEFORE any compile;
           * the source tree + cmake build dir live in a STABLE cache
             (env ZAGROS_SOFTETHER_SRC_CACHE / /var/lib/zagros/cache/

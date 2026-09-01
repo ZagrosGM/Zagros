@@ -1,4 +1,4 @@
-// Clipboard copy that works on EVERY panel deployment (alpha.7.2, item 16).
+// Clipboard copy that works on EVERY panel deployment.
 //
 // The bug: panels are typically served over plain HTTP on a LAN/VPN; there
 // `navigator.clipboard` is UNDEFINED (secure-context-only API), so

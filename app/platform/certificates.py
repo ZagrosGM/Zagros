@@ -47,7 +47,7 @@ class CertificateInfo(BaseModel):
     #: inventory scans the WHOLE tree (core work dirs materialize certs too,
     #: e.g. <data>/cores/sing-box/certs/tuic.crt) — a bare NAME cannot
     #: address those, which is why Delete-by-name answered "not found"
-    #: (alpha.7.4 item 18). Delete addresses certs by `id`.
+    #:. Delete addresses certs by `id`.
     id: str = ""
     #: True when stored in the managed layout <data>/certs/<name>/ (import /
     #: self-signed) — those delete as a directory; scanned core certs delete
@@ -145,7 +145,7 @@ def scan(data_dir: str, *, max_depth: int = 5,
          managed_only: bool = True) -> list[CertificateInfo]:
     """Inventory certificates under *data_dir* (depth-limited, read-only).
 
-    ``managed_only=True`` (alpha.7.5 item 8 — the registry belongs to the
+    managed_only=True (— the registry belongs to the
     OPERATOR): only the managed store ``<data>/certs/<name>/`` is listed.
     Core RUNTIME certs (self-signed material an inbound generated under
     ``cores/<core>/certs/``) are engine plumbing, NOT user-managed

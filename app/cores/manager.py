@@ -554,7 +554,7 @@ class CoreManager:
         """Poll installed cores; publish health transitions AND reconcile the
         persisted lifecycle with the live probe truth.
 
-        Rationale (reported bug, alpha.7.2 item 3): a sing-box core whose
+        Rationale (reported bug): a sing-box core whose
         start() raised AFTER the process came up was marked ERROR while the
         binary kept serving — and the UI kept showing "error", because the
         persisted state outranked the probe and the old monitor only polled

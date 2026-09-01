@@ -35,7 +35,7 @@ interface UserForm {
   downloadLimitMbps: string;
   uploadLimitMbps: string;
   expireDate: string;
-  /** alpha.7: creation mode — from a template, or manual inbound picking */
+  /** creation mode — from a template, or manual inbound picking */
   mode: "template" | "manual";
   templateId: number | null;
   /** protocol -> selected tags ([] = every inbound of the protocol) */

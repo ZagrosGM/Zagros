@@ -71,7 +71,7 @@ class DeliverySection(BaseModel):
     engine: str                           # recommended client engine family
     artifacts: list[DeliveryArtifact] = Field(default_factory=list)
     note: str | None = None
-    # alpha.7.2 (item 13): which core inbound produced this section — the
+    # (item 13): which core inbound produced this section — the
     # Host Settings engine keys its per-tag expansion on it. ``None`` on
     # tagless single-inbound presenters (the engine applies the only
     # defined tag unambiguously then).
@@ -163,7 +163,7 @@ def _transport_params(transport: dict[str, Any], network: str,
                       params: dict[str, Any]) -> None:
     """path/host/serviceName params per transport — without them the client
     silently falls back to defaults and connects to the WRONG listener
-    (the alpha.7.1 emitters added these only for ws; httpupgrade/grpc/h2
+    (the emitters added these only for ws; httpupgrade/grpc/h2
     links were broken)."""
     if network in ("ws", "httpupgrade"):
         params["path"] = transport.get("path") or "/"

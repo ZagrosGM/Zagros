@@ -117,7 +117,7 @@ class CoreHostModel(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     core_id: Mapped[str] = mapped_column(String(32), index=True)
-    # alpha.7.2 (item 13): which inbound of the core this host variant
+    # (item 13): which inbound of the core this host variant
     # belongs to — marzban-era rows backfilled from extras by migration
     # 0008; "" never matches a live tag (inert by design).
     inbound_tag: Mapped[str] = mapped_column(String(256), default="", server_default="")

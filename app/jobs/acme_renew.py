@@ -1,4 +1,4 @@
-"""ACME auto-renewal (alpha.7.5 item 9): entries under 30 days to expiry
+"""ACME auto-renewal: entries under 30 days to expiry
 are renewed in place — same exactly-once discipline as everything else
 (idempotent renew; failures logged, never crash the scheduler loop)."""
 from __future__ import annotations

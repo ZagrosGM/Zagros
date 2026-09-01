@@ -1,13 +1,13 @@
 """Dynamic inbound-wizard blueprints — ONE source of truth for the
 Core → Protocol → Transport → Security → fields flow.
 
-History: the first wizard (alpha.6) hardcoded a single fixed protocol list in
+History: the first wizard hardcoded a single fixed protocol list in
 the dashboard, so switching cores changed nothing and asking for e.g. VLESS
 over HTTPUpgrade was impossible. This module turns the matrix into data the
 dashboard stepper renders directly, per core ID, honoring what each engine
 actually supports.
 
-The matrix is EMPIRICALLY PINNED (alpha.7.1): every offered
+The matrix is EMPIRICALLY PINNED: every offered
 protocol × transport × security cell on xray/sing-box was rendered by the
 real driver translator and validated against the real binary
 (``xray run -test`` Xray 26.3.27, ``sing-box check`` 1.12.4):
@@ -83,7 +83,7 @@ GRPC_FIELDS = [_f("service_name", "gRPC service name", placeholder="grpc-service
 GRPC_XRAY_EXTRA = [_f("multi_mode", "multiMode (separate up/down streams)", "bool",
                       default=False, section="transport",
                       help="xray grpcSettings.multiMode")]
-# alpha.7.5 item 4 — RAW/TCP HTTP camouflage (xray tcpSettings.header.type =
+# RAW/TCP HTTP camouflage (xray tcpSettings.header.type =
 # "http"): a real request/response pair Xray serves, NOT decoration. The
 # translator refuses these facts with header_type=none.
 XRAY_TCP_HTTP_FIELDS = [
@@ -131,7 +131,7 @@ TLS_UPLOAD_FIELDS = [
     _f("certificate_key", "private key (PEM)", "file", section="certificate",
        help="Paste the matching PEM private key (never stored in the studio "
             "document — written 0600 into the core's cert dir)."),
-    # alpha.7.5 item 6 Mode B(path): reference PEM files on the panel host —
+    # Mode B(path): reference PEM files on the panel host —
     # validated with the same rules as pasted content, never copied, never
     # registered in the Certificates store.
     _f("certificate_path", "certificate file path (on this server)", section="certificate",
@@ -575,7 +575,7 @@ def _softether_blueprint() -> list[Protocol]:
 
 # --------------------------------------------------------------------- #
 # registry — keyed by the CORES' canonical ids (their `metadata.id`),
-# with accepted aliases. Field-reported bug (alpha.7.2 item 7): this used
+# with accepted aliases. Field-reported bug: this used
 # to key the sing-box blueprint on "singbox" while the real core id (and
 # the dashboard URL) is "sing-box" — every wizard-schema fetch for the
 # panel's primary core 404'd with "the wizard blueprint could not be

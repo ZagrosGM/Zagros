@@ -127,4 +127,4 @@ jobs:
             sudo env ZAGROS_SCRIPTS_REF=${{ github.ref_name }} bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/${{ github.ref_name }}/zagros.sh)" -- update --version ${{ github.ref_name }}
             ```
 
-            Curated change notes live in [CHANGELOG.md](https://github.com/ZagrosGM/Zagros/blob/main/CHANGELOG.md).
+            Curated change notes live in the [release notes](https://github.com/ZagrosGM/Zagros/releases).

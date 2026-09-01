@@ -47,7 +47,7 @@ class Admin(Base):
     users_usage = Column(BigInteger, nullable=False, default=0)
     usage_logs = relationship("AdminUsageLogs", back_populates="admin")
     # ------------------------------------------------------------- #
-    # Admin governance (Zagros alpha.7+). All four are optional; NULL
+    # Admin governance (Zagros). All four are optional; NULL
     # means "no limit". Enforced transaction-safely in crud.
     #   * max_users — hard cap on users this admin may own.
     #   * expire_at — account expiry: login + every admin action dies.

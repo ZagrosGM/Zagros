@@ -56,7 +56,7 @@ class OpenVPNBackend(Protocol):
 
     def configure(self, specs: list[dict[str, Any]]) -> None:
         """Materialize the whole listener set: one server.conf + accounting
-        hook per tag (multi-inbound, alpha.7.2)."""
+        hook per tag (multi-inbound)."""
         ...
 
     def install_packages(self) -> str: ...
@@ -77,7 +77,7 @@ class OpenVPNBackend(Protocol):
 
 class _Listener:
     """One openvpn process bound to one tag: own config, own management
-    channel, own accounting hook/log (multi-inbound, alpha.7.2)."""
+    channel, own accounting hook/log (multi-inbound)."""
 
     __slots__ = ("tag", "directory", "config_path", "disconnect_log",
                  "hook_path", "network_hook_path", "mgmt_port", "proc", "mgmt")
@@ -100,7 +100,7 @@ class _Listener:
 class LocalOpenVPNBackend:
     """Production backend for the OpenVPN driver.
 
-    Multi-inbound (alpha.7.2): the class manages a SET of listeners keyed
+    Multi-inbound: the class manages a SET of listeners keyed
     by tag — one openvpn process each (the protocol itself is one listener
     per process; several ports ⇒ several processes, exactly how distros
     run openvpn@server1/openvpn@server2). PKI (CA / server cert / tls-crypt
@@ -207,7 +207,7 @@ class LocalOpenVPNBackend:
         was a bare 'cannot reach openvpn management interface: Connection
         refused' — which hid whichever of these actually died first.
 
-        Network-stack readiness is a STRUCTURED diagnosis (alpha.7.2):
+        Network-stack readiness is a STRUCTURED diagnosis:
         TUN device, CAP_NET_ADMIN, kernel module, container context — each
         failed check ships its own host-specific fix, not a bare error."""
         if shutil.which(self.executable) is None and not os.path.exists(self.executable):

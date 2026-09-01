@@ -56,7 +56,7 @@ _INBOUND_KEYS: dict[str, set[str]] = {
     "vmess": {"id"},
     "trojan": {"password"},
     "shadowsocks": {"password"},
-    # consolidated cores (alpha.7.2): the standalone hysteria2/tuic engines
+    # consolidated cores: the standalone hysteria2/tuic engines
     # folded into sing-box — the protocols are served natively, so account
     # management, usage accounting and delivery live here now.
     "hysteria2": {"password"},
@@ -89,7 +89,7 @@ class SingBoxDriver(BaseCoreDriver):
         description=(
             "Universal proxy platform by SagerNet. Config-render driver; "
             "natively serves vless/vmess/trojan/shadowsocks plus the "
-            "consolidated Hysteria2 and TUIC v5 protocols (alpha.7.2: the "
+            "consolidated Hysteria2 and TUIC v5 protocols (: the "
             "standalone hy2/tuic cores folded in — one verified matrix, "
             "unified per-user accounting), and still the richest native "
             "outbound set (wireguard, hysteria2, tuic, shadowsocks, socks, "
@@ -174,7 +174,7 @@ class SingBoxDriver(BaseCoreDriver):
         self._studio_doc: dict[str, Any] | None = None  # set by apply_studio_document
         self._studio_link_meta: dict[str, dict[str, Any]] = {}  # per-tag link metadata
         self._stats_error: str | None = None
-        # alpha.7.2 consolidation: persisted alpha.7.1 settings rows carry a
+        # consolidation: persisted settings rows carry a
         # `ports` map WITHOUT the hysteria2/tuic keys — deep-merge the seed
         # defaults so the derived (pre-studio) render path never KeyErrors.
         port_defaults = dict(self.metadata.default_settings.get("ports") or {})
@@ -308,7 +308,7 @@ class SingBoxDriver(BaseCoreDriver):
             # sing-box strictly rejects unknown fields — panel-side link
             # metadata (reality public key, client flow hint, …) must NOT
             # leak into the rendered document; keep it in the side map the
-            # delivery path reads instead (probe vs real binary, alpha.7.1)
+            # delivery path reads instead (probe vs real binary)
             if tag in self._self_signed_tags:
                 ib["_self_signed_cert"] = True  # delivery emits insecure=1 honestly
             meta = {k: ib.pop(k) for k in list(ib) if k.startswith("_")}
@@ -465,7 +465,7 @@ class SingBoxDriver(BaseCoreDriver):
                  "cipher", "ports", "ipsec_psk", "certificate", "certificate_key",
                  "mode", "username", "password", "auth", "padding_scheme",
                  "masquerade",
-                 # alpha.7.5 item 4 — http transport verb + arbitrary header
+                 # http transport verb + arbitrary header
                  # maps (ws/http); item 6 — certificate-by-path mode.
                  "http_method", "certificate_path", "certificate_key_path"}
         unknown = sorted(set(raw) - known)
@@ -604,7 +604,7 @@ class SingBoxDriver(BaseCoreDriver):
             ib["_reality_public_key"] = public  # → side map (delivery), never rendered
         elif security == "tls" or proto in ("naive", "anytls", "hysteria2", "tuic"):
             if raw.get("certificate_path") or raw.get("certificate_key_path"):
-                # alpha.7.5 item 6 Mode B(path): reference the operator's PEM
+                # Mode B(path): reference the operator's PEM
                 # files in place — validated like any pasted pair first.
                 from app.studio.certs import CertificateError, validate_pem_pair_paths
 

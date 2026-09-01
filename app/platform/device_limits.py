@@ -44,7 +44,7 @@ async def collect_devices_diag(runtime) -> tuple[dict[int, set[str]], list[str],
     * ``probed_core_count`` — online-capable cores that answered. When
       ZERO, the panel simply has no online API on this deployment (every
       enabled core lacks the capability) and presence must be reported as
-      UNKNOWN, never as a fake OFFLINE (alpha.7.5 item 15).
+      UNKNOWN, never as a fake OFFLINE.
     """
     from app.cores.types import Capability
 

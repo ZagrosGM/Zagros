@@ -4,7 +4,7 @@ Revision ID: 0008_core_host_inbound_tag
 Revises: 0007_core_consolidation
 Create Date: 2026-08-08
 
-The Host Settings engine (alpha.7.2, item 13) keys admin host entries by
+The Host Settings engine keys admin host entries by
 ``(core_id, inbound_tag)``. ``core_hosts`` (0001) carried no inbound tag —
 marzban-era rows stashed it inside the ``extras`` JSON blob (0003), which
 is fine for archival but wrong for a live query key. This revision:

@@ -1,4 +1,4 @@
-"""Wizard listen-port suggestion (alpha.7.5 item 3).
+"""Wizard listen-port suggestion.
 
 The wizard must never default to a famous port (443): every fresh create
 gets a RANDOM five-digit port that collides with NOTHING the panel can

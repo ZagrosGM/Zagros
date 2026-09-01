@@ -15,7 +15,7 @@ def validate_admin(db: Session, username: str, password: str) -> Optional[AdminV
 
     dbadmin = crud.get_admin(db, username)
     if dbadmin and crud.admin_is_expired(dbadmin):
-        # Governance (alpha.7+): an expired admin must not be able to log
+        # Governance: an expired admin must not be able to log
         # in at all — fail with a precise reason, not a generic 401.
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

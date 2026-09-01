@@ -20,7 +20,7 @@ class ClientAuthMode(str, Enum):
 
 
 _AUTH_MODE_ALIASES = {
-    # the alpha.7 dashboard posted this shorthand id and got a raw 422 —
+    # the dashboard posted this shorthand id and got a raw 422 —
     # normalize at the schema edge so the spellings stay one concept
     "app_login": "application_login",
     "sub_link": "subscription_link",
@@ -69,7 +69,7 @@ class PortalSettings(BaseModel):
     home_url: str | None = None
     default_lang: str = "fa"
     # identity + link shape surfaced by the dashboard Subscription page
-    # (alpha.7 saved them and they silently vanished — the schema now owns
+    # (saved them and they silently vanished — the schema now owns
     # them, with validation instead of free-form strings):
     app_name: str = Field(default="Zagros", max_length=64)
     subscription_path: str = "sub"
@@ -86,7 +86,7 @@ class PortalSettings(BaseModel):
     listener_mode: Literal["shared", "dedicated", "external_proxy"] = "shared"
     listen_address: str = "0.0.0.0"
     qr_base_url: str | None = None
-    # alpha.9.2 item 3: filename of an operator-uploaded subscription page
+    # filename of an operator-uploaded subscription page
     # template (see app/portal/templates_store.py). None = the built-in page.
     # Selection is by name only — the renderer resolves it inside the managed
     # directory, so a settings value can never reach outside it.

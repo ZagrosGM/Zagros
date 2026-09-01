@@ -5,7 +5,7 @@ Revises: 0009_policy_routing_domains
 Create Date: 2026-08-15
 
 0001 intentionally materializes current metadata on a brand-new database, so
-this revision is column-idempotent: upgrades from alpha.8.2 add the fields;
+this revision is column-idempotent: upgrades add the fields;
 fresh installs already have them before Alembic reaches 0010.
 """
 from alembic import op

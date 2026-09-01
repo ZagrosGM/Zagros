@@ -196,7 +196,7 @@ def update_admin(username: str = typer.Option(..., *utils.FLAGS["username"], pro
                                             default=admin.discord_webhook or "")
         discord_webhook = validate_discord_webhook(discord_webhook)
 
-        # ---- governance prompts (alpha.7+) ---- #
+        # ---- governance prompts ---- #
         def _ask_limit(label: str, current) -> Union[int, None, str]:
             """'' = keep, '0' = clear, positive number = set (bytes shown as GiB)."""
             shown = "" if current is None else (

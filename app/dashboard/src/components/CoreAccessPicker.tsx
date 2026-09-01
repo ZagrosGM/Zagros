@@ -1,4 +1,4 @@
-// CoreAccessPicker — the unified INBOUND TREE (alpha.7.2, item 11).
+// CoreAccessPicker — the unified INBOUND TREE.
 //
 // Contract:
 //   * EVERY core of the catalog appears as one tree row (xray included) —

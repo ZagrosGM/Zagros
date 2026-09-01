@@ -10,7 +10,7 @@ import { useT } from "../lib/i18n";
 import type { CertificateInfo, PanelInfo, PortalSettings, SubscriptionTemplateFile } from "../lib/types";
 
 // canonical enum values of the backend contract (ClientAuthMode); the
-// backend keeps accepting the alpha.7 shorthand "app_login" for stray
+// backend keeps accepting the shorthand "app_login" for stray
 // integrations, but the dashboard speaks the canonical ids itself
 const AUTH_MODES = [
   { id: "subscription_link", label: "Subscription link", hint: "users open the canonical tokenized /sub/<token> link from any client" },
@@ -39,7 +39,7 @@ export default function Subscriptions() {
     onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
   });
 
-  // alpha.9.2 item 3 — operator-authored subscription page template
+  // — operator-authored subscription page template
   const fileRef = useRef<HTMLInputElement>(null);
   const templatesQ = useQuery({
     queryKey: ["zagros", "subscription-templates"],

@@ -1,4 +1,4 @@
-// Templates — first-class page (moved out of Settings in alpha.7).
+// Templates — first-class page (moved out of Settings).
 // User templates pre-fill data limit, expiry, username affixes and the
 // per-protocol inbound sets used by "create user from template".
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";

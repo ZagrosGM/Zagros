@@ -84,7 +84,7 @@ class SSHTunnelDriver(BaseCoreDriver):
                                              "multi-inbound): [{'tag': str, "
                                              "'port': int}[, ...]] — empty = "
                                              "derive from the legacy 'port' "
-                                             "setting (alpha.7.2)"},
+                                             "setting"},
                 "advertise_host": {"type": "string"},
                 "password_auth": {"type": "boolean", "default": True},
                 "pubkey_auth": {"type": "boolean", "default": True},
@@ -118,14 +118,14 @@ class SSHTunnelDriver(BaseCoreDriver):
         provides=set(),
         requires=set(),
         # sshd natively serves ANY number of `Port` directives from one
-        # daemon — multi-inbound exactly like xray (alpha.7.2): N entries,
+        # daemon — multi-inbound exactly like xray: N entries,
         # distinct tags, distinct ports, one drop-in rewrite + reload.
         studio_inbounds_path="/inbounds",
     )
 
     def __init__(self, settings: dict[str, Any] | None = None, *, backend: Any | None = None):
         super().__init__(settings)
-        # multi-inbound settings bridge (alpha.7.2): a persisted pre-7.2
+        # multi-inbound settings bridge: a persisted earlier
         # settings blob has no "listeners" — derive it from the legacy
         # single "port" so old cores keep answering on their port.
         self._listeners = self._derive_listeners(self.settings)
@@ -151,7 +151,7 @@ class SSHTunnelDriver(BaseCoreDriver):
     @classmethod
     def _derive_listeners(cls, settings: dict[str, Any]) -> list[dict[str, Any]]:
         """settings['listeners'] normalized; empty/missing → single listener
-        seeded from the legacy 'port' key (pre-alpha.7.2 compatibility)."""
+        seeded from the legacy 'port' key (pre- compatibility)."""
         raw = settings.get("listeners") or []
         out: list[dict[str, Any]] = []
         for row in raw:
@@ -395,7 +395,7 @@ class SSHTunnelDriver(BaseCoreDriver):
         s = self.settings
 
         # 1) structural pass (fail BEFORE touching any setting). Port stays
-        # optional per entry (alpha.7.1 partial-update contract): missing →
+        # optional per entry: missing →
         # inherit the current listener of the same name, else the legacy
         # single port. Blank tag → "ssh" for a single-entry doc (legacy
         # shape), deterministic ssh-<port> otherwise.
@@ -626,8 +626,8 @@ class SSHTunnelDriver(BaseCoreDriver):
     async def sync_accounts(self, accounts: list[UserAccount]) -> None:
         # reconcile: (re)create desired accounts; delete panel accounts that
         # are no longer desired (only zg-* names are ever touched).
-        # alpha.7.2: every granted account qualifies — credentials are
-        # provisioned first (alpha.7.1 skipped password-less accounts, which
+        # every granted account qualifies — credentials are
+        # provisioned first (skipped password-less accounts, which
         # made the grant fail downstream; now nothing may fail).
         for account in accounts:
             self._provision_credentials(account)
@@ -690,7 +690,7 @@ class SSHTunnelDriver(BaseCoreDriver):
         return out
 
     # ------------------------------------------------------------------ #
-    # usage — real kernel accounting via iptables owner-match (alpha.7.4)  #
+    # usage — real kernel accounting via iptables owner-match #
     # ------------------------------------------------------------------ #
     def _uid_of_account(self, account: UserAccount) -> int | None:
         lookup = getattr(self._backend, "uid_of", None)

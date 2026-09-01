@@ -1,6 +1,6 @@
 """Core consolidation — standalone hysteria2/tuic cores fold into sing-box.
 
-Architecture decision (alpha.7.2, batch item 1), recorded with evidence:
+Architecture decision, recorded with evidence:
 
 * **TUIC v5**: ``tuic-server`` exposes NO stats/online API at all — per-user
   accounting was *impossible* on the standalone core (documented in its own
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping
 
-#: cores that no longer exist as independent engines after alpha.7.2 —
+#: cores that no longer exist as independent engines after —
 #: their protocol layer lives on inside the sing-box core.
 MERGED_CORES: tuple[str, str] = ("hysteria2", "tuic")
 

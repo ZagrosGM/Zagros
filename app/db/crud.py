@@ -353,7 +353,7 @@ def get_users_count(db: Session, status: UserStatus = None, admin: Admin = None)
 
 
 # --------------------------------------------------------------------- #
-# Admin governance (Zagros alpha.7+)
+# Admin governance (Zagros)
 #
 # Four optional caps on every DB-backed admin account, all enforced
 # transaction-safely (the admin row is locked with SELECT ... FOR UPDATE
@@ -1131,7 +1131,7 @@ def create_admin(db: Session, admin: AdminCreate) -> Admin:
 
 
 def _apply_governance_fields(dbadmin: Admin, modified_admin) -> None:
-    """Apply the alpha.7 governance fields with explicit-presence semantics:
+    """Apply the governance fields with explicit-presence semantics:
     field absent from the payload -> keep; present-but-falsy -> clear;
     positive value -> set."""
     fields_set = getattr(modified_admin, "model_fields_set", set()) or set()
@@ -1535,7 +1535,7 @@ def count_online_users(db: Session, within_seconds: int = 90):
     The window is SECONDS, not hours, and defaults to the same 90s the rest
     of the panel uses (platform totals and the multi-core presence
     endpoint). A 24h window answered "who connected today", which the
-    Overview then displayed under the label "Online now" (alpha.9.2 item 2).
+    Overview then displayed under the label "Online now".
     """
     cutoff = datetime.utcnow() - timedelta(seconds=within_seconds)
     query = db.query(func.count(User.id)).filter(User.online_at.isnot(

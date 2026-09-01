@@ -1,4 +1,4 @@
-"""ACME / Let's Encrypt integration (alpha.7.5 item 9) — REAL issuance.
+"""ACME / Let's Encrypt integration — REAL issuance.
 
 Design: the panel adapts the battle-tested ACME clients the host already
 trusts, instead of re-implementing the ACME protocol (and its failure

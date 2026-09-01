@@ -1,5 +1,5 @@
 // Pure selection ↔ wire-model mapping for the UNIFIED inbound tree
-// (alpha.7.2, item 11).
+//.
 //
 // The dashboard shows ONE tree across every core, but the wire keeps the two
 // contracts the backend actually owns:

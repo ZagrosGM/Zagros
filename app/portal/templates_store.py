@@ -1,4 +1,4 @@
-"""Admin-managed subscription page templates (alpha.9.2 item 3).
+"""Admin-managed subscription page templates.
 
 Marzban let an operator point the panel at a custom template directory —
 but only through an environment variable plus shell access to the server.

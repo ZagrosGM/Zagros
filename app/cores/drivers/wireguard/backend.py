@@ -38,7 +38,7 @@ logger = logging.getLogger("zagros.cores.drivers.wireguard")
 
 
 # ---------------------------------------------------------------------- #
-# pure-python key material (alpha.7.2)                                    #
+# pure-python key material #
 # ---------------------------------------------------------------------- #
 # WireGuard keys are RFC 7748 X25519 scalars — deriving/generating them
 # never needed the `wg` binary; shelling out only made the CONFIGURE path
@@ -132,7 +132,7 @@ class LocalWireGuardBackend:
     """Production backend based on wireguard-tools (`wg` / `wg-quick`)."""
 
     # wg-quick is a bash wrapper that shells out to more than just `wg`:
-    # `ip` (iproute2) is a strict requirement (alpha.7 report: "ip: command
+    # `ip` (iproute2) is a strict requirement (report: "ip: command
     # not found"); iptables backs the default-route/PostUp hooks operators
     # rely on.  DNS helpers are deliberately NOT required server-side:
     # panel-rendered server interfaces carry no `DNS =` lines.
@@ -236,13 +236,13 @@ class LocalWireGuardBackend:
                 if manager == "apt-get":
                     # fresh containers/minimal cloud images ship EMPTY apt
                     # lists — install without update fails with
-                    # "Unable to locate package" (reported on alpha.7 VPS)
+                    # "Unable to locate package" (reported on VPS)
                     self._run(["apt-get", "update"], timeout=600)
                 return self._run(argv, timeout=600)
         raise CoreError("no supported package manager found (apt/dnf/yum/pacman).")
 
     def generate_keypair(self) -> tuple[str, str]:
-        # pure python (alpha.7.2): the configure/provision path must work on
+        # pure python: the configure/provision path must work on
         # a host where wireguard-tools is not installed yet.
         return generate_keypair_pure()
 
@@ -339,7 +339,7 @@ class LocalWireGuardBackend:
             pass
 
     def _run_up(self) -> None:
-        """wg-quick up with STRUCTURED failure diagnosis (alpha.7.2): a bare
+        """wg-quick up with STRUCTURED failure diagnosis: a bare
         'Operation not permitted' tells the operator nothing — run the
         NET_ADMIN/kernel-module/container probes and attach the per-check
         fixes for THIS host."""

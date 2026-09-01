@@ -1,7 +1,7 @@
 # Zagros Dashboard (unified panel)
 
 The **single** management interface of Zagros — a React 18 + TypeScript SPA
-written from scratch for the multi-core platform (`v1.0.0-alpha.5`).
+written from scratch for the multi-core platform.
 
 - **Stack:** React 18, Vite 5, Tailwind CSS 3 (design-token driven),
   react-router 6 (hash routing — works on every deployment shape),

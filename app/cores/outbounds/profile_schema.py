@@ -1,4 +1,4 @@
-"""Per-kind outbound profile schemas (alpha.7).
+"""Per-kind outbound profile schemas.
 
 The admin UI used to hard-code a handful of fields per protocol — any
 transport beyond the basics was simply unreachable. These JSON-Schema

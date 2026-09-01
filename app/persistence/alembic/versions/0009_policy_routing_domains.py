@@ -4,7 +4,7 @@ Revision ID: 0009_policy_routing_domains
 Revises: 0008_core_host_inbound_tag
 Create Date: 2026-08-13
 
-The authoritative alpha.7.9/alpha.8/alpha.8.1 outbounds/rules remain in the
+The authoritative// outbounds/rules remain in the
 settings KV rows.  This migration adds only derived stable Linux identities;
 it never moves or deletes the old documents.  Downgrade can therefore drop
 the table without losing user configuration.

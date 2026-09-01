@@ -200,7 +200,7 @@ class XrayDriver(BaseCoreDriver):
             raise CoreError(f"cannot read the legacy xray document '{XRAY_JSON}': {exc}") from exc
 
     # ------------------------------------------------------------------ #
-    # Config Studio bridge (alpha.7.1) — the old gap: xray exported its
+    # Config Studio bridge — the old gap: xray exported its
     # document but had NO apply path, so wizard-created inbounds lived only
     # in the studio store and never became real listeners (field report:
     # "inbound created in wizard does not appear / does nothing").
@@ -228,13 +228,13 @@ class XrayDriver(BaseCoreDriver):
         "public_key", "flow", "method",
         "address", "target_port", "auth", "username", "password",
         "mtu", "tti", "congestion",
-        # alpha.7.5 item 4 — transport depth, all real xray mappings:
+        # transport depth, all real xray mappings:
         # ws arbitrary headers; gRPC multiMode; RAW/TCP HTTP camouflage
         # (tcpSettings.header.type = "http" with full request/response).
         "multi_mode",
         "header_type", "http_method", "request_headers",
         "response_status", "response_reason", "response_headers",
-        # alpha.7.5 item 6 — certificate-by-path wizard mode (validated
+        # certificate-by-path wizard mode (validated
         # against the same PEM rules as pasted content).
         "certificate_path", "certificate_key_path",
     }
@@ -410,7 +410,7 @@ class XrayDriver(BaseCoreDriver):
             from app.studio.headers import parse_http_headers
 
             settings: dict[str, Any] = {"path": path or "/"}
-            # alpha.7.5 item 4: arbitrary ws headers (the explicit Host field
+            # arbitrary ws headers (the explicit Host field
             # wins over a pasted Host line — one source of truth per fact)
             headers = parse_http_headers(raw.get("headers"),
                                          context=f"ws inbound '{tag}'")
@@ -468,7 +468,7 @@ class XrayDriver(BaseCoreDriver):
 
     @staticmethod
     def _studio_tcp_settings(tag: str, raw: dict[str, Any]) -> dict[str, Any]:
-        """RAW/TCP depth (alpha.7.5 item 4): Xray's real HTTP camouflage —
+        """RAW/TCP depth: Xray's real HTTP camouflage —
         ``tcpSettings.header.type = "http"`` with full request/response
         objects (method, paths, status line, arbitrary headers on both
         sides). ``header_type`` other than none/http is refused loudly."""
@@ -547,7 +547,7 @@ class XrayDriver(BaseCoreDriver):
             sni = str(raw.get("sni") or "").strip()
             if not sni:
                 raise CoreError(f"TLS inbound '{tag}' needs an SNI/certificate name.")
-            # alpha.7.5 item 6 Mode B(path): operator-supplied PEM FILES on
+            # Mode B(path): operator-supplied PEM FILES on
             # the panel host — validated with the exact rules pasted content
             # gets, then referenced in place (no copy, no registry entry).
             cert_file = raw.get("certificate_path")
@@ -644,7 +644,7 @@ class XrayDriver(BaseCoreDriver):
                 f"TLS inbound '{tag}': upload certificate AND private key together."
             )
         if cert_pem:
-            # alpha.7.5 item 6: uploaded content now faces the SAME real
+            # uploaded content now faces the SAME real
             # validation sing-box had (parse + match + expiry) — xray used
             # to write anything to disk and let the core die on it.
             from app.studio.certs import CertificateError, validate_pem_pair

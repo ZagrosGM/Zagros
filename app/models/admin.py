@@ -25,7 +25,7 @@ class Admin(BaseModel):
     users_usage: Optional[int] = None
     created_at: Optional[datetime] = None
     # --------------------------------------------------------- #
-    # Admin governance (alpha.7+). None = unlimited / no expiry.
+    # Admin governance. None = unlimited / no expiry.
     #   * max_users — hard cap on owned users
     #   * expire_at — admin account expiry (login + API both die)
     #   * traffic_alloc_limit — cap on SUM(users' data_limit)

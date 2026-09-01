@@ -1,4 +1,4 @@
-"""Cross-core Host Settings engine (alpha.7.2, item 13).
+"""Cross-core Host Settings engine.
 
 Marzban's Host Settings let an admin define, per inbound, a LIST of host
 variants (remark / address / port / sni / host header / path / security /
@@ -78,7 +78,7 @@ _FIELDS_PORT_KEYS = {"port", "server_port"}
 class HostEntry:
     """One admin-defined host variant (a ``core_hosts`` row, normalized).
 
-    The full Marzban-parity field set (alpha.7.2 item 13).  Priority is the
+    The full Marzban-parity field set. Priority is the
     entry's position inside its (core_id, inbound_tag) list — the store
     persists it in the ``sort`` column and hands entries back in order.
     ``extras`` preserves *unrecognized* legacy attributes verbatim
@@ -300,7 +300,7 @@ def _emit_transport_params(s: dict[str, Any], params: dict[str, Any]) -> None:
 
 
 def _emit_client_hint_params(s: dict[str, Any], params: dict[str, Any], proto: str) -> None:
-    """v2rayN/sing-box share-link client hints (alpha.7.2 item 13)."""
+    """v2rayN/sing-box share-link client hints."""
     if proto in _FRAGMENT_CAPABLE:
         if s.get("fragment"):
             params["fragment"] = s["fragment"]
@@ -655,14 +655,14 @@ class HostSettingsEngine:
 
 
 # --------------------------------------------------------------------- #
-# protocol-aware field matrix (alpha.7.4 items 15+16) — the UI renders the
+# protocol-aware field matrix — the UI renders the
 # entry editor from THIS truth instead of an xray-shaped one-size-fits-all.
 # --------------------------------------------------------------------- #
 
 #: default remark applied to every generated variant when an entry leaves
 #: the remark blank (item 15). Protocol/transport/server resolve per link or
 #: per section; username vars resolve per subscriber.
-#: Default remark template for EVERY core (alpha.7.5 item 16). The server
+#: Default remark template for EVERY core. The server
 #: address must NOT leak into the remark — the host entry's Address field
 #: carries it separately; a blank Address means "{SERVER_IP}" (the link's
 #: own server value, preserved on expansion).

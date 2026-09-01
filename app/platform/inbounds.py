@@ -75,7 +75,7 @@ _SERVICE_ENTRIES: dict[str, tuple[tuple[str, str, str | None], ...]] = {
 def _doc_inbounds(doc: Any) -> list[CatalogInbound]:
     """inbound entries out of a studio OR native-core config document.
 
-    Both shapes are accepted (alpha.7.5 item 17): the studio payload
+    Both shapes are accepted: the studio payload
     (tag/protocol/port) AND native core renders (sing-box/xray carry
     'type' + 'listen_port').
     """
@@ -114,7 +114,7 @@ async def _studio_inbounds(runtime, core_id: str) -> list[CatalogInbound]:
         return found
     if core_id in _SERVICE_ENTRIES:
         return []  # healthy static fallback below in catalog()
-    # Studio-first cores (sing-box & co, alpha.7.5 item 17): with NO
+    # Studio-first cores (sing-box & co): with NO
     # persisted studio document the EFFECTIVE inbound set lives in the
     # driver's live render (derived listeners exist as soon as accounts do,
     # with zero studio state). A fresh core with no accounts still exports

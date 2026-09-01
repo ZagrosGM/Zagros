@@ -216,7 +216,7 @@ async def _core_view(runtime, core_id: str, status_by_id: dict) -> dict:
     state = stored_entry.get("state")
     state_value = state.value if isinstance(state, CoreState) else state
     if status is not None:
-        # The live probe is the ground truth for liveness (alpha.7.2 item 3):
+        # The live probe is the ground truth for liveness:
         # * a live RUNNING probe ALWAYS wins over the persisted record — a
         #   recorded "error" from a start that died after the process came
         #   up must not paint the healthy core as Error;
@@ -1337,7 +1337,7 @@ async def outbounds_test(body: OutboundWrite, runtime=Depends(get_runtime)):
 
 
 # --------------------------------------------------------------------- #
-# outbounds schema + share-url import + ovpn export (alpha.7)
+# outbounds schema + share-url import + ovpn export
 # --------------------------------------------------------------------- #
 
 @zagros_admin_router.get("/outbounds/schema")
@@ -1648,7 +1648,7 @@ class AcmeIssueBody(BaseModel):
 @zagros_admin_router.get("/certificates/acme")
 async def certificates_acme_status(runtime=Depends(get_runtime)):
     """ACME reality: which clients exist on this host + every ACME-managed
-    entry with expiry/renewal facts (alpha.7.5 item 9)."""
+    entry with expiry/renewal facts."""
     from app.platform import acme
 
     return acme.acme_status(_data_dir(runtime))
@@ -1751,7 +1751,7 @@ async def certificates_remove(ident: str, runtime=Depends(get_runtime)):
     # ACME-managed material must go through the ACME endpoint, which also
     # performs provider-side cleanup and reports it — a bare store delete
     # would orphan the provider account copy and leave a sidecar pointing
-    # at files that no longer exist (alpha.7.5 item 9).
+    # at files that no longer exist.
     managed_name = ident[len("certs/"):] if ident.startswith("certs/") else ident
     if "/" not in managed_name and managed_name:
         from app.platform import acme
@@ -2049,7 +2049,7 @@ async def users_online_states(runtime=Depends(get_runtime)):
     * ``unknown`` — ≥1 core failed its read in the last pass, OR NO
       online-capable core answered at all. A core without an online API
       must never fabricate 'offline': absence of evidence is not evidence
-      of absence (alpha.7.5 item 15).
+      of absence.
     * ``counts`` — the three buckets tallied, so an aggregate display
       (the Overview "Online now" tile) can never disagree with the dots.
     """
@@ -2104,7 +2104,7 @@ async def users_online_states(runtime=Depends(get_runtime)):
         else:
             states[username] = "offline"
     # counts are free here — the Overview's "Online now" tile reads them so
-    # it can never drift from the dots this endpoint paints (alpha.9.2 #2)
+    # it can never drift from the dots this endpoint paints
     counts = {"online": 0, "offline": 0, "unknown": 0}
     for state in states.values():
         counts[state] = counts.get(state, 0) + 1
@@ -2115,7 +2115,7 @@ async def users_online_states(runtime=Depends(get_runtime)):
 
 
 # --------------------------------------------------------------------- #
-# subscription page templates (alpha.9.2 item 3)
+# subscription page templates
 #
 # Marzban needed an env var plus shell access to point the panel at a
 # custom template. Here an operator uploads an HTML page and picks it in
@@ -2413,7 +2413,7 @@ async def panel_info(runtime=Depends(get_runtime)):
 
 
 # --------------------------------------------------------------------- #
-# host settings (alpha.7.2, item 13) — Marzban-parity, panel-native
+# host settings — Marzban-parity, panel-native
 # --------------------------------------------------------------------- #
 #
 # ONE feature, TWO storage backends, honest by construction:

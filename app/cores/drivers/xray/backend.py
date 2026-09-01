@@ -276,7 +276,7 @@ class LegacyXrayBackend:
         return online
 
     # ------------------------------------------------------------------ #
-    # studio document bridge (alpha.7.1 — the wizard→real-listener root fix)
+    # studio document bridge
     # ------------------------------------------------------------------ #
     def apply_config_document(self, document: dict[str, Any]) -> None:
         """Make the studio document THE xray configuration, in safe order:

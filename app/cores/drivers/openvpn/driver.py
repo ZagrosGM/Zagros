@@ -135,7 +135,7 @@ class OpenVPNDriver(BaseCoreDriver):
                                                     "'max-clients 512')"},
                 "listeners": {"type": "array",
                               "description": "listener set (xray-style multi-inbound, "
-                                             "alpha.7.2): [{'tag', 'port', 'proto', "
+                                             "): [{'tag', 'port', 'proto', "
                                              "'subnet'?, 'cipher'?, ...}] — empty = "
                                              "derive ONE listener from the legacy flat "
                                              "port/proto/subnet keys"},
@@ -169,13 +169,13 @@ class OpenVPNDriver(BaseCoreDriver):
         requires=set(),
         # openvpn is one listener PER PROCESS — multi-inbound = one process
         # per port (openvpn@server style), panel-managed as N inbounds with
-        # distinct tags (alpha.7.2), applied like xray (no replace).
+        # distinct tags, applied like xray (no replace).
         studio_inbounds_path="/inbounds",
     )
 
     def __init__(self, settings: dict[str, Any] | None = None, *, backend: Any | None = None):
         super().__init__(settings)
-        # multi-inbound bridge (alpha.7.2): persisted pre-7.2 settings carry
+        # multi-inbound bridge: persisted earlier settings carry
         # no "listeners" — derive ONE listener from the legacy flat
         # port/proto/subnet/… keys so the served config is bit-identical.
         if not self.settings.get("listeners"):
@@ -610,7 +610,7 @@ class OpenVPNDriver(BaseCoreDriver):
         if not running:
             # stopped core: persist the materialized set anyway so Start
             # renders exactly what the studio last saved (offline-friendly,
-            # same rule as wireguard since alpha.7.2)
+            # same rule as wireguard)
             await asyncio.to_thread(self._backend.configure, self._listener_specs())
             return
         await asyncio.to_thread(self._backend.configure, self._listener_specs())
@@ -719,7 +719,7 @@ class OpenVPNDriver(BaseCoreDriver):
         return "\n".join(lines)
 
     def _client_cert_directive(self) -> str:
-        """Version-gated client-cert directive (alpha.7.5 item 11).
+        """Version-gated client-cert directive.
 
         OpenVPN 2.6 REMOVED ``--client-cert-not-required`` — the daemon
         aborts with 'REMOVED OPTION: --client-cert-not-required, use

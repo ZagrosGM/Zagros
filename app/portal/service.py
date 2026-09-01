@@ -47,7 +47,7 @@ class PortalService:
                  *, host_store: Any | None = None) -> None:
         self._provider = provider
         self._settings = settings
-        # alpha.7.2 (item 13): optional Host-Settings store — when absent
+        # (item 13): optional Host-Settings store — when absent
         # (tests, minimal boots) profiles pass through byte-identically.
         self._host_store = host_store
         self._host_engine = HostSettingsEngine()

@@ -1,4 +1,4 @@
-// Advanced Mode (in-panel Config Studio) — VISUAL by default (alpha.7):
+// Advanced Mode (in-panel Config Studio) — VISUAL by default:
 // the tree editor covers objects/arrays/scalars without ever showing raw
 // JSON; "raw document" and "patch operations" stay available as explicit
 // pro modes. Schema validation + diff preview + apply are shared by all.

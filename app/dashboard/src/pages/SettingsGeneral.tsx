@@ -1,7 +1,7 @@
 // Settings → General — panel info, Panel Network and Advanced Mode.
 // (Moved verbatim when Settings gained tabs: this is the tab the
 // operator already knows.)
-// (alpha.7: admins and user templates are no longer second-class Settings
+// (: admins and user templates are no longer second-class Settings
 // widgets — both moved to first-class sidebar pages under "Management".)
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Save, Settings as SettingsIcon, TerminalSquare } from "lucide-react";

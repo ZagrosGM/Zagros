@@ -1,9 +1,9 @@
-"""Shared wizard certificate validation (alpha.7.5 items 6/8).
+"""Shared wizard certificate validation.
 
 ONE validator for every certificate a wizard can reference — stored
 (certificate_ref), pasted content (certificate + certificate_key) or
 server-side paths (certificate_path + certificate_key_path). Same rules the
-sing-box driver pioneered in alpha.7.4: real PEM parse, key/cert public-key
+sing-box driver pioneered: real PEM parse, key/cert public-key
 match, expiry surfaced loudly. xray previously trusted uploads blindly;
 both drivers now share this module instead of diverging.
 """
@@ -48,7 +48,7 @@ def validate_pem_pair(cert_pem, key_pem, *, context: str) -> x509.Certificate:
 
 def validate_pem_pair_paths(cert_path: str, key_path: str, *,
                             context: str) -> x509.Certificate:
-    """Mode B (path) of the wizard certificate contract (alpha.7.5 item 6):
+    """Mode B (path) of the wizard certificate contract:
     the operator points at PEM files on the PANEL HOST (inside the panel
     container that is the same filesystem the cores see); the pair must
     exist, be readable, and pass :func:`validate_pem_pair`."""

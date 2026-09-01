@@ -1,6 +1,6 @@
 // Dialog + Drawer — portal-mounted, scroll-locked overlays.
 //
-// alpha.7 fix (the "black band at the bottom of the page" bug): the old
+// fix (the "black band at the bottom of the page" bug): the old
 // implementation rendered the backdrop as `absolute inset-0` INSIDE a
 // scrollable grid container. The moment dialog content exceeded the
 // viewport height — exactly what the New-User dialog does — the grid row
@@ -191,7 +191,7 @@ export function ConfirmDialog({ open, onClose, onConfirm, title, body, confirmLa
 
 // ------------------------------------------------------------- RowMenu ---
 //
-// alpha.7.2 (item 16): the old per-row ⋯ menu was `absolute` INSIDE the
+// (item 16): the old per-row ⋯ menu was `absolute` INSIDE the
 // table's scroll container (`card overflow-auto`, fixed height). Anything
 // overflowing that box got clipped — the menu opened but was invisible,
 // which read as "the ⋯ button does nothing". No absolute-in-container

@@ -1,4 +1,4 @@
-// JsonTree — the visual Config-Studio editor (alpha.7): collapsible
+// JsonTree — the visual Config-Studio editor: collapsible
 // objects/arrays, inline scalar editing, add/remove nodes, drag-free row
 // ops — zero raw JSON in Normal mode. Changes write back a JSON document
 // that the Studio's validate/diff/apply pipeline consumes unchanged.

@@ -110,11 +110,11 @@ export default function SettingsGeneral() {
             <p className="py-4 text-xs text-content-3">{t(adminQueryErrorKey(info.error))}</p>
           ) : (
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-[12.5px]">
-              <Meta k={t("version")} v={<Badge tone="brand">{info.data!.version}</Badge>} />
+              <Meta k={t("version")} v={<Badge tone="brand"><span dir="ltr">{info.data!.version}</span></Badge>} />
               <Meta k={t("app")} v={info.data!.app_name} />
-              <Meta k={t("domain")} v={info.data!.domain || "—"} />
+              <Meta k={t("domain")} v={<span dir="ltr">{info.data!.domain || "—"}</span>} />
               <Meta k={t("tls mode")} v={info.data!.tls_mode} />
-              <Meta k={t("database")} v={info.data!.database_driver} />
+              <Meta k={t("database")} v={<span dir="ltr">{info.data!.database_driver}</span>} />
               <Meta k={t("uptime")} v={formatDuration(info.data!.uptime_seconds, digits)} />
               <Meta k={t("panel url")} v={<span className="break-all" dir="ltr">{info.data!.panel_base_url || "—"}</span>} />
               <Meta k={t("auth mode")} v={info.data!.client_auth_mode} />

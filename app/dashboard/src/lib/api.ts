@@ -1,3 +1,4 @@
+import type { Key as I18nKey } from "./i18n";
 // API client — one wrapper for the legacy admin API and the Zagros admin
 // surface; token handling, 401 recovery, and error shaping live here only.
 
@@ -103,3 +104,16 @@ export const auth = {
   },
   logout(): void { setToken(""); },
 };
+
+/** Human-readable reason a Zagros admin panel query failed.
+ *
+ *  A 403 really is a permission problem; a 503 means the platform runtime is
+ *  not available (typically the database was still starting). Reporting every
+ *  failure as "requires sudo admin" sent operators hunting for the wrong bug. */
+export function adminQueryErrorKey(error: unknown): I18nKey {
+  const status = error instanceof ApiError ? error.status : undefined;
+  if (status === 403) return "requires sudo admin";
+  if (status === 503) return "the Zagros platform runtime is unavailable — check that the database is running";
+  if (status === 0) return "network error — the panel is unreachable";
+  return "could not load this section — see the panel logs";
+}

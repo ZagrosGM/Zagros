@@ -8,6 +8,7 @@ stack (fastapi/apscheduler/xray singletons) into their interpreter.
 """
 import asyncio
 import logging
+import time
 
 __version__ = "1.0.0-alpha.9.4.4"  # Zagros begins a new version line after the rebrand
 
@@ -134,17 +135,42 @@ def _build_app_inner():
         from app.platform import admin_api as _zagros_admin_api  # noqa: F401
         # (registers the unified-dashboard admin endpoints on the same router)
 
-        zagros_runtime = None
-        try:
-            zagros_runtime = PlatformRuntime.from_env()
-            zagros_runtime.verify_schema()
-        except Exception as exc:  # noqa: BLE001 - degrade, never crash boot
+        def _try_build_runtime():
+            """Build the runtime, or return the reason it is not available yet."""
+            try:
+                runtime = PlatformRuntime.from_env()
+                runtime.verify_schema()
+                return runtime, None
+            except Exception as exc:  # noqa: BLE001 - degrade, never crash boot
+                return None, exc
+
+        # A managed MySQL/MariaDB container is usually still refusing
+        # connections while the panel boots. Retry briefly so a cold start
+        # does not leave the platform layer switched off until someone
+        # restarts the panel by hand. SQLite is always ready, so this loop
+        # costs a single attempt there.
+        zagros_runtime, zagros_boot_error = None, None
+        for attempt in range(30):
+            zagros_runtime, zagros_boot_error = _try_build_runtime()
+            if zagros_runtime is not None:
+                break
+            if attempt == 0:
+                logging.getLogger("uvicorn.error").warning(
+                    "Zagros platform runtime not ready yet (%s) - retrying",
+                    zagros_boot_error)
+            time.sleep(2)
+
+        if zagros_runtime is None:
             logging.getLogger("uvicorn.error").critical(
                 "Zagros platform runtime disabled: %s "
-                "(set ZAGROS_SECRET_KEY and run `alembic upgrade head`)", exc)
-            zagros_runtime = None
-        if zagros_runtime is not None:
+                "(set ZAGROS_SECRET_KEY and run `alembic upgrade head`)",
+                zagros_boot_error)
+        else:
             app.state.zagros = zagros_runtime
+        # Keep the builder reachable so the request path can recover later:
+        # a database that comes back after boot should heal the panel without
+        # an operator having to restart it.
+        app.state.zagros_builder = _try_build_runtime
         app.include_router(zagros_router)
         app.include_router(zagros_admin_router)
 

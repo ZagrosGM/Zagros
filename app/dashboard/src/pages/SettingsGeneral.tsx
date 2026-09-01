@@ -8,7 +8,7 @@ import { Save, Settings as SettingsIcon, TerminalSquare } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "../components/feedback";
 import { Badge, Button, Card, CardHeader, Field, Input, Select, Skeleton, Switch } from "../components/ui";
-import { api, ApiError } from "../lib/api";
+import { api, ApiError, adminQueryErrorKey } from "../lib/api";
 import { useDigits, formatDuration } from "../lib/format";
 import { useT } from "../lib/i18n";
 import { applyUiState, useUI } from "../stores/ui";
@@ -107,7 +107,7 @@ export default function SettingsGeneral() {
         <Card>
           <CardHeader title={t("panel")} subtitle={t("identity & runtime (read-only, .env is the source of truth)")} />
           {info.isLoading ? <Skeleton className="h-40" /> : info.isError ? (
-            <p className="py-4 text-xs text-content-3">{t("requires sudo admin")}</p>
+            <p className="py-4 text-xs text-content-3">{t(adminQueryErrorKey(info.error))}</p>
           ) : (
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-[12.5px]">
               <Meta k={t("version")} v={<Badge tone="brand">{info.data!.version}</Badge>} />
@@ -124,7 +124,9 @@ export default function SettingsGeneral() {
 
         <Card className="lg:col-span-2">
           <CardHeader title={t("Panel Network")} subtitle={t("validated host binding and managed TLS certificate")} />
-          {!network ? <Skeleton className="h-56" /> : (
+          {networkQ.isError ? (
+            <p className="py-4 text-xs text-content-3">{t(adminQueryErrorKey(networkQ.error))}</p>
+          ) : !network ? <Skeleton className="h-56" /> : (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               <Field label={t("panel domain")}><Input value={network.domain ?? ""} onChange={(e) => setNetwork({ ...network, domain: e.target.value || null })} dir="ltr" placeholder="panel.example.com" /></Field>
               <Field label={t("public port")}><Input type="number" min={1} max={65535} value={network.port} onChange={(e) => setNetwork({ ...network, port: Number(e.target.value) || 8000 })} dir="ltr" /></Field>

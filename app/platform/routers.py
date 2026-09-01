@@ -88,9 +88,25 @@ zagros_admin_router = APIRouter(
 
 def get_runtime(request: Request):
     runtime = getattr(request.app.state, "zagros", None)
-    if runtime is None:
-        raise HTTPException(503, "Zagros platform runtime is not initialized")
-    return runtime
+    if runtime is not None:
+        return runtime
+
+    # The runtime is built at boot, which can land before a managed
+    # MySQL/MariaDB container accepts connections. Rather than staying
+    # disabled until someone restarts the panel, retry once per request so
+    # the platform layer heals as soon as the database is reachable.
+    builder = getattr(request.app.state, "zagros_builder", None)
+    if builder is not None:
+        runtime, exc = builder()
+        if runtime is not None:
+            request.app.state.zagros = runtime
+            logging.getLogger("uvicorn.error").info(
+                "Zagros platform runtime recovered")
+            return runtime
+        raise HTTPException(
+            503, f"Zagros platform runtime is not initialized: {exc}")
+
+    raise HTTPException(503, "Zagros platform runtime is not initialized")
 
 
 def _client_error(exc: Exception) -> HTTPException:

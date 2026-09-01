@@ -94,13 +94,17 @@
 
 <div align="center">
 
-| پورتال اشتراک | حالت اپ |
+| هسته‌ها — هر موتور، یک چرخهٔ عمر | کاربران — یک هویت روی همهٔ هسته‌ها |
 | :---: | :---: |
-| ![پورتال اشتراک](assets/screenshots/subscription-portal.png) | ![حالت اپ](assets/screenshots/app-mode.png) |
+| ![هسته‌ها](assets/screenshots/cores.png) | ![کاربران](assets/screenshots/users.png) |
 
-| هسته‌ها | Config Studio |
+| نودها | اشتراک‌ها |
 | :---: | :---: |
-| ![هسته‌ها](assets/screenshots/cores.png) | ![Config Studio](assets/screenshots/config-studio.png) |
+| ![نودها](assets/screenshots/nodes.png) | ![اشتراک‌ها](assets/screenshots/subscriptions.png) |
+
+| مسیریابی | گواهی‌نامه‌ها |
+| :---: | :---: |
+| ![مسیریابی](assets/screenshots/routing.png) | ![گواهی‌نامه‌ها](assets/screenshots/certificates.png) |
 
 </div>
 

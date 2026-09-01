@@ -97,13 +97,17 @@ start, meter and uninstall mean the same thing regardless of the engine undernea
 
 <div align="center">
 
-| Subscription portal | App mode |
+| Cores — every engine, one lifecycle | Users — one identity across cores |
 | :---: | :---: |
-| ![Subscription portal](assets/screenshots/subscription-portal.png) | ![App mode](assets/screenshots/app-mode.png) |
+| ![Cores](assets/screenshots/cores.png) | ![Users](assets/screenshots/users.png) |
 
-| Cores | Config Studio |
+| Nodes | Subscriptions |
 | :---: | :---: |
-| ![Cores](assets/screenshots/cores.png) | ![Config Studio](assets/screenshots/config-studio.png) |
+| ![Nodes](assets/screenshots/nodes.png) | ![Subscriptions](assets/screenshots/subscriptions.png) |
+
+| Routing | Certificates |
+| :---: | :---: |
+| ![Routing](assets/screenshots/routing.png) | ![Certificates](assets/screenshots/certificates.png) |
 
 </div>
 

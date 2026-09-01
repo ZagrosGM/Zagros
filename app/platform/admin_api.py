@@ -470,9 +470,22 @@ async def cores_install_progress(core_id: str, runtime=Depends(get_runtime)):
         return {"stage": "idle", "detail": "installation has not started"}
     backend = getattr(driver, "_backend", None)
     provider = getattr(backend, "install_progress", None)
-    if not callable(provider):
-        return {"stage": "working", "detail": "driver installation in progress"}
-    return await asyncio.to_thread(provider)
+    if callable(provider):
+        return await asyncio.to_thread(provider)
+
+    # Drivers without their own progress pipeline still have an honest
+    # lifecycle state. Reporting a flat "working" here left a finished
+    # install claiming to be in progress forever, so an admin who reloaded
+    # the page mid-install could never tell the core was already there.
+    from app.cores.types import CoreState
+
+    state = runtime.core_manager.state_of(core_id)
+    if state in (CoreState.INSTALLED, CoreState.RUNNING,
+                 CoreState.STOPPED, CoreState.STARTING, CoreState.STOPPING):
+        return {"stage": "done", "detail": f"core is {state.value}"}
+    if state is CoreState.ERROR:
+        return {"stage": "failed", "detail": "installation failed — see core logs"}
+    return {"stage": "working", "detail": "driver installation in progress"}
 
 
 async def _ensure_pptp_auto_provisioned(runtime) -> str:

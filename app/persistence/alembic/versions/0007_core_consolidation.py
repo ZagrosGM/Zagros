@@ -122,8 +122,15 @@ def upgrade() -> None:
 
     docs: dict[str, dict] = {}
     if "settings" in tables:
+        # "key" is reserved in MySQL, so the identifier has to be quoted the
+        # way the active dialect expects (backticks on MySQL, double quotes
+        # elsewhere) -- an unquoted one is a syntax error there.
+        kq = conn.dialect.identifier_preparer.quote("key")
         rows = conn.execute(
-            sa.text("SELECT key, value_json FROM settings WHERE key LIKE 'studio.document.%'"),
+            sa.text(
+                f"SELECT {kq}, value_json FROM settings "
+                f"WHERE {kq} LIKE 'studio.document.%'"
+            ),
         ).mappings()
         for row in rows:
             cid = str(row["key"]).rsplit(".", 1)[-1]
@@ -156,8 +163,9 @@ def upgrade() -> None:
         existing = list(sb_doc.get("inbounds") or [])
         merged, renames = merge_inbound_entries(existing, incoming)
         sb_doc["inbounds"] = merged
+        kq = conn.dialect.identifier_preparer.quote("key")
         stmt = sa.text(
-            "INSERT INTO settings (key, value_json, updated_at) "
+            f"INSERT INTO settings ({kq}, value_json, updated_at) "
             "VALUES (:k, :v, CURRENT_TIMESTAMP) "
             + _upsert_suffix(conn.dialect.name)
         ).bindparams(sa.bindparam("v", type_=sa.JSON))
@@ -183,11 +191,12 @@ def upgrade() -> None:
         # the usernames charset ([a-z0-9_]) guarantees the core prefix
         # appears only at position 1, so a plain REPLACE of the prefix is
         # exact (and portable across sqlite/MySQL/PostgreSQL).
+        kq = conn.dialect.identifier_preparer.quote("key")
         for core_id in MERGED_CORES:
             conn.execute(
                 sa.text(
-                    "UPDATE usage_baselines SET key = REPLACE(key, :p, :t) "
-                    "WHERE key LIKE :like"
+                    f"UPDATE usage_baselines SET {kq} = REPLACE({kq}, :p, :t) "
+                    f"WHERE {kq} LIKE :like"
                 ),
                 {"p": f"{core_id}:", "t": f"{TARGET_CORE_ID}:", "like": f"{core_id}:%"},
             )
@@ -202,9 +211,10 @@ def upgrade() -> None:
             {"a": MERGED_CORES[0], "b": MERGED_CORES[1]},
         )
     if "settings" in tables:
+        kq = conn.dialect.identifier_preparer.quote("key")
         conn.execute(
-            sa.text("DELETE FROM settings WHERE key LIKE 'studio.document.%' "
-                    "AND (key = :ka OR key = :kb)"),
+            sa.text(f"DELETE FROM settings WHERE {kq} LIKE 'studio.document.%' "
+                    f"AND ({kq} = :ka OR {kq} = :kb)"),
             {"ka": f"studio.document.{MERGED_CORES[0]}",
              "kb": f"studio.document.{MERGED_CORES[1]}"},
         )
@@ -251,12 +261,12 @@ def upgrade() -> None:
 def _upsert_suffix(dialect: str) -> str:
     """Portable upsert for the settings KV row (sqlite/mysql/postgres)."""
     if dialect == "postgresql":
-        return "ON CONFLICT (key) DO UPDATE SET value_json = EXCLUDED.value_json"
+        return 'ON CONFLICT ("key") DO UPDATE SET value_json = EXCLUDED.value_json' 
     if dialect == "mysql":
         # MySQL JSON columns refuse a plain string param as JSON in strict
         # mode unless wrapped — CAST keeps it valid on 5.7+/8.x.
         return "ON DUPLICATE KEY UPDATE value_json = VALUES(value_json)"
-    return "ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json"  # sqlite
+    return 'ON CONFLICT ("key") DO UPDATE SET value_json = excluded.value_json'  # sqlite
 
 
 def downgrade() -> None:

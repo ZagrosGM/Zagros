@@ -86,7 +86,7 @@ zagros_admin_router = APIRouter(
 # plumbing
 # ---------------------------------------------------------------------- #
 
-def get_runtime(request: Request):
+async def get_runtime(request: Request):
     runtime = getattr(request.app.state, "zagros", None)
     if runtime is not None:
         return runtime
@@ -102,6 +102,18 @@ def get_runtime(request: Request):
             request.app.state.zagros = runtime
             logging.getLogger("uvicorn.error").info(
                 "Zagros platform runtime recovered")
+            # The startup event already ran (and did nothing, because there
+            # was no runtime yet), so run its work here or the panel serves
+            # requests with no cores attached.
+            if not getattr(request.app.state, "zagros_booted", False):
+                request.app.state.zagros_booted = True
+                boot = getattr(request.app.state, "zagros_boot_sequence", None)
+                if boot is not None:
+                    try:
+                        await boot(runtime)
+                    except Exception:  # noqa: BLE001 - serve the request anyway
+                        logging.getLogger("uvicorn.error").exception(
+                            "Zagros boot sequence after recovery failed")
             return runtime
         raise HTTPException(
             503, f"Zagros platform runtime is not initialized: {exc}")

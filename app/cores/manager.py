@@ -124,7 +124,34 @@ class CoreManager:
                 else state
             )
             self._enabled[core_id] = bool(record.get("enabled", True))
-        logger.info("CoreManager boot: %d persisted core(s) loaded.", len(self._drivers))
+
+        # Built-ins are part of the panel, not add-ons: their binary ships
+        # with it and they cannot be uninstalled. Attaching them only when a
+        # persisted row happened to exist left a fresh install reporting zero
+        # cores while the engine was running, so every xray-backed
+        # subscription rendered "no inbound is available for protocol ..."
+        # until an admin pressed Install on a core that was already there.
+        for core_id in sorted(self._builtin_core_ids):
+            if core_id in self._drivers:
+                continue
+            try:
+                cls = get_driver_class(core_id)
+            except DriverNotFoundError:
+                logger.warning(
+                    "Built-in core '%s' has no registered driver; skipping.",
+                    core_id)
+                continue
+            settings: dict[str, Any] = {}
+            if self._settings_transform is not None:
+                settings = self._settings_transform(core_id, settings)
+            self._drivers[core_id] = cls(settings=settings)
+            # The legacy application lifespan owns the process, so record it
+            # as installed-but-not-started here and let start_enabled() skip
+            # it exactly as it already does for persisted built-in rows.
+            self._states[core_id] = CoreState.INSTALLED
+            self._enabled[core_id] = True
+
+        logger.info("CoreManager boot: %d core(s) loaded.", len(self._drivers))
 
     def list_cores(self) -> list[str]:
         return sorted(self._drivers)
@@ -147,6 +174,10 @@ class CoreManager:
 
     def is_enabled(self, core_id: str) -> bool:
         return self._enabled.get(core_id, False)
+
+    def state_of(self, core_id: str) -> CoreState:
+        """Lifecycle state of an attached core (LOADED when unknown)."""
+        return self._states.get(core_id, CoreState.LOADED)
 
     def get(self, core_id: str) -> BaseCoreDriver:
         try:

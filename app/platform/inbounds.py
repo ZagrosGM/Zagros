@@ -55,10 +55,6 @@ class CatalogGroup:
 
 # service-core derivations: core_id → list of (tag, protocol, settings-port-key)
 _SERVICE_ENTRIES: dict[str, tuple[tuple[str, str, str | None], ...]] = {
-    "openvpn": (
-        ("openvpn-tcp", "openvpn", "port"),
-        ("openvpn-udp", "openvpn", "port"),
-    ),
     "wireguard": (("wireguard", "wireguard", "port"),),
     "ssh": (("ssh", "ssh", "port"),),
     "softether": (
@@ -130,7 +126,29 @@ async def _studio_inbounds(runtime, core_id: str) -> list[CatalogInbound]:
     return _doc_inbounds(doc)
 
 
+def _openvpn_inbounds(settings: dict[str, Any]) -> list[CatalogInbound]:
+    """OpenVPN listeners exactly as the driver names them.
+
+    The catalog used to advertise a fixed "openvpn-tcp"/"openvpn-udp" pair,
+    but the driver derives its listener tags from settings ("openvpn" for a
+    flat config, "ovpn-<port>-<proto>" otherwise). Granting a user one of the
+    invented tags therefore matched no listener and the subscription silently
+    rendered nothing — the tags have to come from the same place the server
+    processes do.
+    """
+    from app.cores.drivers.openvpn.driver import OpenVPNDriver
+
+    rows = settings.get("listeners") or []
+    listeners = ([OpenVPNDriver._normalize_listener(r, settings) for r in rows]
+                 if rows else [OpenVPNDriver._listener_from_flat(settings)])
+    return [CatalogInbound(tag=str(l["tag"]), protocol="ovpn",
+                           port=int(l["port"]))
+            for l in listeners]
+
+
 def _service_inbounds(core_id: str, settings: dict[str, Any]) -> list[CatalogInbound]:
+    if core_id == "openvpn":
+        return _openvpn_inbounds(settings)
     out: list[CatalogInbound] = []
     for tag, protocol, port_key in _SERVICE_ENTRIES.get(core_id, ()):
         if core_id == "softether":

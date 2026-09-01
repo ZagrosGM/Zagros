@@ -879,8 +879,17 @@ want_pass="${creds#*:}"
     # ------------------------------------------------------------------ #
     # user management
     # ------------------------------------------------------------------ #
+    # Accounts provisioned before the inbound catalog was corrected carry the
+    # core id "openvpn" where the wire protocol "ovpn" was meant. Treat it as
+    # the alias it always was so those users keep working after an upgrade.
+    _PROTOCOL_ALIASES = ("ovpn", "openvpn")
+
+    @staticmethod
+    def _canonical_protocol(protocol: str) -> str:
+        return "ovpn" if protocol in OpenVPNDriver._PROTOCOL_ALIASES else protocol
+
     def _ensure_supported(self, protocol: str) -> None:
-        if protocol != "ovpn":
+        if self._canonical_protocol(protocol) != "ovpn":
             raise CoreError(f"OpenVPN core only serves protocol 'ovpn', got '{protocol}'.")
 
     def _provision_credentials(self, account: UserAccount) -> None:
@@ -981,11 +990,12 @@ want_pass="${creds#*:}"
 
     async def sync_accounts(self, accounts: list[UserAccount]) -> None:
         for account in accounts:
-            if account.protocol == "ovpn":
+            if self._canonical_protocol(account.protocol) == "ovpn":
                 self._provision_credentials(account)
                 self._ensure_credentials(account)
                 self._ensure_bandwidth_addresses(account)
-        self._accounts = {a.account_id: a for a in accounts if a.protocol == "ovpn"}
+        self._accounts = {a.account_id: a for a in accounts
+                          if self._canonical_protocol(a.protocol) == "ovpn"}
         live = {a.account_id for a in self._accounts.values() if a.enabled}
         try:
             for client in await asyncio.to_thread(self._backend.status_clients):

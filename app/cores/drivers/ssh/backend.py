@@ -211,6 +211,36 @@ class LocalSystemSSHBackend:
         except (OSError, ValueError, TypeError):
             return None
 
+    def _running_on_a_node(self) -> bool:
+        """True when this core is hosted by a node agent, not by the panel.
+
+        The remedy is different on each, and printing the panel's command on a
+        node — which has no ``zagros`` CLI — is why this warning used to be
+        impossible to act on.
+        """
+        if os.environ.get("ZAGROS_NODE_DATA") or os.environ.get("ZAGROS_NODE_PORT"):
+            return True
+        return os.path.isdir("/var/lib/zagros/node")
+
+    def _missing_collector_hint(self) -> str:
+        """Name the machine to fix, and the exact commands that fix it."""
+        if self._running_on_a_node():
+            remedy = (
+                "on the node's HOST re-run the node installer "
+                "(install-node.sh), or install the collector directly: "
+                "'systemctl enable --now zagros-ssh-accounting.service'"
+            )
+        else:
+            remedy = (
+                "on the panel's HOST run "
+                "'sudo zagros advanced install-host-agent'"
+            )
+        return (
+            "host SSH accounting snapshot is missing — the collector that "
+            f"writes it is not running. {remedy}. Verify with "
+            "'systemctl status zagros-ssh-accounting.service'."
+        )
+
     def transport_acct_available(self) -> str | None:
         if self._host_transport_payload() is not None:
             return None
@@ -221,11 +251,7 @@ class LocalSystemSSHBackend:
                 raw = json.loads(open(
                     self._host_transport_state_path, encoding="utf-8").read())
             except FileNotFoundError:
-                return ("host SSH accounting snapshot is missing; on the host "
-                        "that RUNS this core install the collector — panel: "
-                        "'zagros install-host-agent', node: re-run "
-                        "install-node.sh — then verify "
-                        "zagros-ssh-accounting.service")
+                return self._missing_collector_hint()
             except PermissionError:
                 return ("Panel cannot read the host SSH accounting snapshot; "
                         "verify /var/lib/zagros/cores/ssh permissions")
@@ -795,7 +821,7 @@ class LocalSystemSSHBackend:
         raise CoreError("no supported package manager found (apt/dnf/yum/pacman/apk).")
 
     # ------------------------------------------------------------------ #
-    # full service bring-up (alpha.7.1): the old behaviour was a bare
+    # full service bring-up: the old behaviour was a bare
     # "sshd is not running — enable the system ssh service" error. A core
     # must reach the READY state itself: install → host keys → panel-owned
     # drop-in → validate → enable+start → verify.
@@ -833,7 +859,7 @@ class LocalSystemSSHBackend:
         kept — a `Port` directive replaces the default listener set, and a
         panel that removed 22 would lock the operator out of their own box.
 
-        Multi-inbound (alpha.7.2): one `Port` line per panel listener
+        Multi-inbound: one `Port` line per panel listener
         (settings['listeners']); the legacy single 'port' is the fallback
         for pre-7.2 settings blobs."""
         s = self.settings

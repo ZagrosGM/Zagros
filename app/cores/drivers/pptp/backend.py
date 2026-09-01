@@ -148,8 +148,100 @@ class LocalPptpBackend:
         return False
 
     @staticmethod
-    def _module_loaded(name: str) -> bool:
-        return Path(f"/sys/module/{name}").is_dir()
+    def _in_container() -> bool:
+        """True when this process runs inside a container.
+
+        A container shares the host kernel but cannot load modules into it
+        (that needs CAP_SYS_MODULE in the initial user namespace), so the
+        remedy printed for a missing module differs from the bare-metal one.
+        """
+        if Path("/.dockerenv").exists():
+            return True
+        try:
+            return "docker" in Path("/proc/1/cgroup").read_text(encoding="ascii")
+        except OSError:
+            return False
+
+    @staticmethod
+    def _module_present(name: str) -> bool:
+        """Is ``name`` usable by the running kernel?
+
+        Three shapes count as present, and only checking the first one is why
+        a perfectly good host was reported as "module is not loaded":
+
+        * loaded as a module — ``/sys/module/<name>`` exists;
+        * loaded under its alias spelling — ppp-generic vs ppp_generic;
+        * compiled into the kernel (``CONFIG_PPP_MPPE=y``) — such a kernel has
+          no ``/sys/module`` entry at all, yet MPPE works fine.
+        """
+        variants = {name, name.replace("_", "-"), name.replace("-", "_")}
+        for variant in variants:
+            if Path(f"/sys/module/{variant}").is_dir():
+                return True
+        try:
+            loaded = Path("/proc/modules").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            loaded = ""
+        for line in loaded.splitlines():
+            if line.split(" ", 1)[0] in variants:
+                return True
+        # built into the kernel: it will never appear in /proc/modules
+        try:
+            release = os.uname().release
+        except OSError:
+            return False
+        for builtin in (
+            Path(f"/lib/modules/{release}/modules.builtin"),
+            Path(f"/usr/lib/modules/{release}/modules.builtin"),
+        ):
+            try:
+                text = builtin.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                if Path(line.strip()).stem in variants:
+                    return True
+        return False
+
+    @classmethod
+    def _module_loaded(cls, name: str) -> bool:
+        """Present already, or loadable on demand.
+
+        The modules the PPTP core needs are rarely loaded on a fresh host —
+        nothing asks for MPPE until the first tunnel — so a plain "is it
+        loaded?" test failed on hosts that were perfectly capable of running
+        the core. Try to load it before declaring failure; on a host that
+        allows it this turns a hard error into a no-op.
+        """
+        if cls._module_present(name):
+            return True
+        modprobe = shutil.which("modprobe") or "/sbin/modprobe"
+        if not Path(modprobe).exists():
+            return False
+        try:
+            subprocess.run(
+                [modprobe, name], capture_output=True, timeout=15, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return cls._module_present(name)
+
+    @classmethod
+    def _missing_module_failure(cls, name: str) -> str:
+        """A message that names the machine to fix and the command to run."""
+        where = (
+            "the container cannot load kernel modules; run this on the HOST "
+            "that runs this node"
+            if cls._in_container() else
+            "run this on this host"
+        )
+        return (
+            f"kernel module {name} is not loaded — {where}: "
+            f"'modprobe {name}' (make it permanent with "
+            f"'echo {name} >> /etc/modules-load.d/zagros-pptp.conf'). "
+            "If modprobe reports the module does not exist, install the kernel "
+            "extra modules package for this kernel "
+            "(Ubuntu/Debian: 'apt-get install -y linux-modules-extra-$(uname -r) ppp')"
+        )
 
     @staticmethod
     def _ppp_device_ready() -> tuple[bool, str]:
@@ -207,9 +299,9 @@ class LocalPptpBackend:
         if not self._effective_capability(13):
             failures.append("CAP_NET_RAW is not effective")
         if not self._module_loaded("ppp_generic"):
-            failures.append("kernel module ppp_generic is not loaded")
+            failures.append(self._missing_module_failure("ppp_generic"))
         if not self._module_loaded("ppp_mppe"):
-            failures.append("kernel module ppp_mppe is not loaded")
+            failures.append(self._missing_module_failure("ppp_mppe"))
         try:
             forwarding = Path("/proc/sys/net/ipv4/ip_forward").read_text().strip()
         except OSError:

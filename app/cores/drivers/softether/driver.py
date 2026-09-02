@@ -927,6 +927,7 @@ class SoftEtherDriver(BaseCoreDriver):
         old_sstp_port = int(getattr(self, "_legacy_sstp_port", None)
                             or s.get("sstp_port") or 443)
         sstp_port = 443  # normalize_studio_document enforces this too
+        live = await self._live_clone_servers()
         if sstp:
             # SoftEther may listen for its native TLS protocol on any port,
             # but the MS-SSTP HTTP dispatcher is interoperable on TCP/443.
@@ -934,7 +935,9 @@ class SoftEtherDriver(BaseCoreDriver):
             # old rows that only created a custom generic TLS listener.
             await command("SstpEnable yes")
             await command("ListenerCreate 443", ignore_exists=True)
-        elif bool(s.get("feature_sstp")):
+        elif live is None or live.sstp or bool(s.get("feature_sstp")):
+            # The factory vpn_server.config ships with the clone ON: judge by
+            # the live switch, not by a settings flag that was never true.
             await command("SstpEnable no")
         if (old_sstp_port != 443
                 and old_sstp_port != int(s.get("native_port") or 5555)):
@@ -945,13 +948,15 @@ class SoftEtherDriver(BaseCoreDriver):
 
         ovpn = "ovpn" in wanted
         ovpn_port = int(wanted.get("ovpn", {}).get("port") or 1194)
-        # Runtime truth can outlive panel settings in vpn_server.config. Always
-        # assert the disabled state: otherwise a stale SoftEther OpenVPN clone
-        # keeps UDP/1194 after the real OpenVPN Core releases it for restart,
-        # and the real Core can never bind again (EADDRINUSE).
-        if (not ovpn
-                or ovpn != bool(s.get("feature_ovpn"))
-                or str(s.get("ovpn_ports") or "1194") != str(ovpn_port)):
+        # Runtime truth can outlive panel settings in vpn_server.config (and a
+        # factory config starts with the clone ON): converge against the LIVE
+        # switch, and assert blindly only when it cannot be read — otherwise a
+        # stale SoftEther OpenVPN clone keeps UDP/1194 after the real OpenVPN
+        # Core releases it for restart, and the real Core can never bind
+        # again (EADDRINUSE).
+        if (live is None
+                or live.openvpn != ovpn
+                or (ovpn and tuple(sorted(live.openvpn_ports)) != (ovpn_port,))):
             await command(f"OpenVpnEnable {'yes' if ovpn else 'no'} /PORTS:{ovpn_port}")
         s["feature_ovpn"] = ovpn
         s["ovpn_ports"] = str(ovpn_port)
@@ -961,6 +966,50 @@ class SoftEtherDriver(BaseCoreDriver):
         s["feature_tags"] = {
             proto: str(entry["tag"]) for proto, entry in wanted.items()
         }
+
+    # ------------------------------------------------------------------ #
+    # clone servers — SoftEther's factory config answers OpenVPN on UDP/1194
+    # and SSTP on TCP/443 before anyone asked. Both are real host sockets
+    # (host network mode), so an unrequested clone steals the port the real
+    # OpenVPN core binds by default: "install SoftEther, then start OpenVPN"
+    # failed with EADDRINUSE on every fresh host. The switches are converged
+    # to the operator's feature set on every start; a feature the studio
+    # document grants is left exactly as apply_studio_document set it.
+    # ------------------------------------------------------------------ #
+    async def _live_clone_servers(self):
+        reader = getattr(self._backend, "clone_servers_get", None)
+        if not callable(reader):
+            return None
+        try:
+            return await asyncio.to_thread(reader)
+        except CoreError as exc:
+            logger.warning("softether: cannot read clone-server switches (%s)", exc)
+            return None
+
+    async def _converge_clone_servers(self) -> None:
+        live = await self._live_clone_servers()
+        if live is None:
+            return
+        s = self.settings
+        want_ovpn = bool(s.get("feature_ovpn"))
+        want_sstp = bool(s.get("feature_sstp"))
+        ports = [int(p) for p in str(s.get("ovpn_ports") or "1194").split(",")
+                 if p.strip().isdigit()] or [1194]
+        if live.openvpn != want_ovpn or (
+                want_ovpn and tuple(sorted(live.openvpn_ports)) != tuple(sorted(ports))):
+            logger.info("softether: OpenVPN clone server %s (was %s on %s) — feature %s",
+                        "on" if want_ovpn else "off",
+                        "on" if live.openvpn else "off",
+                        ",".join(str(p) for p in live.openvpn_ports) or "-",
+                        "granted" if want_ovpn else "not granted; the real OpenVPN "
+                        "core owns UDP/1194")
+            await asyncio.to_thread(self._backend.openvpn_clone_set,
+                                    enabled=want_ovpn, ports=ports)
+        if live.sstp != want_sstp:
+            logger.info("softether: SSTP clone server %s (was %s) — feature %s",
+                        "on" if want_sstp else "off", "on" if live.sstp else "off",
+                        "granted" if want_sstp else "not granted")
+            await asyncio.to_thread(self._backend.sstp_clone_set, enabled=want_sstp)
 
     # ------------------------------------------------------------------ #
     # lifecycle — the server is external/systemd-owned; we verify reachability
@@ -990,6 +1039,7 @@ class SoftEtherDriver(BaseCoreDriver):
                 await asyncio.to_thread(self.ensure_policy_source, source_id)
 
         if await asyncio.to_thread(self._backend.reachable):
+            await self._converge_clone_servers()
             await restore_policy_source()
             return
         server_binary = getattr(self._backend, "server_binary", lambda: None)
@@ -1019,6 +1069,7 @@ class SoftEtherDriver(BaseCoreDriver):
             await asyncio.sleep(3.0)
             for _ in range(30):
                 if await asyncio.to_thread(self._backend.reachable):
+                    await self._converge_clone_servers()
                     await restore_policy_source()
                     return
                 await asyncio.sleep(2.0)
@@ -1029,6 +1080,7 @@ class SoftEtherDriver(BaseCoreDriver):
                     "softether recovered persisted admin authority on a fresh "
                     "post-upgrade server; Studio/accounts will now reconcile"
                 )
+                await self._converge_clone_servers()
                 await restore_policy_source()
                 return
         raise CoreError(
@@ -1083,6 +1135,10 @@ class SoftEtherDriver(BaseCoreDriver):
         for _ in range(10):
             await asyncio.sleep(0.5)
             if await asyncio.to_thread(self._backend.reachable):
+                # a fresh vpn_server.config has the OpenVPN (UDP/1194) and
+                # SSTP (TCP/443) clones ON — release them now, not on the
+                # next start, so the real OpenVPN core can bind immediately
+                await self._converge_clone_servers()
                 break
 
     # ------------------------------------------------------------------ #

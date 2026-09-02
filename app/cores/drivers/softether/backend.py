@@ -17,6 +17,9 @@ import time
 from typing import Protocol, runtime_checkable
 
 from app.cores.drivers.softether.setool import (
+    CloneServers,
+    parse_openvpn_get,
+    parse_sstp_get,
     IPsecServices,
     SESession,
     SessionStatistics,
@@ -57,6 +60,15 @@ class SoftEtherBackend(Protocol):
     def ipsec_get(self) -> IPsecServices: ...
     def ipsec_services_set(self, *, l2tp: bool, l2tp_raw: bool, etherip: bool,
                            psk: str, default_hub: str) -> None: ...
+    def clone_servers_get(self) -> CloneServers:
+        """Current OpenVPN / SSTP clone-server switches (server-wide)."""
+        ...
+    def openvpn_clone_set(self, *, enabled: bool, ports: list[int]) -> None:
+        """`OpenVpnEnable yes|no /PORTS:...` — the UDP clone listener switch."""
+        ...
+    def sstp_clone_set(self, *, enabled: bool) -> None:
+        """`SstpEnable yes|no` — the MS-SSTP clone switch on TCP/443."""
+        ...
     def secure_nat_ensure(self, *, hub_name: str | None = None) -> None:
         """Ensure a Virtual Hub has SecureNAT + DHCP enabled."""
         ...
@@ -319,6 +331,34 @@ class LocalSoftEtherBackend:
             f"/ETHERIP:{yn(etherip)} /PSK:{psk_arg} /DEFAULTHUB:{hub}",
             hub=False,
         )
+
+    # ------------------------------------------------------------------ #
+    # Clone servers (OpenVPN on UDP, MS-SSTP on TCP/443)
+    #
+    # A freshly installed vpn_server.config ships with BOTH clone servers
+    # enabled: SoftEther takes UDP/1194 and answers SSTP on 443 before the
+    # operator has asked for anything. That is exactly the port the real
+    # OpenVPN core binds by default, so "install SoftEther, then start
+    # OpenVPN" died with EADDRINUSE until someone switched the clone off by
+    # hand. These verbs let the driver converge the switches to the
+    # operator's feature set on every start.
+    # ------------------------------------------------------------------ #
+
+    def clone_servers_get(self) -> CloneServers:
+        openvpn, ports = parse_openvpn_get(self._cmd("OpenVpnGet", hub=False))
+        sstp = parse_sstp_get(self._cmd("SstpGet", hub=False))
+        return CloneServers(openvpn=openvpn, openvpn_ports=ports, sstp=sstp)
+
+    def openvpn_clone_set(self, *, enabled: bool, ports: list[int]) -> None:
+        clean = sorted({int(p) for p in ports if 1 <= int(p) <= 65535}) or [1194]
+        self._cmd(
+            f"OpenVpnEnable {'yes' if enabled else 'no'} "
+            f"/PORTS:{','.join(str(p) for p in clean)}",
+            hub=False,
+        )
+
+    def sstp_clone_set(self, *, enabled: bool) -> None:
+        self._cmd(f"SstpEnable {'yes' if enabled else 'no'}", hub=False)
 
     def hub_list(self) -> list[str]:
         """Return live Virtual Hub names without changing the configured hub."""

@@ -75,6 +75,15 @@ class IPsecServices:
         return self.l2tp or self.l2tp_raw or self.etherip
 
 
+@dataclass(frozen=True, slots=True)
+class CloneServers:
+    """Server-wide protocol clone switches per `OpenVpnGet` / `SstpGet`."""
+
+    openvpn: bool                       # OpenVPN clone server function
+    openvpn_ports: tuple[int, ...]      # UDP ports the clone listens on
+    sstp: bool                          # MS-SSTP clone server function
+
+
 _BOOL_TRUE = {"yes", "enable", "enabled", "true", "on"}
 _EMPTY_PRINTS = {"", "none", "(none)", "(empty)", "-", "--"}
 
@@ -115,6 +124,47 @@ def parse_ipsec_get(text: str) -> IPsecServices:
 
 
 _SIZE_LABEL = re.compile(r"^([\d,]+)\s+bytes$", re.IGNORECASE)
+
+
+def _table_rows(text: str) -> dict[str, str]:
+    """``Label | Value`` rows of a vpncmd console table, label lower-cased."""
+    rows: dict[str, str] = {}
+    for raw in (text or "").splitlines():
+        if "|" not in raw:
+            continue
+        label, _, value = raw.rpartition("|")
+        rows[label.strip().lower()] = value.strip()
+    return rows
+
+
+def _table_bool(rows: dict[str, str], *needles: str) -> bool:
+    for key, value in rows.items():
+        if any(n in key for n in needles):
+            return value.strip().lower().split(" ")[0].rstrip(".") in _BOOL_TRUE
+    return False
+
+
+def parse_openvpn_get(text: str) -> tuple[bool, tuple[int, ...]]:
+    """Parse the `OpenVpnGet` console table → (enabled, udp ports).
+
+    Labels are localized ("OpenVPN Clone Server Enabled", "UDP Port List"),
+    so rows are matched by keyword; the port list is comma/space separated.
+    """
+    rows = _table_rows(text)
+    enabled = _table_bool(rows, "clone server enabled", "openvpn")
+    ports: list[int] = []
+    for key, value in rows.items():
+        if "port" in key:
+            for token in re.split(r"[,\s]+", value):
+                if token.isdigit() and 1 <= int(token) <= 65535:
+                    ports.append(int(token))
+            break
+    return enabled, tuple(ports)
+
+
+def parse_sstp_get(text: str) -> bool:
+    """Parse the `SstpGet` console table → enabled."""
+    return _table_bool(_table_rows(text), "clone server enabled", "sstp")
 
 
 def _bytes(value: str) -> int:

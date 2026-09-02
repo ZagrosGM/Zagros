@@ -447,6 +447,16 @@ export interface SubscriptionTemplateFile {
   name: string; size: number; modified_at: number;
 }
 
+/** GET /zagros/subscription/templates — the files plus which one is active,
+ *  whether that file still exists, and the last serve-time render failure
+ *  (null when the active template renders fine). */
+export interface SubscriptionTemplatesResponse {
+  templates: SubscriptionTemplateFile[];
+  active: string | null;
+  active_exists: boolean;
+  last_failure: { template: string; error: string; line: number | null; at: number } | null;
+}
+
 // Mirror of app/adminapi/dashboard.py DashboardSnapshot — flat fields,
 // everything except the top counters optional (sudo surface; payloads may be
 // minimal on degraded runtimes).

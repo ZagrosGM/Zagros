@@ -138,8 +138,8 @@ export default function SettingsGeneral() {
               <label className="flex items-center gap-2.5 text-sm text-content-2"><Switch checked={network.redirect_http_to_https} onChange={(v) => setNetwork({ ...network, redirect_http_to_https: v })} label={t("redirect HTTP to HTTPS")} />{t("Redirect HTTP → HTTPS")}</label>
               <div className="flex flex-wrap items-end gap-2 sm:col-span-2 lg:col-span-3">
                 <Button variant="secondary" onClick={() => testNetwork.mutate()} loading={testNetwork.isPending}>{t("test configuration")}</Button>
-                <Button variant="secondary" onClick={() => saveNetwork.mutate()} loading={saveNetwork.isPending}><Save size={14} />{t("save desired state")}</Button>
-                <Button onClick={() => applyNetwork.mutate()} loading={applyNetwork.isPending}>{t("apply with rollback")}</Button>
+                <Button variant="secondary" onClick={() => saveNetwork.mutate()} loading={saveNetwork.isPending}><Save size={14} />{t("common.save")}</Button>
+                <Button onClick={() => applyNetwork.mutate()} loading={applyNetwork.isPending}>{t("common.apply")}</Button>
               </div>
               {networkTransition && <p role="status" className="rounded-xl border border-brand/30 bg-brand-soft px-3 py-2 text-xs text-content-2 sm:col-span-2 lg:col-span-3">{networkTransition}</p>}
               {networkTest && <pre className="max-h-48 overflow-auto rounded-xl bg-surface p-3 text-[10px] text-content-2 sm:col-span-2 lg:col-span-3" dir="ltr">{JSON.stringify(networkTest, null, 2)}</pre>}

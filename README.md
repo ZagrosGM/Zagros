@@ -148,7 +148,7 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scr
 When it finishes, open **`http://<server-ip>:8000/dashboard/`** and create your first admin:
 
 ```bash
-sudo zagros advanced create-admin
+sudo zagros advanced create-admin --sudo
 ```
 
 > Put the panel behind TLS before you use it for anything real — see

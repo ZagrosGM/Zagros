@@ -145,7 +145,7 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scr
 پس از پایان، آدرس **`http://<server-ip>:8000/dashboard/`** را باز کنید و اولین مدیر را بسازید:
 
 ```bash
-sudo zagros advanced create-admin
+sudo zagros advanced create-admin --sudo
 ```
 
 > پیش از استفادهٔ واقعی، پنل را پشت TLS ببرید — [TLS برای پنل](https://github.com/ZagrosGM/zagros-docs/blob/main/fa/examples/panel-tls.md).

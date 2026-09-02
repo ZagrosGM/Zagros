@@ -34,6 +34,9 @@ class ArtifactKind(str, Enum):
     FIELDS = "fields"    # credential table (host/port/username/password/...)
     NOTE = "note"        # human-readable explanation / honest limitation
 
+    def __str__(self) -> str:  # "link", not "ArtifactKind.LINK" (py>=3.11)
+        return self.value
+
 
 class DeliveryField(BaseModel):
     key: str                              # semantic id: host/port/username/password/...

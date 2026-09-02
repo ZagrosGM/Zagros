@@ -436,6 +436,10 @@ async def _serve_subscription(runtime, user_id: int, request: Request,
             user_id, lang=lang, public_host=request.url.hostname)
         if page is None:
             raise HTTPException(404, "subscription not found")
+        # the URL this page was fetched from, as the subscriber's browser
+        # sees it (operator templates print/QR it — Marzban's
+        # ``user.subscription_url``); the ?format= variants derive from it
+        page.subscription_url = _public_request_url(request)
         # an operator may have picked an uploaded page
         # template. A missing/broken one serves the built-in page, so a
         # subscriber is never the one who pays for an operator's typo.
@@ -496,6 +500,18 @@ async def _serve_subscription(runtime, user_id: int, request: Request,
             "content-disposition": "attachment; filename=\"zagros-subscription\"",
         },
     )
+
+
+def _public_request_url(request: Request) -> str:
+    """The request URL as the subscriber's browser sees it, without the
+    query string (the canonical link is the bare token URL).
+
+    Behind a reverse proxy the scheme/host are already the public ones:
+    uvicorn rewrites them from ``X-Forwarded-*`` — but only for proxies
+    listed in ``TRUSTED_PROXIES`` (main.py). Reading those headers here
+    again would bypass that trust policy, so this deliberately does not.
+    """
+    return str(request.url.replace(query="", fragment=""))
 
 
 def _format_for_ua(ua: str) -> str:

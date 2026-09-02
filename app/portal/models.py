@@ -47,6 +47,9 @@ class PageKind(str, Enum):
     PORTAL = "portal"
     APP_DOWNLOAD = "app_download"
 
+    def __str__(self) -> str:
+        return self.value
+
 
 class AppDownload(BaseModel):
     """A configured download target for the official app (admin-managed)."""
@@ -188,6 +191,16 @@ class PortalUserView(BaseModel):
     # per-user override (None = inherit); same alias tolerance as the panel
     # setting so a legacy-stored shorthand cannot 422 the whole portal page
     client_auth_mode: CoercedClientAuthMode | None = None
+    # Marzban-parity extras an operator template may show (``user.note``,
+    # ``user.data_limit_reset_strategy``, ...). Optional: the built-in page
+    # does not need them, and minimal providers may leave them unset.
+    note: str | None = None
+    data_limit_reset_strategy: str = "no_reset"
+    lifetime_used_bytes: int | None = None
+    created_at: datetime | None = None
+    online_at: datetime | None = None
+    sub_updated_at: datetime | None = None
+    sub_last_user_agent: str | None = None
 
     @property
     def remaining_bytes(self) -> int | None:
@@ -217,3 +230,6 @@ class PortalPage(BaseModel):
     support_url: str | None = None
     notes: list[str] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # the URL this page was fetched from — operator templates print it, QR
+    # it and hand it to clients (Marzban's ``user.subscription_url``)
+    subscription_url: str | None = None

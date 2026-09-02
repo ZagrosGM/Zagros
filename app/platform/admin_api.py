@@ -28,6 +28,7 @@ import asyncio
 import os
 import json
 import logging
+import re
 import secrets
 import shlex
 import socket
@@ -37,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field, SecretStr
 
 # native Zagros multi-core nodes (see the nodes section at the bottom)
@@ -2138,12 +2139,114 @@ async def users_online_states(runtime=Depends(get_runtime)):
 # built-in page — subscribers never see a broken subscription.
 # --------------------------------------------------------------------- #
 
+async def _template_sample_context(runtime, request: Request | None = None):
+    """A representative render context built from THIS panel's identity, so
+    a validation render sees the brand/support URL a real page would."""
+    from app.portal.render import sample_context
+
+    brand, app_name, support_url, lang = "Zagros", "Zagros", None, "fa"
+    try:
+        settings = await runtime.portal_settings.get_portal_settings()
+        brand, app_name = settings.brand, settings.app_name
+        support_url, lang = settings.support_url, settings.default_lang or "fa"
+        base = (settings.normalize().public_base_url() or "").rstrip("/")
+    except Exception:  # noqa: BLE001 — a sample is a sample
+        base = ""
+    if not base and request is not None:
+        base = f"{request.url.scheme}://{request.url.netloc}"
+    url = f"{base}/sub/SAMPLETOKEN" if base else None
+    return sample_context(brand=brand, app_name=app_name, support_url=support_url,
+                          lang=lang, subscription_url=url)
+
+
 @zagros_admin_router.get("/subscription/templates")
 async def list_subscription_templates(runtime=Depends(get_runtime)):
-    """Uploaded subscription page templates: name, size, modified_at."""
-    from app.portal.templates_store import data_dir_for, list_templates
+    """Uploaded subscription page templates: name, size, modified_at — plus
+    which one is active, whether it exists, and the last serve-time failure
+    (so "why is the built-in page showing?" is answered right here)."""
+    from app.portal.templates_store import (
+        data_dir_for, last_failure, list_templates, template_exists)
 
-    return {"templates": list_templates(data_dir_for(runtime))}
+    data_dir = data_dir_for(runtime)
+    active: str | None = None
+    try:
+        settings = await runtime.portal_settings.get_portal_settings()
+        active = settings.subscription_template or None
+    except Exception:  # noqa: BLE001
+        active = None
+    return {
+        "templates": list_templates(data_dir),
+        "active": active,
+        "active_exists": bool(active and template_exists(data_dir, active)),
+        "last_failure": last_failure(),
+    }
+
+
+@zagros_admin_router.get("/subscription/templates/preview", response_class=HTMLResponse)
+async def preview_subscription_template(name: str, request: Request,
+                                        username: str | None = None,
+                                        runtime=Depends(get_runtime)):
+    """Render an uploaded template the way subscribers will see it.
+
+    Without ``username`` a sample subscriber (every artifact kind, quota,
+    expiry) is used; with one, that user's real page. Errors come back as
+    422 with the line number — never a silent fallback here."""
+    from app.portal.render import render_with_template_strict
+    from app.portal.templates_store import TemplateError, data_dir_for
+
+    if username:
+        row = await asyncio.to_thread(runtime.users.get_user_by_username, username)
+        if row is None:
+            raise HTTPException(404, f"user '{username}' not found")
+        page = await runtime.portal.build_page(row.id, public_host=request.url.hostname)
+        if page is None:
+            raise HTTPException(404, "subscription not found")
+        # the same link the Users page copies/QRs for this user
+        try:
+            from app.utils.jwt import create_subscription_token
+
+            settings = (await runtime.portal_settings.get_portal_settings()).normalize()
+            base = (settings.public_base_url() or f"{request.url.scheme}://{request.url.netloc}").rstrip("/")
+            page.subscription_url = f"{base}{settings.canonical_path(create_subscription_token(username))}"
+        except Exception:  # noqa: BLE001 — a preview still renders without it
+            page.subscription_url = f"{request.url.scheme}://{request.url.netloc}/sub/<token>"
+    else:
+        page = (await _template_sample_context(runtime, request))["page"]
+    try:
+        html = render_with_template_strict(page, name, data_dir_for(runtime))
+    except TemplateError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return HTMLResponse(_preview_storage_shim(html), headers={
+        "Cache-Control": "no-store",
+        # a preview is an admin-only artifact; never let it be framed by others
+        "Content-Security-Policy": "frame-ancestors 'self'",
+    })
+
+
+# The dashboard shows a preview inside a sandboxed iframe WITHOUT
+# allow-same-origin, so a third-party template can never reach the admin's
+# session. In that sandbox `localStorage` throws — and Marzban templates
+# (language toggle, theme) read it on load and would die on the first line.
+# An in-memory stand-in is installed only where the real one is unavailable;
+# on a real subscriber page this script is not present at all.
+_PREVIEW_STORAGE_SHIM = (
+    "<script>(function(){try{void window.localStorage.length;return}catch(e){}"
+    "var mem=function(){var s={};return{getItem:function(k){return Object.prototype"
+    ".hasOwnProperty.call(s,k)?s[k]:null},setItem:function(k,v){s[k]=String(v)},"
+    "removeItem:function(k){delete s[k]},clear:function(){s={}},key:function(i)"
+    "{return Object.keys(s)[i]||null},get length(){return Object.keys(s).length}}};"
+    "try{Object.defineProperty(window,'localStorage',{value:mem(),configurable:true});"
+    "Object.defineProperty(window,'sessionStorage',{value:mem(),configurable:true})}"
+    "catch(e){}})();</script>"
+)
+_HEAD_OPEN_RE = re.compile(r"<head\b[^>]*>", re.IGNORECASE)
+
+
+def _preview_storage_shim(html: str) -> str:
+    match = _HEAD_OPEN_RE.search(html)
+    if match:
+        return html[:match.end()] + _PREVIEW_STORAGE_SHIM + html[match.end():]
+    return _PREVIEW_STORAGE_SHIM + html
 
 
 @zagros_admin_router.get("/subscription/templates/starter",
@@ -2160,20 +2263,74 @@ async def starter_subscription_template():
 
 
 @zagros_admin_router.post("/subscription/templates")
-async def upload_subscription_template(file: UploadFile = File(...),
+async def upload_subscription_template(request: Request,
+                                       file: UploadFile = File(...),
+                                       activate: bool = Form(default=True),
                                        runtime=Depends(get_runtime)):
-    """Store an operator-authored HTML template (max 256 KB, .html/.htm)."""
+    """Store an operator-authored HTML template (max 1 MB, .html/.htm).
+
+    The upload is validated with a test render against a sample subscriber:
+    a template that cannot render is rejected (400, with the line number)
+    and nothing is stored. A stored template is **activated at once**
+    (``activate=false`` to only upload): that is what every operator who
+    pressed "upload" meant, and it removes the "uploaded but forgot to
+    Save" trap that showed the built-in page.
+    """
     from app.portal.templates_store import (
         TemplateError, data_dir_for, list_templates, save_template)
 
     try:
         content = await file.read()
-        name = save_template(data_dir_for(runtime), file.filename or "", content)
+        context = await _template_sample_context(runtime, request)
+        name = save_template(data_dir_for(runtime), file.filename or "", content,
+                             context=context)
     except TemplateError as exc:
         raise HTTPException(400, str(exc)) from exc
     finally:
         await file.close()
-    return {"name": name, "templates": list_templates(data_dir_for(runtime))}
+    activated = False
+    if activate:
+        try:
+            settings = await runtime.portal_settings.get_portal_settings()
+            if settings.subscription_template != name:
+                await runtime.portal_settings.save_portal_settings(
+                    settings.model_copy(update={"subscription_template": name}))
+            activated = True
+        except Exception as exc:  # noqa: BLE001 — stored, but not selected
+            logger.warning("template %r stored but could not be activated: %s", name, exc)
+    return {"name": name, "activated": activated,
+            "templates": list_templates(data_dir_for(runtime))}
+
+
+class SubscriptionTemplateSelect(BaseModel):
+    name: str | None = Field(default=None, max_length=80,
+                             description="uploaded template file name; null/empty = built-in page")
+
+
+@zagros_admin_router.put("/subscription/templates/active")
+async def select_subscription_template(body: SubscriptionTemplateSelect,
+                                       runtime=Depends(get_runtime)):
+    """Pick the active template (or the built-in page) — only that setting,
+    so choosing a page never re-validates or re-applies the listener the
+    way the full portal-settings PUT does."""
+    from app.portal.templates_store import TemplateError, data_dir_for, safe_name, template_exists
+
+    name = (body.name or "").strip() or None
+    if name:
+        try:
+            name = safe_name(name)
+        except TemplateError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not template_exists(data_dir_for(runtime), name):
+            raise HTTPException(404, f"template '{name}' is not on the server")
+    settings = await runtime.portal_settings.get_portal_settings()
+    if settings.subscription_template != name:
+        try:
+            await runtime.portal_settings.save_portal_settings(
+                settings.model_copy(update={"subscription_template": name}))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+    return {"active": name}
 
 
 @zagros_admin_router.delete("/subscription/templates/{name}")
@@ -2184,14 +2341,23 @@ async def delete_subscription_template(name: str, runtime=Depends(get_runtime)):
     built-in page again until another template is chosen.
     """
     from app.portal.templates_store import (
-        TemplateError, data_dir_for, delete_template, list_templates)
+        TemplateError, data_dir_for, delete_template, list_templates, safe_name)
 
     try:
+        name = safe_name(name)
         deleted = delete_template(data_dir_for(runtime), name)
     except TemplateError as exc:
         raise HTTPException(400, str(exc)) from exc
     if not deleted:
         raise HTTPException(404, "template not found")
+    # the selection must not keep pointing at a file that is gone
+    try:
+        settings = await runtime.portal_settings.get_portal_settings()
+        if settings.subscription_template == name:
+            await runtime.portal_settings.save_portal_settings(
+                settings.model_copy(update={"subscription_template": None}))
+    except Exception as exc:  # noqa: BLE001 — the file is gone either way
+        logger.warning("could not clear the deleted template %r from settings: %s", name, exc)
     return {"deleted": name, "templates": list_templates(data_dir_for(runtime))}
 
 

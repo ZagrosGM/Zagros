@@ -38,7 +38,54 @@ def _user_record_view(row, used: int) -> dict[str, Any]:
         "data_limit_bytes": row.data_limit_bytes,
         "download_limit_mbps": int(row.download_limit_mbps or 0),
         "upload_limit_mbps": int(row.upload_limit_mbps or 0),
+        # Marzban-parity extras for operator-authored subscription templates
+        "note": getattr(row, "note", None),
+        "data_limit_reset_strategy": str(
+            getattr(row, "data_limit_reset_strategy", None) or "no_reset"),
+        "created_at": getattr(row, "created_at", None),
+        "online_at": row.online_at,
     }
+
+
+def _legacy_subscription_extras(username: str) -> dict[str, Any]:
+    """Columns only the legacy users row keeps (last subscription fetch,
+    traffic reset history) — Marzban-parity decoration for operator page
+    templates. ONE column query, no ORM row, no relationship loads: this
+    runs on every subscription fetch. Best-effort: a missing legacy stack
+    or table yields ``{}`` and the page renders without them."""
+    try:
+        from sqlalchemy import func, select
+
+        from app.db.base import SessionLocal
+        from app.db.models import User, UserUsageResetLogs
+    except Exception:  # noqa: BLE001 — bare platform boot without legacy tables
+        return {}
+    try:
+        with SessionLocal() as db:
+            reset_total = (
+                select(func.coalesce(func.sum(UserUsageResetLogs.used_traffic_at_reset), 0))
+                .where(UserUsageResetLogs.user_id == User.id)
+                .scalar_subquery()
+            )
+            row = db.execute(
+                select(User.sub_updated_at, User.sub_last_user_agent, reset_total)
+                .where(User.username == username)
+            ).first()
+    except Exception:  # noqa: BLE001 — extras are decoration, never a failure
+        return {}
+    if row is None:
+        return {}
+    return {
+        "sub_updated_at": row[0],
+        "sub_last_user_agent": row[1],
+        "reset_used_bytes": int(row[2] or 0),
+    }
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
 
 
 class SQLOnlineDataAdapter:
@@ -131,6 +178,10 @@ class SQLOnlineDataAdapter:
         # enrich account identities for display
         for _, account in pairs:
             account.username = username
+        extras = await asyncio.to_thread(_legacy_subscription_extras, username)
+        # Marzban's lifetime_used_traffic = current counter + every reset
+        used = int(record["used_bytes"] or 0)
+        lifetime = used + extras["reset_used_bytes"] if "reset_used_bytes" in extras else None
         view = PortalUserView(
             user_id=user_id,
             username=username,
@@ -140,5 +191,12 @@ class SQLOnlineDataAdapter:
             expire_at=record["expire_at"],
             online=record["online"],
             client_auth_mode=record.get("client_auth_mode"),
+            note=record.get("note"),
+            data_limit_reset_strategy=record.get("data_limit_reset_strategy") or "no_reset",
+            lifetime_used_bytes=int(lifetime) if lifetime is not None else None,
+            created_at=_aware(record.get("created_at")),
+            online_at=_aware(record.get("online_at")),
+            sub_updated_at=_aware(extras.get("sub_updated_at")),
+            sub_last_user_agent=extras.get("sub_last_user_agent"),
         )
         return SubscriptionContext(user=view, accounts=pairs)

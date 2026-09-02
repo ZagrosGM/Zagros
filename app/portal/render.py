@@ -11,10 +11,14 @@ from __future__ import annotations
 import base64
 import html
 import datetime
+import logging
+from typing import Any
 
 from app.cores.delivery import ArtifactKind, DeliverySection
 from app.cores.qr import encode_matrix, to_svg
 from app.portal.models import PageKind, PortalPage
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------- #
 # i18n (fa default, en fallback) — presentation strings only
@@ -395,39 +399,312 @@ def _render_app_page(page: PortalPage) -> str:
 """
 
 
+class _EnumLike:
+    """``user.status.value`` the way Marzban templates read enum fields —
+    while ``{{ user.status }}`` and ``user.status == 'active'`` keep working."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: str) -> None:
+        self.value = str(value)
+
+    def __str__(self) -> str:
+        return self.value
+
+    def __repr__(self) -> str:
+        return repr(self.value)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _EnumLike):
+            return self.value == other.value
+        return self.value == other
+
+    def __hash__(self) -> int:
+        return hash(self.value)
+
+
+class TemplateUser:
+    """The ``user`` object an operator template sees.
+
+    One object answers **both** vocabularies: the Zagros names of
+    :class:`PortalUserView` (``used_bytes``, ``data_limit_bytes``,
+    ``expire_at``, ``online``, ``remaining_bytes`` ...) and the Marzban
+    ``UserResponse`` names templates written for Marzban rely on
+    (``links``, ``subscription_url``, ``used_traffic``, ``data_limit``,
+    ``expire`` as a unix timestamp, ``status.value``,
+    ``data_limit_reset_strategy.value``, ``lifetime_used_traffic`` ...).
+    Attribute access never raises; unknown names read as ``None`` so a
+    template can be as defensive as ``{% if user.note %}`` and no more.
+    """
+
+    def __init__(self, page: PortalPage, links: list[str]) -> None:
+        view = page.user
+        self._view = view
+        # -- Zagros names -------------------------------------------------
+        self.user_id = view.user_id
+        self.username = view.username
+        self.online = view.online
+        self.used_bytes = int(view.used_bytes or 0)
+        self.data_limit_bytes = view.data_limit_bytes
+        self.remaining_bytes = view.remaining_bytes
+        self.usage_ratio = view.usage_ratio
+        self.expire_at = view.expire_at
+        self.client_auth_mode = (view.client_auth_mode.value
+                                 if view.client_auth_mode else None)
+        self.note = view.note
+        self.created_at = view.created_at
+        self.online_at = view.online_at
+        self.sub_updated_at = view.sub_updated_at
+        # The ONE value in this context a subscriber controls (any client may
+        # send any User-Agent). Templates render without auto-escaping, so it
+        # is escaped here once: printing it can never inject markup or break
+        # out of a <script> string — in a subscriber's page or in an admin's
+        # preview of that subscriber.
+        self.sub_last_user_agent = (html.escape(view.sub_last_user_agent, quote=True)
+                                    if view.sub_last_user_agent else None)
+        # -- Marzban names ------------------------------------------------
+        self.status = _EnumLike(view.status)
+        self.data_limit_reset_strategy = _EnumLike(view.data_limit_reset_strategy)
+        self.links = list(links)
+        self.subscription_url = page.subscription_url or ""
+        self.used_traffic = self.used_bytes
+        self.lifetime_used_traffic = (int(view.lifetime_used_bytes)
+                                      if view.lifetime_used_bytes is not None
+                                      else self.used_bytes)
+        self.data_limit = view.data_limit_bytes
+        self.expire = int(view.expire_at.timestamp()) if view.expire_at else None
+        self.proxies: dict[str, Any] = {}
+        self.inbounds: dict[str, Any] = {}
+        self.excluded_inbounds: dict[str, Any] = {}
+        self.on_hold_expire_duration = None
+        self.on_hold_timeout = None
+        self.admin = None
+
+    def __getattr__(self, name: str) -> Any:
+        # only reached for names not set in __init__: a Jinja "undefined",
+        # so ``{{ user.whatever }}`` prints nothing (not the word None) and
+        # ``{% if user.whatever %}`` is simply false — Marzban behaviour
+        if name.startswith("_"):
+            raise AttributeError(name)
+        from jinja2 import ChainableUndefined
+
+        return ChainableUndefined(name=f"user.{name}")
+
+    def __getitem__(self, name: str) -> Any:
+        return getattr(self, name)
+
+    def __repr__(self) -> str:
+        return f"TemplateUser({self.username!r})"
+
+
+def _template_qr_svg(content: Any, *, size: int = 4, border: int = 2) -> str:
+    """``qr_svg(text)`` for templates: an inline SVG (no external service,
+    no JavaScript), or ``""`` when the text is empty / too long for a QR
+    code — a template prints nothing rather than failing."""
+    text = str(content or "")
+    if not text:
+        return ""
+    try:
+        return to_svg(encode_matrix(text), border=max(0, int(border)),
+                      module_px=max(1, int(size)))
+    except Exception:  # noqa: BLE001 — QrError or a bad argument: no QR, no crash
+        return ""
+
+
+def _template_data_uri(content: Any, mime: str = "text/plain") -> str:
+    """``data_uri(text, mime)`` for templates — a download ``href`` for a
+    FILE artifact, keeping the page self-contained."""
+    return _data_uri(str(mime or "text/plain"), str(content or ""))
+
+
+def _template_days_left(value: Any) -> int | None:
+    """``days_left(expire_at)`` — whole days until expiry (negative when
+    expired), ``None`` for no expiry. Accepts a datetime or a unix time."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        value = datetime.datetime.fromtimestamp(value, datetime.timezone.utc)
+    if not isinstance(value, datetime.datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=datetime.timezone.utc)
+    return _days_left(value)
+
+
+def import_links(subscription_url: str, name: str = "",
+                 *, clash_url: str = "", sing_box_url: str = "") -> dict[str, str]:
+    """One-tap "add to app" deep links for the popular clients, built from
+    the subscription URL (the same schemes Marzban pages use). Clients that
+    consume a Clash or sing-box profile get the matching ``?format=`` URL;
+    everything else gets the plain link list. Keys are the app ids a
+    template can iterate over."""
+    from urllib.parse import quote
+
+    if not subscription_url:
+        return {}
+    url = subscription_url
+    clash = clash_url or url
+    singbox = sing_box_url or url
+    enc = quote(url, safe="")
+    label = quote(name or "Zagros", safe="")
+    return {
+        "v2rayng": f"v2rayng://install-config?url={enc}",
+        "hiddify": f"hiddify://import/{url}",
+        "streisand": f"streisand://import/{url}",
+        "happ": f"happ://add/{url}",
+        "v2box": f"v2box://install-sub?url={enc}&name={label}",
+        "shadowrocket": f"sub://{base64.b64encode(url.encode()).decode()}",
+        "nekobox": f"sn://subscription?url={enc}&name={label}",
+        "karing": f"karing://install-config?url={enc}&name={label}",
+        "sing-box": f"sing-box://import-remote-profile?url={quote(singbox, safe='')}#{label}",
+        "clash": f"clash://install-config?url={quote(clash, safe='')}&name={label}",
+        "stash": f"stash://install-config?url={quote(clash, safe='')}&name={label}",
+    }
+
+
 def _template_context(page: PortalPage) -> dict[str, Any]:
     """Variables an operator-authored subscription template may use.
 
     The context is deliberately a *summary* of :class:`PortalPage` plus the
     page object itself: a template can reach anything the built-in page
     shows, while the common cases stay one word long (``links``,
-    ``format_bytes``).
+    ``format_bytes``) — and the Marzban names work too (see
+    :class:`TemplateUser`). Every protocol a core delivers is present in
+    ``sections`` (share links, OpenVPN/WireGuard files, SSH/SoftEther/PPTP
+    credential tables, notes); ``links`` is the flat share-link view.
     """
     links: list[dict[str, Any]] = []
+    raw_links: list[str] = []
+    files: list[dict[str, Any]] = []
     for section in page.sections:
         for artifact in section.artifacts:
             if artifact.kind is ArtifactKind.LINK and artifact.content:
                 links.append({"protocol": section.protocol, "title": section.title,
                               "label": artifact.label, "url": artifact.content})
+                if artifact.content not in raw_links:
+                    raw_links.append(artifact.content)
+            elif artifact.kind is ArtifactKind.FILE and artifact.content:
+                files.append({"protocol": section.protocol, "title": section.title,
+                              "label": artifact.label, "filename": artifact.filename or "config.txt",
+                              "mime": artifact.mime, "content": artifact.content,
+                              "href": _data_uri(artifact.mime, artifact.content)})
+    user = TemplateUser(page, raw_links)
+    sub_url = page.subscription_url or ""
+    formats = {
+        "links": sub_url,
+        "clash": f"{sub_url}?format=clash-meta" if sub_url else "",
+        "sing_box": f"{sub_url}?format=sing-box" if sub_url else "",
+    }
     return {
         "page": page,
-        "user": page.user,
+        "user": user,
         "sections": page.sections,
         "apps": page.apps,
         "notes": page.notes,
         "links": links,
+        "files": files,
         "brand": page.brand,
         "app_name": page.app_name,
         "support_url": page.support_url,
+        "subscription_url": sub_url,
+        "subscription_formats": formats,
+        "import_links": import_links(sub_url, page.brand, clash_url=formats["clash"],
+                                     sing_box_url=formats["sing_box"]),
         "generated_at": page.generated_at,
-        "used_bytes": page.user.used_bytes,
+        "used_bytes": user.used_bytes,
         "data_limit_bytes": page.user.data_limit_bytes,
         "remaining_bytes": page.user.remaining_bytes,
         "expire_at": page.user.expire_at,
         "online": page.user.online,
+        "lang": page.lang,
+        "direction": page.direction,
         "format_bytes": _fmt_bytes,
         "format_date": lambda value: _fmt_date(value, "—"),
+        "days_left": _template_days_left,
+        "qr_svg": _template_qr_svg,
+        "data_uri": _template_data_uri,
     }
+
+
+def template_context(page: PortalPage) -> dict[str, Any]:
+    """Public name of the render context (upload validation + preview)."""
+    return _template_context(page)
+
+
+def sample_page(*, brand: str = "Zagros", app_name: str = "Zagros",
+                support_url: str | None = None, lang: str = "fa",
+                subscription_url: str | None = None) -> PortalPage:
+    """A representative page for validating and previewing a template
+    without touching a real subscriber: every artifact kind, a quota, an
+    expiry, and a handful of realistic share links."""
+    from app.cores.delivery import DeliveryArtifact, DeliveryField, DeliverySection
+    from app.portal.models import PortalUserView
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    user = PortalUserView(
+        user_id=0, username="sample_user", status="active",
+        used_bytes=7 * 1024 ** 3 + 512 * 1024 ** 2,
+        data_limit_bytes=50 * 1024 ** 3,
+        expire_at=now + datetime.timedelta(days=23),
+        online=True, note="sample subscriber (preview)",
+        data_limit_reset_strategy="month",
+        lifetime_used_bytes=19 * 1024 ** 3,
+        created_at=now - datetime.timedelta(days=37),
+        online_at=now - datetime.timedelta(minutes=1),
+        sub_updated_at=now - datetime.timedelta(hours=3),
+        sub_last_user_agent="v2rayNG/1.9.5",
+    )
+    sections = [
+        DeliverySection(protocol="vless", title=f"{brand} · VLESS · Reality", engine="xray",
+                        inbound_tag="VLESS_REALITY", artifacts=[
+                            DeliveryArtifact(kind=ArtifactKind.LINK, label="VLESS Reality · DE",
+                                             content="vless://8f3b1a2c-0000-4000-8000-000000000001@de.example.com:443?security=reality&encryption=none&pbk=SAMPLEPUBLICKEY&fp=chrome&sni=www.example.com&type=tcp&flow=xtls-rprx-vision#Sample%20DE",
+                                             qr=True),
+                            DeliveryArtifact(kind=ArtifactKind.LINK, label="VLESS Reality · NL",
+                                             content="vless://8f3b1a2c-0000-4000-8000-000000000001@nl.example.com:443?security=reality&encryption=none&pbk=SAMPLEPUBLICKEY&fp=chrome&sni=www.example.com&type=tcp&flow=xtls-rprx-vision#Sample%20NL",
+                                             qr=True),
+                        ]),
+        DeliverySection(protocol="hysteria2", title=f"{brand} · Hysteria2", engine="sing-box",
+                        inbound_tag="HY2", artifacts=[
+                            DeliveryArtifact(kind=ArtifactKind.LINK, label="Hysteria2 · FI",
+                                             content="hy2://samplepassword@fi.example.com:8443?sni=fi.example.com&insecure=0#Sample%20HY2",
+                                             qr=True)]),
+        DeliverySection(protocol="wireguard", title=f"{brand} · WireGuard", engine="wireguard",
+                        artifacts=[
+                            DeliveryArtifact(kind=ArtifactKind.FILE, label="WireGuard config",
+                                             filename="sample_user.conf", mime="text/plain",
+                                             content="[Interface]\nPrivateKey = SAMPLEPRIVATEKEY=\nAddress = 10.66.0.2/32\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = SAMPLEPEERKEY=\nEndpoint = wg.example.com:51820\nAllowedIPs = 0.0.0.0/0, ::/0\n",
+                                             qr=True)]),
+        DeliverySection(protocol="ovpn", title=f"{brand} · OpenVPN", engine="openvpn",
+                        artifacts=[
+                            DeliveryArtifact(kind=ArtifactKind.FILE, label="OpenVPN profile",
+                                             filename="sample_user.ovpn", mime="application/x-openvpn-profile",
+                                             content="client\ndev tun\nproto udp\nremote ovpn.example.com 1194\n<ca>\n-----BEGIN CERTIFICATE-----\nSAMPLE\n-----END CERTIFICATE-----\n</ca>\n")]),
+        DeliverySection(protocol="ssh", title=f"{brand} · SSH", engine="ssh",
+                        note="Use any SSH tunnelling client.", artifacts=[
+                            DeliveryArtifact(kind=ArtifactKind.FIELDS, label="SSH account", fields=[
+                                DeliveryField(key="host", label="Host", value="ssh.example.com"),
+                                DeliveryField(key="port", label="Port", value="22"),
+                                DeliveryField(key="username", label="Username", value="sample_user"),
+                                DeliveryField(key="password", label="Password", value="s4mpl3-p4ss", secret=True),
+                            ]),
+                            DeliveryArtifact(kind=ArtifactKind.NOTE, label="Note",
+                                             note="UDP is not tunnelled over SSH."),
+                        ]),
+    ]
+    return PortalPage(
+        kind=PageKind.PORTAL, brand=brand, app_name=app_name,
+        title="Subscription", lang=lang,
+        direction="rtl" if lang in ("fa", "ar", "he") else "ltr",
+        user=user, sections=sections, apps=[], support_url=support_url,
+        notes=[], subscription_url=subscription_url or
+        "https://panel.example.com/sub/SAMPLETOKEN",
+    )
+
+
+def sample_context(**kwargs: Any) -> dict[str, Any]:
+    """Render context of :func:`sample_page` — for upload validation."""
+    return _template_context(sample_page(**kwargs))
 
 
 def _render_with_template(page: PortalPage, template_name: str,
@@ -450,14 +727,27 @@ def _render_with_template(page: PortalPage, template_name: str,
         return None
 
 
+def render_with_template_strict(page: PortalPage, template_name: str,
+                                templates_dir: str) -> str:
+    """Preview path: render the operator template or raise
+    :class:`app.portal.templates_store.TemplateError` with the reason."""
+    from app.portal.templates_store import render_template
+
+    return render_template(templates_dir, template_name,
+                           _template_context(page), strict=True) or ""
+
+
 def render_page_html(page: PortalPage, template_name: str | None = None,
                      *, templates_dir: str | None = None) -> str:
     """Render a complete, self-contained HTML document.
 
     ``template_name`` selects an operator-uploaded template (Subscriptions
     section); when it is missing or broken, the built-in page is served.
+    The application-login page is never replaced by a template: in that
+    mode not a single byte of configuration material may leave the panel,
+    and an operator template cannot be audited for that.
     """
-    if template_name:
+    if template_name and page.kind is PageKind.PORTAL:
         custom = _render_with_template(page, template_name, templates_dir)
         if custom is not None:
             return custom

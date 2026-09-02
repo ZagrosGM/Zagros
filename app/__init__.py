@@ -10,7 +10,7 @@ import asyncio
 import logging
 import time
 
-__version__ = "1.0.0-beta.7"  # Zagros begins a new version line after the rebrand
+__version__ = "1.0.0"  # first stable release of the Zagros version line
 
 
 _building = False

@@ -102,6 +102,9 @@ jobs:
           provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # the OCI version label follows the tag, never a stale Dockerfile default
+          build-args: |
+            ZAGROS_VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -137,13 +140,16 @@ jobs:
             docker pull ${{ env.IMAGE }}:${{ github.ref_name }}
             ```
 
-            **Install / update on a VPS:**
+            **Install / update on a VPS** (stable releases move the floating `latest` image tag, which the installer runs by default):
 
             ```bash
-            # Fresh install, pinned to matching Panel + Scripts tags:
-            sudo env ZAGROS_SCRIPTS_REF=${{ github.ref_name }} bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/${{ github.ref_name }}/zagros.sh)" -- install --version ${{ github.ref_name }}
+            # Fresh install:
+            sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/main/zagros.sh)" -- install
 
-            # Existing host: refresh CLI/host-agent/compose first, then update:
+            # Existing host (refreshes CLI / host agent / compose, then updates the panel):
+            sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/main/zagros.sh)" -- update
+
+            # Pin this exact release instead (also how pre-releases are installed):
             sudo env ZAGROS_SCRIPTS_REF=${{ github.ref_name }} bash -c "$(curl -fsSL https://raw.githubusercontent.com/ZagrosGM/zagros-scripts/${{ github.ref_name }}/zagros.sh)" -- update --version ${{ github.ref_name }}
             ```
 

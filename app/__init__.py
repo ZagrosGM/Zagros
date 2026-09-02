@@ -10,7 +10,7 @@ import asyncio
 import logging
 import time
 
-__version__ = "1.0.0"  # first stable release of the Zagros version line
+__version__ = "1.0.1"
 
 
 _building = False

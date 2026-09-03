@@ -155,4 +155,9 @@ RUN ln -s /code/zagros-cli.py /usr/bin/zagros-cli \
     && chmod +x /usr/bin/zagros-cli \
     && zagros-cli completion install --shell bash
 
-CMD ["bash", "-c", "alembic upgrade head; python main.py"]
+# Boot order: wait for the configured SQL server(s) (a co-started
+# MySQL/MariaDB/PostgreSQL service needs a few seconds; SQLite is a no-op),
+# then migrate, then serve. Running Alembic before the database answers left
+# every fresh managed-database install with an empty schema and a panel that
+# spent a minute retrying before it would even bind its port.
+CMD ["bash", "-c", "python3 -m app.bootwait; alembic upgrade head; python main.py"]

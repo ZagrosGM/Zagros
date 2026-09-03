@@ -144,21 +144,21 @@ def _build_app_inner():
             except Exception as exc:  # noqa: BLE001 - degrade, never crash boot
                 return None, exc
 
-        # A managed MySQL/MariaDB container is usually still refusing
+        # A managed MySQL/MariaDB container can still be refusing
         # connections while the panel boots. Retry briefly so a cold start
         # does not leave the platform layer switched off until someone
-        # restarts the panel by hand. SQLite is always ready, so this loop
-        # costs a single attempt there.
-        zagros_runtime, zagros_boot_error = None, None
-        for attempt in range(30):
-            zagros_runtime, zagros_boot_error = _try_build_runtime()
-            if zagros_runtime is not None:
-                break
-            if attempt == 0:
-                logging.getLogger("uvicorn.error").warning(
-                    "Zagros platform runtime not ready yet (%s) - retrying",
-                    zagros_boot_error)
-            time.sleep(2)
+        # restarts the panel by hand. Only TRANSIENT database errors are
+        # retried: an incomplete schema or a missing secret is not something
+        # time fixes, and sitting through the whole retry budget on it kept
+        # uvicorn from binding for a minute on every fresh MySQL/MariaDB
+        # install (the installer could not run the migration until the
+        # panel answered — a dead lock the timeout broke). SQLite is always
+        # ready, so this costs a single attempt there.
+        from app.bootwait import build_with_retries
+
+        zagros_runtime, zagros_boot_error = build_with_retries(
+            _try_build_runtime, attempts=30, delay=2.0, sleep=time.sleep,
+            log=logging.getLogger("uvicorn.error").warning)
 
         if zagros_runtime is None:
             logging.getLogger("uvicorn.error").critical(

@@ -11,7 +11,7 @@ A multi-core VPN control panel that runs your cores on this host — and on as m
 [![Docs](https://img.shields.io/badge/docs-zagros--docs-success)](https://github.com/ZagrosGM/zagros-docs)
 [![Cores](https://img.shields.io/badge/cores-7-orange)](#supported-cores)
 
-### 📖 [**مستندات فارسی**](README_FA.md) &nbsp;·&nbsp; [**Documentation**](https://github.com/ZagrosGM/zagros-docs) &nbsp;·&nbsp; [**Installation**](#installation)
+### 📖 [**مستندات فارسی**](README_FA.md) &nbsp;·&nbsp; [**Documentation**](https://zagrosgm.github.io/zagros-docs) &nbsp;·&nbsp; [**Installation**](#installation)
 
 </div>
 

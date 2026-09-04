@@ -647,9 +647,10 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
           inbounds: inboundSel,
           data_limit_reset_strategy: "no_reset",
           telegram_id: form.telegramId ? Number(form.telegramId) : null,
-          ...(Object.values(form.coreAccess).some((tags) => tags.length)
-            ? { core_access: Object.fromEntries(Object.entries(form.coreAccess).filter(([, tags]) => tags.length)) }
-            : {}),
+          // always explicit: an empty mapping means "xray only" by the
+          // admin's choice — omitting the key would hand the user the
+          // panel's API defaults (meant for Marzban-style bots).
+          core_access: Object.fromEntries(Object.entries(form.coreAccess).filter(([, tags]) => tags.length)),
         });
         toast.ok(`${form.username} created`);
       } else if (user) {

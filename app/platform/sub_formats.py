@@ -67,11 +67,32 @@ def parse_named(links: list[str]) -> tuple[list[tuple[str, Any]], list[str]]:
 # Clash-Meta (mihomo) — also what Stash imports
 # --------------------------------------------------------------------- #
 
-_CLASH_META_TYPES = {"vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic"}
+_CLASH_META_TYPES = {"vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic",
+                     "anytls", "socks", "http"}
+
+
+class UnrepresentableLink(ValueError):
+    """The link is valid but this client format has no construct for it —
+    the caller keeps it on the link list/portal with the reason as a note."""
+
+
+def _tcp_http_header(settings: dict[str, Any]) -> bool:
+    return ((settings.get("network") or "tcp") in ("tcp", "raw")
+            and str(settings.get("headerType") or "none") == "http")
 
 
 def _clash_transport(settings: dict[str, Any], proxy: dict[str, Any]) -> None:
     network = settings.get("network") or "tcp"
+    if _tcp_http_header(settings):
+        # mihomo `http` network == xray RAW/TCP HTTP-header camouflage
+        proxy["network"] = "http"
+        opts: dict[str, Any] = {"method": "GET"}
+        if settings.get("path"):
+            opts["path"] = [p.strip() for p in str(settings["path"]).split(",") if p.strip()]
+        if settings.get("host"):
+            opts["headers"] = {"Host": [h.strip() for h in str(settings["host"]).split(",") if h.strip()]}
+        proxy["http-opts"] = opts
+        return
     if network == "ws":
         proxy["network"] = "ws"
         ws: dict[str, Any] = {}
@@ -86,6 +107,24 @@ def _clash_transport(settings: dict[str, Any], proxy: dict[str, Any]) -> None:
         if service:
             proxy["network"] = "grpc"
             proxy["grpc-opts"] = {"grpc-service-name": service}
+    elif network == "http":
+        # mihomo h2 transport (xray h2 / sing-box http): path + host list
+        proxy["network"] = "h2"
+        h2: dict[str, Any] = {}
+        if settings.get("path"):
+            h2["path"] = settings["path"]
+        if settings.get("host"):
+            h2["host"] = [h.strip() for h in str(settings["host"]).split(",") if h.strip()]
+        proxy["h2-opts"] = h2
+    elif network == "httpupgrade":
+        # mihomo expresses HTTPUpgrade as ws with v2ray-http-upgrade
+        proxy["network"] = "ws"
+        ws: dict[str, Any] = {"v2ray-http-upgrade": True}
+        if settings.get("path"):
+            ws["path"] = settings["path"]
+        if settings.get("host"):
+            ws["headers"] = {"Host": settings["host"]}
+        proxy["ws-opts"] = ws
 
 
 def _clash_proxy(name: str, ob: Any) -> dict[str, Any] | None:
@@ -144,6 +183,30 @@ def _clash_proxy(name: str, ob: Any) -> dict[str, Any] | None:
         if s.get("sni"):
             proxy["sni"] = s["sni"]
         return proxy
+    if proto == "anytls":
+        # mihomo ≥ 1.19.x anytls proxy: {type: anytls, password, sni, alpn,
+        # skip-cert-verify, client-fingerprint}
+        proxy = {**base, "type": "anytls", "password": s.get("password") or "",
+                 "udp": True, "client-fingerprint": s.get("fingerprint") or "chrome"}
+        if s.get("sni"):
+            proxy["sni"] = s["sni"]
+        if s.get("alpn"):
+            proxy["alpn"] = [a for a in str(s["alpn"]).split(",") if a]
+        if s.get("allow_insecure"):
+            proxy["skip-cert-verify"] = True
+        return proxy
+    if proto in ("socks", "http"):
+        proxy = {**base, "type": "socks5" if proto == "socks" else "http"}
+        if s.get("username"):
+            proxy["username"] = s["username"]
+            proxy["password"] = s.get("password") or ""
+        if proto == "http" and s.get("security") == "tls":
+            proxy["tls"] = True
+            if s.get("sni"):
+                proxy["sni"] = s["sni"]
+        if proto == "socks":
+            proxy["udp"] = True
+        return proxy
     return None
 
 
@@ -160,7 +223,11 @@ def to_clash_meta(links: list[str], extra_notes: list[str] | None = None) -> tup
         if ob.protocol not in _CLASH_META_TYPES and ob.kind.value not in _CLASH_META_TYPES:
             notes.append(f"{name}: protocol '{ob.protocol}' has no clash-meta form — kept on the link list/portal")
             continue
-        proxy = _clash_proxy(name, ob)
+        try:
+            proxy = _clash_proxy(name, ob)
+        except UnrepresentableLink as exc:
+            notes.append(f"{name}: {exc} — kept on the link list/portal")
+            continue
         if proxy is None:
             notes.append(f"{name}: incomplete link fields — kept on the link list/portal")
             continue
@@ -221,6 +288,14 @@ def _sb_tls(s: dict[str, Any], *, always: bool = False) -> dict[str, Any] | None
 
 def _sb_transport(s: dict[str, Any]) -> dict[str, Any] | None:
     network = s.get("network") or "tcp"
+    if _tcp_http_header(s):
+        # sing-box's v2ray `http` transport is a REAL HTTP/1.1 (h2 under
+        # TLS) stream that checks the response status — not xray's fake
+        # request/response header around a raw stream; a mapped outbound
+        # would dial and fail, so the link is kept off this format honestly.
+        raise UnrepresentableLink(
+            "xray RAW/TCP HTTP-header camouflage (headerType=http) has no "
+            "sing-box transport — use a v2rayN/xray or mihomo client")
     if network == "ws":
         tr: dict[str, Any] = {"type": "ws"}
         if s.get("path"):
@@ -232,6 +307,23 @@ def _sb_transport(s: dict[str, Any]) -> dict[str, Any] | None:
         service = s.get("serviceName") or s.get("service_name")
         if service:
             return {"type": "grpc", "service_name": service}
+    if network == "http":
+        # v2ray http transport (sing-box TCP camouflage / xray h2): the
+        # listener VERIFIES host+path — a client config without this block
+        # speaks raw VLESS into an HTTP listener ("unknown version: 72")
+        tr = {"type": "http"}
+        if s.get("path"):
+            tr["path"] = s["path"]
+        if s.get("host"):
+            tr["host"] = [h.strip() for h in str(s["host"]).split(",") if h.strip()]
+        return tr
+    if network == "httpupgrade":
+        tr = {"type": "httpupgrade"}
+        if s.get("path"):
+            tr["path"] = s["path"]
+        if s.get("host"):
+            tr["host"] = s["host"]
+        return tr
     return None
 
 
@@ -263,11 +355,23 @@ def _sb_outbound(name: str, ob: Any) -> dict[str, Any] | None:
         out.update({"type": "tuic", "uuid": str(s.get("uuid") or ""),
                     "password": s.get("password") or "",
                     "congestion_control": s.get("congestion_control") or "bbr"})
+    elif proto == "anytls":
+        out.update({"type": "anytls", "password": s.get("password") or ""})
+    elif proto == "socks":
+        out.update({"type": "socks", "version": "5"})
+        if s.get("username"):
+            out.update({"username": s["username"], "password": s.get("password") or ""})
+    elif proto == "http":
+        out["type"] = "http"
+        if s.get("username"):
+            out.update({"username": s["username"], "password": s.get("password") or ""})
     else:
+        # naive has no sing-box OUTBOUND (client side lives in the naive
+        # binary / Chromium network stack) — kept on the link list/portal
         return None
 
-    tls = _sb_tls(s, always=proto in ("hysteria2", "tuic"))
-    if tls is not None and proto != "shadowsocks":
+    tls = _sb_tls(s, always=proto in ("hysteria2", "tuic", "anytls"))
+    if tls is not None and proto not in ("shadowsocks", "socks"):
         out["tls"] = tls
     transport = _sb_transport(s)
     if transport is not None:
@@ -290,7 +394,11 @@ def to_sing_box(links: list[str], extra_notes: list[str] | None = None) -> tuple
     outbounds: list[dict[str, Any]] = []
     tags: list[str] = []
     for name, ob in parsed:
-        proxy = _sb_outbound(name, ob)
+        try:
+            proxy = _sb_outbound(name, ob)
+        except UnrepresentableLink as exc:
+            notes.append(f"{name}: {exc} — kept on the link list/portal")
+            continue
         if proxy is None:
             notes.append(f"{name}: protocol '{ob.protocol}' has no sing-box form — kept on the link list/portal")
             continue

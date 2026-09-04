@@ -29,6 +29,11 @@ class OutboundKind(str, Enum):
     WIREGUARD = "wireguard"
     HYSTERIA2 = "hysteria2"
     TUIC = "tuic"
+    # sing-box account protocols that share links can name (v1.0.3): the
+    # subscription renderers/host engine parse and re-emit them; no host
+    # egress runtime exists for them yet (capability: not applicable).
+    ANYTLS = "anytls"
+    NAIVE = "naive"
     OPENVPN = "openvpn"
     SSH = "ssh"
     # Canonical independent Linux client providers.  L2TP/SSTP profiles may

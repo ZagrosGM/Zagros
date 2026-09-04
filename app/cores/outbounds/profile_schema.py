@@ -286,6 +286,23 @@ _KIND_SCHEMAS: dict[OutboundKind, dict] = {
                             "default": False}},
         required=("server", "server_port", "uuid", "password"),
         description="TUIC upstream (QUIC, always TLS)"),
+    OutboundKind.ANYTLS: _schema(
+        {**_server_fields(),
+         "password": _str("password", "password", group="auth", secret=True),
+         "sni": _str("sni", "SNI", group="security"),
+         "alpn": _str("alpn", "ALPN", group="security"),
+         "allow_insecure": {"type": "boolean", "title": "allow insecure",
+                            "x-group": "security", "x-widget": "toggle",
+                            "default": False}},
+        required=("server", "server_port", "password"),
+        description="AnyTLS upstream (parsed from anytls:// links; host egress not implemented yet)"),
+    OutboundKind.NAIVE: _schema(
+        {**_server_fields(),
+         "username": _str("username", "username", group="auth"),
+         "password": _str("password", "password", group="auth", secret=True),
+         "sni": _str("sni", "SNI", group="security")},
+        required=("server", "server_port", "username", "password"),
+        description="NaïveProxy upstream (parsed from naive+https:// links; host egress not implemented yet)"),
     OutboundKind.OPENVPN: _schema(
         {**_server_fields(),
          "proto": _select("proto", "protocol", group="basic",

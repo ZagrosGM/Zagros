@@ -41,8 +41,13 @@ Shape consumed by the dashboard (JSON)::
       }]
     }
 
-FieldSpec: {key, label, type, required, default, options, placeholder, help}
+FieldSpec: {key, label, type, required, default, options, placeholder, help,
+            section, depends_on}
 with type ∈ string|int|bool|select|multiselect|password|textarea|file.
+``depends_on`` = {key: [allowed values]} — the field only applies (is shown
+AND submitted) while every listed sibling holds one of the allowed values;
+the dashboard drops dependent fields from the spec when the condition is not
+met, so a hidden default can never contradict the visible choice.
 Secrets are write-only (apply keeps the stored value when left blank).
 """
 from __future__ import annotations
@@ -84,25 +89,43 @@ GRPC_XRAY_EXTRA = [_f("multi_mode", "multiMode (separate up/down streams)", "boo
                       default=False, section="transport",
                       help="xray grpcSettings.multiMode")]
 # RAW/TCP HTTP camouflage (xray tcpSettings.header.type =
-# "http"): a real request/response pair Xray serves, NOT decoration. The
-# translator refuses these facts with header_type=none.
+# "http"): a real request/response pair Xray serves, NOT decoration. Every
+# HTTP fact depends on header_type = http: the dashboard shows and submits
+# them only for that choice, and the translator treats the schema defaults
+# (GET / 200 / OK / no headers) as "not set" under header_type = none, so a
+# plain RAW inbound never trips over values it never asked for.
+_TCP_HTTP_ONLY = {"header_type": ["http"]}
 XRAY_TCP_HTTP_FIELDS = [
     _f("header_type", "RAW/TCP header", "select", options=["none", "http"],
        default="none", section="transport",
        help="'http' makes the listener camouflage as an HTTP server "
             "(tcpSettings.header.type)"),
+    _f("path", "camouflage request path(s)", placeholder="/", default="/",
+       section="transport", depends_on=_TCP_HTTP_ONLY,
+       help="comma separated, each starting with '/'"),
+    _f("host", "camouflage Host header", placeholder="www.example.com",
+       section="transport", depends_on=_TCP_HTTP_ONLY,
+       help="added to the request headers (a pasted Host line wins)"),
     _f("http_method", "camouflage request method", placeholder="GET", default="GET",
-       section="headers", help="requires header_type = http"),
+       section="headers", depends_on=_TCP_HTTP_ONLY),
     _f("request_headers", "request headers (one 'Name: value' per line)", "textarea",
        placeholder="Accept: */*\nUser-Agent: curl/8.0", section="headers",
-       help="requires header_type = http; the Host field (if set) is added"),
+       depends_on=_TCP_HTTP_ONLY,
+       help="the Host field (if set) is added"),
     _f("response_status", "response status code", "int", default=200, placeholder="200",
-       section="headers"),
+       section="headers", depends_on=_TCP_HTTP_ONLY),
     _f("response_reason", "response reason phrase", placeholder="OK", default="OK",
-       section="headers"),
+       section="headers", depends_on=_TCP_HTTP_ONLY),
     _f("response_headers", "response headers (one 'Name: value' per line)", "textarea",
-       placeholder="Server: nginx\nContent-Type: text/html", section="headers"),
+       placeholder="Server: nginx\nContent-Type: text/html", section="headers",
+       depends_on=_TCP_HTTP_ONLY),
 ]
+# schema defaults of the dependent HTTP facts — what a spec carries when the
+# operator never touched the camouflage fields (used by the xray translator
+# to tell "left at default" from "explicitly asked for").
+XRAY_TCP_HTTP_DEFAULTS = {
+    f["key"]: f.get("default") for f in XRAY_TCP_HTTP_FIELDS if f.get("depends_on")
+}
 # sing-box http transport verb + header map (its V2Ray-transport http struct
 # carries method/host/path/headers; method/headers were missing here)
 SINGBOX_HTTP_EXTRA = [
@@ -110,6 +133,42 @@ SINGBOX_HTTP_EXTRA = [
     _f("headers", "extra headers (one 'Name: value' per line)", "textarea",
        placeholder="Accept: */*", section="headers"),
 ]
+# sing-box TCP (raw) HTTP camouflage — the same wizard as xray's RAW/TCP
+# header (v1.0.3): sing-box has no tcpSettings.header; its equivalent is
+# the V2Ray ``http`` transport (plain HTTP/1.1 without TLS, HTTP/2 under
+# TLS), which verifies host/path/method and echoes the headers back. The
+# fields therefore mirror the xray request side one-to-one and the
+# translator emits ``transport: {type: http, host, path, method, headers}``
+# for header_type = http. There is NO response side in sing-box (status /
+# reason / response headers are xray-only) — those are deliberately not
+# offered here rather than accepted and dropped.
+SINGBOX_TCP_HTTP_FIELDS = [
+    _f("header_type", "RAW/TCP header", "select", options=["none", "http"],
+       default="none", section="transport",
+       help="'http' makes the listener camouflage as an HTTP server "
+            "(sing-box http transport: HTTP/1.1 without TLS, HTTP/2 under "
+            "TLS). Reachable from sing-box based clients (mihomo too, under "
+            "TLS); Xray-core clients removed this transport upstream."),
+    _f("path", "camouflage request path", placeholder="/", default="/",
+       section="transport", depends_on=_TCP_HTTP_ONLY,
+       help="one path starting with '/' (sing-box verifies it)"),
+    _f("host", "camouflage Host header", placeholder="www.example.com",
+       section="transport", depends_on=_TCP_HTTP_ONLY,
+       help="sing-box verifies the Host of every request when set"),
+    _f("http_method", "camouflage request method (verified)", placeholder="any",
+       section="headers", depends_on=_TCP_HTTP_ONLY,
+       help="leave empty to accept any verb. sing-box REFUSES every other "
+            "method (HTTP 404) once one is set, share links cannot carry the "
+            "verb and sing-box/xray clients send PUT by default — set it only "
+            "when every client uses the panel's sing-box profile"),
+    _f("request_headers", "request headers (one 'Name: value' per line)", "textarea",
+       placeholder="Accept: */*\nUser-Agent: curl/8.0", section="headers",
+       depends_on=_TCP_HTTP_ONLY,
+       help="sent by the client and written back into the response"),
+]
+SINGBOX_TCP_HTTP_DEFAULTS = {
+    f["key"]: f.get("default") for f in SINGBOX_TCP_HTTP_FIELDS if f.get("depends_on")
+}
 XHTTP_FIELDS = [_f("path", "XHTTP path", placeholder="/xh", default="/xh", section="transport"),
                 _f("host", "Host header", placeholder="cdn.example.com", section="transport"),
                 _f("mode", "mode", "select", options=["auto", "packet-up", "stream-up", "stream-one"],
@@ -227,10 +286,11 @@ def _xray_transports(*, reality: bool, tls_only: bool = False,
 
 
 def _singbox_proxy_transports(*, reality: bool, none_too: bool = True) -> list[Transport]:
-    """Verified sing-box matrix (vless/vmess/trojan): quic only under TLS/REALITY."""
+    """Verified sing-box matrix (vless/vmess/trojan): quic only under TLS/REALITY.
+    TCP (raw) carries the same HTTP-camouflage wizard as xray (v1.0.3)."""
     out: list[Transport] = []
     for tid, label, extra in (
-        ("tcp", "TCP (raw)", None),
+        ("tcp", "TCP (raw)", SINGBOX_TCP_HTTP_FIELDS),
         ("ws", "WebSocket", None),
         ("httpupgrade", "HTTPUpgrade", None),
         ("grpc", "gRPC", None),
@@ -303,10 +363,16 @@ def _xray_blueprint() -> list[Protocol]:
 # --------------------------------------------------------------------- #
 
 def _proxy_user_fields(*, required: bool) -> list[Field]:
+    """Wizard-level proxy credential pair. Real users are PANEL accounts
+    assigned through core access (v1.0.3: every sing-box protocol accepts
+    them); this pair is only a bootstrap identity for a listener nobody is
+    assigned to yet — hence never required anymore (``required`` kept for
+    the blueprint contract; ``True`` only tightens the label)."""
+    hint = ("bootstrap identity while no panel user is assigned; assigned "
+            "users authenticate with their own credentials")
     return [
-        _f("username", "username" + ("" if required else " (optional)"), required=required),
-        _f("password", "password" + ("" if required else " (optional)"), "password",
-           required=required),
+        _f("username", "username (optional)", help=hint),
+        _f("password", "password (optional)", "password", help=hint),
     ]
 
 
@@ -359,11 +425,14 @@ def _singbox_blueprint() -> list[Protocol]:
             _tr("tcp", "TCP (local proxy)", [_none(_proxy_user_fields(required=False))]),
         ]),
         _proto("naive", "NaiveProxy", 8446, [
-            _tr("quic", "HTTPS/2 (implicit)", [_tls(_proxy_user_fields(required=True))]),
+            _tr("quic", "HTTPS/2 (implicit)", [_tls(_proxy_user_fields(required=False))]),
         ]),
         _proto("anytls", "AnyTLS", 8447, [
             _tr("tcp", "TCP", [_tls([
-                _f("password", "listener password", "password", required=True),
+                _f("password", "listener password", "password", required=True,
+                   help="keeps the listener bound while no panel user is "
+                        "assigned (sing-box refuses an anytls inbound without "
+                        "users); assigned users get their own passwords"),
                 _f("padding_scheme", "padding scheme", "textarea",
                    placeholder="stop=8\n0=30-30\n1=100-400",
                    help="one per line, AnyTLS padding grammar (optional)"),

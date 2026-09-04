@@ -210,6 +210,211 @@ def _client_inbound_index(con: sqlite3.Connection) -> dict[Any, list[dict[str, A
     return index
 
 
+def _xui_inbound_tag(inbound: dict[str, Any]) -> str:
+    """The xray tag an imported 3x-ui inbound gets on this panel.
+
+    3x-ui's own tags are machine names (``inbound-3000``, ``in-3000-tcp``);
+    the remark is what the operator recognises — but remarks carry flags,
+    spaces and Persian text, and the tag is a JSON identity that must stay
+    stable and shell/URL safe. Keep 3x-ui's tag when it has one; otherwise
+    derive one from the port.
+    """
+    tag = str(inbound.get("tag") or "").strip()
+    if tag:
+        return tag
+    return f"xui-{inbound.get('protocol') or 'in'}-{inbound.get('port') or inbound.get('id')}"
+
+
+# xray wizard protocols the importer can materialize (mirrors the xray
+# driver's studio set minus dokodemo-door which carries no clients)
+_XUI_IMPORTABLE_PROTOCOLS = {"vless", "vmess", "trojan", "shadowsocks"}
+
+
+def _xui_inbound_spec(inbound: dict[str, Any]) -> dict[str, Any] | None:
+    """One 3x-ui ``inbounds`` row → a wizard-shaped inbound spec.
+
+    Returns ``None`` for rows that cannot become a per-user xray inbound on
+    this panel (wireguard/dokodemo/socks/http/mixed rows have no client
+    list to import). Anything the wizard cannot express (a REALITY key
+    pair, sockopt/proxy-protocol tuning, an exotic transport) is reported in
+    ``notes`` rather than silently dropped — the operator re-adds it by hand
+    knowing exactly what is missing.
+    """
+    protocol = str(inbound.get("protocol") or "").strip().lower()
+    if protocol not in _XUI_IMPORTABLE_PROTOCOLS:
+        return None
+    try:
+        port = int(inbound.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if not 1 <= port <= 65535:
+        return None
+    stream = _json_field(inbound.get("stream_settings"), {}) or {}
+    if not isinstance(stream, dict):
+        stream = {}
+    notes: list[str] = []
+    settings: dict[str, Any] = {}
+
+    network = str(stream.get("network") or "tcp").strip().lower()
+    if network == "raw":
+        network = "tcp"
+    if network == "kcp":
+        network = "mkcp"
+    if network in ("h2", "http"):
+        # xray removed the h2 transport upstream ("migrated to XHTTP")
+        notes.append("h2/http transport is no longer served by xray — imported as xhttp")
+        network = "xhttp"
+    if network == "splithttp":
+        network = "xhttp"
+    if network not in ("tcp", "ws", "httpupgrade", "grpc", "xhttp", "mkcp"):
+        notes.append(f"transport '{network}' cannot be imported — created as tcp")
+        network = "tcp"
+    settings["transport"] = network
+
+    def _section(*names: str) -> dict[str, Any]:
+        for name in names:
+            value = stream.get(name)
+            if isinstance(value, dict):
+                return value
+        return {}
+
+    if network == "ws":
+        ws = _section("wsSettings")
+        settings["path"] = str(ws.get("path") or "/")
+        host = ws.get("host") or (ws.get("headers") or {}).get("Host") or ""
+        if host:
+            settings["host"] = str(host)
+    elif network == "httpupgrade":
+        hu = _section("httpupgradeSettings")
+        settings["path"] = str(hu.get("path") or "/")
+        if hu.get("host"):
+            settings["host"] = str(hu["host"])
+    elif network == "grpc":
+        grpc = _section("grpcSettings")
+        settings["service_name"] = str(grpc.get("serviceName") or "grpc")
+        if grpc.get("authority"):
+            settings["authority"] = str(grpc["authority"])
+        if grpc.get("multiMode"):
+            settings["multi_mode"] = True
+    elif network == "xhttp":
+        xh = _section("xhttpSettings", "splithttpSettings", "httpSettings")
+        settings["path"] = str(xh.get("path") or "/")
+        host = xh.get("host") or ""
+        if isinstance(host, list):
+            host = host[0] if host else ""
+        if host:
+            settings["host"] = str(host)
+        if xh.get("mode") in ("auto", "packet-up", "stream-up", "stream-one"):
+            settings["mode"] = xh["mode"]
+    elif network == "mkcp":
+        kcp = _section("kcpSettings")
+        for src, dst in (("mtu", "mtu"), ("tti", "tti")):
+            if kcp.get(src):
+                settings[dst] = int(kcp[src])
+        if kcp.get("congestion") is not None:
+            settings["congestion"] = bool(kcp["congestion"])
+        if kcp.get("seed") or (kcp.get("header") or {}).get("type", "none") != "none":
+            notes.append("mKCP seed/header obfuscation was removed upstream — imported without it")
+    elif network == "tcp":
+        tcp = _section("tcpSettings", "rawSettings")
+        header = tcp.get("header") if isinstance(tcp.get("header"), dict) else {}
+        if header.get("type") == "http":
+            request = header.get("request") if isinstance(header.get("request"), dict) else {}
+            settings["header_type"] = "http"
+            paths = request.get("path") or ["/"]
+            settings["path"] = ",".join(str(p) for p in paths) if isinstance(paths, list) else str(paths)
+            headers = request.get("headers") if isinstance(request.get("headers"), dict) else {}
+            host = headers.get("Host") or headers.get("host") or ""
+            if isinstance(host, list):
+                host = host[0] if host else ""
+            if host:
+                settings["host"] = str(host)
+            if request.get("method"):
+                settings["http_method"] = str(request["method"])
+
+    security = str(stream.get("security") or "none").strip().lower()
+    if security == "tls":
+        tls = _section("tlsSettings")
+        sni = str(tls.get("serverName") or "").strip()
+        certs = tls.get("certificates") if isinstance(tls.get("certificates"), list) else []
+        cert = next((c for c in certs if isinstance(c, dict)), {})
+        if cert.get("certificateFile") and cert.get("keyFile"):
+            # the files live on the OLD host; referencing them here would
+            # fail validation — the panel mints a self-signed pair instead
+            notes.append(
+                f"TLS certificate files {cert.get('certificateFile')} are not part "
+                "of the backup — a self-signed certificate is used; upload the "
+                "real pair in the inbound editor")
+        if not sni:
+            sni = str(cert.get("certificateFile") or "").rsplit("/", 1)[-1].split(".")[0] or "localhost"
+            notes.append("TLS inbound without serverName — SNI defaulted; set it in the inbound editor")
+        settings["security"] = "tls"
+        settings["sni"] = sni
+        alpn = [a for a in (tls.get("alpn") or []) if a]
+        if alpn:
+            settings["alpn"] = alpn
+    elif security == "reality":
+        reality = _section("realitySettings")
+        names = reality.get("serverNames") if isinstance(reality.get("serverNames"), list) else []
+        dest = str(reality.get("dest") or reality.get("target") or "")
+        sni = str((names[0] if names else "") or dest.split(":")[0] or "")
+        if not sni:
+            notes.append("REALITY inbound without serverNames/dest — imported as plain TLS-less tcp")
+            settings["security"] = "none"
+        else:
+            settings["security"] = "reality"
+            settings["sni"] = sni
+            inner = reality.get("settings") if isinstance(reality.get("settings"), dict) else {}
+            fp = str(inner.get("fingerprint") or "chrome")
+            settings["fingerprint"] = fp
+            notes.append(
+                "REALITY key pair is re-generated on this panel (private keys are "
+                "not carried over) — clients need the new subscription link")
+        if network not in ("tcp", "xhttp", "grpc"):
+            notes.append(f"REALITY is not servable over {network} — security downgraded to none")
+            settings["security"] = "none"
+            settings.pop("sni", None)
+            settings.pop("fingerprint", None)
+    else:
+        settings["security"] = "none"
+    if protocol == "trojan" and settings["security"] == "none":
+        # xray trojan without TLS is refused by the wizard blueprint
+        settings["security"] = "tls"
+        settings.setdefault("sni", "localhost")
+        notes.append("trojan needs TLS — a self-signed certificate is used; upload the real pair")
+    if protocol == "shadowsocks":
+        proto_settings = _json_field(inbound.get("settings"), {}) or {}
+        method = str(proto_settings.get("method") or "").strip()
+        if method.startswith("2022-"):
+            notes.append(f"shadowsocks-2022 cipher {method} is not importable on xray — "
+                         "created with aes-128-gcm")
+            method = "aes-128-gcm"
+        settings["method"] = method or "aes-128-gcm"
+        settings["security"] = "none"
+        settings.pop("sni", None)
+    sockopt = stream.get("sockopt") if isinstance(stream.get("sockopt"), dict) else {}
+    if sockopt.get("acceptProxyProtocol"):
+        notes.append("sockopt.acceptProxyProtocol is not carried by the wizard — re-enable "
+                     "it in Advanced Mode if a proxy-protocol front sits before xray")
+    proto_settings = _json_field(inbound.get("settings"), {}) or {}
+    if protocol == "vless":
+        flows = {str(c.get("flow") or "") for c in (proto_settings.get("clients") or [])
+                 if isinstance(c, dict)}
+        if "xtls-rprx-vision" in flows and network == "tcp" and settings["security"] in ("tls", "reality"):
+            settings["flow"] = "xtls-rprx-vision"
+    return {
+        "tag": _xui_inbound_tag(inbound),
+        "remark": str(inbound.get("remark") or "").strip(),
+        "protocol": protocol,
+        "port": port,
+        "listen": None,
+        "enabled": bool(inbound.get("enable", True)),
+        "settings": settings,
+        "notes": notes,
+        "source_id": inbound.get("id"),
+    }
+
+
 def _settings_for(protocol: str, client: dict[str, Any],
                   inbound: dict[str, Any] | None) -> dict[str, Any]:
     """The credential this panel stores for the protocol.
@@ -229,9 +434,57 @@ def _settings_for(protocol: str, client: dict[str, Any],
     if proto == "trojan":
         return {"password": client.get("password") or uuid}
     if proto == "shadowsocks":
+        from app.models.proxy import canonical_ss_method
+
         return {"password": client.get("password") or uuid,
-                "method": (client.get("security") or "").strip() or "chacha20-poly1305"}
+                "method": canonical_ss_method(client.get("security")) or "chacha20-ietf-poly1305"}
     return {"id": uuid}
+
+
+# Both user tables (panel + platform) declare ``note`` as VARCHAR(500); MySQL
+# rejects longer values outright (1406 "Data too long"), so a note built from
+# imported material is trimmed here instead of failing the whole import.
+NOTE_MAX_LEN = 500
+
+
+def _fit_note(note: str | None) -> str | None:
+    if not note:
+        return None
+    note = str(note)
+    if len(note) <= NOTE_MAX_LEN:
+        return note
+    return note[: NOTE_MAX_LEN - 1].rstrip() + "…"
+
+
+def _summarize_client_ips(raw: Any, limit: int = 5) -> str:
+    """``inbound_client_ips.ips`` → a short, human-readable IP list.
+
+    Modern 3x-ui stores a JSON array of ``{"ip", "timestamp"}`` objects (one
+    per seen address); older builds a JSON list of strings or a plain comma
+    list. Dumping the raw JSON into the note overflowed the column.
+    """
+    if raw in (None, "", b""):
+        return ""
+    ips: list[str] = []
+    text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        parsed = None
+    if isinstance(parsed, list):
+        for item in parsed:
+            ip = item.get("ip") if isinstance(item, dict) else item
+            if ip and str(ip) not in ips:
+                ips.append(str(ip))
+    else:
+        for piece in text.replace(";", ",").split(","):
+            piece = piece.strip().strip('"[]')
+            if piece and piece not in ips:
+                ips.append(piece)
+    if not ips:
+        return ""
+    shown = ", ".join(ips[:limit])
+    return shown + (f" (+{len(ips) - limit} more)" if len(ips) > limit else "")
 
 
 def read_3x_ui(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
@@ -262,6 +515,21 @@ def read_3x_ui(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
             for client in clients:
                 client.setdefault("_links", [])
 
+        # per-protocol listener tags the importer will materialize — used to
+        # BIND each client to exactly the inbounds the source assigned it
+        # (3x-ui ``client_inbounds``): the proxy is stored once per protocol
+        # and the OTHER listeners of that protocol are excluded, so an
+        # imported user never silently inherits every listener of the
+        # protocol the panel has — or will ever add (the 3x-ui import
+        # \"assigned inbounds\" bug: the sub links served unrelated
+        # inbounds to every imported user).
+        importable_tags: dict[str, list[str]] = {}
+        for row in inbounds:
+            spec = _xui_inbound_spec(row)
+            if spec is None:
+                continue
+            importable_tags.setdefault(spec["protocol"], []).append(spec["tag"])
+
         taken: set[str] = set()
         for index, client in enumerate(clients, start=1):
             email = (client.get("email") or "").strip()
@@ -283,7 +551,7 @@ def read_3x_ui(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
             enabled = bool(traffic_row.get("enable", client.get("enable", True)))
             limit_ip = (client.get("limit_ip") if client.get("limit_ip") is not None
                         else client.get("limitIp") or 0)
-            ips = limits_ip.get(email)
+            ips = _summarize_client_ips(limits_ip.get(email))
             device_limit = int(limit_ip) if str(limit_ip).isdigit() and int(limit_ip) > 0 else None
 
             user_id = index
@@ -291,8 +559,8 @@ def read_3x_ui(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
                 "id": user_id,
                 "username": username,
                 "status": "active" if enabled else "disabled",
-                "note": note or f"imported from 3x-ui ({email})"
-                        + (f"; allowed IPs: {ips}" if ips else ""),
+                "note": _fit_note(note or f"imported from 3x-ui ({email})"
+                                  + (f"; last IPs: {ips}" if ips else "")),
                 "data_limit": total or None,
                 "download_limit_mbps": 0,
                 "upload_limit_mbps": 0,
@@ -316,30 +584,102 @@ def read_3x_ui(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
                 if not protocol or protocol in seen:
                     continue
                 seen.add(protocol)
-                snapshot.proxies.append({
+                proxy = {
                     "id": len(snapshot.proxies) + 1,
                     "user_id": user_id,
                     "type": protocol,
                     "settings": _settings_for(protocol, client, link),
-                })
+                }
+                # Bind the proxy to the source's assignment: every other
+                # listener of this protocol is excluded. A client linked to
+                # ONE inbound of a three-inbound panel must not be served by
+                # all three — that leak is what made imported users' sub
+                # links show inbounds (and credentials) that were never
+                # theirs. Clients the source never linked explicitly keep the
+                # Marzban semantics (empty exclusions = all listeners).
+                linked = {
+                    _xui_inbound_tag(entry)
+                    for entry in links
+                    if entry.get("tag") and (entry.get("protocol") or "").lower() == protocol
+                }
+                candidates = importable_tags.get(protocol) or []
+                if linked and candidates:
+                    excluded = [t for t in candidates if t not in linked]
+                    if excluded:
+                        proxy["excluded_inbounds"] = excluded
+                        notes.setdefault("restricted", []).append(
+                            f"{username}: {protocol} is bound to "
+                            f"{', '.join(sorted(linked))} — "
+                            f"{len(excluded)} other listener(s) excluded")
+                snapshot.proxies.append(proxy)
 
-        # hosts: one per inbound, so restored links point at the same entry points
+        # inbounds: 3x-ui keeps the LISTENERS in its database (Marzban keeps
+        # them in xray_config.json). Without them the imported users have
+        # credentials for inbounds that do not exist on this panel — "the
+        # users came over but none of them can connect". Each becomes a
+        # wizard-shaped spec the importer materializes on the xray core.
+        sub_hosts = (_rows(con, "hosts") if "hosts" in tables else [])
         for inbound in inbounds:
+            spec = _xui_inbound_spec(inbound)
+            if spec is not None:
+                snapshot.inbounds.append(spec)
+                for note in spec.get("notes") or []:
+                    notes["unsupported"].append(f"{spec['tag']}: {note}")
+
+        # hosts: what the SUBSCRIPTION advertises per inbound. Newer 3x-ui
+        # builds keep real host rows (address/port/path/host header/sni —
+        # a CDN front, typically) in ``hosts``; those are the entry points
+        # the users actually connect through. Older builds have no such
+        # table — fall back to one row per inbound. ``listen`` is the bind
+        # address ("" or 0.0.0.0 — never a public name), so a missing
+        # address means "this server" ({SERVER_IP}), exactly like the panel's
+        # own default host row.
+        tag_of = {row.get("id"): _xui_inbound_tag(row) for row in inbounds}
+        covered: set[Any] = set()
+        for row in sorted(sub_hosts, key=lambda r: (r.get("inbound_id") or 0,
+                                                     r.get("sort_order") or 0,
+                                                     r.get("id") or 0)):
+            tag = tag_of.get(row.get("inbound_id"))
+            if not tag:
+                continue
+            covered.add(row.get("inbound_id"))
+            security = str(row.get("security") or "").strip().lower()
+            snapshot.hosts.append({
+                "remark": row.get("remark") or tag,
+                "address": (row.get("address") or "").strip() or "{SERVER_IP}",
+                "port": row.get("port") or None,
+                "sni": (row.get("sni") or "").strip() or None,
+                "host": (row.get("host_header") or "").strip() or None,
+                "path": (row.get("path") or "").strip() or None,
+                # 3x-ui "same" = follow the inbound (Marzban inbound_default)
+                "security": security if security in ("tls", "none") else "inbound_default",
+                "alpn": None,
+                "fingerprint": (row.get("fingerprint") or "").strip() or None,
+                "inbound_tag": tag,
+                "allowinsecure": bool(row.get("allow_insecure")),
+                "is_disabled": bool(row.get("is_disabled")),
+                "mux_enable": False,
+                "random_user_agent": False,
+            })
+        for inbound in inbounds:
+            if inbound.get("id") in covered:
+                continue
             stream = _json_field(inbound.get("stream_settings"), {}) or {}
+            ws = stream.get("wsSettings") if isinstance(stream.get("wsSettings"), dict) else {}
+            reality = (stream.get("realitySettings")
+                       if isinstance(stream.get("realitySettings"), dict) else {})
             snapshot.hosts.append({
                 "remark": inbound.get("remark") or inbound.get("tag") or "",
-                "address": (inbound.get("listen") or "").strip() or None,
+                "address": "{SERVER_IP}",
                 "port": inbound.get("port"),
-                "sni": (stream.get("realitySettings", {}).get("serverNames") or [None])[0]
-                       if isinstance(stream.get("realitySettings"), dict) else None,
-                "host": (stream.get("wsSettings", {}).get("headers", {}) or {}).get("Host")
-                        if isinstance(stream.get("wsSettings"), dict) else None,
-                "path": (stream.get("wsSettings", {}) or {}).get("path")
-                        if isinstance(stream.get("wsSettings"), dict) else None,
-                "security": stream.get("security"),
+                "sni": (reality.get("serverNames") or [None])[0] if reality else None,
+                "host": ((ws.get("headers") or {}).get("Host") or ws.get("host") or None)
+                        if ws else None,
+                "path": ws.get("path") if ws else None,
+                "security": "inbound_default",
                 "alpn": None,
                 "fingerprint": None,
-                "inbound_tag": inbound.get("remark") or inbound.get("tag"),
+                "inbound_tag": _xui_inbound_tag(inbound),
                 "allowinsecure": False,
                 "is_disabled": not bool(inbound.get("enable", True)),
                 "mux_enable": False,

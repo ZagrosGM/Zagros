@@ -87,9 +87,42 @@ class TrojanSettings(ProxySettings):
         self.password = random_password()
 
 
+def canonical_ss_method(value) -> str | None:
+    """Normalize legacy Shadowsocks cipher spellings to the panel's canonical.
+
+    3x-ui restores and pre-0.5 Marzban archives write ``chacha20-poly1305``
+    (or the ancient ``chacha20``) while the panel's enum only knows
+    ``chacha20-ietf-poly1305``. Stored raw, one such row makes the WHOLE
+    users list answer 500 (ResponseValidationError at serialization), so
+    every settings-producing path (restore, archive import, API input) maps
+    the aliases here. Unset markers (empty / auto / none — values that only
+    make sense for stream ciphers like vless) collapse to None so callers
+    fall back to the default cipher instead of storing a broken method.
+    """
+    if value is None:
+        return None
+    m = str(value).strip().lower()
+    if m in ("", "auto", "none"):
+        return None
+    if m in ("chacha20-poly1305", "chacha20"):
+        return "chacha20-ietf-poly1305"
+    return m
+
+
 class ShadowsocksSettings(ProxySettings):
     password: str = Field(default_factory=random_password)
     method: ShadowsocksMethods = ShadowsocksMethods.CHACHA20_POLY1305
+
+    @field_validator("method", mode="before")
+    @classmethod
+    def normalize_legacy_method(cls, v):
+        # API input, Marzban-compat JSON and legacy DB rows may carry the
+        # pre-ietf cipher name or an unset marker (see canonical_ss_method);
+        # map them before the enum validation so creation AND response
+        # serialization both pass instead of 500-ing the whole users list.
+        if v is None:
+            return v
+        return canonical_ss_method(v) or "chacha20-ietf-poly1305"
 
     def revoke(self):
         self.password = random_password()

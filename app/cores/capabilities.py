@@ -402,6 +402,23 @@ def _base_capability(kind: OutboundKind) -> OutboundCapability:
             security_class="target_dependent",
             reason="resolved dynamically from the target core's chain endpoint",
         )
+    if kind in (OutboundKind.ANYTLS, OutboundKind.NAIVE):
+        # Share links of these sing-box ACCOUNT protocols are parsed and
+        # re-emitted (subscription formats, host overrides, Import URL), but
+        # no host egress runtime translates them yet — say so instead of
+        # offering a profile that could never deploy.
+        return OutboundCapability(
+            kind=kind, state=SupportState.UNSUPPORTED,
+            protocol=kind.value,
+            provider="none",
+            authentication=(["password", "TLS server certificate"]
+                            if kind is OutboundKind.ANYTLS
+                            else ["username/password", "TLS server certificate"]),
+            security_class="standard",
+            reason=(f"{kind.value} is served to USERS by the sing-box core; a "
+                    "host-side egress profile of this kind is not implemented "
+                    "yet (sing-box outbound translation pending)."),
+        )
     return OutboundCapability(
         kind=kind, state=SupportState.NOT_APPLICABLE,
         reason="no outbound capability contract is registered",

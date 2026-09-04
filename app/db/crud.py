@@ -78,6 +78,40 @@ def get_or_create_inbound(db: Session, inbound_tag: str) -> ProxyInbound:
     return inbound
 
 
+def remove_inbound_row(db: Session, inbound_tag: str) -> bool:
+    """Delete a legacy ``inbounds`` row plus every association pointing at it.
+
+    ``exclude_inbounds_association`` and ``template_inbounds_association``
+    are plain ``REFERENCES inbounds(tag)`` FKs with no ON DELETE CASCADE, so
+    deleting a wizard-removed listener while a restored proxy (or a user
+    template) still references its tag makes MySQL answer 1451 and the DELETE
+    endpoint 500. The association rows are removed first, then the inbound
+    (its hosts go with it via delete-orphan). Returns True when a row was
+    actually deleted.
+
+    SQLite note: the test harness enables ``PRAGMA foreign_keys`` so the
+    same ordering is pinned there.
+    """
+    from app.db.models import (
+        excluded_inbounds_association,
+        template_inbounds_association,
+    )
+
+    db.execute(excluded_inbounds_association.delete().where(
+        excluded_inbounds_association.c.inbound_tag == inbound_tag))
+    db.execute(template_inbounds_association.delete().where(
+        template_inbounds_association.c.inbound_tag == inbound_tag))
+    row = db.query(ProxyInbound).filter(ProxyInbound.tag == inbound_tag).first()
+    if row is None:
+        # still commit the association cleanup (a stray tag could point at a
+        # non-existent inbound row only when broken data was pre-existing)
+        db.commit()
+        return False
+    db.delete(row)
+    db.commit()
+    return True
+
+
 def get_hosts(db: Session, inbound_tag: str) -> List[ProxyHost]:
     """
     Retrieves hosts for a given inbound tag.

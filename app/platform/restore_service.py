@@ -123,6 +123,13 @@ class RestoreReport:
     credentials: dict[str, str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     restart: dict[str, Any] = field(default_factory=dict)
+    # hand-off to the async API layer (not serialized): the listeners the
+    # source carried and the users this run created — the inbound
+    # materialization is a studio transaction that cannot run from the
+    # thread-bound row importer.
+    pending_inbounds: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    pending_hosts: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    imported_usernames: list[str] = field(default_factory=list, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -274,7 +281,32 @@ def _inspect_foreign(archive: Path, source: str, report: RestoreReport, *,
         report.source = used_source
         report.steps.append(f"read {db_path.name} as {used_source}")
         report.counts = {"users": len(snapshot.users), "hosts": len(snapshot.hosts),
-                         "admins": len(snapshot.admins), "nodes": len(snapshot.nodes)}
+                         "admins": len(snapshot.admins), "nodes": len(snapshot.nodes),
+                         "inbounds": len(snapshot.inbounds)}
+        # listeners carried by the source (3x-ui): created on the xray core
+        # by the API layer after the rows are in — previewed here so the
+        # operator sees them BEFORE applying, with what cannot be carried.
+        report.pending_inbounds = [dict(item) for item in snapshot.inbounds]
+        report.pending_hosts = [dict(item) for item in snapshot.hosts]
+        # every user of the source that exists on the panel afterwards
+        # (created by this run OR an earlier one) is converged onto the
+        # imported inbounds by the API layer — unknown names are skipped there
+        report.imported_usernames = [
+            str(u.get("username")) for u in snapshot.users if u.get("username")]
+        if snapshot.inbounds:
+            summary = ", ".join(
+                f"{item.get('tag')} ({item.get('protocol')}/"
+                f"{(item.get('settings') or {}).get('transport', 'tcp')}:{item.get('port')})"
+                for item in snapshot.inbounds[:12])
+            more = len(snapshot.inbounds) - 12
+            report.steps.append(
+                f"{len(snapshot.inbounds)} inbound(s) found in the source: {summary}"
+                + (f" (+{more} more)" if more > 0 else "")
+                + (" — they will be created on the xray core" if apply
+                   else " — applying creates them on the xray core"))
+            for item in snapshot.inbounds:
+                for note in item.get("notes") or []:
+                    report.notes.append(f"inbound {item.get('tag')}: {note}")
 
         if session_factory is None or cipher is None or users_repo is None:
             report.warnings.append("preview only — the importer is not wired to a session")
@@ -300,6 +332,13 @@ def _inspect_foreign(archive: Path, source: str, report: RestoreReport, *,
             report.counts.update({"panel_users": panel["created"],
                                   "panel_proxies": panel["proxies_created"],
                                   "panel_users_already_present": panel["skipped_existing"]})
+            restricted = panel.get("proxies_restricted") or 0
+            if restricted:
+                report.counts["panel_proxies_restricted"] = restricted
+                report.steps.append(
+                    f"{restricted} imported proxy(ies) bound to exactly the "
+                    "inbounds the source assigned them — the other listeners "
+                    "of those protocols are excluded for these users")
             report.warnings.extend(panel["warnings"])
             report.steps.append(
                 f"{panel['created']} user(s) written to the panel's user list "
@@ -324,9 +363,22 @@ def _inspect_foreign(archive: Path, source: str, report: RestoreReport, *,
 def restore_foreign(archive: Path, source: str, *, session_factory, cipher,
                     users_repo, legacy_session_factory=None) -> RestoreReport:
     report = RestoreReport(source=source, archive=Path(archive).name, dry_run=False)
-    result = _inspect_foreign(Path(archive), source, report, session_factory=session_factory,
-                              cipher=cipher, users_repo=users_repo,
-                              legacy_session_factory=legacy_session_factory, apply=True)
+    try:
+        result = _inspect_foreign(Path(archive), source, report, session_factory=session_factory,
+                                  cipher=cipher, users_repo=users_repo,
+                                  legacy_session_factory=legacy_session_factory, apply=True)
+    except RestoreError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - name the failing row, never a bare 500
+        from sqlalchemy.exc import SQLAlchemyError
+
+        if isinstance(exc, SQLAlchemyError):
+            detail = str(getattr(exc, "orig", None) or exc).splitlines()[0]
+            raise RestoreError(
+                f"the {source} import stopped at the database: {detail} — "
+                "nothing after that row was written; fix the offending record "
+                "in the source and upload the archive again") from exc
+        raise
     result.restart = {"required": False,
                       "reason": "an import changes rows, not the deployment"}
     return result

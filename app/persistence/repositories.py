@@ -468,6 +468,14 @@ class SQLPortalSettingsStore:
                 else:
                     row.value_json = payload
                 s.commit()
+            # user serializers cache the public link shape for a few seconds;
+            # a save must be visible on the very next API response
+            try:
+                from app.platform.subscription_links import invalidate
+
+                invalidate()
+            except Exception:  # noqa: BLE001 - cache hygiene never fails a save
+                pass
             return settings
         return await asyncio.to_thread(_sync)
 
@@ -577,7 +585,9 @@ class UserRepository:
             if upload_limit_mbps is not None:
                 row.upload_limit_mbps = int(upload_limit_mbps)
             if note is not None:
-                row.note = note
+                # VARCHAR(500): MySQL refuses longer values (1406) and a
+                # migration/import must not die on an oversized remark.
+                row.note = str(note)[:500] or None
             if client_auth_mode is not None:
                 row.client_auth_mode = client_auth_mode
             if admin_id is not None:

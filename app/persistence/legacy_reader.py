@@ -24,6 +24,12 @@ class LegacySnapshot:
     usage_reset_logs: list[dict[str, Any]] = field(default_factory=list)
     node_user_usages: list[dict[str, Any]] = field(default_factory=list)
     system: dict[str, Any] | None = None
+    #: listener definitions a source carries IN its database (3x-ui keeps
+    #: every inbound there; Marzban keeps them in xray_config.json, so this
+    #: stays empty for Marzban-shaped panels). Each entry is a wizard-shaped
+    #: spec: {tag, protocol, port, listen, settings{transport, security,
+    #: path, host, service_name, sni, ...}, remark, enabled, notes[]}.
+    inbounds: list[dict[str, Any]] = field(default_factory=list)
 
 
 _TABLES: dict[str, str] = {

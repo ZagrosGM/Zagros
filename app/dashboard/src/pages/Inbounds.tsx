@@ -24,6 +24,10 @@ interface WizardField {
    *  panel the field belongs to — the stepper renders groups, not a flat
    *  wall. "headers" joins for the transport verb/header depth. */
   section?: "general" | "transport" | "headers" | "tls" | "reality" | "certificate" | "advanced";
+  /** {sibling key: allowed values} — the field applies (is shown AND
+   *  submitted) only while every listed sibling holds an allowed value,
+   *  e.g. the RAW/TCP camouflage facts only under header_type = http. */
+  depends_on?: Record<string, string[]>;
 }
 interface WizardSecurity { id: string; label: string; fields: WizardField[] }
 interface WizardTransport { id: string; label: string; securities: WizardSecurity[] }
@@ -338,6 +342,26 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
     ));
   };
 
+  // Effective value of a field: what the operator typed, else the schema
+  // default (the input shows exactly this).
+  const effectiveValue = (key: string): unknown => {
+    if (fields[key] !== undefined) return fields[key];
+    return effSecurity?.fields.find((f) => f.key === key)?.default;
+  };
+  // A dependent field only applies while its controlling siblings hold one
+  // of the allowed values — otherwise it is neither shown nor submitted, so a
+  // hidden default (GET / 200 / OK under header_type = none) can never
+  // contradict the visible choice server-side.
+  const depsMet = (f: WizardField): boolean =>
+    Object.entries(f.depends_on ?? {}).every(([key, allowed]) => {
+      const v = effectiveValue(key);
+      return allowed.includes(v === undefined || v === null ? "" : String(v));
+    });
+  // Controllers (fields others depend on) are a real decision — visible even
+  // in Simple mode.
+  const isController = (f: WizardField): boolean =>
+    (effSecurity?.fields ?? []).some((o) => o.depends_on && Object.keys(o.depends_on).includes(f.key));
+
   const spec = useMemo(() => {
     if (!effProto || !effTransport || !effSecurity) return null;
     const settings: Record<string, unknown> = {
@@ -345,6 +369,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
       security: effSecurity.id,
     };
     for (const f of effSecurity.fields) {
+      if (!depsMet(f)) continue;
       // The displayed schema default is part of the submitted spec. The old
       // code rendered defaults in the input but skipped them in the payload;
       // generated required values (notably SoftEther's L2TP PSK) therefore
@@ -378,6 +403,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
   const fieldErrors = useMemo(() => {
     const errs: Record<string, string> = {};
     for (const f of effSecurity?.fields ?? []) {
+      if (!depsMet(f)) continue;
       const raw = fields[f.key];
       const empty = raw === undefined || raw === "" || (Array.isArray(raw) && raw.length === 0);
       const val = raw === undefined ? f.default : raw;
@@ -389,6 +415,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
     return errs;
   }, [effSecurity, fields]);
   const missingRequired = (effSecurity?.fields ?? []).filter((f) => {
+    if (!depsMet(f)) return false;
     const val = fields[f.key] === undefined ? f.default : fields[f.key];
     return f.required && (val === undefined || val === "" || (Array.isArray(val) && val.length === 0));
   });
@@ -483,9 +510,10 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
   // default (the server cannot guess it), or the operator already set it —
   // everything else lives under Advanced (full Marzban-style control).
   const fieldVisible = (f: WizardField) =>
-    advanced || !!f.required || f.default === undefined ||
-    (fields[f.key] !== undefined && fields[f.key] !== "" &&
-     !(Array.isArray(fields[f.key]) && (fields[f.key] as string[]).length === 0));
+    depsMet(f) && (
+      advanced || !!f.required || f.default === undefined || isController(f) ||
+      (fields[f.key] !== undefined && fields[f.key] !== "" &&
+       !(Array.isArray(fields[f.key]) && (fields[f.key] as string[]).length === 0)));
 
   return (
     <Dialog open onClose={onClose} wide

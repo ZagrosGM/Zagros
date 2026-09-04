@@ -243,15 +243,26 @@ async def panel_network_transition_probe(operation_id: str):
 # Subscription portal (/zagros/sub/{token})
 # ---------------------------------------------------------------------- #
 
-async def _legacy_sub_user_id(token: str) -> int | None:
+async def _legacy_sub_user_id(token: str, runtime=None) -> int | None:
     """Validate a LEGACY username token (pre-
     `create_subscription_token`) under the legacy rules (issued before the
     user's created_at is invalid; `sub_revoked_at` revokes). Returns the
-    platform user id, or None when the token is not a valid legacy token.
+    **platform** user id, or None when the token is not a valid legacy token.
 
     This is the migration bridge: the legacy /sub/ endpoint is GONE, but
     already-issued URLs (telegram bot messages, admin notes) must keep
-    working — they land on the one multi-core portal now."""
+    working — they land on the one multi-core portal now.
+
+    The token names the user by USERNAME. The portal, however, is keyed by
+    the platform ``users.id`` — a different table with its own sequence.
+    Returning the legacy row id here only worked while both stores had been
+    filled in lock-step; a 3x-ui/Marzban import (which writes the two stores
+    independently), a deleted-and-recreated user, or a panel restored from a
+    backup makes the sequences diverge — and a legacy link then served
+    ANOTHER user's subscription (same number, different table) or a bare
+    ``subscription not found``. Resolve by username on BOTH sides instead,
+    and heal a missing platform projection on the spot (a legacy row that
+    never got mirrored is still a real user with a real link)."""
     import asyncio as _asyncio
 
     from app.utils.jwt import get_subscription_payload
@@ -260,7 +271,7 @@ async def _legacy_sub_user_id(token: str) -> int | None:
     if not sub:
         return None
 
-    def _resolve() -> int | None:
+    def _legacy_row():
         from app.db import crud
         from app.db.base import SessionLocal
 
@@ -271,11 +282,34 @@ async def _legacy_sub_user_id(token: str) -> int | None:
                 return None
             if dbuser.sub_revoked_at and dbuser.sub_revoked_at > sub["created_at"]:
                 return None
-            return int(dbuser.id)
+            # the self-heal below reads these relationships AFTER the
+            # session is gone — load them now (detached rows only answer
+            # for what was loaded while attached)
+            for proxy in dbuser.proxies:
+                _ = [i.tag for i in proxy.excluded_inbounds]
+            _ = getattr(dbuser.admin, "username", None)
+            return dbuser
         finally:
             db.close()
 
-    return await _asyncio.to_thread(_resolve)
+    dbuser = await _asyncio.to_thread(_legacy_row)
+    if dbuser is None:
+        return None
+    if runtime is None:
+        return int(dbuser.id)  # no platform store to map into (bare legacy stack)
+    row = await _asyncio.to_thread(runtime.users.get_user_by_username, dbuser.username)
+    if row is not None:
+        return int(row.id)
+    # the legacy row exists but was never projected: converge it now (the
+    # same path User Edit takes) so the link works instead of 404-ing.
+    try:
+        from app.platform import provisioning
+
+        return int(await provisioning.sync_user(runtime, dbuser, None))
+    except Exception as exc:  # noqa: BLE001 — honest miss, never a 500
+        logger.warning("legacy subscription token for %r: platform projection "
+                       "missing and self-heal failed: %s", dbuser.username, exc)
+        return None
 
 
 async def _verify_and_serve(token, request, runtime,
@@ -294,7 +328,7 @@ async def _verify_and_serve(token, request, runtime,
     if user_id is None:
         # legacy username token (issued pre-) — same portal, one
         # multi-core subscription surface, legacy revocation rules honored
-        user_id = await _legacy_sub_user_id(token)
+        user_id = await _legacy_sub_user_id(token, runtime)
     if user_id is None:
         raise HTTPException(404, "subscription not found")
     return await _serve_subscription(runtime, user_id, request,
@@ -859,18 +893,17 @@ async def studio_wizard_delete_inbound(core_id: str, tag: str,
         await reconcile_default_hosts(runtime.core_hosts, core_id, tags)
     elif core_id == "xray":
         # Grant cascade ran first; now the legacy inbound/host row can be
-        # removed cleanly. ProxyHost has delete-orphan cascade from inbound.
+        # removed cleanly. Association rows (proxy exclusions / template
+        # inbounds) pointing at the tag are removed first — their FKs carry
+        # no ON DELETE CASCADE and MySQL answers 1451 otherwise — then the
+        # inbound itself (ProxyHost goes with it via delete-orphan).
         import asyncio as _asyncio
 
         def _remove_legacy_host() -> None:
-            from app.db import GetDB
-            from app.db.models import ProxyInbound
+            from app.db import GetDB, crud
 
             with GetDB() as db:
-                row = db.query(ProxyInbound).filter(ProxyInbound.tag == tag).first()
-                if row is not None:
-                    db.delete(row)
-                    db.commit()
+                crud.remove_inbound_row(db, tag)
 
         await _asyncio.to_thread(_remove_legacy_host)
     return {"ok": True, "deleted": tag,

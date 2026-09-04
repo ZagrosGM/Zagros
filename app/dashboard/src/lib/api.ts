@@ -23,9 +23,28 @@ export class ApiError extends Error {
   }
 }
 
+/** The sign-in call itself: a 401 here means WRONG CREDENTIALS, never an
+ *  expired session. */
+const LOGIN_PATH = "/admin/token";
+
+/** Session-generation counter. Bumped on every sign-in and sign-out so a
+ *  response that belongs to an OLDER session (a background poller fired with
+ *  a stale token a moment before the operator signed in) can never clear the
+ *  fresh token or redirect the shell back to /login. */
+let sessionGeneration = 0;
+export function bumpSession(): void { sessionGeneration += 1; }
+
+function detailMessage(data: unknown, status: number): string {
+  const detail = (data as { detail?: unknown })?.detail;
+  return typeof detail === "string" ? detail
+    : Array.isArray(detail) ? detail.map((d: { msg?: string }) => d.msg).join("; ")
+    : `request failed (${status})`;
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   const token = getToken();
+  const generation = sessionGeneration;
   if (token) headers.set("Authorization", `Bearer ${token}`);
   if (init.body && !headers.has("Content-Type") && !(init.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
@@ -36,22 +55,27 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   } catch {
     throw new ApiError(0, "network error — the panel is unreachable");
   }
-  if (res.status === 401) {
-    setToken("");
-    if (!location.hash.includes("/login")) location.assign("#/login");
-    throw new ApiError(401, "session expired — sign in again");
-  }
   if (res.status === 204) return undefined as T;
   const text = await res.text();
   let data: unknown = undefined;
   try { data = text ? JSON.parse(text) : undefined; } catch { data = text; }
-  if (!res.ok) {
-    const detail = (data as { detail?: unknown })?.detail;
-    const msg = typeof detail === "string" ? detail
-      : Array.isArray(detail) ? detail.map((d: { msg?: string }) => d.msg).join("; ")
-      : `request failed (${res.status})`;
-    throw new ApiError(res.status, msg, data);
+  if (res.status === 401) {
+    if (path === LOGIN_PATH) {
+      // Bad username/password (or an expired admin account) — the server's
+      // detail says which; never mistake it for a dead session.
+      throw new ApiError(401, detailMessage(data, 401), data);
+    }
+    // Only the CURRENT session may be declared dead: a late reply to a
+    // request sent with a previous token must not log the operator out.
+    if (generation === sessionGeneration && token && getToken() === token) {
+      setToken("");
+      bumpSession();
+      if (!location.hash.includes("/login")) location.assign("#/login");
+      throw new ApiError(401, "session expired — sign in again");
+    }
+    throw new ApiError(401, detailMessage(data, 401), data);
   }
+  if (!res.ok) throw new ApiError(res.status, detailMessage(data, res.status), data);
   return data as T;
 }
 
@@ -99,10 +123,16 @@ export const api = {
 
 export const auth = {
   async login(username: string, password: string): Promise<void> {
-    const t = await api.form<{ access_token: string }>("/admin/token", { username, password });
+    // A stale token from a previous session must not ride along on the
+    // sign-in request, and nothing issued before this moment may touch the
+    // new session (see sessionGeneration).
+    setToken("");
+    bumpSession();
+    const t = await api.form<{ access_token: string }>(LOGIN_PATH, { username, password });
     setToken(t.access_token);
+    bumpSession();
   },
-  logout(): void { setToken(""); },
+  logout(): void { setToken(""); bumpSession(); },
 };
 
 /** Human-readable reason a Zagros admin panel query failed.

@@ -1,8 +1,9 @@
 """Share-URL parser ("Import URL") for URL-based proxy protocols.
 
 One Paste of ``vless://...`` / ``vmess://...`` / ``trojan://...`` /
-``ss://...`` / ``hysteria2://...`` / ``tuic://...`` fills every outbound
-field — address, port, UUID/password, security, flow, transport
+``ss://...`` / ``hysteria2://...`` / ``tuic://...`` / ``anytls://...`` /
+``naive+https://...`` / ``socks5://...`` / ``http(s)://...`` fills every
+outbound field — address, port, UUID/password, security, flow, transport
 (ws/gRPC/HTTP/HTTPUpgrade/KCP/SplitHTTP/QUIC/TCP), SNI, ALPN, fingerprint
 and the full REALITY parameter set.
 
@@ -319,6 +320,71 @@ def _parse_tuic(url: str) -> ParsedShareURL:
                           transport="udp", security="tls")
 
 
+def _parse_anytls(url: str) -> ParsedShareURL:
+    """anytls-go URI scheme: ``anytls://password@host[:443]/?sni=&insecure=#name``
+    (the password is percent-encoded; the port defaults to 443)."""
+    parsed = _urlparse(url)
+    password = unquote(parsed.username or "")
+    host = parsed.hostname or ""
+    if not host:
+        raise ShareURLError("anytls link is missing a server address")
+    if not password:
+        raise ShareURLError("anytls link is missing the password")
+    port = parsed.port if parsed.port is not None else 443
+    q = _query(parsed)
+    settings: dict = {"server": host, "server_port": port, "password": password,
+                      "security": "tls"}
+    for src, dst in (("sni", "sni"), ("alpn", "alpn"), ("fp", "fingerprint"),
+                     ("insecure", "allow_insecure"), ("allowInsecure", "allow_insecure")):
+        if q.get(src):
+            settings[dst] = q[src]
+    if "allow_insecure" in settings:
+        settings["allow_insecure"] = str(settings["allow_insecure"]).lower() in ("1", "true")
+    return ParsedShareURL(kind=OutboundKind.ANYTLS, settings=settings,
+                          name_hint=_fragment_name(parsed), protocol="anytls",
+                          transport="tcp", security="tls")
+
+
+def _parse_userpass(url: str) -> ParsedShareURL:
+    """Plain proxy URLs: ``socks5://user:pass@host:port#name``,
+    ``http(s)://user:pass@host:port#name`` and NaïveProxy's
+    ``naive+https://user:pass@host:port#name`` (its TLS name IS the host)."""
+    parsed = _urlparse(url)
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname or ""
+    if not host:
+        raise ShareURLError(f"{scheme} link is missing a server address")
+    default_port = {"https": 443, "naive+https": 443, "http": 80}.get(scheme)
+    port = parsed.port if parsed.port is not None else default_port
+    if port is None:
+        raise ShareURLError(f"{scheme} link is missing a port")
+    settings: dict = {"server": host, "server_port": port}
+    if parsed.username:
+        settings["username"] = unquote(parsed.username)
+    if parsed.password is not None:
+        settings["password"] = unquote(parsed.password)
+    if scheme in ("socks", "socks5", "socks5h"):
+        settings["version"] = "5"
+        settings["security"] = "none"
+        return ParsedShareURL(kind=OutboundKind.SOCKS, settings=settings,
+                              name_hint=_fragment_name(parsed), protocol="socks",
+                              transport="tcp", security="none")
+    if scheme == "naive+https":
+        if not settings.get("username") or settings.get("password") is None:
+            raise ShareURLError("naive link needs user:password credentials")
+        # no separate SNI: the TLS name IS the host (an SNI host override
+        # therefore moves the host itself when the link is re-emitted)
+        settings["security"] = "tls"
+        return ParsedShareURL(kind=OutboundKind.NAIVE, settings=settings,
+                              name_hint=_fragment_name(parsed), protocol="naive",
+                              transport="tcp", security="tls")
+    security = "tls" if scheme == "https" else "none"
+    settings["security"] = security
+    return ParsedShareURL(kind=OutboundKind.HTTP, settings=settings,
+                          name_hint=_fragment_name(parsed), protocol="http",
+                          transport="tcp", security=security)
+
+
 _PARSERS = {
     "vless": _parse_vless,
     "trojan": _parse_trojan,
@@ -329,6 +395,13 @@ _PARSERS = {
     "hysteria2": _parse_hysteria2,
     "hy2": _parse_hysteria2,
     "tuic": _parse_tuic,
+    "anytls": _parse_anytls,
+    "naive+https": _parse_userpass,
+    "socks": _parse_userpass,
+    "socks5": _parse_userpass,
+    "socks5h": _parse_userpass,
+    "http": _parse_userpass,
+    "https": _parse_userpass,
 }
 
 SUPPORTED_SCHEMES = sorted(_PARSERS)

@@ -2876,6 +2876,26 @@ DEFAULT_SUPPORT_BOT_URL = "https://support.zagrosgm.site"
 DEFAULT_SUPPORT_INTEGRATION_SECRET = "6b3f42e6569ab1184fafe7ed3e60879ba5cb74ce855371d92274d36987ebd6dc"
 
 
+class SupportBotError(RuntimeError):
+    """The support bot refused or could not be reached — message says why."""
+
+    def __init__(self, message: str, *, status: int | None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def _is_upload_size_refusal(bot_error: Any) -> bool:
+    """PHP's ``$_FILES[...]['error']`` codes 1 and 2 mean "file too large for
+    this server" (upload_max_filesize / MAX_FILE_SIZE); the bot echoes them as
+    ``Attachment error: Upload error code: N``."""
+    text = str(bot_error or "").lower()
+    if not text:
+        return False
+    if "upload error code: 1" in text or "upload error code: 2" in text:
+        return True
+    return "too large" in text or ("exceeds" in text and "size" in text)
+
+
 class SupportConfigBody(BaseModel):
     bot_url: str = Field(default="")
     integration_secret: str = Field(default="")
@@ -2936,14 +2956,54 @@ async def _forward_ticket_to_bot(
     if not target_url.endswith(".php"):
         target_url = f"{target_url}/api.php"
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post(target_url, data=form_data, files=files, headers=headers)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Support bot returned HTTP {resp.status_code}")
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(target_url, data=form_data, files=files, headers=headers)
+    except httpx.HTTPError as exc:
+        raise SupportBotError(
+            f"the support bot at {target_url} is unreachable ({exc.__class__.__name__})",
+            status=None) from exc
+    try:
         data = resp.json()
-        if not isinstance(data, dict) or not data.get("ok"):
-            raise RuntimeError(data.get("error") if isinstance(data, dict) else "Support bot error")
-        return data
+    except ValueError:
+        data = {}
+    bot_error = data.get("error") if isinstance(data, dict) else None
+    if resp.status_code == 401:
+        # The bot verified our HMAC and refused it: the panel's integration
+        # secret is not the one configured in the bot (or the clocks differ).
+        raise SupportBotError(
+            "the support bot rejected this panel's signature "
+            f"({bot_error or 'HTTP 401'}) — the integration secret does not match "
+            "the bot's configuration, or the two clocks disagree", status=401)
+    if resp.status_code != 200:
+        if files and _is_upload_size_refusal(bot_error):
+            # PHP dropped the file before the bot script saw it
+            # (UPLOAD_ERR_INI_SIZE / UPLOAD_ERR_FORM_SIZE): the attachment is
+            # bigger than the BOT server accepts, whatever the panel allows.
+            raise SupportBotError(
+                f"the support bot refused the attachment ({len(file_bytes or b'') // 1024} KB): "
+                "it is larger than the bot server accepts (PHP upload_max_filesize / "
+                "post_max_size). Attach a smaller file or raise the limit on the bot host",
+                status=413)
+        raise SupportBotError(
+            f"the support bot answered HTTP {resp.status_code}"
+            + (f": {bot_error}" if bot_error else ""), status=resp.status_code)
+    if not isinstance(data, dict) or not data.get("ok"):
+        raise SupportBotError(
+            f"the support bot did not accept the ticket: {bot_error or 'unknown error'}",
+            status=resp.status_code)
+    return data
+
+
+async def _support_settings(runtime) -> tuple[str, str]:
+    """Bot URL + integration secret: the saved override, else the defaults."""
+    try:
+        raw = await runtime.kv.get_value("admin.support.config.v1") or {}
+    except Exception:  # noqa: BLE001 - settings must never block a ticket
+        raw = {}
+    bot_url = str(raw.get("bot_url") or "").strip() or DEFAULT_SUPPORT_BOT_URL
+    secret = str(raw.get("integration_secret") or "").strip() or DEFAULT_SUPPORT_INTEGRATION_SECRET
+    return bot_url, secret
 
 
 @zagros_admin_router.get("/support/config")
@@ -2984,8 +3044,7 @@ async def support_test_send(
 ):
     if not body.confirm:
         raise HTTPException(400, "Admin confirmation required to send test message")
-    bot_url = DEFAULT_SUPPORT_BOT_URL
-    secret = DEFAULT_SUPPORT_INTEGRATION_SECRET
+    bot_url, secret = await _support_settings(runtime)
 
     try:
         res = await _forward_ticket_to_bot(
@@ -2995,6 +3054,9 @@ async def support_test_send(
             message="This is a test message sent from Zagros Panel to verify Telegram Bot integration.",
         )
         return {"ok": True, "detail": "Test message delivered successfully to Telegram Bot", "ticket_id": res.get("ticket_id")}
+    except SupportBotError as exc:
+        logger.error("Support test connection failed: %s", exc)
+        raise HTTPException(502, f"Support service unavailable: {exc}") from exc
     except Exception as exc:
         logger.error("Support test connection failed: %s", exc)
         raise HTTPException(502, "Support service is temporarily unavailable.") from exc
@@ -3016,8 +3078,7 @@ async def support_submit_ticket(
     if not subj or not msg:
         raise HTTPException(422, "Subject and Message are required")
 
-    bot_url = DEFAULT_SUPPORT_BOT_URL
-    secret = DEFAULT_SUPPORT_INTEGRATION_SECRET
+    bot_url, secret = await _support_settings(runtime)
 
     file_bytes = None
     file_name = None
@@ -3040,6 +3101,13 @@ async def support_submit_ticket(
         return {"ok": True, "ticket_id": res.get("ticket_id"), "detail": "Ticket submitted successfully"}
     except HTTPException:
         raise
+    except SupportBotError as exc:
+        # Say WHY (unreachable / signature refused / bot error) so the operator
+        # can act, instead of a blanket "temporarily unavailable".
+        logger.error("Support ticket submission failed: %s", exc)
+        if exc.status == 413:
+            raise HTTPException(413, f"Attachment not accepted: {exc}") from exc
+        raise HTTPException(502, f"Support service unavailable: {exc}") from exc
     except Exception as exc:
         logger.error("Support ticket submission failed: %s", exc)
         raise HTTPException(502, "Support service is temporarily unavailable.") from exc
@@ -3462,7 +3530,25 @@ async def apply_restore_archive(body: dict, request: Request,
     _audit(runtime, f"restore.applied.{source}", path.name, request=request)
     # The archive is staging-only once applied; keep nothing behind.
     await asyncio.to_thread(restore_service.discard, path)
-    return report.to_dict()
+    payload = report.to_dict()
+    if source != "zagros" and report.pending_inbounds:
+        # 3x-ui carries its listeners in the database: create them on the
+        # xray core (studio transaction — async, under the core lock) and
+        # attach the imported users, so "imported" means "can connect".
+        from app.platform.restore_inbounds import materialize_imported_inbounds
+        from app.persistence.legacy_reader import LegacySnapshot
+
+        snapshot = LegacySnapshot(inbounds=report.pending_inbounds,
+                                  hosts=report.pending_hosts)
+        try:
+            payload = await materialize_imported_inbounds(
+                runtime, snapshot, payload, usernames=report.imported_usernames)
+        except Exception as exc:  # noqa: BLE001 — rows are in; say what failed
+            logger.warning("restore: inbound materialization failed: %s", exc)
+            payload.setdefault("warnings", []).append(
+                f"users were imported but their inbounds could not be created "
+                f"on the xray core: {exc} — add them in Inbounds → Add inbound")
+    return payload
 
 
 # --------------------------------------------------------------------- #
@@ -3611,6 +3697,39 @@ async def set_token_lifetime(body: dict, request: Request,
     _audit(runtime, "security.token_lifetime", str(minutes), request=request)
     return {"override_minutes": saved.get("token_expire_minutes"),
             "source": "database" if minutes is not None else "environment"}
+
+
+# --------------------------------------------------------------------- #
+# API defaults — what Marzban-compatible clients get when they do not say
+# --------------------------------------------------------------------- #
+@zagros_admin_router.get("/settings/api-defaults")
+async def api_defaults_get(runtime=Depends(get_runtime)):
+    """The panel-wide policy for ``POST /api/user`` calls without ``core_access``
+    (bots and shops written for Marzban), plus a preview of the grants it
+    resolves to right now."""
+    from app.platform import api_defaults
+
+    policy = await asyncio.to_thread(api_defaults.load_policy, runtime.session_factory)
+    try:
+        resolved = await api_defaults.default_core_access(runtime)
+    except Exception:  # noqa: BLE001 - the policy page still opens
+        resolved = None
+    return {"core_access": policy.get("core_access", "all"),
+            "resolved_core_access": resolved or {}}
+
+
+@zagros_admin_router.put("/settings/api-defaults")
+async def api_defaults_put(body: dict, request: Request, runtime=Depends(get_runtime)):
+    from app.platform import api_defaults
+
+    try:
+        policy = api_defaults.normalize_policy(dict(body or {}))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    saved = await asyncio.to_thread(api_defaults.save_policy, runtime.session_factory, policy)
+    _audit(runtime, "settings.api_defaults", json.dumps(saved.get("core_access")), request=request)
+    resolved = await api_defaults.default_core_access(runtime)
+    return {"core_access": saved.get("core_access"), "resolved_core_access": resolved or {}}
 
 
 def _list_sessions(runtime) -> list[dict]:

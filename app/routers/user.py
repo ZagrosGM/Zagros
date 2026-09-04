@@ -90,6 +90,20 @@ def _bridge_sync(request: Request, dbuser, grants) -> int | None:
         ) from exc
 
 
+def _default_api_grants(request: Request) -> dict | None:
+    """Panel-wide default ``core_access`` for a create request without one."""
+    runtime = _platform_runtime(request)
+    if runtime is None:
+        return None
+    from app.platform import api_defaults
+
+    try:
+        return asyncio.run(api_defaults.default_core_access(runtime))
+    except Exception as exc:  # noqa: BLE001 — defaults are best-effort
+        logger.warning("default core_access could not be resolved: %s", exc)
+        return None
+
+
 def _bridge_grants(request: Request, username: str) -> dict | None:
     runtime = _platform_runtime(request)
     if runtime is None:
@@ -181,8 +195,15 @@ def add_user(
 
     bg.add_task(xray.operations.add_user, dbuser=dbuser)
     bg.add_task(_sync_nodes_after_user_change, request)
+    # Marzban-compatible clients (bots, shops) never send ``core_access``:
+    # they get the panel's default grants (Settings → API defaults) so a
+    # bot-created user is not silently xray-only on a multi-core panel. An
+    # explicit mapping — even {} — is the caller's decision and wins.
+    grants = new_user.core_access
+    if grants is None:
+        grants = _default_api_grants(request)
     try:
-        platform_id = _bridge_sync(request, dbuser, new_user.core_access)
+        platform_id = _bridge_sync(request, dbuser, grants)
         _ensure_xray_bandwidth_identity(
             dbuser, platform_user_id=platform_id)
     except HTTPException:
@@ -324,9 +345,10 @@ def remove_user(
     bg.add_task(xray.operations.remove_user, dbuser=dbuser)
     bg.add_task(_sync_nodes_after_user_change, request)
 
-    bg.add_task(
-        report.user_deleted, username=dbuser.username, user_admin=Admin.model_validate(dbuser.admin), by=admin
-    )
+    # An imported user (3x-ui / Marzban archive) may have no owning admin —
+    # deleting it must not 500 on validating ``None`` as an Admin.
+    owner = Admin.model_validate(dbuser.admin) if dbuser.admin is not None else None
+    bg.add_task(report.user_deleted, username=dbuser.username, user_admin=owner, by=admin)
 
     logger.info(f'User "{dbuser.username}" deleted')
     return {"detail": "User successfully deleted"}

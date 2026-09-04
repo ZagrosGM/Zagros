@@ -63,10 +63,23 @@ logger = logging.getLogger(__name__)
 
 # security override values that mean "leave the inbound's own TLS alone"
 _KEEP_SECURITY = {None, "", "inbound_default"}
-_TLS_CAPABLE = {"vless", "trojan", "vmess", "hysteria2", "tuic"}
+_TLS_CAPABLE = {"vless", "trojan", "vmess", "hysteria2", "tuic", "anytls", "naive", "http"}
 _REALITY_CAPABLE = {"vless"}
+# transports that carry an HTTP request (path + Host header) — plus the
+# RAW/TCP HTTP-header camouflage, see :func:`_carries_http_request`
 _PATH_TRANSPORTS = {"ws", "http", "httpupgrade", "splithttp"}
-_HOST_TRANSPORTS = {"ws", "httpupgrade"}
+_HOST_TRANSPORTS = {"ws", "http", "httpupgrade", "splithttp"}
+
+
+def _carries_http_request(s: Mapping[str, Any]) -> bool:
+    """True when the link's transport sends an HTTP request whose path/Host
+    an admin may override: ws / http(h2) / httpupgrade / xhttp, and the
+    xray RAW/TCP ``headerType=http`` camouflage. (The old ws/httpupgrade-only
+    set silently DROPPED the Host of http/xhttp links — sing-box verifies it.)"""
+    net = s.get("network", "tcp") or "tcp"
+    if net in _PATH_TRANSPORTS:
+        return True
+    return net in ("tcp", "raw") and str(s.get("headerType") or "none") == "http"
 # URI-level client hints (v2rayN/sing-box share-link conventions)
 _XMUX_CAPABLE = {"vless", "trojan"}
 _FRAGMENT_CAPABLE = {"vless", "trojan"}
@@ -284,15 +297,46 @@ def _emit(parsed: ParsedShareURL, remark: str) -> str:
             auth += f":{quote(str(s['password']), safe='')}"
         return f"tuic://{auth}@{server}:{port}?{_q(params)}#{tag}"
 
+    if proto == "anytls":
+        params = {}
+        if s.get("sni"):
+            params["sni"] = s["sni"]
+        if s.get("allow_insecure"):
+            params["insecure"] = "1"
+        if s.get("alpn"):
+            params["alpn"] = s["alpn"]
+        if s.get("fingerprint"):
+            params["fp"] = s["fingerprint"]
+        qs = f"?{_q(params)}" if params else ""
+        return f"anytls://{quote(str(s['password']), safe='')}@{server}:{port}/{qs}#{tag}"
+
+    if proto in ("naive", "socks", "http"):
+        auth = ""
+        if s.get("username"):
+            auth = quote(str(s["username"]), safe="")
+            if s.get("password") is not None:
+                auth += ":" + quote(str(s["password"]), safe="")
+            auth += "@"
+        if proto == "naive":
+            scheme = "naive+https"
+            # the TLS name IS the host for naive — an SNI override moves the host
+            server = s.get("sni") or server
+        elif proto == "socks":
+            scheme = "socks5"
+        else:
+            scheme = "https" if s.get("security") == "tls" else "http"
+        return f"{scheme}://{auth}{server}:{port}#{tag}"
+
     raise ValueError(f"no emitter for protocol '{proto}'")
 
 
 def _emit_transport_params(s: dict[str, Any], params: dict[str, Any]) -> None:
     net = s.get("network", "tcp")
-    if net in _PATH_TRANSPORTS and s.get("path") is not None:
-        params["path"] = s.get("path")
-    if net in _HOST_TRANSPORTS and s.get("host"):
-        params["host"] = s["host"]
+    if _carries_http_request(s):
+        if s.get("path") is not None:
+            params["path"] = s.get("path")
+        if s.get("host"):
+            params["host"] = s["host"]
     if net == "grpc" and s.get("serviceName"):
         params["serviceName"] = s["serviceName"]
     if net == "tcp" and s.get("headerType") not in (None, "none"):
@@ -456,10 +500,10 @@ class HostSettingsEngine:
             if security not in _KEEP_SECURITY:
                 security = security.lower()
                 if security == "none":
-                    if proto == "hysteria2":
+                    if proto in ("hysteria2", "tuic", "anytls", "naive"):
                         inapplicable.append(
                             f"entry '{name}': security=none is not possible on "
-                            "Hysteria2 (TLS is protocol-defined)")
+                            f"{proto} (TLS is protocol-defined)")
                     else:
                         new["security"] = "none"
                         for k in ("sni", "alpn", "fingerprint",
@@ -484,7 +528,7 @@ class HostSettingsEngine:
             # link's `security` param records the raw query state (usually
             # "none"), NOT the protocol's TLS truth
             tls_effective = (
-                proto in ("hysteria2", "tuic")
+                proto in ("hysteria2", "tuic", "anytls", "naive")
                 or eff_security in ("tls", "reality")
             )
             if entry.sni:
@@ -506,7 +550,7 @@ class HostSettingsEngine:
                     inapplicable.append(
                         f"entry '{name}': fingerprint requires TLS")
             if entry.host:
-                if new.get("network") in _HOST_TRANSPORTS:
+                if _carries_http_request(new):
                     new["host"] = _r(entry.host)
                 else:
                     inapplicable.append(
@@ -515,17 +559,17 @@ class HostSettingsEngine:
             elif entry.use_sni_as_host and new.get("sni"):
                 # Marzban parity: reuse the effective SNI as the ws host —
                 # even when the entry leaves `host` unset.
-                if new.get("network") in _HOST_TRANSPORTS:
+                if _carries_http_request(new):
                     new["host"] = new["sni"]
             if entry.path:
-                if new.get("network") in _PATH_TRANSPORTS:
+                if _carries_http_request(new):
                     new["path"] = _r(entry.path)
                 else:
                     inapplicable.append(
                         f"entry '{name}': a path does not apply to "
                         f"{proto}/{new.get('network', 'tcp')}")
             if entry.allowinsecure is not None:
-                if proto in ("vless", "trojan", "hysteria2", "tuic"):
+                if proto in ("vless", "trojan", "hysteria2", "tuic", "anytls"):
                     new["allow_insecure"] = bool(entry.allowinsecure)
                 else:
                     inapplicable.append(

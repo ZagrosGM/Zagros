@@ -182,15 +182,29 @@ def _transport_params(transport: dict[str, Any], network: str,
         if isinstance(host, list):
             host = host[0] if host else None
         params["host"] = host
+    elif network in ("tcp", "raw") and transport.get("header_type") == "http":
+        # xray RAW/TCP HTTP-header camouflage: v2rayN/xray read
+        # headerType=http + path/host into tcpSettings.header.request
+        params["headerType"] = "http"
+        params["path"] = transport.get("path") or "/"
+        host = transport.get("host")
+        if isinstance(host, list):
+            host = host[0] if host else None
+        params["host"] = host
+
+
+def _tcp_http_header(transport: dict[str, Any], network: str) -> bool:
+    return network in ("tcp", "raw") and transport.get("header_type") == "http"
 
 
 def share_url_for_outbound(outbound: dict[str, Any], remark: str) -> str:
     """Encode a sing-box-shaped outbound fragment as a standard share link.
 
     Supported: ``vless``, ``vmess``, ``trojan``, ``shadowsocks``,
-    ``hysteria2``, ``tuic``.
-    Anything else raises :class:`ShareLinkError` — the presenter turns that
-    into an honest NOTE artifact instead of guessing a URL scheme.
+    ``hysteria2``, ``tuic``, ``anytls`` (anytls-go URI scheme), ``naive``
+    (``naive+https://``) and the plain proxy URLs for ``socks``/``http``/
+    ``mixed``. Anything else raises :class:`ShareLinkError` — the presenter
+    turns that into an honest NOTE artifact instead of guessing a URL scheme.
     """
     otype = outbound.get("type")
     server = outbound.get("server")
@@ -238,14 +252,16 @@ def share_url_for_outbound(outbound: dict[str, Any], remark: str) -> str:
             host = host[0] if host else ""
         if network == "grpc":
             path = str(transport.get("service_name") or "")
-        elif network in ("ws", "httpupgrade", "http"):
+        elif network in ("ws", "httpupgrade", "http") or _tcp_http_header(transport, network):
             path = str(transport.get("path") or "")
         else:
             path = ""
         doc = {
             "v": "2", "ps": remark, "add": server, "port": str(port),
             "id": uuid, "aid": "0", "scy": "auto",
-            "net": network, "type": "none",
+            "net": network,
+            # vmess JSON `type` IS the RAW header kind
+            "type": "http" if _tcp_http_header(transport, network) else "none",
             "host": host,
             "path": path,
             "tls": "tls" if tls_on else "",
@@ -316,6 +332,45 @@ def share_url_for_outbound(outbound: dict[str, Any], remark: str) -> str:
             params["allow_insecure"] = "1"
         auth = quote(str(uuid), safe="") + ":" + quote(str(password), safe="")
         return f"tuic://{auth}@{server}:{port}?{_query(params)}#{tag}"
+
+    if otype == "anytls":
+        # anytls-go URI scheme: anytls://[password@]host[:port]/?sni=&insecure=#name
+        password = outbound.get("password")
+        if password is None:
+            raise ShareLinkError("anytls outbound lacks password")
+        params = {}
+        if tls.get("server_name"):
+            params["sni"] = tls.get("server_name")
+        if tls.get("insecure"):
+            params["insecure"] = "1"
+        query = _query(params)
+        return (f"anytls://{quote(str(password), safe='')}@{server}:{port}/"
+                + (f"?{query}" if query else "") + f"#{tag}")
+
+    if otype == "naive":
+        # NaïveProxy proxy URL: naive+https://user:pass@host:port#name
+        # (the TLS name IS the host; there is no separate SNI parameter)
+        username, password = outbound.get("username"), outbound.get("password")
+        if not username or password is None:
+            raise ShareLinkError("naive outbound lacks username/password")
+        host = (tls.get("server_name") or server) if tls.get("enabled") else server
+        auth = quote(str(username), safe="") + ":" + quote(str(password), safe="")
+        return f"naive+https://{auth}@{host}:{port}#{tag}"
+
+    if otype in ("socks", "http", "mixed"):
+        # plain proxy URLs (what v2rayN/Nekoray/Streisand/Shadowrocket import):
+        # socks5://user:pass@host:port#name / http(s)://user:pass@host:port#name;
+        # a mixed listener speaks both — advertise the SOCKS5 side (the
+        # HTTP side is the same host:port for a client that prefers it).
+        username, password = outbound.get("username"), outbound.get("password")
+        if not username or password is None:
+            raise ShareLinkError(f"{otype} outbound lacks username/password")
+        auth = quote(str(username), safe="") + ":" + quote(str(password), safe="")
+        if otype == "http":
+            scheme = "https" if tls.get("enabled") else "http"
+        else:
+            scheme = "socks5"
+        return f"{scheme}://{auth}@{server}:{port}#{tag}"
 
     raise ShareLinkError(f"no share-link encoding implemented for '{otype}'")
 

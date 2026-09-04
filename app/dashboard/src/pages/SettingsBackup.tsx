@@ -29,6 +29,7 @@ interface ServiceState {
 interface ServicePayload { settings: ServiceSettings; state: ServiceState }
 interface RestoreReport {
   source: string; dry_run: boolean; ok: boolean; steps: string[]; warnings: string[];
+  notes?: string[];
   counts: Record<string, number>; credentials: Record<string, string>; restart?: Record<string, unknown>;
 }
 
@@ -327,7 +328,13 @@ export default function SettingsBackup() {
               </ul>
               {(report.warnings ?? []).length > 0 && (
                 <ul className="list-inside list-disc text-[12px] text-warn">
-                  {report.warnings.slice(0, 8).map((warning, i) => <li key={i}>{warning}</li>)}
+                  {report.warnings.slice(0, 24).map((warning, i) => <li key={i}>{warning}</li>)}
+                  {report.warnings.length > 24 && <li>… +{report.warnings.length - 24}</li>}
+                </ul>
+              )}
+              {(report.notes ?? []).length > 0 && (
+                <ul className="list-inside list-disc text-[11.5px] text-content-3">
+                  {(report.notes ?? []).slice(0, 24).map((note, i) => <li key={i}>{note}</li>)}
                 </ul>
               )}
               {Object.keys(report.credentials ?? {}).length > 0 && (

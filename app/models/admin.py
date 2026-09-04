@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
@@ -76,7 +76,12 @@ class Admin(BaseModel):
         if dbadmin.password_reset_at:
             if not payload.get("created_at"):
                 return
-            if dbadmin.password_reset_at > payload.get("created_at"):
+            # ``iat`` is whole seconds (floored) while the reset stamp keeps
+            # sub-second precision — and MySQL DATETIME(0) *rounds* it up.
+            # A token issued in the same second as the reset must survive,
+            # otherwise a sign-in right after ``zagros reset-admin`` (or a
+            # password change in Settings) is bounced as "session expired".
+            if dbadmin.password_reset_at > payload["created_at"] + timedelta(seconds=1):
                 return
 
         # Admin governance: an expired admin's token is dead. Login,

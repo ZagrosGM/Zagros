@@ -54,6 +54,34 @@ class PlatformConfigError(RuntimeError):
     pass
 
 
+def _normalize_legacy_cipher(protocol: str, settings: dict) -> dict:
+    """Map pre-canonical Shadowsocks cipher names on account replay.
+
+    3x-ui restores (and old archives) stored ``chacha20-poly1305``; the
+    driver account models only accept ``chacha20-ietf-poly1305`` and the enum
+    error deferred xray hydration forever ("could not reconcile in this boot
+    phase" retried 9/30 times). Normalising at replay time converges the
+    hydration, and the caller's write-back persists the canonical value so
+    the row heals on disc too.
+    """
+    if not isinstance(settings, dict) or not settings.get("method"):
+        return settings
+    if str(protocol or "").lower() != "shadowsocks":
+        return settings
+    from app.models.proxy import canonical_ss_method
+
+    canonical = (canonical_ss_method(settings["method"])
+                 or "chacha20-ietf-poly1305")
+    if canonical == settings["method"]:
+        return settings
+    # A NEW dict (never mutate the caller's row copy): the hydration
+    # write-back compares against the raw value, so the repair must be
+    # visible as a change, not be lost by in-place mutation.
+    out = dict(settings)
+    out["method"] = canonical
+    return out
+
+
 class PlatformRuntime:
     def __init__(self, *, database_url: str, master_secret: str,
                  client_token_ttl: int = 900) -> None:
@@ -481,7 +509,9 @@ class PlatformRuntime:
                 from app.cores.types import UserAccount
 
                 stored_enabled = bool(row["enabled"])
-                settings = copy.deepcopy(row["settings"] or {})
+                raw_settings = copy.deepcopy(row["settings"] or {})
+                settings = _normalize_legacy_cipher(
+                    str(row["protocol"]), raw_settings)
                 account = UserAccount(
                     user_id=int(row["user_id"]),
                     username=str(owner.username),
@@ -491,8 +521,11 @@ class PlatformRuntime:
                     settings=settings,
                 )
                 accounts.append(account)
+                # ``before`` must be the RAW stored value: the write-back
+                # below compares against it, so a repaired credential (e.g.
+                # the canonicalised ss cipher) is persisted, not dropped.
                 originals[account.account_id] = (
-                    stored_enabled, copy.deepcopy(settings))
+                    stored_enabled, copy.deepcopy(raw_settings))
             try:
                 await self.core_manager.sync_accounts(core_id, accounts)
                 logger.info("account hydration: %s restored %d account(s)",

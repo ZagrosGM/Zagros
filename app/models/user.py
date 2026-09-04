@@ -1,5 +1,4 @@
 import re
-import secrets
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
@@ -12,7 +11,6 @@ if TYPE_CHECKING:
 from app.models.proxy import ProxySettings, ProxyTypes
 from app.subscription.share import generate_v2ray_links
 from app.utils.jwt import create_subscription_token
-from config import XRAY_SUBSCRIPTION_PATH, XRAY_SUBSCRIPTION_URL_PREFIX
 
 USERNAME_REGEXP = re.compile(r"^(?=\w{3,32}\b)[a-zA-Z0-9-_@.]+(?:_[a-zA-Z0-9-_@.]+)*$")
 
@@ -397,14 +395,16 @@ class UserResponse(User):
     @model_validator(mode="after")
     def validate_subscription_url(self):
         if not self.subscription_url:
-            salt = secrets.token_hex(8)
-            url_prefix = (XRAY_SUBSCRIPTION_URL_PREFIX).replace('*', salt)
-            token = create_subscription_token(self.username)
-            # (item 14): the legacy /<XRAY_SUBSCRIPTION_PATH>/
-            # Canonical public subscription route. /zagros/sub/<token> remains
-            # a server-side legacy alias only; no newly generated/copied/QR URL
-            # may carry the old dashboard namespace.
-            self.subscription_url = f"{url_prefix}/sub/{token}"
+            # The public link shape comes from the dashboard's Subscription
+            # settings (public domain/scheme/port + path) with the environment
+            # (SUBSCRIPTION_URL_PREFIX / PANEL_BASE_URL) as the fallback — the
+            # same recipe the Users page uses for copy/QR, so a bot reading
+            # this field (Mirza, scripts) hands out the same link the panel
+            # shows. /zagros/sub/<token> remains a server-side legacy alias
+            # only; no newly generated URL carries the old namespace.
+            from app.platform.subscription_links import subscription_url
+
+            self.subscription_url = subscription_url(create_subscription_token(self.username))
         return self
 
     @field_validator("proxies", mode="before")

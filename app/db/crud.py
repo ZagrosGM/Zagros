@@ -570,6 +570,7 @@ def create_user(db: Session, user: UserCreate, admin: Admin = None) -> User:
         proxies=proxies,
         status=user.status,
         data_limit=(user.data_limit or None),
+        ip_limit=(user.ip_limit or None),
         device_limit=(user.device_limit or None),
         download_limit_mbps=int(user.download_limit_mbps or 0),
         upload_limit_mbps=int(user.upload_limit_mbps or 0),
@@ -673,7 +674,9 @@ def update_user(db: Session, dbuser: User, modify: UserModify) -> User:
     if modify.status is not None:
         dbuser.status = modify.status
 
-    # Global device limit: None (field absent) = keep; 0 = explicit unlimited.
+    # Limit updates: None (field absent) = keep; 0 = explicit unlimited.
+    if modify.ip_limit is not None:
+        dbuser.ip_limit = (modify.ip_limit or None)
     if modify.device_limit is not None:
         dbuser.device_limit = (modify.device_limit or None)
     if modify.download_limit_mbps is not None:

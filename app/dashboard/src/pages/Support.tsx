@@ -50,11 +50,6 @@ export default function Support() {
         toast.error(t("Attachment size exceeds 10MB limit"));
         return;
       }
-      if (file.size > 2 * 1024 * 1024) {
-        // the panel accepts 10 MB, but the support bot's web server keeps
-        // PHP's 2 MB upload default — warn before the bot refuses it
-        toast.info(t("Files over 2MB are usually refused by the support bot — prefer a smaller file"));
-      }
       setAttachment(file);
     }
   };
@@ -140,7 +135,7 @@ export default function Support() {
           />
         </Field>
 
-        <Field label={t("Attachments (Optional)")} hint={t("Images, log files, or documents (up to 2MB is safe; 10MB max)")}>
+        <Field label={t("Attachments (Optional)")} hint={t("Images, log files, or documents (10MB max)")}>
           <div className="flex items-center gap-3">
             <label className="cursor-pointer inline-flex items-center gap-2 rounded-xl border border-border bg-surface-2 px-3.5 py-2 text-xs font-medium text-content-2 transition-colors hover:bg-surface-3 hover:text-content">
               <Paperclip size={15} />

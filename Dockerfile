@@ -87,7 +87,7 @@ RUN python3 -m pip install --upgrade pip setuptools \
 # Final image
 # --------------------------------------------------------------------------
 FROM python:$PYTHON_VERSION-slim
-ARG ZAGROS_VERSION=1.0.3
+ARG ZAGROS_VERSION=1.0.4
 LABEL org.opencontainers.image.title="Zagros" \
       org.opencontainers.image.description="Zagros — Enterprise Multi-Core VPN Management Platform" \
       org.opencontainers.image.source="https://github.com/ZagrosGM/Zagros" \
@@ -117,7 +117,7 @@ RUN set -eux; \
     apt-get download $specs; \
     python3 -c 'import hashlib,json,pathlib; d=json.load(open("/tmp/ppp-client-manifest.json")); root=pathlib.Path("/tmp/ppp-client-debs"); [(lambda f,p: (_ for _ in ()).throw(SystemExit(f"sha256 mismatch: {f.name}")) if hashlib.sha256(f.read_bytes()).hexdigest()!=p["sha256"] else None)(root/p["filename"],p) for p in d["packages"]]'; \
     apt-get install -y --no-install-recommends \
-       iptables nftables iproute2 openvpn wireguard-tools procps busybox-static \
+       iptables nftables iproute2 conntrack openvpn wireguard-tools procps busybox-static \
        openssh-client openssh-server certbot libpcre2-8-0 ca-certificates \
        /tmp/ppp-client-debs/*.deb; \
     cp /tmp/ppp-client-manifest.json /usr/share/doc/zagros/ppp-client-manifest.json; \

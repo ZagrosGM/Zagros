@@ -227,7 +227,7 @@ export function Stat({ label, value, sub, icon, tone = "default" }: {
 
 export function Tabs({ tabs, active, onChange }: { tabs: { id: string; label: ReactNode; icon?: ReactNode }[]; active: string; onChange: (id: string) => void }) {
   return (
-    <div role="tablist" className="inline-flex items-center gap-1 rounded-2xl border border-border bg-surface-1 p-1">
+    <div role="tablist" className="flex max-w-full items-center gap-1 overflow-x-auto rounded-2xl border border-border bg-surface-1 p-1">
       {tabs.map((t) => (
         <button
           key={t.id}
@@ -235,7 +235,7 @@ export function Tabs({ tabs, active, onChange }: { tabs: { id: string; label: Re
           aria-selected={active === t.id}
           onClick={() => onChange(t.id)}
           className={cn(
-            "flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-medium transition-colors",
+            "flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl px-3.5 py-1.5 text-xs font-medium transition-colors",
             active === t.id ? "bg-brand-soft text-brand" : "text-content-2 hover:text-content",
           )}
         >

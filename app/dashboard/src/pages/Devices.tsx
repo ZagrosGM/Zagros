@@ -1,71 +1,76 @@
-// Devices — registered Zagros app devices with forget action.
+// Monitoring · Devices — strict enrolled X-Device-ID/X-HWID rows only.
+// Source IP activity is intentionally a separate tab and table.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { RefreshCcw, Trash2, Wifi } from "lucide-react";
 import { useState } from "react";
+import { DataTable } from "../components/DataTable";
+import { PaginationBar } from "../components/PaginationBar";
 import { toast } from "../components/feedback";
 import { ConfirmDialog } from "../components/overlays";
-import { Badge, Button, Card, EmptyState, Skeleton } from "../components/ui";
-import { DataTable } from "../components/DataTable";
+import { Badge, Button, EmptyState, Skeleton } from "../components/ui";
 import { api, ApiError } from "../lib/api";
-import { useDigits, formatRelative } from "../lib/format";
+import { formatRelative, useDigits } from "../lib/format";
 import { useT } from "../lib/i18n";
-import type { Device } from "../lib/types";
+import type { MonitoringDevice } from "../lib/types";
 
-export default function Devices() {
+const PAGE_SIZE = 100;
+
+export default function Devices({ embedded = false }: { embedded?: boolean }) {
   const t = useT();
   const digits = useDigits();
-  const qc = useQueryClient();
-  const [forgetFor, setForgetFor] = useState<Device | null>(null);
-
+  const client = useQueryClient();
+  const [page, setPage] = useState(1);
+  const [forgetFor, setForgetFor] = useState<MonitoringDevice | null>(null);
   const list = useQuery({
-    queryKey: ["zagros", "devices"],
-    queryFn: () => api.get<{ devices: Device[] }>("/zagros/devices"),
+    queryKey: ["zagros", "monitoring", "devices", page],
+    queryFn: () => api.get<{ items: MonitoringDevice[]; total: number; page: number; page_size: number }>(
+      `/zagros/monitoring/devices?page=${page}&page_size=${PAGE_SIZE}`),
     refetchInterval: 15000,
+    placeholderData: (previous) => previous,
   });
   const forget = useMutation({
-    mutationFn: (id: string) => api.delete(`/zagros/devices/${encodeURIComponent(id)}`),
-    onSuccess: () => { toast.ok("device forgotten"); setForgetFor(null); qc.invalidateQueries({ queryKey: ["zagros", "devices"] }); },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
+    mutationFn: (id: number) => api.delete(`/zagros/monitoring/devices/${id}`),
+    onSuccess: () => {
+      toast.ok(t("common.deleted"));
+      setForgetFor(null);
+      client.invalidateQueries({ queryKey: ["zagros", "monitoring", "devices"] });
+    },
+    onError: (error) => toast.error(error instanceof ApiError ? error.message : t("common.error")),
   });
 
-  const cols = [
-    {
-      id: "dev", header: t("device"), cell: (d: Device) => (
-        <div>
-          <span className="font-medium">{d.name || d.device_id}</span>
-          <span className="ms-2 text-[11px] text-content-3">{d.platform ?? ""}{d.app_version ? ` · v${d.app_version}` : ""}</span>
-        </div>
-      ),
-    },
-    { id: "user", header: t("user"), cell: (d: Device) => <Badge tone="brand">{d.username ?? `#${d.user_id}`}</Badge> },
-    { id: "ip", header: t("last ip"), cell: (d: Device) => <code className="font-mono text-[11px]" dir="ltr">{d.last_ip ?? "—"}</code> },
-    { id: "core", header: t("core"), cell: (d: Device) => <span className="text-[12px] text-content-2">{d.current_core ?? (d.cores ?? []).join(", ") ?? "—"}</span> },
-    { id: "seen", header: t("last seen"), width: "130px", cell: (d: Device) => <span className="text-[12px] text-content-3">{formatRelative(d.last_seen, digits)}</span> },
-    {
-      id: "act", header: "", width: "96px",
-      cell: (d: Device) => <Button variant="danger" size="sm" onClick={() => setForgetFor(d)}><Trash2 size={12} /> forget</Button>,
-    },
+  const columns = [
+    { id: "user", header: t("user"), cell: (row: MonitoringDevice) => <span className="font-medium">{row.username}</span> },
+    { id: "device", header: "Device / HWID", cell: (row: MonitoringDevice) => <code className="font-mono text-[11px]" dir="ltr">{row.device}</code> },
+    { id: "ip", header: t("last ip"), cell: (row: MonitoringDevice) => <code className="font-mono text-[11px]" dir="ltr">{row.last_ip ?? "—"}</code> },
+    { id: "core", header: t("core"), cell: (row: MonitoringDevice) => <span className="text-content-2">{row.core_id ?? "—"}</span> },
+    { id: "node", header: t("node"), cell: (row: MonitoringDevice) => <span className="text-content-2">{row.node_name ?? "—"}</span> },
+    { id: "seen", header: t("last seen"), cell: (row: MonitoringDevice) => <span className="text-[12px] text-content-3">{formatRelative(row.last_seen, digits)}</span> },
+    { id: "status", header: t("common.status"), cell: () => <Badge tone="info">{t("monitoring.enrolled")}</Badge> },
+    { id: "action", header: "", width: "82px", cell: (row: MonitoringDevice) => (
+      <Button variant="ghost" size="sm" onClick={() => setForgetFor(row)} aria-label={t("common.delete")}><Trash2 size={13} /></Button>
+    )},
   ];
 
   return (
-    <div className="space-y-4 animate-fade-up">
-      <div className="flex flex-wrap items-center gap-2">
-        <h1 className="me-auto flex items-center gap-2 text-lg font-bold tracking-tight">
-          <Wifi size={18} className="text-brand" />{t("nav.devices")}
-        </h1>
-        <Button variant="ghost" size="sm" onClick={() => list.refetch()}><RefreshCcw size={13} /> {t("common.refresh")}</Button>
-      </div>
-
-      {list.isLoading ? <Skeleton className="h-72" /> : (
-        <DataTable columns={cols as never} rows={list.data?.devices ?? []} rowKey={(d: Device) => d.device_id} height={560}
-          empty={<EmptyState title={t("No devices yet")} hint={t("Devices register themselves the first time the Zagros app signs in on them.")} />} />
+    <div className="space-y-3">
+      {!embedded && (
+        <div className="flex items-center gap-2">
+          <h1 className="me-auto flex items-center gap-2 text-lg font-bold"><Wifi size={18} className="text-brand" />{t("monitoring.devices")}</h1>
+          <Button variant="ghost" size="sm" onClick={() => list.refetch()}><RefreshCcw size={13} />{t("common.refresh")}</Button>
+        </div>
       )}
-
+      {list.isLoading ? <Skeleton className="h-72" /> : list.isError ? (
+        <EmptyState title={t("common.loadFailed")} hint={t("common.tryAgain")} />
+      ) : (
+        <DataTable columns={columns as never} rows={list.data?.items ?? []}
+          rowKey={(row: MonitoringDevice) => row.id} height={520}
+          empty={<EmptyState title={t("monitoring.noDevices")} hint={t("monitoring.noDevicesHint")} />} />
+      )}
+      {!list.isError && <PaginationBar page={page} pageSize={PAGE_SIZE} total={list.data?.total ?? 0} onChange={setPage} />}
       <ConfirmDialog open={!!forgetFor} onClose={() => setForgetFor(null)}
-        onConfirm={() => forgetFor && forget.mutate(forgetFor.device_id)}
-        title={`forget device — ${forgetFor?.name ?? forgetFor?.device_id ?? ""}`}
-        body="The device record is removed; the app re-registers on its next sign-in."
-        danger loading={forget.isPending} />
+        onConfirm={() => forgetFor && forget.mutate(forgetFor.id)}
+        title={`${t("common.delete")} — ${forgetFor?.device ?? ""}`}
+        body={t("monitoring.forgetDeviceHint")} danger loading={forget.isPending} />
     </div>
   );
 }

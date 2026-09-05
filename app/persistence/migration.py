@@ -148,11 +148,23 @@ def build_migration_plan(snapshot: LegacySnapshot) -> MigrationPlan:
             "expire_at": _epoch_to_dt(user.get("expire")),
             "data_limit_reset_strategy": user.get("data_limit_reset_strategy") or "no_reset",
             "created_at": _naive_to_utc(user.get("created_at")),
-            # 3x-ui carries a per-client IP limit; Marzban-shaped panels do not
-            # (None keeps whatever the user already had on upsert).
-            "device_limit": (int(user["device_limit"])
-                             if str(user.get("device_limit") or "").isdigit()
-                             and int(user["device_limit"]) > 0 else None),
+            # Pre-split backups omitted ip_limit and called the online cap
+            # device_limit. New snapshots preserve both independent fields.
+            "ip_limit": (
+                int(user["ip_limit"])
+                if str(user.get("ip_limit") or "").isdigit()
+                and int(user["ip_limit"]) > 0
+                else (int(user["device_limit"])
+                      if "ip_limit" not in user
+                      and str(user.get("device_limit") or "").isdigit()
+                      and int(user["device_limit"]) > 0 else None)
+            ),
+            "device_limit": (
+                int(user["device_limit"])
+                if "ip_limit" in user
+                and str(user.get("device_limit") or "").isdigit()
+                and int(user["device_limit"]) > 0 else None
+            ),
         })
         plan.usage.append({
             "username": username,
@@ -304,7 +316,7 @@ class LegacyImportService:
                 user_id = self._users.upsert_user(
                     username=u["username"], status=u["status"],
                     data_limit_bytes=u["data_limit_bytes"], expire_at=u["expire_at"],
-                    device_limit=u.get("device_limit"),
+                    ip_limit=u.get("ip_limit"), device_limit=u.get("device_limit"),
                     download_limit_mbps=u.get("download_limit_mbps", 0),
                     upload_limit_mbps=u.get("upload_limit_mbps", 0),
                     note=u["note"],

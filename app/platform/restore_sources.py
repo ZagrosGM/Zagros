@@ -552,7 +552,7 @@ def read_3x_ui(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
             limit_ip = (client.get("limit_ip") if client.get("limit_ip") is not None
                         else client.get("limitIp") or 0)
             ips = _summarize_client_ips(limits_ip.get(email))
-            device_limit = int(limit_ip) if str(limit_ip).isdigit() and int(limit_ip) > 0 else None
+            ip_limit = int(limit_ip) if str(limit_ip).isdigit() and int(limit_ip) > 0 else None
 
             user_id = index
             snapshot.users.append({
@@ -568,7 +568,8 @@ def read_3x_ui(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
                 "created_at": None,
                 "used_traffic": used,
                 "data_limit_reset_strategy": "no_reset",
-                "device_limit": device_limit,
+                "ip_limit": ip_limit,
+                "device_limit": None,
             })
 
             # One proxy per protocol, not per inbound: the panel stores the
@@ -823,6 +824,7 @@ def read_zagros_platform(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]
                 "used_traffic": usage.get(int(row.get("id") or 0), 0),
                 "data_limit_reset_strategy": row.get("data_limit_reset_strategy")
                                             or "no_reset",
+                "ip_limit": row.get("ip_limit"),
                 "device_limit": row.get("device_limit"),
             })
 

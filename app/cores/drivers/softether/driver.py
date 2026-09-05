@@ -356,6 +356,17 @@ class SoftEtherDriver(BaseCoreDriver):
                 port=int(self.settings.get("native_port") or 5555),
                 label="SoftEther native VPN",
             ))
+        if self.settings.get("feature_l2tp") or self.settings.get("feature_etherip"):
+            for port in (500, 4500):
+                claims.append(ListenerClaim(
+                    core_id="softether", protocol="ipsec", transport="udp",
+                    port=port, label=f"SoftEther IPsec UDP {port}",
+                ))
+        if self.settings.get("feature_l2tp_raw"):
+            claims.append(ListenerClaim(
+                core_id="softether", protocol="l2tp", transport="udp",
+                port=1701, label="SoftEther raw L2TP",
+            ))
         if self.settings.get("feature_ovpn"):
             for raw in str(self.settings.get("ovpn_ports") or "1194").split(","):
                 try:

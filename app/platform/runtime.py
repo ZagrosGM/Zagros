@@ -169,7 +169,9 @@ class PlatformRuntime:
             node_provider=_RuntimeNodeProvider(self.session_factory),
             routing_engine=self.routing_engine,
             outbound_manager=self.outbound_manager,
-            device_store=self.devices,
+            # The legacy DeviceStore historically held source-IP identities.
+            # Monitoring reads strict subscription_devices instead, so IPs
+            # are never counted or presented as HWIDs.
         )
 
     @classmethod

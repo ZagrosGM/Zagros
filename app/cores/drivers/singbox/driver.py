@@ -47,6 +47,7 @@ from app.cores.types import (
     CoreStatus,
     DeviceSession,
     HealthStatus,
+    ListenerClaim,
     UsageRecord,
     UserAccount,
 )
@@ -147,6 +148,8 @@ class SingBoxDriver(BaseCoreDriver):
                 "final_outbound": {"type": "string", "default": "direct"},
                 "stats_enabled": {"type": "boolean", "default": True},
                 "stats_api": {"type": "string", "default": "127.0.0.1:19091"},
+                "clash_api": {"type": "string", "default": "127.0.0.1:19092",
+                              "description": "loopback session API used for source-IP enforcement"},
                 "geoip_db": {"type": "string"},
                 "geosite_db": {"type": "string"},
             },
@@ -165,6 +168,8 @@ class SingBoxDriver(BaseCoreDriver):
             "geosite_db": "",
             "stats_enabled": True,
             "stats_api": "127.0.0.1:19091",
+            "clash_api": "127.0.0.1:19092",
+            "log_buffer": 5000,
         },
         homepage="https://github.com/SagerNet/sing-box",
         release_repo="SagerNet/sing-box",
@@ -190,6 +195,12 @@ class SingBoxDriver(BaseCoreDriver):
         self._chain_listeners: dict[tuple[str, int], ChainEndpoint] = {}
         self._usage = DeltaTracker()
         self._online_seen: dict[str, tuple[int, int]] = {}
+        # Info logs correlate source and authenticated user by sing-box's
+        # connection context ID; Clash API then tells us which sources remain
+        # active and gives closeable connection IDs.
+        self._log_sources: dict[str, str] = {}
+        self._bound_log_events: set[str] = set()
+        self._source_bindings: dict[tuple[str, str], tuple[Any, Any]] = {}
         self._v2ray_supported: bool | None = None  # lazy binary probe cache
         self._stats_degrade_warned = False
         self._studio_doc: dict[str, Any] | None = None  # set by apply_studio_document
@@ -910,6 +921,28 @@ class SingBoxDriver(BaseCoreDriver):
             os.chmod(path, mode)
         return cert_path, key_path
 
+    async def listener_claims(self) -> list[ListenerClaim]:
+        claims: list[ListenerClaim] = []
+        for inbound in self._render_inbounds():
+            port = int(inbound.get("listen_port") or 0)
+            if not port:
+                continue
+            protocol = str(inbound.get("type") or "sing-box")
+            if protocol in {"hysteria2", "tuic"}:
+                transports = ("udp",)
+            elif protocol in {"shadowsocks", "socks", "mixed"}:
+                transports = ("tcp", "udp")
+            else:
+                transports = ("tcp",)
+            for transport in transports:
+                claims.append(ListenerClaim(
+                    core_id=self.metadata.id, protocol=protocol,
+                    transport=transport,
+                    address=str(inbound.get("listen") or "0.0.0.0"),
+                    port=port, label=str(inbound.get("tag") or protocol),
+                ))
+        return claims
+
     def render_config(self) -> dict[str, Any]:
         """Desired-state → full sing-box JSON (deterministic, testable)."""
         from app.platform.bandwidth import mark_for_user
@@ -939,7 +972,10 @@ class SingBoxDriver(BaseCoreDriver):
         final = self.settings.get("final_outbound") or "direct"
         inbounds = self._render_inbounds()
         config: dict[str, Any] = {
-            "log": {"level": "warning", "timestamp": True},
+            # Info lines carry a shared connection context containing source
+            # and authenticated account. They are parsed locally for strict
+            # cross-core IP limits and never used as HWID.
+            "log": {"level": "info", "timestamp": True},
             "dns": {"servers": [{"type": "local", "tag": "dns-local"}]},
             "inbounds": inbounds,
             "outbounds": outbounds,
@@ -952,20 +988,25 @@ class SingBoxDriver(BaseCoreDriver):
                 "auto_detect_interface": True,
             },
         }
+        config["experimental"] = {
+            "clash_api": {
+                # Loopback only; this API supplies source IP/connection IDs so
+                # Zagros can terminate a banned source immediately.
+                "external_controller": self.settings.get("clash_api", "127.0.0.1:19092"),
+            }
+        }
         if self.settings.get("stats_enabled") and self._v2ray_api_supported():
-            config["experimental"] = {
-                "v2ray_api": {
-                    "listen": self.settings["stats_api"],
-                    "stats": {
-                        "enabled": True,
-                        "inbounds": [
-                            f"{ib['tag']}"
-                            for ib in inbounds
-                            if not ib["tag"].startswith("zg-chain-")
-                        ],
-                        "outbounds": ["direct"],
-                        "users": sorted(self._accounts),
-                    },
+            config["experimental"]["v2ray_api"] = {
+                "listen": self.settings["stats_api"],
+                "stats": {
+                    "enabled": True,
+                    "inbounds": [
+                        f"{ib['tag']}"
+                        for ib in inbounds
+                        if not ib["tag"].startswith("zg-chain-")
+                    ],
+                    "outbounds": ["direct"],
+                    "users": sorted(self._accounts),
                 },
             }
         elif self.settings.get("stats_enabled"):
@@ -1240,20 +1281,133 @@ class SingBoxDriver(BaseCoreDriver):
             ))
         return records
 
+    @staticmethod
+    def _source_ip(value: str) -> str | None:
+        """Extract a canonical IP from sing-box Socksaddr log spelling."""
+        import ipaddress
+
+        raw = value.strip().rstrip(",")
+        if raw.startswith("[") and "]:" in raw:
+            raw = raw[1:raw.rfind("]")]
+        else:
+            try:
+                ipaddress.ip_address(raw)
+            except ValueError:
+                if raw.count(":") == 1:
+                    raw = raw.rsplit(":", 1)[0]
+        try:
+            return str(ipaddress.ip_address(raw))
+        except ValueError:
+            return None
+
+    def _read_source_bindings(self):
+        """Parse source/account pairs sharing sing-box connection context IDs."""
+        import re
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        logs = list(self._backend.logs(int(self.settings.get("log_buffer", 5000))))
+        identities = {
+            str(account.settings.get("username") or account.account_id): account.account_id
+            for account in self._accounts.values()
+        }
+        identities.update({account_id: account_id for account_id in self._accounts})
+        ansi = re.compile(r"\x1b\[[0-9;]*m")
+        context_re = re.compile(r"\[(\d+)\s+[^\]]+\]")
+        source_re = re.compile(r"inbound connection from\s+(\S+)")
+        user_re = re.compile(r"\[([^\]]+)\]\s+inbound connection to\s+")
+        combined_re = re.compile(r"\[([^\]]+)\]\s+inbound connection from\s+(\S+)")
+        for index, original in enumerate(logs):
+            # ManagedProcess keeps lines in emission order. Preserve that order
+            # even when several new connections are discovered in one poll.
+            event_time = now - timedelta(microseconds=len(logs) - index)
+            line = ansi.sub("", str(original))
+            context_match = context_re.search(line)
+            context = context_match.group(1) if context_match else None
+            combined = combined_re.search(line)
+            if combined:
+                account_id = identities.get(combined.group(1))
+                ip = self._source_ip(combined.group(2))
+                event = context or hashlib.sha256(line.encode()).hexdigest()
+                if account_id and ip and event not in self._bound_log_events:
+                    key = (account_id, ip)
+                    first, _last = self._source_bindings.get(key, (event_time, event_time))
+                    self._source_bindings[key] = (first, event_time)
+                    self._bound_log_events.add(event)
+                continue
+            source = source_re.search(line)
+            if source and context:
+                ip = self._source_ip(source.group(1))
+                if ip:
+                    self._log_sources[context] = ip
+            user = user_re.search(line)
+            if (user and context and context in self._log_sources
+                    and context not in self._bound_log_events):
+                account_id = identities.get(user.group(1))
+                ip = self._log_sources[context]
+                if account_id:
+                    key = (account_id, ip)
+                    first, _last = self._source_bindings.get(key, (event_time, event_time))
+                    self._source_bindings[key] = (first, event_time)
+                    self._bound_log_events.add(context)
+        # Bound memory while retaining enough correlation to survive quiet
+        # long-lived tunnels and one missed five-second poll.
+        cutoff = now.timestamp() - 3600
+        self._source_bindings = {
+            key: times for key, times in self._source_bindings.items()
+            if times[1].timestamp() >= cutoff
+        }
+        return now
+
     async def get_online_devices(
         self, account_ids: list[str] | None = None
     ) -> list[DeviceSession]:
-        """Counter-delta heuristic (documented, same technique 3x-ui uses):
+        """Exact source/account sessions via info-log + Clash API correlation.
 
-        the stats API exposes traffic counters but no session list — a user
-        whose counters grew since the last poll is *active* right now. The
-        user's IP is not exposed by the API and is honestly reported as None.
+        Current sing-box deliberately omits ``metadata.User`` from Clash JSON,
+        while its info logs carry the user under the same connection context
+        as the source. Combining those two native views keeps source identity
+        honest and also supplies connection IDs for immediate termination.
         """
-        from datetime import datetime, timezone
-
-        counters = await self._query_counters()
-        now = datetime.now(timezone.utc)
+        now = await asyncio.to_thread(self._read_source_bindings)
+        connections_getter = getattr(self._backend, "clash_connections", None)
+        connections = (await asyncio.to_thread(connections_getter)
+                       if callable(connections_getter) else [])
+        active_ips = {
+            self._source_ip(str((row.get("metadata") or {}).get("sourceIP") or ""))
+            for row in connections
+        }
+        active_ips.discard(None)
         sessions: list[DeviceSession] = []
+        for (account_id, ip), (first_seen, log_seen) in self._source_bindings.items():
+            if account_ids is not None and account_id not in account_ids:
+                continue
+            # Empty can mean the API is briefly unavailable during restart;
+            # retain very recent authenticated logs as a fail-safe. With a
+            # working non-empty API, only genuinely active sources survive.
+            if active_ips:
+                if ip not in active_ips:
+                    continue
+            elif (now - log_seen).total_seconds() > 90:
+                continue
+            # Keep authenticated correlation alive for genuinely active
+            # long-lived tunnels. Without this, a one-hour Hysteria2 session
+            # would age out even though Clash still reports its source. A
+            # log-only fallback is NOT refreshed or it would never expire.
+            if active_ips:
+                self._source_bindings[(account_id, ip)] = (first_seen, now)
+            sessions.append(DeviceSession(
+                core_id=self.metadata.id, account_id=account_id, ip=ip,
+                connected_at=first_seen, last_activity=now,
+                metadata={"identity": "source_ip",
+                          "provider": "sing-box-log+clash"},
+            ))
+        if sessions:
+            return sessions
+
+        # Honest lower-bound fallback for binaries/configs without Clash API:
+        # counters can prove presence but cannot invent a source address.
+        counters = await self._query_counters()
         for account_id, (up, down) in counters.items():
             if account_id not in self._accounts:
                 continue
@@ -1262,14 +1416,19 @@ class SingBoxDriver(BaseCoreDriver):
             previous = self._online_seen.get(account_id)
             if previous is not None and (up, down) != previous:
                 sessions.append(DeviceSession(
-                    core_id=self.metadata.id,
-                    account_id=account_id,
-                    ip=None,  # the API exposes no client IPs (documented)
+                    core_id=self.metadata.id, account_id=account_id, ip=None,
                     last_activity=now,
                     metadata={"detection": "counter-delta heuristic"},
                 ))
             self._online_seen[account_id] = (up, down)
         return sessions
+
+    async def terminate_source_ip(self, source_ip: str) -> int:
+        """Close every active sing-box connection from a newly banned IP."""
+        closer = getattr(self._backend, "close_connections_from", None)
+        if not callable(closer):
+            return 0
+        return int(await asyncio.to_thread(closer, source_ip) or 0)
 
     # ------------------------------------------------------------------ #
     # routing translation (ROUTING + GEO_ROUTING + PROCESS_ROUTING)

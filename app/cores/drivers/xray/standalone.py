@@ -105,7 +105,8 @@ class StandaloneXrayBackend:
         document.setdefault("stats", {})
         policy = document.setdefault("policy", {})
         levels = policy.setdefault("levels", {}).setdefault("0", {})
-        levels.update({"statsUserUplink": True, "statsUserDownlink": True})
+        levels.update({"statsUserUplink": True, "statsUserDownlink": True,
+                       "statsUserOnline": True})
         api_inbound = {
             "listen": "127.0.0.1", "port": self._api_port,
             "protocol": "dokodemo-door", "tag": "API_INBOUND",
@@ -277,6 +278,8 @@ class StandaloneXrayBackend:
             return {}
         totals: dict[str, list[int]] = defaultdict(lambda: [0, 0])
         for row in rows:
+            if row.link not in {"uplink", "downlink"}:
+                continue
             totals[row.name][0 if row.link == "uplink" else 1] += int(row.value)
         return {name: (value[0], value[1]) for name, value in totals.items()}
 
@@ -284,7 +287,23 @@ class StandaloneXrayBackend:
         return [XrayUsageStat(email=name, uplink=value[0], downlink=value[1])
                 for name, value in self._stats(reset).items()]
 
+    def online_device_details(self) -> dict[str, dict[str, int]]:
+        if not self.is_running():
+            return {}
+        try:
+            from xray_api import XRay
+            return XRay("127.0.0.1", self._api_port).get_online_ip_details(timeout=10)
+        except Exception:  # noqa: BLE001 — old Xray retains delta fallback
+            return {}
+
+    def online_devices(self) -> dict[str, set[str]]:
+        detailed = self.online_device_details()
+        return {email: set(ips) for email, ips in detailed.items()}
+
     def online_accounts(self) -> list[str]:
+        native = self.online_devices()
+        if native:
+            return list(native)
         current = self._stats(False)
         online = [name for name, totals in current.items()
                   if name in self._counters and sum(totals) > sum(self._counters[name])]

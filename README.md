@@ -22,7 +22,7 @@ A multi-core VPN control panel that runs your cores on this host — and on as m
 Zagros is a hard fork of [Marzban](https://github.com/Gozargah/Marzban) that stops treating Xray as
 *the* engine and starts treating every VPN core as a first-class citizen.
 
-One dashboard user can hold protocols from **any** core at once. Their quota, device limit and
+One dashboard user can hold protocols from **any** core at once. Their quota, IP limit, HWID device limit and
 session presence are counted **once**, across every core and every node. They get **one**
 subscription link, and the client receives whichever format it understands.
 
@@ -59,7 +59,7 @@ start, meter and uninstall mean the same thing regardless of the engine undernea
 ### Users and delivery
 - **One user, many cores** — a single dashboard user carries protocols from any installed core.
 - **Unified quota** — every core's usage folds into one counter set; a restart never re-counts old traffic.
-- **Global device limit** — cross-core IP-union enforcement, not a per-core guess.
+- **Independent access limits** — cross-core source-IP ceilings temporarily block only the newest overflow IP; strict `X-Device-ID`/`X-HWID` enrollment limits subscription retrieval.
 - **One subscription URL, many formats** — raw share links, Clash / Stash / FlClash (mihomo YAML),
   and complete sing-box JSON, negotiated from the client's User-Agent or forced with `?format=`.
 - **Subscription portal** — browsers get a real page, and you can design it yourself.

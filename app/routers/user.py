@@ -364,7 +364,13 @@ def reset_user_data_usage(
 ):
     """Reset user data usage"""
     dbuser = crud.reset_user_data_usage(db=db, dbuser=dbuser)
-    _bridge_sync(request, dbuser, None)  # keep the portal quota baseline honest
+    platform_id = _bridge_sync(request, dbuser, None)
+    # The legacy row and the unified all-core quota are one accounting period.
+    # Merely re-syncing cannot move a live quota backwards, so reset the exact
+    # projected user explicitly for consistent User Statistics.
+    runtime = _platform_runtime(request)
+    if runtime is not None and platform_id is not None:
+        asyncio.run(runtime.quota.reset(platform_id))
     if dbuser.status in [UserStatus.active, UserStatus.on_hold]:
         bg.add_task(xray.operations.add_user, dbuser=dbuser)
 
@@ -397,6 +403,30 @@ def revoke_user_subscription(
     logger.info(f'User "{dbuser.username}" subscription revoked')
 
     return user
+
+
+@router.get(
+    "/user/{username}/sub_update",
+    responses={403: responses._403, 404: responses._404},
+)
+def get_user_subscription_updates(
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=10, ge=1, le=100),
+    dbuser: UserResponse = Depends(get_validated_user),
+):
+    """Legacy subscription-update shape used by older MirzaBot profiles.
+
+    Zagros stores the latest fetch timestamp/user-agent on the user row rather
+    than a historical event table. Expose that authoritative snapshot as a
+    one-row paginated collection; current MirzaBot asks for offset=0&limit=1.
+    """
+    updates = []
+    if dbuser.sub_updated_at is not None:
+        updates.append({
+            "created_at": dbuser.sub_updated_at,
+            "user_agent": dbuser.sub_last_user_agent,
+        })
+    return {"updates": updates[offset:offset + limit], "total": len(updates)}
 
 
 @router.get("/users", response_model=UsersResponse, responses={400: responses._400, 403: responses._403, 404: responses._404})

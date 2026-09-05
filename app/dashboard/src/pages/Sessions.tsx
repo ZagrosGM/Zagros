@@ -1,96 +1,66 @@
-// Sessions — live core sessions + client (Zagros app) refresh-token inventory
-// with revoke actions.
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, Ban, MonitorSmartphone, RefreshCcw } from "lucide-react";
-import { toast } from "../components/feedback";
-import { ConfirmDialog } from "../components/overlays";
-import { Badge, Button, Card, CardHeader, EmptyState, Skeleton, Tabs } from "../components/ui";
-import { DataTable } from "../components/DataTable";
-import { api, ApiError } from "../lib/api";
-import { useDigits, formatBytes, formatDate, formatDuration } from "../lib/format";
-import { useT } from "../lib/i18n";
+// Monitoring · Live Connections — current authenticated core/node sessions.
+// The API reads the existing IP-limit poll snapshot; opening this tab does not
+// trigger a second driver scan.
+import { useQuery } from "@tanstack/react-query";
+import { Activity, RefreshCcw } from "lucide-react";
 import { useState } from "react";
-import type { ClientSession, SessionRecord } from "../lib/types";
+import { DataTable } from "../components/DataTable";
+import { PaginationBar } from "../components/PaginationBar";
+import { Badge, Button, EmptyState, Skeleton } from "../components/ui";
+import { api } from "../lib/api";
+import { formatBytes, formatDate, formatDuration, useDigits } from "../lib/format";
+import { useT } from "../lib/i18n";
+import type { MonitoringConnection } from "../lib/types";
 
-export default function Sessions() {
+const PAGE_SIZE = 100;
+
+export default function LiveConnections({ embedded = false }: { embedded?: boolean }) {
   const t = useT();
   const digits = useDigits();
-  const qc = useQueryClient();
-  const [tab, setTab] = useState("live");
-  const [revokeFor, setRevokeFor] = useState<ClientSession | null>(null);
-
-  const live = useQuery({
-    queryKey: ["zagros", "sessions"],
-    queryFn: () => api.get<{ sessions: SessionRecord[] }>("/zagros/sessions"),
+  const [page, setPage] = useState(1);
+  const query = useQuery({
+    queryKey: ["zagros", "monitoring", "connections", page],
+    queryFn: () => api.get<{
+      items: MonitoringConnection[]; total: number; page: number; page_size: number;
+      failed_sources: string[]; generated_at?: string | null;
+    }>(`/zagros/monitoring/live-connections?page=${page}&page_size=${PAGE_SIZE}`),
     refetchInterval: 5000,
-  });
-  const clients = useQuery({
-    queryKey: ["zagros", "client-sessions"],
-    queryFn: () => api.get<{ sessions: ClientSession[] }>("/zagros/client-sessions"),
-    refetchInterval: 10000,
-    enabled: tab === "clients",
-  });
-  const revoke = useMutation({
-    mutationFn: (hash: string) => api.delete(`/zagros/client-sessions/${encodeURIComponent(hash)}`),
-    onSuccess: () => { toast.ok("session revoked"); setRevokeFor(null); qc.invalidateQueries({ queryKey: ["zagros", "client-sessions"] }); },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
+    placeholderData: (previous) => previous,
   });
 
-  const liveCols = [
-    { id: "user", header: t("user"), cell: (s: SessionRecord) => <span className="font-medium">#{s.user_id}</span> },
-    { id: "core", header: t("core"), cell: (s: SessionRecord) => <Badge tone="brand">{s.core_id}</Badge> },
-    { id: "ip", header: "ip", cell: (s: SessionRecord) => <code className="font-mono text-[11px]" dir="ltr">{s.ip ?? "—"}</code> },
-    { id: "started", header: t("started"), cell: (s: SessionRecord) => <span className="text-[12px] tabular-nums text-content-2">{formatDate(s.started_at, digits)}</span> },
-    { id: "dur", header: t("duration"), cell: (s: SessionRecord) => <span className="text-[12px] tabular-nums text-content-2">{formatDuration(s.duration_seconds, digits)}</span> },
-    { id: "traffic", header: t("traffic"), cell: (s: SessionRecord) => <span className="text-[12px] tabular-nums">{formatBytes(s.rx_bytes, digits)} ↓ / {formatBytes(s.tx_bytes, digits)} ↑</span> },
-    { id: "state", header: "", width: "90px", cell: (s: SessionRecord) => s.ended_at ? <Badge tone="muted">ended</Badge> : <Badge tone="ok" dot>live</Badge> },
-  ];
-  const clientCols = [
-    { id: "user", header: t("user"), cell: (s: ClientSession) => <div><span className="font-medium">{s.username ?? `#${s.user_id}`}</span></div> },
-    { id: "ua", header: "client", cell: (s: ClientSession) => <span className="block max-w-[220px] truncate text-[11px] text-content-3" title={s.user_agent ?? ""}>{s.user_agent ?? "—"}</span> },
-    { id: "created", header: t("issued"), cell: (s: ClientSession) => <span className="text-[12px] tabular-nums text-content-2">{formatDate(s.created_at, digits)}</span> },
-    { id: "expires", header: t("expires"), cell: (s: ClientSession) => <span className="text-[12px] tabular-nums text-content-2">{formatDate(s.expires_at, digits)}</span> },
-    { id: "state", header: "state", width: "110px", cell: (s: ClientSession) => s.revoked ? <Badge tone="danger">revoked</Badge> : <Badge tone="ok" dot>{t("active")}</Badge> },
-    {
-      id: "act", header: "", width: "100px",
-      cell: (s: ClientSession) => !s.revoked && (
-        <Button variant="danger" size="sm" onClick={() => setRevokeFor(s)}><Ban size={12} /> revoke</Button>
-      ),
-    },
+  const columns = [
+    { id: "user", header: t("user"), cell: (row: MonitoringConnection) => <span className="font-medium">{row.username ?? `#${row.user_id}`}</span> },
+    { id: "core", header: t("core"), cell: (row: MonitoringConnection) => <Badge tone="brand">{row.core_id}</Badge> },
+    { id: "node", header: t("node"), cell: (row: MonitoringConnection) => <span className="text-content-2">{row.node_id == null ? t("Master") : (row.node_name ?? "—")}</span> },
+    { id: "ip", header: "IP", cell: (row: MonitoringConnection) => <code className="font-mono text-[11px]" dir="ltr">{row.ip ?? "—"}</code> },
+    { id: "device", header: "Device / HWID", cell: (row: MonitoringConnection) => <code className="font-mono text-[11px]" dir="ltr">{row.device ?? "—"}</code> },
+    { id: "started", header: t("started"), cell: (row: MonitoringConnection) => <span className="text-[12px] tabular-nums text-content-2">{formatDate(row.started_at, digits)}</span> },
+    { id: "duration", header: t("duration"), cell: (row: MonitoringConnection) => <span className="text-[12px] tabular-nums text-content-2">{formatDuration(row.duration_seconds, digits)}</span> },
+    { id: "traffic", header: t("traffic"), cell: (row: MonitoringConnection) => <span className="text-[12px] tabular-nums">{formatBytes(row.download_bytes, digits)} ↓ / {formatBytes(row.upload_bytes, digits)} ↑</span> },
+    { id: "status", header: t("common.status"), cell: () => <Badge tone="ok" dot>{t("active")}</Badge> },
   ];
 
   return (
-    <div className="space-y-4 animate-fade-up">
-      <div className="flex flex-wrap items-center gap-3">
-        <h1 className="me-auto flex items-center gap-2 text-lg font-bold tracking-tight">
-          <Activity size={18} className="text-brand" />{t("nav.sessions")}
-        </h1>
-        <Tabs active={tab} onChange={setTab} tabs={[
-          { id: "live", label: t("live core sessions"), icon: <Activity size={13} /> },
-          { id: "clients", label: t("app sign-ins"), icon: <MonitorSmartphone size={13} /> },
-        ]} />
-        <Button variant="ghost" size="sm" onClick={() => tab === "live" ? live.refetch() : clients.refetch()}><RefreshCcw size={13} /></Button>
-      </div>
-
-      {tab === "live" ? (
-        live.isLoading ? <Skeleton className="h-72" /> : (
-          <DataTable columns={liveCols as never} rows={live.data?.sessions ?? []} rowKey={(s: SessionRecord) => s.key}
-            height={560}
-            empty={<EmptyState title={t("No live sessions")} hint={t("Sessions appear as users connect through cores — this is real data, not a placeholder.")} />} />
-        )
-      ) : (
-        clients.isLoading ? <Skeleton className="h-72" /> : (
-          <DataTable columns={clientCols as never} rows={(clients.data?.sessions ?? []).filter((s) => !s.revoked)} rowKey={(s: ClientSession) => s.token_hash}
-            height={560}
-            empty={<EmptyState title={t("No active app sign-ins")} hint={t("Zagros app sessions (refresh tokens) appear here after a device signs in.")} />} />
-        )
+    <div className="space-y-3">
+      {!embedded && (
+        <div className="flex items-center gap-2">
+          <h1 className="me-auto flex items-center gap-2 text-lg font-bold"><Activity size={18} className="text-brand" />{t("monitoring.liveConnections")}</h1>
+          <Button variant="ghost" size="sm" onClick={() => query.refetch()}><RefreshCcw size={13} />{t("common.refresh")}</Button>
+        </div>
       )}
-
-      <ConfirmDialog open={!!revokeFor} onClose={() => setRevokeFor(null)}
-        onConfirm={() => revokeFor && revoke.mutate(revokeFor.token_hash)}
-        title={`revoke sign-in — ${revokeFor?.username ?? revokeFor?.user_id ?? ""}`}
-        body="The device's refresh token is invalidated; it must sign in again."
-        danger loading={revoke.isPending} />
+      {!!query.data?.failed_sources.length && (
+        <p className="rounded-xl border border-warn/30 bg-warn-soft px-3 py-2 text-xs text-warn">
+          {t("monitoring.partial")}: {query.data.failed_sources.join(", ")}
+        </p>
+      )}
+      {query.isLoading ? <Skeleton className="h-72" /> : query.isError ? (
+        <EmptyState title={t("common.loadFailed")} hint={t("common.tryAgain")} />
+      ) : (
+        <DataTable columns={columns as never} rows={query.data?.items ?? []}
+          rowKey={(row: MonitoringConnection) => row.key} height={520}
+          empty={<EmptyState title={t("monitoring.noConnections")} hint={t("monitoring.noConnectionsHint")} />} />
+      )}
+      {!query.isError && <PaginationBar page={page} pageSize={PAGE_SIZE} total={query.data?.total ?? 0} onChange={setPage} />}
     </div>
   );
 }

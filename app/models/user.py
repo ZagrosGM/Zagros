@@ -64,11 +64,16 @@ class User(BaseModel):
     data_limit_reset_strategy: UserDataLimitResetStrategy = (
         UserDataLimitResetStrategy.no_reset
     )
-    # Global device limit — ALL cores combined (distinct IPs; cores without
-    # a per-IP view count as one online presence each). None/0 = unlimited.
+    # Two independent limits. IP overflow never changes account status: only
+    # the newest source IP is temporarily blocked on managed VPN inbounds.
+    ip_limit: Optional[int] = Field(
+        None, ge=0,
+        description="max simultaneous source IPs across every core; 0/None = unlimited")
+    # Stable subscription enrollment only. When positive, X-Device-ID or
+    # X-HWID is mandatory; IP/User-Agent are never treated as device IDs.
     device_limit: Optional[int] = Field(
         None, ge=0,
-        description="max simultaneous devices across every core; 0/None = unlimited")
+        description="max enrolled subscription HWIDs; 0/None = unlimited")
     # Aggregate across every core/connection for this user. Strict integers
     # reject NaN, booleans, strings and fractional values at the API boundary.
     download_limit_mbps: int = Field(

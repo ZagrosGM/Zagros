@@ -38,6 +38,7 @@ from app.cores.types import (
     CoreStatus,
     DeviceSession,
     HealthStatus,
+    ListenerClaim,
     UsageRecord,
     UserAccount,
 )
@@ -247,6 +248,14 @@ class OpenVPNDriver(BaseCoreDriver):
         if not listeners:
             listeners = [self._listener_from_flat(self.settings)]
         return [dict(l) for l in listeners]
+
+    async def listener_claims(self) -> list[ListenerClaim]:
+        return [ListenerClaim(
+            core_id=self.metadata.id, protocol="openvpn",
+            transport=str(listener.get("proto") or "udp"),
+            address=str(listener.get("listen") or "0.0.0.0"),
+            port=int(listener["port"]), label=str(listener["tag"]),
+        ) for listener in self._listeners()]
 
     def _listener_mgmt_ports(self) -> dict[str, int]:
         """Deterministic management ports: an explicit per-listener

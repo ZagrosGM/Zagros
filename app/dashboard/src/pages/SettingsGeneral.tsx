@@ -3,8 +3,8 @@
 // operator already knows.)
 // (: admins and user templates are no longer second-class Settings
 // widgets — both moved to first-class sidebar pages under "Management".)
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, Save, Settings as SettingsIcon, TerminalSquare } from "lucide-react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { Save, Settings as SettingsIcon, TerminalSquare } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "../components/feedback";
 import { Badge, Button, Card, CardHeader, Field, Input, Select, Skeleton, Switch } from "../components/ui";
@@ -157,52 +157,8 @@ export default function SettingsGeneral() {
           </div>
         </Card>
 
-        <ApiDefaultsCard />
       </div>
     </div>
-  );
-}
-
-interface ApiDefaults { core_access: "all" | "none" | Record<string, string[]>; resolved_core_access: Record<string, string[]> }
-
-/** Settings → API defaults: what a Marzban-compatible client (Mirza and other
- *  bots/shops that never send `core_access`) gets on `POST /api/user`. */
-function ApiDefaultsCard() {
-  const t = useT();
-  const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["zagros", "api-defaults"], queryFn: () => api.get<ApiDefaults>("/zagros/settings/api-defaults"), retry: false });
-  const save = useMutation({
-    mutationFn: (mode: "all" | "none") => api.put<ApiDefaults>("/zagros/settings/api-defaults", { core_access: mode }),
-    onSuccess: () => { toast.ok(t("common.saved")); void qc.invalidateQueries({ queryKey: ["zagros", "api-defaults"] }); },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
-  });
-  const mode = q.data?.core_access;
-  const allCores = mode === "all";
-  const resolved = Object.entries(q.data?.resolved_core_access ?? {});
-  return (
-    <Card>
-      <CardHeader title={<span className="inline-flex items-center gap-2"><Bot size={16} className="text-brand" /> {t("API defaults (bots & shops)")}</span>}
-        subtitle={t("users created through the Marzban-compatible API without core_access")} />
-      <p className="text-[12.5px] leading-6 text-content-2">
-        {t("Bots written for Marzban (Mirza, resellers, scripts) only send xray proxies. With this on, every user they create also receives every inbound of the other enabled cores — the same selection the Create user dialog pre-selects. Off keeps them xray-only.")}
-      </p>
-      {q.isLoading ? <Skeleton className="mt-4 h-8" /> : q.isError ? (
-        <p className="mt-4 text-xs text-danger">{t(adminQueryErrorKey(q.error))}</p>
-      ) : (
-        <div className="mt-4 space-y-3">
-          <div className="flex items-center gap-2.5">
-            <Switch checked={allCores} disabled={save.isPending || (mode !== undefined && typeof mode !== "string")}
-              onChange={(v) => save.mutate(v ? "all" : "none")} label={t("grant all cores to API-created users")} />
-            <span className="text-sm">{typeof mode === "string" ? (allCores ? t("all enabled cores") : t("xray only")) : t("custom selection (set via API)")}</span>
-          </div>
-          <div className="text-[11.5px] text-content-3">
-            {resolved.length
-              ? <>{t("a bot-created user gets right now:")} {resolved.map(([core, tags]) => <span key={core} className="ms-1 inline-flex"><Badge tone="brand">{core} · {tags.length}</Badge></span>)}</>
-              : t("right now no extra core would be granted (no other enabled core has inbounds).")}
-          </div>
-        </div>
-      )}
-    </Card>
   );
 }
 

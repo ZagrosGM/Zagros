@@ -89,7 +89,11 @@ class XRayConfig(dict):
             "levels": {
                 "0": {
                     "statsUserUplink": True,
-                    "statsUserDownlink": True
+                    "statsUserDownlink": True,
+                    # Xray >= 24.11 tracks distinct active source IPs per
+                    # email. Device Limit consumes that map; older binaries
+                    # ignore the unsupported key and keep the delta fallback.
+                    "statsUserOnline": True
                 }
             },
             "system": {

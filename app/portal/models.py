@@ -37,7 +37,12 @@ CoercedClientAuthMode = Annotated[ClientAuthMode,
                                   BeforeValidator(_coerce_auth_mode)]
 
 
-_SUBSCRIPTION_PATH_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
+# One or more URL-safe segments. The complete path stays capped at 32
+# characters for backward compatibility, but an operator may now namespace it
+# (for example ``sub/test``) instead of being restricted to one segment.
+_SUBSCRIPTION_PATH_RE = re.compile(
+    r"^[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*$")
+_SUBSCRIPTION_PATH_MAX_LENGTH = 32
 # uploaded subscription page templates: flat file names only (never a path)
 _SUBSCRIPTION_TEMPLATE_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.(?:html|htm)$", re.IGNORECASE)
@@ -118,16 +123,20 @@ class PortalSettings(BaseModel):
 
     def normalize(self) -> "PortalSettings":
         path = (self.subscription_path or "sub").strip().strip("/") or "sub"
-        if not _SUBSCRIPTION_PATH_RE.match(path):
+        if (len(path) > _SUBSCRIPTION_PATH_MAX_LENGTH
+                or not _SUBSCRIPTION_PATH_RE.fullmatch(path)):
             raise ValueError(
-                "subscription_path must be 1-32 chars of a-z 0-9 . _ - "
-                "and start with a letter or digit"
+                "subscription_path must be 1-32 chars total; use a-z 0-9 . _ - "
+                "inside segments, / between segments, and start every segment "
+                "with a letter or digit"
             )
-        if path.lower() in {
+        first_segment = path.split("/", 1)[0].lower()
+        if first_segment in {
             "api", "dashboard", "statics", "client", "docs", "redoc",
-            "openapi", "favicon", "health",
+            "openapi", "openapi.json", "favicon", "health",
         }:
-            raise ValueError(f"subscription_path '{path}' is reserved by the panel")
+            raise ValueError(
+                f"subscription_path prefix '{first_segment}' is reserved by the panel")
         domain = (self.public_domain or "").strip().strip(".") or None
         subdomain = (self.custom_subdomain or "").strip().strip(".") or None
         if domain and ("/" in domain or "://" in domain or " " in domain):

@@ -29,11 +29,13 @@ class SubscriptionOnlyASGI:
     def _allowed(path: str) -> bool:
         if path.startswith("/sub/") or path.startswith("/zagros/"):
             return True
-        # Configurable canonical path: /<segment>/<token>. Validation inside
-        # the shared router still checks the currently persisted segment.
+        # Configurable canonical path: /<one/or/more/segments>/<token>.
+        # Validation inside the shared router still checks the exact persisted
+        # path; this guard only keeps admin/static surfaces off this listener.
         parts = [part for part in path.split("/") if part]
-        return len(parts) == 2 and parts[0] not in {
-            "api", "dashboard", "docs", "redoc", "openapi.json", "client",
+        return len(parts) >= 2 and parts[0] not in {
+            "api", "dashboard", "docs", "redoc", "openapi", "openapi.json",
+            "client", "statics", "favicon", "health",
         }
 
     async def __call__(self, scope, receive, send) -> None:

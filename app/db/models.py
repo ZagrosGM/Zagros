@@ -129,12 +129,15 @@ class User(Base):
     # re-activated automatically — users an operator disabled by hand are
     # never touched by the reconciler.
     admin_limit_disabled = Column(Boolean, nullable=False, default=False)
-    # Global device limit (ALL cores combined): max distinct devices
-    # (IP-union across cores; cores without an IP view count as one online
-    # presence). ``device_limit_disabled`` mirrors the admin-cap flag
-    # contract: only users Zagros itself limited for device overflow are
-    # auto-revived when the count drops back under the limit.
+    # Independent access controls:
+    # * ip_limit caps simultaneously observed source IPs across every core;
+    #   overflow IPs are temporarily firewalled (the account stays active).
+    # * device_limit caps stable X-Device-ID/X-HWID enrollments used to fetch
+    #   subscriptions/configs. It is never inferred from IP or User-Agent.
+    ip_limit = Column(Integer, nullable=True, default=None)
     device_limit = Column(Integer, nullable=True, default=None)
+    # Kept only as an upgrade compatibility tombstone. v1.0.4 never suspends
+    # an account for IP overflow and always leaves this false.
     device_limit_disabled = Column(Boolean, nullable=False, default=False)
     # Per-user aggregate bandwidth ceilings in decimal megabits/second.
     # Zero is deliberately unlimited for backward compatibility.

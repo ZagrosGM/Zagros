@@ -104,9 +104,10 @@ async def sync_platform_user(runtime, user: Any) -> int:
     """Upsert the platform projection of a legacy user; returns platform id.
 
     ``user`` is the legacy ORM row (``app.db.models.User``). The upsert keeps
-    platform-specific fields (app credentials, device limit, auth mode) —
-    only mirrored fields are written.
+    platform-specific fields (app credentials and auth mode) while mirroring
+    both independent IP/HWID limits from the compatibility row.
     """
+    ip_limit = int(getattr(user, "ip_limit", 0) or 0) or None
     device_limit = int(getattr(user, "device_limit", 0) or 0) or None
     platform_id = await asyncio.to_thread(
         runtime.users.upsert_user,
@@ -114,6 +115,7 @@ async def sync_platform_user(runtime, user: Any) -> int:
         status=_legacy_status(user.status),
         data_limit_bytes=(int(getattr(user, "data_limit", 0) or 0) or None),
         expire_at=_legacy_expire_dt(user),
+        ip_limit=ip_limit,
         device_limit=device_limit,
         download_limit_mbps=max(0, int(
             getattr(user, "download_limit_mbps", 0) or 0)),
@@ -124,8 +126,8 @@ async def sync_platform_user(runtime, user: Any) -> int:
     )
     # upsert keeps None optional fields by design — but a CLEARED legacy
     # limit must clear the mirror too, so reconcile the exact value:
-    await asyncio.to_thread(_reconcile_device_limit, runtime, platform_id,
-                            device_limit)
+    await asyncio.to_thread(_reconcile_access_limits, runtime, platform_id,
+                            ip_limit, device_limit)
     # Upgrade/bootstrap mirror: never reset an already-live unified quota on
     # every User Edit.  The old reset-then-add sequence raced the recorder and
     # could erase a concurrent core delta.  Bring a missing/older platform row
@@ -141,12 +143,9 @@ async def sync_platform_user(runtime, user: Any) -> int:
     return platform_id
 
 
-def _reconcile_device_limit(runtime, platform_id: int, value: int | None) -> None:
-    """Write the mirrored device_limit verbatim (incl. NULL for "unlimited").
-
-    Separate from upsert_user because its keep-None contract exists to
-    protect platform-local fields — the legacy column is the master here.
-    """
+def _reconcile_access_limits(runtime, platform_id: int, ip_limit: int | None,
+                             device_limit: int | None) -> None:
+    """Mirror both access limits verbatim, including NULL = unlimited."""
     from sqlalchemy import update
 
     from app.persistence.models import UserModel
@@ -155,7 +154,7 @@ def _reconcile_device_limit(runtime, platform_id: int, value: int | None) -> Non
         s.execute(
             update(UserModel)
             .where(UserModel.id == platform_id)
-            .values(device_limit=value)
+            .values(ip_limit=ip_limit, device_limit=device_limit)
         )
         s.commit()
 

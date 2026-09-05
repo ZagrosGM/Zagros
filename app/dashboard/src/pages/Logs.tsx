@@ -7,7 +7,7 @@ import { api } from "../lib/api";
 import { useT } from "../lib/i18n";
 import type { CoreView } from "../lib/types";
 
-export default function Logs() {
+export default function Logs({ embedded = false }: { embedded?: boolean }) {
   const t = useT();
   const [coreId, setCoreId] = useState("");
   const [lines, setLines] = useState(300);
@@ -39,10 +39,12 @@ export default function Logs() {
   return (
     <div className="flex h-full flex-col space-y-4 animate-fade-up">
       <div className="flex flex-wrap items-center gap-2">
-        <h1 className="me-auto flex items-center gap-2 text-lg font-bold tracking-tight">
-          <FileTerminal size={18} className="text-brand" />{t("nav.logs")}
-          {effectiveCore && <Badge tone="brand">{effectiveCore}</Badge>}
-        </h1>
+        {!embedded ? (
+          <h1 className="me-auto flex items-center gap-2 text-lg font-bold tracking-tight">
+            <FileTerminal size={18} className="text-brand" />{t("nav.logs")}
+            {effectiveCore && <Badge tone="brand">{effectiveCore}</Badge>}
+          </h1>
+        ) : <span className="me-auto">{effectiveCore && <Badge tone="brand">{effectiveCore}</Badge>}</span>}
         <Select value={effectiveCore} onChange={(e) => setCoreId(e.target.value)} className="w-40" aria-label={t("core")}>
           {(cores.data?.cores ?? []).map((c) => <option key={c.id} value={c.id}>{c.id}</option>)}
           {!cores.data?.cores?.length && <option value="">{t("— install a core —")}</option>}

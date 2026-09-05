@@ -12,6 +12,7 @@ when the platform runtime is available):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -136,6 +137,20 @@ def _bearer(authorization: str | None, runtime) -> int:
         raise _client_error(exc) from exc
 
 
+async def _enforce_client_device(request: Request, runtime, user_id: int) -> None:
+    from app.platform.device_enrollment import DeviceEnrollmentError, enforce
+
+    try:
+        await enforce(
+            runtime, user_id, request.headers,
+            request.headers.get("user-agent"),
+            request.client.host if request.client else None,
+        )
+    except DeviceEnrollmentError as exc:
+        raise HTTPException(403, {"error": "device_limit",
+                                 "message": str(exc)}) from exc
+
+
 # ---------------------------------------------------------------------- #
 # Client API (/client/v1)
 # ---------------------------------------------------------------------- #
@@ -155,16 +170,28 @@ class ConfigBody(BaseModel):
 
 
 @zagros_router.post("/client/v1/auth/login", response_model=AuthTokens)
-async def client_login(body: LoginBody, runtime=Depends(get_runtime)):
+async def client_login(body: LoginBody, request: Request,
+                       runtime=Depends(get_runtime)):
     try:
-        return await runtime.client_api.authenticate(body.username, body.password)
+        tokens = await runtime.client_api.authenticate(body.username, body.password)
+        user_id = runtime.client_api.verify_access(tokens.access_token)
+        try:
+            await _enforce_client_device(request, runtime, user_id)
+        except HTTPException:
+            await runtime.client_api.logout(tokens.refresh_token)
+            raise
+        return tokens
     except ClientApiError as exc:
         raise _client_error(exc) from exc
 
 
 @zagros_router.post("/client/v1/auth/refresh", response_model=AuthTokens)
-async def client_refresh(body: RefreshBody, runtime=Depends(get_runtime)):
+async def client_refresh(body: RefreshBody, request: Request,
+                         runtime=Depends(get_runtime)):
     try:
+        owner = await runtime.client_api.refresh_owner(body.refresh_token)
+        if owner is not None:
+            await _enforce_client_device(request, runtime, owner)
         return await runtime.client_api.refresh(body.refresh_token)
     except ClientApiError as exc:
         raise _client_error(exc) from exc
@@ -177,18 +204,21 @@ async def client_logout(body: RefreshBody, runtime=Depends(get_runtime)):
 
 
 @zagros_router.get("/client/v1/profile")
-async def client_profile(authorization: str | None = Header(default=None),
+async def client_profile(request: Request,
+                         authorization: str | None = Header(default=None),
                          runtime=Depends(get_runtime)):
     user_id = _bearer(authorization, runtime)
+    await _enforce_client_device(request, runtime, user_id)
     return await runtime.client_api.get_profile(user_id)
 
 
 @zagros_router.post("/client/v1/connect/{core_id}", response_model=ConnectOffer)
-async def client_connect(core_id: str,
+async def client_connect(core_id: str, request: Request,
                          authorization: str | None = Header(default=None),
                          runtime=Depends(get_runtime)):
     user_id = _bearer(authorization, runtime)
     try:
+        await _enforce_client_device(request, runtime, user_id)
         return await runtime.client_api.request_connect(user_id, core_id)
     except ClientApiError as exc:
         raise _client_error(exc) from exc
@@ -198,6 +228,9 @@ async def client_connect(core_id: str,
 async def client_config(body: ConfigBody, request: Request,
                         runtime=Depends(get_runtime)):
     try:
+        owner = await runtime.client_api.connect_owner(body.connect_token)
+        if owner is not None:
+            await _enforce_client_device(request, runtime, owner)
         settings = await runtime.portal_settings.get_portal_settings()
         context = runtime.portal._delivery_context(  # noqa: SLF001
             settings, request.url.hostname)
@@ -357,14 +390,19 @@ async def subscription_portal(token: str, request: Request,
                                    accept_language, user_agent)
 
 
-@zagros_router.get("/{sub_path}/{token}", response_class=HTMLResponse)
-async def subscription_portal_configured_path(
-    sub_path: str, token: str, request: Request,
-    runtime=Depends(get_runtime),
-    accept_language: str | None = Header(default=None),
-    user_agent: str | None = Header(default=None),
-):
-    """Canonical configurable root path, e.g. /clients/<token>."""
+@zagros_router.get("/zagros/{sub_path:path}/{token}", response_class=HTMLResponse)
+async def subscription_portal_custom_path(sub_path: str, token: str,
+                                          request: Request,
+                                          runtime=Depends(get_runtime),
+                                          accept_language: str | None = Header(default=None),
+                                          user_agent: str | None = Header(default=None)):
+    """Settings-driven subscription path. Fail closed: any path other than
+    the currently configured one is indistinguishable from a bad token (404),
+    never a redirect that would leak the configured path.
+
+    This route must precede the generic root catch-all: ``:path`` deliberately
+    accepts namespaced values such as ``sub/test``.
+    """
     settings = await runtime.portal_settings.get_portal_settings()
     if sub_path != settings.subscription_path:
         raise HTTPException(404, "subscription not found")
@@ -372,15 +410,14 @@ async def subscription_portal_configured_path(
                                    accept_language, user_agent)
 
 
-@zagros_router.get("/zagros/{sub_path}/{token}", response_class=HTMLResponse)
-async def subscription_portal_custom_path(sub_path: str, token: str,
-                                          request: Request,
-                                          runtime=Depends(get_runtime),
-                                          accept_language: str | None = Header(default=None),
-                                          user_agent: str | None = Header(default=None)):
-    """Settings-driven subscription URL segment. Fail closed: any segment
-    other than the currently-configured one is indistinguishable from a bad
-    token (404), never a redirect that would leak the configured path."""
+@zagros_router.get("/{sub_path:path}/{token}", response_class=HTMLResponse)
+async def subscription_portal_configured_path(
+    sub_path: str, token: str, request: Request,
+    runtime=Depends(get_runtime),
+    accept_language: str | None = Header(default=None),
+    user_agent: str | None = Header(default=None),
+):
+    """Canonical configurable root path, e.g. /sub/test/<token>."""
     settings = await runtime.portal_settings.get_portal_settings()
     if sub_path != settings.subscription_path:
         raise HTTPException(404, "subscription not found")
@@ -451,6 +488,16 @@ async def _serve_subscription(runtime, user_id: int, request: Request,
     except Exception:  # noqa: BLE001 — bookkeeping must never kill delivery
         username = None
     if username:
+        # Strict HWID enrollment happens before any portal/config metadata is
+        # returned. IP and User-Agent are intentionally never fallback IDs.
+        from app.platform.device_enrollment import DeviceEnrollmentError, enforce
+        try:
+            await enforce(
+                runtime, user_id, request.headers, user_agent,
+                request.client.host if request.client else None,
+            )
+        except DeviceEnrollmentError as exc:
+            raise HTTPException(403, str(exc)) from exc
         try:
             await _asyncio.to_thread(
                 _track_subscription_fetch, username, user_agent or "")
@@ -555,6 +602,45 @@ def _format_for_ua(ua: str) -> str:
     if any(k in ua for k in ("sing-box", "singbox", "sfa", "sfi", "sfm")):
         return "sing-box"
     return ""
+
+
+@zagros_admin_router.get("/users/by-username/{username}/devices")
+async def enrolled_subscription_devices(username: str,
+                                         runtime=Depends(get_runtime)):
+    from app.platform.device_enrollment import list_devices
+
+    row = await asyncio.to_thread(runtime.users.get_user_by_username, username)
+    if row is None:
+        raise HTTPException(404, "user not found")
+    devices = await asyncio.to_thread(list_devices, runtime, row.id)
+    return {"username": username, "device_limit": row.device_limit,
+            "devices": devices}
+
+
+@zagros_admin_router.delete("/users/by-username/{username}/devices/{device_id}")
+async def remove_enrolled_subscription_device(username: str, device_id: int,
+                                                runtime=Depends(get_runtime)):
+    from app.platform.device_enrollment import remove_device
+
+    row = await asyncio.to_thread(runtime.users.get_user_by_username, username)
+    if row is None:
+        raise HTTPException(404, "user not found")
+    removed = await asyncio.to_thread(remove_device, runtime, row.id, device_id)
+    if not removed:
+        raise HTTPException(404, "device not found")
+    return {"removed": removed}
+
+
+@zagros_admin_router.delete("/users/by-username/{username}/devices")
+async def clear_enrolled_subscription_devices(username: str,
+                                               runtime=Depends(get_runtime)):
+    from app.platform.device_enrollment import remove_device
+
+    row = await asyncio.to_thread(runtime.users.get_user_by_username, username)
+    if row is None:
+        raise HTTPException(404, "user not found")
+    removed = await asyncio.to_thread(remove_device, runtime, row.id, None)
+    return {"removed": removed}
 
 
 @zagros_admin_router.post("/users/{user_id}/subscription-token")

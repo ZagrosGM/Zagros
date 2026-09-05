@@ -1523,7 +1523,101 @@ async def outbounds_deploy(body: OutboundDeployBody, runtime=Depends(get_runtime
 
 
 # --------------------------------------------------------------------- #
-# sessions / client sessions / devices
+# Monitoring + aggregate Statistics
+# --------------------------------------------------------------------- #
+
+@zagros_admin_router.get("/monitoring/live-connections")
+async def monitoring_live_connections(page: int = 1, page_size: int = 100,
+                                      runtime=Depends(get_runtime)):
+    from app.platform.monitoring import live_connections
+    return await asyncio.to_thread(
+        live_connections, runtime, page=page, page_size=page_size)
+
+
+@zagros_admin_router.get("/monitoring/devices")
+async def monitoring_devices(page: int = 1, page_size: int = 100,
+                             runtime=Depends(get_runtime)):
+    from app.platform.monitoring import enrolled_devices
+    return await asyncio.to_thread(
+        enrolled_devices, runtime, page=page, page_size=page_size)
+
+
+@zagros_admin_router.delete("/monitoring/devices/{device_id}")
+async def monitoring_device_remove(device_id: int, request: Request,
+                                   runtime=Depends(get_runtime)):
+    from sqlalchemy import delete
+    from app.persistence.models import SubscriptionDeviceModel
+
+    def _remove() -> int:
+        with runtime.session_factory() as session:
+            result = session.execute(delete(SubscriptionDeviceModel).where(
+                SubscriptionDeviceModel.id == device_id))
+            session.commit()
+            return int(result.rowcount or 0)
+
+    if not await asyncio.to_thread(_remove):
+        raise HTTPException(404, "device not found")
+    _audit(runtime, "monitoring.device.removed", str(device_id), request=request)
+    return {"removed": device_id}
+
+
+@zagros_admin_router.get("/monitoring/ip-activity")
+async def monitoring_ip_activity(page: int = 1, page_size: int = 100,
+                                 user_id: int | None = None,
+                                 runtime=Depends(get_runtime)):
+    from app.platform.monitoring import ip_activity
+    return await asyncio.to_thread(
+        ip_activity, runtime, page=page, page_size=page_size,
+        user_id=user_id)
+
+
+@zagros_admin_router.get("/statistics/overview")
+async def statistics_overview(runtime=Depends(get_runtime)):
+    from app.platform.statistics import overview
+    return await asyncio.to_thread(overview, runtime)
+
+
+@zagros_admin_router.get("/statistics/traffic-history")
+async def statistics_traffic_history(range: str = "day",
+                                     start: str | None = None,
+                                     end: str | None = None,
+                                     runtime=Depends(get_runtime)):
+    from app.platform.statistics import range_spec, system_history
+    try:
+        spec = range_spec(range, start, end)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return await asyncio.to_thread(system_history, runtime, spec)
+
+
+@zagros_admin_router.get("/statistics/users/by-username/{username}")
+async def statistics_user_overview(username: str,
+                                   runtime=Depends(get_runtime)):
+    from app.platform.statistics import user_overview
+    result = await asyncio.to_thread(user_overview, runtime, username)
+    if result is None:
+        raise HTTPException(404, "user not found")
+    return result
+
+
+@zagros_admin_router.get("/statistics/users/by-username/{username}/traffic")
+async def statistics_user_traffic(username: str, range: str = "day",
+                                  start: str | None = None,
+                                  end: str | None = None,
+                                  runtime=Depends(get_runtime)):
+    from app.platform.statistics import range_spec, user_overview, user_traffic
+    try:
+        spec = range_spec(range, start, end)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    user = await asyncio.to_thread(user_overview, runtime, username)
+    if user is None:
+        raise HTTPException(404, "user not found")
+    return await asyncio.to_thread(user_traffic, runtime, user["user_id"], spec)
+
+
+# --------------------------------------------------------------------- #
+# compatibility inventories (legacy dashboard deep links)
 # --------------------------------------------------------------------- #
 
 @zagros_admin_router.get("/sessions")
@@ -2905,6 +2999,23 @@ class SupportTestBody(BaseModel):
     confirm: bool = False
 
 
+def _support_target_urls(bot_url: str) -> list[str]:
+    """Resolve an operator value to concrete support API endpoints.
+
+    The current Cloudflare Worker serves ``/api/ticket``.  Older PHP installs
+    served ``/api.php``.  An explicit endpoint is always honoured; a base URL
+    tries the Worker route first and retains a 404-only PHP fallback so an
+    upgrade of the panel does not break self-hosted legacy bots.
+    """
+    base = str(bot_url or "").strip().rstrip("/")
+    if not base:
+        base = DEFAULT_SUPPORT_BOT_URL
+    path = base.split("?", 1)[0].lower()
+    if path.endswith("/api/ticket") or path.endswith(".php"):
+        return [base]
+    return [f"{base}/api/ticket", f"{base}/api.php"]
+
+
 async def _forward_ticket_to_bot(
     bot_url: str,
     secret: str,
@@ -2915,7 +3026,7 @@ async def _forward_ticket_to_bot(
     file_name: str | None = None,
     mime_type: str | None = None,
 ) -> dict[str, Any]:
-    """Forward a user support ticket to the independent PHP Telegram Bot API.
+    """Forward a user support ticket to the independent Telegram Bot API.
 
     PRIVACY GUARANTEE:
     This payload MUST ONLY contain:
@@ -2952,13 +3063,19 @@ async def _forward_ticket_to_bot(
             "attachment": (file_name, file_bytes, mime_type or "application/octet-stream")
         }
 
-    target_url = bot_url.rstrip("/")
-    if not target_url.endswith(".php"):
-        target_url = f"{target_url}/api.php"
-
+    targets = _support_target_urls(bot_url)
+    target_url = targets[0]
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(target_url, data=form_data, files=files, headers=headers)
+            for index, candidate in enumerate(targets):
+                target_url = candidate
+                resp = await client.post(
+                    target_url, data=form_data, files=files, headers=headers)
+                # Base URLs keep backward compatibility with the retired PHP
+                # API.  Never replay on auth/validation/server errors: only a
+                # missing Worker route proves this is probably a PHP install.
+                if resp.status_code != 404 or index == len(targets) - 1:
+                    break
     except httpx.HTTPError as exc:
         raise SupportBotError(
             f"the support bot at {target_url} is unreachable ({exc.__class__.__name__})",
@@ -3589,6 +3706,8 @@ async def security_overview(request: Request, runtime=Depends(get_runtime)):
     override = kv_load(runtime.session_factory, SECURITY_SETTINGS_KEY, {})
     lifetime = override.get("token_expire_minutes")
     sessions = await asyncio.to_thread(_list_sessions, runtime)
+    from app.platform.ip_limits import load_settings as load_ip_limit_settings
+    ip_limit = await asyncio.to_thread(load_ip_limit_settings, runtime)
     return {
         "admin": {"username": username},
         "token": {
@@ -3599,8 +3718,49 @@ async def security_overview(request: Request, runtime=Depends(get_runtime)):
             "source": "database" if lifetime is not None else "environment",
             "env_var": "JWT_ACCESS_TOKEN_EXPIRE_MINUTES",
         },
+        "ip_limit": ip_limit,
         "sessions": sessions,
     }
+
+
+@zagros_admin_router.put("/security/ip-limit")
+async def set_ip_limit_settings(body: dict, request: Request,
+                                runtime=Depends(get_runtime)):
+    from app.platform.ip_limits import save_settings
+
+    data = body or {}
+    try:
+        ban_minutes = int(data.get("ban_duration_minutes", 15))
+        review_seconds = int(data.get("review_interval_seconds", 5))
+        saved = await asyncio.to_thread(
+            save_settings, runtime,
+            ban_duration_minutes=ban_minutes,
+            review_interval_seconds=review_seconds,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    _audit(runtime, "security.ip_limit_settings", str(saved), request=request)
+    return saved
+
+
+@zagros_admin_router.get("/security/ip-bans")
+async def get_ip_bans(active_only: bool = False,
+                       runtime=Depends(get_runtime)):
+    from app.platform.ip_limits import list_bans
+    return {"bans": await asyncio.to_thread(
+        list_bans, runtime, active_only=active_only)}
+
+
+@zagros_admin_router.delete("/security/ip-bans/{ban_id}")
+async def delete_ip_ban(ban_id: int, request: Request,
+                        runtime=Depends(get_runtime)):
+    from app.platform.ip_limits import revoke_ban, run_once
+    if not await asyncio.to_thread(revoke_ban, runtime, ban_id):
+        raise HTTPException(404, "ban not found")
+    # Reconcile now; do not leave the address blocked until the next tick.
+    await run_once(runtime, force=True)
+    _audit(runtime, "security.ip_ban.removed", str(ban_id), request=request)
+    return {"removed": ban_id}
 
 
 @zagros_admin_router.post("/security/credentials")

@@ -60,6 +60,7 @@ class DeviceStore(Protocol):
 
     async def get(self, device_id: str) -> DeviceInfo | None: ...
     async def upsert(self, device: DeviceInfo) -> None: ...
+    async def bulk_upsert(self, devices: list[DeviceInfo]) -> None: ...
     async def for_user(self, user_id: int) -> list[DeviceInfo]: ...
     async def all(self) -> list[DeviceInfo]: ...
 
@@ -75,6 +76,10 @@ class InMemoryDeviceStore:
     async def upsert(self, device: DeviceInfo) -> None:
         async with self._lock:
             self._devices[device.device_id] = device
+
+    async def bulk_upsert(self, devices: list[DeviceInfo]) -> None:
+        async with self._lock:
+            self._devices.update({device.device_id: device for device in devices})
 
     async def for_user(self, user_id: int) -> list[DeviceInfo]:
         return [d for d in self._devices.values() if d.user_id == user_id]

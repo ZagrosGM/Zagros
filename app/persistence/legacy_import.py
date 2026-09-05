@@ -193,7 +193,12 @@ def import_users(snapshot: Any, session_factory, *, admin_id: int | None = None,
                 data_limit_reset_strategy=_coerce_strategy(
                     entry.get("data_limit_reset_strategy")),
                 expire=_as_int(entry.get("expire")),
-                device_limit=_as_int(entry.get("device_limit")),
+                # Backups produced before the split omitted ip_limit and used
+                # device_limit for online IPs. New backups preserve both.
+                ip_limit=(_as_int(entry.get("ip_limit")) if "ip_limit" in entry
+                          else _as_int(entry.get("device_limit"))),
+                device_limit=(_as_int(entry.get("device_limit"))
+                              if "ip_limit" in entry else None),
                 download_limit_mbps=_as_int(entry.get("download_limit_mbps")) or 0,
                 upload_limit_mbps=_as_int(entry.get("upload_limit_mbps")) or 0,
                 note=(entry.get("note") or "")[:500] or None,

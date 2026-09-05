@@ -42,6 +42,7 @@ from app.cores.types import (
     CoreStatus,
     DeviceSession,
     HealthStatus,
+    ListenerClaim,
     UsageRecord,
     UserAccount,
 )
@@ -170,6 +171,13 @@ class SSHTunnelDriver(BaseCoreDriver):
             port = int(settings.get("port") or 2022)
             out.append({"tag": "ssh", "port": port})
         return out
+
+    async def listener_claims(self) -> list[ListenerClaim]:
+        return [ListenerClaim(
+            core_id=self.metadata.id, protocol="ssh", transport="tcp",
+            address=str(listener.get("listen") or "0.0.0.0"),
+            port=int(listener["port"]), label=str(listener["tag"]),
+        ) for listener in self._listeners]
 
     @classmethod
     def _validate_listener_set(cls, listeners: list[dict[str, Any]]) -> None:

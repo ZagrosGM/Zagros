@@ -58,8 +58,11 @@ class XrayBackend(Protocol):
 
     # ---- statistics ---- #
     def usage(self, reset: bool = False) -> list[XrayUsageStat]: ...
+    def online_devices(self) -> dict[str, set[str]]:
+        """Current source IPs grouped by account email when Xray exposes them."""
+        ...
     def online_accounts(self) -> list[str]:
-        """Emails with traffic growth since the previous sample (delta probe)."""
+        """Online emails; traffic growth is the legacy fallback."""
         ...
 
     # ---- config injection (routing/outbounds/chain listeners) ---- #
@@ -246,6 +249,11 @@ class LegacyXrayBackend:
             except Exception:  # noqa: BLE001 - node outage must not kill the sweep
                 continue
             for stat in filter(lambda s: s.value, stats):
+                # Enabling statsUserOnline adds a third user statistic. It is
+                # a device count, never traffic; folding it into downlink would
+                # corrupt quotas by a few bytes on every sample.
+                if stat.link not in {"uplink", "downlink"}:
+                    continue
                 slot = 0 if stat.link == "uplink" else 1
                 aggregates[stat.name][slot] += stat.value
             records.extend(
@@ -254,16 +262,43 @@ class LegacyXrayBackend:
             )
         return records
 
+    def online_device_details(self) -> dict[str, dict[str, int]]:
+        """Exact source-IP map including Xray's native last-seen timestamps."""
+        try:
+            return self._x().api.get_online_ip_details(timeout=10)
+        except Exception:  # noqa: BLE001 — old Xray/stub
+            return {}
+
+    def online_devices(self) -> dict[str, set[str]]:
+        """Use Xray's native online-IP map (one exact set per email).
+
+        Xray 24.11+ maintains the map from live connection reference counts.
+        A deployment behind a same-host proxy may hide the real source as
+        loopback; in that case this returns no IPs and ``online_accounts``
+        falls back to traffic growth instead of inventing a hardware ID.
+        """
+        detailed = self.online_device_details()
+        if detailed:
+            return {email: set(ips) for email, ips in detailed.items()}
+        try:
+            return self._x().api.get_online_ips(timeout=10)
+        except Exception:  # noqa: BLE001 — old Xray/stub: retain legacy probe
+            return {}
+
     def online_accounts(self) -> list[str]:
-        """Xray's stats API has no per-user IP table; online == counters grew
-        since the previous sample."""
+        native = self.online_devices()
+        if native:
+            return list(native)
+
+        # Backward compatibility for Xray releases/topologies without an
+        # online-IP map: online means counters grew since the previous sample.
         current: dict[str, tuple[int, int]] = {}
         try:
             for stat in self._x().api.get_users_stats(reset=False, timeout=30):
                 up, down = current.get(stat.name, (0, 0))
                 if stat.link == "uplink":
                     current[stat.name] = (up + stat.value, down)
-                else:
+                elif stat.link == "downlink":
                     current[stat.name] = (up, down + stat.value)
         except Exception:  # noqa: BLE001
             return []

@@ -1,5 +1,5 @@
 import { lazy, Suspense } from "react";
-import { HashRouter, Route, Routes } from "react-router-dom";
+import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import AppLayout from "./layouts/AppLayout";
 import Login from "./pages/Login";
 import { Skeleton } from "./components/ui";
@@ -19,9 +19,8 @@ const Inbounds = lazy(() => import("./pages/Inbounds"));
 const Hosts = lazy(() => import("./pages/Hosts"));
 const Dns = lazy(() => import("./pages/Dns"));
 const Certificates = lazy(() => import("./pages/Certificates"));
-const Sessions = lazy(() => import("./pages/Sessions"));
-const Devices = lazy(() => import("./pages/Devices"));
-const Logs = lazy(() => import("./pages/Logs"));
+const Monitoring = lazy(() => import("./pages/Monitoring"));
+const Statistics = lazy(() => import("./pages/Statistics"));
 const Settings = lazy(() => import("./pages/Settings"));
 const SettingsGeneral = lazy(() => import("./pages/SettingsGeneral"));
 const SettingsSecurity = lazy(() => import("./pages/SettingsSecurity"));
@@ -59,9 +58,12 @@ export default function App() {
           <Route path="hosts" element={<Suspense fallback={<PageFallback />}><Hosts /></Suspense>} />
           <Route path="dns" element={<Suspense fallback={<PageFallback />}><Dns /></Suspense>} />
           <Route path="certificates" element={<Suspense fallback={<PageFallback />}><Certificates /></Suspense>} />
-          <Route path="sessions" element={<Suspense fallback={<PageFallback />}><Sessions /></Suspense>} />
-          <Route path="devices" element={<Suspense fallback={<PageFallback />}><Devices /></Suspense>} />
-          <Route path="logs" element={<Suspense fallback={<PageFallback />}><Logs /></Suspense>} />
+          <Route path="monitoring" element={<Suspense fallback={<PageFallback />}><Monitoring /></Suspense>} />
+          <Route path="statistics" element={<Suspense fallback={<PageFallback />}><Statistics /></Suspense>} />
+          {/* Preserve old bookmarks without exposing independent Observe pages. */}
+          <Route path="sessions" element={<Navigate to="/monitoring" replace />} />
+          <Route path="devices" element={<Navigate to="/monitoring?tab=devices" replace />} />
+          <Route path="logs" element={<Navigate to="/monitoring?tab=logs" replace />} />
           <Route path="support" element={<Suspense fallback={<PageFallback />}><Support /></Suspense>} />
           {/* Settings is a section with three linkable tabs */}
           <Route path="settings" element={<Suspense fallback={<PageFallback />}><Settings /></Suspense>}>

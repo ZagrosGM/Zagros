@@ -59,6 +59,7 @@ class UserModel(Base):
     data_limit_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     data_limit_reset_strategy: Mapped[str] = mapped_column(String(20), default="no_reset")
     expire_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    ip_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     device_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Decimal Mbps; 0 means unlimited. Non-null defaults keep every upgraded
     # user unthrottled until an operator explicitly opts in.
@@ -78,6 +79,72 @@ class UserModel(Base):
     accounts: Mapped[list["UserCoreAccountModel"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+
+
+class SubscriptionDeviceModel(Base):
+    """One stable identifier enrolled for subscription/config delivery.
+
+    Only a SHA-256 digest and a short non-secret hint are retained. ``last_ip``
+    is request metadata, never identity: the stable header remains the sole
+    enrollment key.
+    """
+    __tablename__ = "subscription_devices"
+    __table_args__ = (
+        UniqueConstraint("user_id", "device_hash", name="uq_subscription_device"),
+        Index("ix_subscription_devices_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    device_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    device_hint: Mapped[str] = mapped_column(String(24), nullable=False)
+    first_seen: Mapped[datetime] = mapped_column(UtcDateTime, default=_utcnow)
+    last_seen: Mapped[datetime] = mapped_column(UtcDateTime, default=_utcnow)
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    last_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+
+
+class IPBanModel(Base):
+    """Auditable timed source-IP ban; nftables is a projection of active rows."""
+    __tablename__ = "ip_bans"
+    __table_args__ = (
+        Index("ix_ip_bans_active_expiry", "active", "expires_at"),
+        Index("ix_ip_bans_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    ip: Mapped[str] = mapped_column(String(45), nullable=False)
+    banned_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    reason: Mapped[str] = mapped_column(String(128), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+
+
+class IPActivityModel(Base):
+    """Observed authenticated source IP, independent from stable HWID rows."""
+
+    __tablename__ = "ip_activity"
+    __table_args__ = (
+        Index("ix_ip_activity_last_seen", "last_seen"),
+        Index("ix_ip_activity_user_last", "user_id", "last_seen"),
+        Index("ix_ip_activity_core_last", "core_id", "last_seen"),
+        Index("ix_ip_activity_node_last", "node_id", "last_seen"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_key: Mapped[str] = mapped_column(String(64), unique=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    ip: Mapped[str] = mapped_column(String(45), nullable=False)
+    core_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    node_id: Mapped[int | None] = mapped_column(
+        ForeignKey("nodes.id", ondelete="SET NULL"), nullable=True)
+    first_seen: Mapped[datetime] = mapped_column(UtcDateTime, default=_utcnow)
+    active_since: Mapped[datetime] = mapped_column(UtcDateTime, default=_utcnow)
+    last_seen: Mapped[datetime] = mapped_column(UtcDateTime, default=_utcnow)
 
 
 # --------------------------------------------------------------------- #
@@ -231,7 +298,12 @@ class UsageRecordModel(Base):
     """Append-only usage journal (per polling batch, per account)."""
 
     __tablename__ = "usage_records"
-    __table_args__ = (Index("ix_usage_owner_time", "user_id", "recorded_at"),)
+    __table_args__ = (
+        Index("ix_usage_owner_time", "user_id", "recorded_at"),
+        Index("ix_usage_recorded_at", "recorded_at"),
+        Index("ix_usage_core_time", "core_id", "recorded_at"),
+        Index("ix_usage_node_time", "node_id", "recorded_at"),
+    )
 
     # SQLite only auto-increments INTEGER PRIMARY KEY (rowid alias);
     # BigInteger would silently break autoincrement there.
@@ -247,6 +319,28 @@ class UsageRecordModel(Base):
     uplink_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     downlink_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     recorded_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utcnow)
+
+
+class UsageAggregateModel(Base):
+    """Small cumulative rollups for system/core/node Statistics cards."""
+
+    __tablename__ = "usage_aggregates"
+
+    dimension: Mapped[str] = mapped_column(String(190), primary_key=True)
+    uplink_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    downlink_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utcnow,
+                                                  onupdate=_utcnow)
+
+
+class SystemUsageBucketModel(Base):
+    """Five-minute real-accounting rollup; one row regardless of user count."""
+
+    __tablename__ = "system_usage_buckets"
+
+    bucket_start: Mapped[datetime] = mapped_column(UtcDateTime, primary_key=True)
+    uplink_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    downlink_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
 
 
 # --------------------------------------------------------------------- #

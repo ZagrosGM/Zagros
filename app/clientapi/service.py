@@ -151,6 +151,20 @@ class ClientApiService:
         await self._refresh.revoke(hash_token(refresh_token))
         self._emit("auth.logout", {})
 
+    async def refresh_owner(self, refresh_token: str) -> int | None:
+        """Resolve a refresh token for route-level HWID enforcement."""
+        row = await self._refresh.get(hash_token(refresh_token))
+        now = _epoch_to_dt(self._now())
+        return (None if row is None or row.revoked or row.expires_at < now
+                else int(row.user_id))
+
+    async def connect_owner(self, connect_token: str) -> int | None:
+        """Resolve a one-time connect token without consuming it."""
+        row = await self._connect.get(hash_token(connect_token))
+        now = _epoch_to_dt(self._now())
+        return (None if row is None or row.consumed or row.expires_at < now
+                else int(row.user_id))
+
     def verify_access(self, access_token: str) -> int:
         """AuthZ guard for routers; returns user_id or raises AuthFailed."""
         try:

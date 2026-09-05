@@ -3,7 +3,7 @@
 // application login), per-user quick actions. No JSON anywhere.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Ban, Check, ChevronDown, Copy, Dices, ExternalLink, Filter, Link2, MoreHorizontal,
+  Ban, BarChart3, Check, ChevronDown, Copy, Dices, ExternalLink, Filter, Link2, MoreHorizontal,
   Plus, RefreshCcw, Search, Trash2, UserPlus, Users as UsersIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -12,6 +12,7 @@ import { toast } from "../components/feedback";
 import { ConfirmDialog, Dialog, RowMenu } from "../components/overlays";
 import { Badge, Button, Card, EmptyState, Field, Input, Progress, Select, Switch, Tooltip, cn } from "../components/ui";
 import CoreAccessPicker from "../components/CoreAccessPicker";
+import { UserStatisticsDrawer } from "../components/UserStatisticsDrawer";
 import { api, ApiError } from "../lib/api";
 import { copyText } from "../lib/clipboard";
 import { XRAY_CORE_ID, allCoreAccess, allLegacySelected } from "../lib/inboundTree";
@@ -30,7 +31,9 @@ interface UserForm {
   note: string;
   status: UserStatus;
   dataLimitGB: string;
-  /** global device limit as text ("" / "0" = unlimited), all cores combined */
+  /** online source-IP cap, aggregated across every core */
+  ipLimit: string;
+  /** stable subscription X-Device-ID/X-HWID enrollment cap */
   deviceLimit: string;
   downloadLimitMbps: string;
   uploadLimitMbps: string;
@@ -46,7 +49,7 @@ interface UserForm {
 }
 
 const emptyForm: UserForm = {
-  username: "", note: "", status: "active", dataLimitGB: "", deviceLimit: "",
+  username: "", note: "", status: "active", dataLimitGB: "", ipLimit: "", deviceLimit: "",
   downloadLimitMbps: "0", uploadLimitMbps: "0", expireDate: "",
   mode: "manual", templateId: null, inbounds: {}, coreAccess: {}, telegramId: "",
 };
@@ -118,6 +121,8 @@ export default function Users() {
   const [showFilters, setShowFilters] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dialog, setDialog] = useState<{ mode: "create" } | { mode: "edit"; user: User } | null>(null);
+  // Statistics queries mount only after this explicit per-user action.
+  const [usageUser, setUsageUser] = useState<User | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ type: "single"; username: string } | { type: "bulk"; usernames: string[] } | null>(null);
   const [moreAnchor, setMoreAnchor] = useState<HTMLElement | null>(null);
   const [bulkDialog, setBulkDialog] = useState(false);
@@ -364,6 +369,7 @@ export default function Users() {
         <>
           <MenuItem icon={<ExternalLink size={14} />} label={t("common.edit")} onClick={() => { setMenu(null); setDialog({ mode: "edit", user: mu }); }} />
           <MenuItem icon={<Copy size={14} />} label={t("users.copySub")} onClick={() => { setMenu(null); copySub(mu); }} />
+          <MenuItem icon={<BarChart3 size={14} />} label={t("users.usageStatistics")} onClick={() => { setMenu(null); setUsageUser(mu); }} />
           <MenuItem icon={<RefreshCcw size={14} />} label={t("users.resetUsage")} onClick={() => { setMenu(null); resetUsage.mutate(mu.username); }} />
           <div className="my-1 border-t border-border" />
           <MenuItem icon={<Trash2 size={14} />} label={t("common.delete")} danger
@@ -459,6 +465,7 @@ export default function Users() {
           onSaved={() => { setDialog(null); invalidate(); }}
         />
       )}
+      {usageUser && <UserStatisticsDrawer user={usageUser} onClose={() => setUsageUser(null)} />}
 
       <ConfirmDialog
         open={!!confirmDelete}
@@ -523,6 +530,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
         ...emptyForm,
         username: user.username, note: user.note ?? "", status: user.status,
         dataLimitGB: user.data_limit ? String(user.data_limit / 1024 ** 3) : "",
+        ipLimit: user.ip_limit ? String(user.ip_limit) : "",
         deviceLimit: user.device_limit ? String(user.device_limit) : "",
         downloadLimitMbps: String(user.download_limit_mbps ?? 0),
         uploadLimitMbps: String(user.upload_limit_mbps ?? 0),
@@ -542,6 +550,24 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
   // α7.2 (item 12): username generator state
   const [genLen, setGenLen] = useState(8);
   const [genBusy, setGenBusy] = useState(false);
+
+  const enrolledDevicesQ = useQuery({
+    queryKey: ["zagros", "subscription-devices", user?.username],
+    queryFn: () => api.get<{ devices: Array<{ id: number; device: string; first_seen: string; last_seen: string; user_agent: string | null }> }>(
+      `/zagros/users/by-username/${encodeURIComponent(user!.username)}/devices`,
+    ),
+    enabled: mode === "edit" && Boolean(user?.username),
+  });
+  const removeEnrolledDevice = async (id?: number) => {
+    if (!user) return;
+    try {
+      await api.delete(`/zagros/users/by-username/${encodeURIComponent(user.username)}/devices${id ? `/${id}` : ""}`);
+      toast.ok(t("common.deleted"));
+      await enrolledDevicesQ.refetch();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : t("common.error"));
+    }
+  };
 
   const canonicalSubQ = useQuery({
     queryKey: ["zagros", "subscription-url", user?.username],
@@ -627,6 +653,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
   const save = async () => {
     setBusy(true); setError("");
     const data_limit = form.dataLimitGB ? Math.round(parseFloat(form.dataLimitGB) * 1024 ** 3) : null;
+    const ip_limit = form.ipLimit ? Math.max(0, parseInt(form.ipLimit, 10) || 0) : null;
     const device_limit = form.deviceLimit ? Math.max(0, parseInt(form.deviceLimit, 10) || 0) : null;
     const download_limit_mbps = Math.max(0, Math.trunc(Number(form.downloadLimitMbps) || 0));
     const upload_limit_mbps = Math.max(0, Math.trunc(Number(form.uploadLimitMbps) || 0));
@@ -641,7 +668,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
       if (mode === "create") {
         await api.post("/user", {
           username: form.username.trim(), status: form.status,
-          data_limit, device_limit, download_limit_mbps, upload_limit_mbps, expire,
+          data_limit, ip_limit, device_limit, download_limit_mbps, upload_limit_mbps, expire,
           note: form.note || null,
           proxies: proxySettings,
           inbounds: inboundSel,
@@ -655,7 +682,10 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
         toast.ok(`${form.username} created`);
       } else if (user) {
         const body: Record<string, unknown> = {
-          status: form.status, data_limit, device_limit,
+          status: form.status, data_limit,
+          // The compatibility update model treats null as "field omitted";
+          // explicit zero is the API spelling for clearing either limit.
+          ip_limit: ip_limit ?? 0, device_limit: device_limit ?? 0,
           download_limit_mbps, upload_limit_mbps, expire, note: form.note || null,
           telegram_id: form.telegramId ? Number(form.telegramId) : null,
         };
@@ -733,10 +763,44 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
           <Input id="dataLimit" type="number" min="0" step="0.1" value={form.dataLimitGB}
             onChange={(e) => setForm({ ...form, dataLimitGB: e.target.value })} />
         </Field>
+        <Field label={t("users.ipLimit")} hint={t("users.ipLimitHint")}>
+          <Input id="ipLimit" type="number" min="0" step="1" value={form.ipLimit}
+            onChange={(e) => setForm({ ...form, ipLimit: e.target.value })} />
+        </Field>
         <Field label={t("users.deviceLimit")} hint={t("users.deviceLimitHint")}>
           <Input id="deviceLimit" type="number" min="0" step="1" value={form.deviceLimit}
             onChange={(e) => setForm({ ...form, deviceLimit: e.target.value })} />
         </Field>
+        {mode === "edit" && (
+          <div className="sm:col-span-2 rounded-xl border border-border bg-surface-2 p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div>
+                <p className="text-xs font-medium">{t("users.enrolledDevices")}</p>
+                <p className="text-[11px] text-content-3">{t("users.enrolledDevicesHint")}</p>
+              </div>
+              {(enrolledDevicesQ.data?.devices.length ?? 0) > 0 && (
+                <Button type="button" size="sm" variant="ghost" onClick={() => void removeEnrolledDevice()}>
+                  <Trash2 size={13} />{t("users.clearDevices")}
+                </Button>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              {(enrolledDevicesQ.data?.devices ?? []).map((device) => (
+                <div key={device.id} className="flex items-center justify-between gap-2 rounded-lg border border-line/60 px-2.5 py-2">
+                  <div className="min-w-0">
+                    <code className="text-[11px]" dir="ltr">{device.device}</code>
+                    <p className="truncate text-[10.5px] text-content-3">last seen {formatDate(device.last_seen)}</p>
+                  </div>
+                  <Button type="button" size="sm" variant="ghost" aria-label="remove device"
+                    onClick={() => void removeEnrolledDevice(device.id)}><Trash2 size={13} /></Button>
+                </div>
+              ))}
+              {!enrolledDevicesQ.isLoading && (enrolledDevicesQ.data?.devices.length ?? 0) === 0 && (
+                <p className="py-2 text-center text-[11px] text-content-3">{t("users.noEnrolledDevices")}</p>
+              )}
+            </div>
+          </div>
+        )}
         <Field label={t("Download Limit (Mbps)")} hint={t("0 = Unlimited · aggregate across all cores")}>
           <Input id="downloadLimitMbps" type="number" min="0" max="100000" step="1"
             value={form.downloadLimitMbps}

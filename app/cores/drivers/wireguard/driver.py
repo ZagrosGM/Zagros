@@ -39,6 +39,7 @@ from app.cores.types import (
     CoreStatus,
     DeviceSession,
     HealthStatus,
+    ListenerClaim,
     UsageRecord,
     UserAccount,
 )
@@ -281,6 +282,14 @@ class WireGuardDriver(BaseCoreDriver):
                 if key in self.settings:
                     listeners[0][key] = copy.deepcopy(self.settings[key])
         return listeners
+
+    async def listener_claims(self) -> list[ListenerClaim]:
+        return [ListenerClaim(
+            core_id=self.metadata.id, protocol="wireguard", transport="udp",
+            address=str(listener.get("listen") or "0.0.0.0"),
+            port=int(listener["port"]),
+            label=str(listener.get("tag") or listener.get("interface") or "wireguard"),
+        ) for listener in self._listeners()]
 
     def _primary_listener(self) -> dict[str, Any]:
         listeners = self._listeners()

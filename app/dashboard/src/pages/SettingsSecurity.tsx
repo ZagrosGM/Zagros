@@ -24,6 +24,10 @@ interface SecurityOverview {
     source: "database" | "environment";
     env_var: string;
   };
+  ip_limit: {
+    ban_duration_minutes: number;
+    review_interval_seconds: number;
+  };
   sessions: Array<{
     token_hash: string;
     user_id: number;
@@ -57,12 +61,16 @@ export default function SettingsSecurity() {
   const [confirm, setConfirm] = useState("");
   const [lifetime, setLifetime] = useState<string>("");
   const [overrideEnabled, setOverrideEnabled] = useState(false);
+  const [banMinutes, setBanMinutes] = useState("");
+  const [reviewSeconds, setReviewSeconds] = useState("");
 
   const state = overview.data;
   if (state && lifetime === "" && state.token.override_minutes !== null) {
     setLifetime(String(state.token.override_minutes));
     setOverrideEnabled(true);
   }
+  if (state && banMinutes === "") setBanMinutes(String(state.ip_limit.ban_duration_minutes));
+  if (state && reviewSeconds === "") setReviewSeconds(String(state.ip_limit.review_interval_seconds));
 
   const changeCredentials = useMutation({
     mutationFn: () =>
@@ -91,6 +99,18 @@ export default function SettingsSecurity() {
       api.put("/zagros/security/token-lifetime", {
         expire_minutes: overrideEnabled ? Number(lifetime) : null,
       }),
+    onSuccess: () => {
+      toast.ok(t("common.saved"));
+      void qc.invalidateQueries({ queryKey: ["zagros", "security"] });
+    },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
+  });
+
+  const saveIpLimits = useMutation({
+    mutationFn: () => api.put("/zagros/security/ip-limit", {
+      ban_duration_minutes: Number(banMinutes),
+      review_interval_seconds: Number(reviewSeconds),
+    }),
     onSuccess: () => {
       toast.ok(t("common.saved"));
       void qc.invalidateQueries({ queryKey: ["zagros", "security"] });
@@ -169,6 +189,30 @@ export default function SettingsSecurity() {
               <Save size={14} />{t("save token lifetime")}</Button>
           </div>
         )}
+      </Card>
+
+      <Card className="lg:col-span-2">
+        <CardHeader
+          title={t("settings.security.ipLimit")}
+          subtitle={t("settings.security.ipLimitSubtitle")}
+        />
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Field label={t("settings.security.banMinutes")} hint={t("settings.security.banMinutesHint")}>
+            <Input type="number" min={1} max={10080} value={banMinutes}
+              onChange={(e) => setBanMinutes(e.target.value)} dir="ltr" />
+          </Field>
+          <Field label={t("settings.security.reviewSeconds")} hint={t("settings.security.reviewSecondsHint")}>
+            <Input type="number" min={5} max={300} value={reviewSeconds}
+              onChange={(e) => setReviewSeconds(e.target.value)} dir="ltr" />
+          </Field>
+          <div className="sm:col-span-2">
+            <Button variant="secondary" onClick={() => saveIpLimits.mutate()}
+              loading={saveIpLimits.isPending}
+              disabled={!banMinutes || !reviewSeconds}>
+              <Save size={14} />{t("common.save")}
+            </Button>
+          </div>
+        </div>
       </Card>
 
       <Card className="lg:col-span-2">

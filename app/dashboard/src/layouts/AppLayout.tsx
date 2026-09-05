@@ -2,10 +2,10 @@
 // theme/locale toggles, mobile drawer, keyboard shortcuts.
 import { clsx } from "clsx";
 import {
-  Activity, Award, Boxes, ChevronLeft, Cpu, FileTerminal, Globe,
-  HardDrive, LayoutDashboard, LayoutTemplate, LifeBuoy, LogOut, Menu, Moon, Network,
+  Award, BarChart3, Boxes, ChevronLeft, Cpu, Globe,
+  HardDrive, LayoutDashboard, LayoutTemplate, LifeBuoy, LogOut, Menu, Monitor, Moon, Network,
   Radio, Route, Search, ServerCog, Settings, ShieldCheck, Sun, TerminalSquare,
-  Users, Waypoints, Wifi,
+  Users, Waypoints,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
@@ -36,10 +36,9 @@ const NAV = [
     { to: "/certificates", icon: ShieldCheck, key: "nav.certificates" },
     { to: "/dns", icon: Globe, key: "nav.dns" },
   ]},
-  { section: "nav.section.observe", items: [
-    { to: "/sessions", icon: Activity, key: "nav.sessions" },
-    { to: "/devices", icon: Wifi, key: "nav.devices" },
-    { to: "/logs", icon: FileTerminal, key: "nav.logs" },
+  { section: null, items: [
+    { to: "/monitoring", icon: Monitor, key: "nav.monitoring" },
+    { to: "/statistics", icon: BarChart3, key: "nav.statistics" },
   ]},
   { section: "nav.section.system", items: [
     { to: "/support", icon: LifeBuoy, key: "nav.support" },
@@ -95,8 +94,8 @@ export default function AppLayout() {
       </div>
       <nav aria-label={t("Primary")} className="flex-1 space-y-4 overflow-y-auto p-2.5">
         {NAV.map((group) => (
-          <div key={group.section}>
-            {!sidebarCollapsed && (
+          <div key={group.section ?? group.items[0].to}>
+            {!sidebarCollapsed && group.section && (
               <p className="px-2.5 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-wider text-content-3">
                 {t(group.section as Parameters<typeof t>[0])}
               </p>

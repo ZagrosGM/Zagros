@@ -6,6 +6,7 @@ from . import (
     user_template,
     user,
     home,
+    node_compat,
 )
 
 api_router = APIRouter()
@@ -17,6 +18,7 @@ routers = [
     user_template.router,
     user.router,
     home.router,
+    node_compat.router,
 ]
 
 for router in routers:

@@ -28,6 +28,8 @@ from app.persistence.models import (
     DeviceSessionModel,
     RefreshTokenModel,
     SettingModel,
+    SystemUsageBucketModel,
+    UsageAggregateModel,
     UsageBaselineModel,
     UsageRecordModel,
     UserCoreAccountModel,
@@ -264,17 +266,69 @@ class SQLUsageJournal:
 
     async def append(self, records: list[UsageRecord],
                      owners: dict[tuple[str, str], int]) -> int:
-        """Journal each record with its attributed user; returns row count."""
+        """Journal and roll up one real-accounting batch atomically.
+
+        Statistics reads a constant-size cumulative table and one five-minute
+        system series rather than scanning every user's raw records.  The raw
+        journal remains authoritative for lazy, single-user drill-downs.
+        """
         def _sync() -> int:
+            if not records:
+                return 0
+            dimensions: dict[str, list[int]] = {}
+            buckets: dict[datetime, list[int]] = {}
+            rows: list[UsageRecordModel] = []
+            for r in records:
+                recorded = r.recorded_at
+                if recorded.tzinfo is None:
+                    recorded = recorded.replace(tzinfo=timezone.utc)
+                recorded = recorded.astimezone(timezone.utc)
+                bucket = recorded.replace(
+                    minute=(recorded.minute // 5) * 5,
+                    second=0, microsecond=0,
+                )
+                up, down = int(r.uplink_bytes), int(r.downlink_bytes)
+                for dimension in (
+                    "system",
+                    f"core:{r.core_id}",
+                    f"node:{'master' if r.node_id is None else int(r.node_id)}",
+                ):
+                    totals = dimensions.setdefault(dimension, [0, 0])
+                    totals[0] += up
+                    totals[1] += down
+                bucket_totals = buckets.setdefault(bucket, [0, 0])
+                bucket_totals[0] += up
+                bucket_totals[1] += down
+                rows.append(UsageRecordModel(
+                    user_id=owners.get((r.core_id, r.account_id)),
+                    core_id=r.core_id, account_id=r.account_id,
+                    node_id=r.node_id,
+                    uplink_bytes=up, downlink_bytes=down,
+                    recorded_at=recorded,
+                ))
+
             with self._sf() as s:
-                for r in records:
-                    s.add(UsageRecordModel(
-                        user_id=owners.get((r.core_id, r.account_id)),
-                        core_id=r.core_id, account_id=r.account_id,
-                        node_id=r.node_id,
-                        uplink_bytes=r.uplink_bytes, downlink_bytes=r.downlink_bytes,
-                        recorded_at=r.recorded_at,
-                    ))
+                s.add_all(rows)
+                now = _utcnow()
+                for dimension, (up, down) in dimensions.items():
+                    row = s.get(UsageAggregateModel, dimension)
+                    if row is None:
+                        s.add(UsageAggregateModel(
+                            dimension=dimension, uplink_bytes=up,
+                            downlink_bytes=down, updated_at=now))
+                    else:
+                        row.uplink_bytes += up
+                        row.downlink_bytes += down
+                        row.updated_at = now
+                for bucket, (up, down) in buckets.items():
+                    row = s.get(SystemUsageBucketModel, bucket)
+                    if row is None:
+                        s.add(SystemUsageBucketModel(
+                            bucket_start=bucket, uplink_bytes=up,
+                            downlink_bytes=down))
+                    else:
+                        row.uplink_bytes += up
+                        row.downlink_bytes += down
                 s.commit()
                 return len(records)
         return await asyncio.to_thread(_sync)
@@ -342,6 +396,36 @@ class SQLDeviceStore:
                 row.last_seen = device.last_seen
                 row.current_core = device.current_core
                 row.cores_json = sorted(device.cores)
+                s.commit()
+        await asyncio.to_thread(_sync)
+
+    async def bulk_upsert(self, devices: list[DeviceInfo]) -> None:
+        """Persist one observation pass in one transaction (IP poll hot path)."""
+        if not devices:
+            return
+        def _sync() -> None:
+            ids = [device.device_id for device in devices]
+            with self._sf() as s:
+                existing = {
+                    row.device_id: row for row in s.execute(
+                        select(DeviceModel).where(DeviceModel.device_id.in_(ids))
+                    ).scalars()
+                }
+                for device in devices:
+                    row = existing.get(device.device_id)
+                    if row is None:
+                        row = DeviceModel(device_id=device.device_id,
+                                          user_id=device.user_id)
+                        s.add(row)
+                    row.user_id = device.user_id
+                    row.name = device.name
+                    row.platform = device.platform
+                    row.app_version = device.app_version
+                    row.last_ip = device.last_ip
+                    row.first_seen = device.first_seen
+                    row.last_seen = device.last_seen
+                    row.current_core = device.current_core
+                    row.cores_json = sorted(device.cores)
                 s.commit()
         await asyncio.to_thread(_sync)
 
@@ -553,6 +637,7 @@ class UserRepository:
     def upsert_user(self, *, username: str, status: str = "active",
                     data_limit_bytes: int | None = None,
                     expire_at: datetime | None = None,
+                    ip_limit: int | None = None,
                     device_limit: int | None = None,
                     download_limit_mbps: int | None = None,
                     upload_limit_mbps: int | None = None,
@@ -578,6 +663,8 @@ class UserRepository:
                 row.data_limit_bytes = data_limit_bytes
             if expire_at is not None:
                 row.expire_at = expire_at
+            if ip_limit is not None:
+                row.ip_limit = ip_limit
             if device_limit is not None:
                 row.device_limit = device_limit
             if download_limit_mbps is not None:

@@ -10,7 +10,7 @@ import asyncio
 import logging
 import time
 
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 
 _building = False
@@ -171,8 +171,12 @@ def _build_app_inner():
         # a database that comes back after boot should heal the panel without
         # an operator having to restart it.
         app.state.zagros_builder = _try_build_runtime
-        app.include_router(zagros_router)
+        # Register the finite authenticated API before the configurable root
+        # subscription catch-all (/{sub_path:path}/{token}). Otherwise a GET
+        # such as /api/zagros/settings/api-defaults is interpreted as a bad
+        # subscription path and returns the catch-all's 404.
         app.include_router(zagros_admin_router)
+        app.include_router(zagros_router)
 
         async def _zagros_boot_sequence(runtime) -> None:
             """Everything the platform layer must do once it has a runtime.

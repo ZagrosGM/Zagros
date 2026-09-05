@@ -39,6 +39,7 @@ export interface User {
   /** the field the legacy API actually sends — a RELATIVE /sub/... path */
   subscription_url?: string;
   /** global device limit (all cores combined); null/0 = unlimited */
+  ip_limit?: number | null;
   device_limit?: number | null;
   /** aggregate across every core/connection; 0 = unlimited */
   download_limit_mbps: number;
@@ -404,6 +405,62 @@ export interface Device {
   name?: string | null; platform?: string | null; app_version?: string | null;
   last_ip?: string | null; first_seen?: string | null; last_seen?: string | null;
   current_core?: string | null; cores?: string[];
+}
+
+export interface MonitoringConnection {
+  key: string; user_id: number; username?: string | null; core_id: string;
+  node_id?: number | null; node_name?: string | null; ip?: string | null;
+  device?: string | null; started_at: string; last_activity: string;
+  duration_seconds: number; upload_bytes: number; download_bytes: number;
+  total_bytes: number; status: "active";
+}
+
+export interface MonitoringDevice {
+  id: number; user_id: number; username: string; device: string;
+  last_ip?: string | null; core_id?: string | null; node_id?: number | null;
+  node_name?: string | null; first_seen: string; last_seen: string;
+  status: "enrolled"; user_agent?: string | null;
+}
+
+export interface IPActivity {
+  id: number; user_id: number; username: string; ip: string; core_id: string;
+  node_id?: number | null; node_name?: string | null; first_seen: string;
+  active_since: string; last_seen: string;
+  status: "active" | "inactive" | "banned" | "unknown";
+}
+
+export interface TrafficPoint {
+  bucket_start: string; upload_bytes: number; download_bytes: number;
+  total_bytes: number;
+}
+export interface TrafficByCore {
+  core_id: string; core_name: string; upload_bytes: number;
+  download_bytes: number; total_bytes: number;
+}
+export interface TrafficByNode {
+  node_id?: number | null; node_name: string; upload_bytes: number;
+  download_bytes: number; total_bytes: number;
+}
+export interface StatisticsOverview {
+  generated_at: string; total_traffic_bytes: number; upload_bytes: number;
+  download_bytes: number; active_users: number; active_connections: number;
+  total_nodes: number; total_cores: number; traffic_by_core: TrafficByCore[];
+  traffic_by_node: TrafficByNode[]; monitoring_generated_at?: string | null;
+  monitoring_partial: boolean; source: "usage_records";
+}
+export interface TrafficHistory {
+  range: string; start: string; end: string; bucket_seconds: number;
+  points: TrafficPoint[]; source: string;
+}
+export interface UserStatisticsOverview {
+  user_id: number; username: string; status: string; total_traffic_bytes: number;
+  upload_bytes: number; download_bytes: number; data_limit_bytes?: number | null;
+  used_bytes: number; remaining_bytes?: number | null;
+  usage_percentage?: number | null; updated_at?: string | null; source: string;
+}
+export interface UserTrafficStatistics extends TrafficHistory {
+  upload_bytes: number; download_bytes: number; total_bytes: number;
+  traffic_by_core: TrafficByCore[]; traffic_by_node: TrafficByNode[];
 }
 
 export interface CertificateInfo {

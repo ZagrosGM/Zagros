@@ -53,6 +53,13 @@ def run_build():
                 exc, DASHBOARD_PATH)
 
     if build_dir.is_dir():
+        # These mounts are installed during FastAPI startup, after the
+        # configurable subscription route ``/{sub_path:path}/{token}`` was
+        # registered. Starlette dispatches in route order, so merely
+        # appending the mounts lets that greedy public route swallow paths
+        # such as /dashboard/statics/index.js. Move only the two exact-prefix
+        # mounts to the front; finite API routes remain ordered as registered.
+        mount_start = len(app.router.routes)
         app.mount(
             DASHBOARD_PATH,
             StaticFiles(directory=build_dir, html=True),
@@ -63,6 +70,9 @@ def run_build():
             StaticFiles(directory=statics_dir, html=True),
             name="statics"
         )
+        dashboard_mounts = app.router.routes[mount_start:]
+        del app.router.routes[mount_start:]
+        app.router.routes[0:0] = dashboard_mounts
         return
 
     dash_path = DASHBOARD_PATH.rstrip('/')

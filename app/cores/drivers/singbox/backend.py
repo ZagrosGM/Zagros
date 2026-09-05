@@ -456,3 +456,44 @@ class LocalSingBoxBackend:
 
     def logs(self, tail: int = 200) -> Sequence[str]:
         return self._proc.logs(tail)
+
+    def clash_connections(self) -> list[dict[str, Any]]:
+        """Active routed connections with source IP and closeable IDs."""
+        import urllib.error
+        import urllib.request
+
+        address = str(self.settings.get("clash_api") or "127.0.0.1:19092")
+        try:
+            with urllib.request.urlopen(
+                f"http://{address}/connections", timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+            return []
+        rows = payload.get("connections", []) if isinstance(payload, dict) else []
+        return [row for row in rows if isinstance(row, dict)]
+
+    def close_connections_from(self, source_ip: str) -> int:
+        """Close every Clash-tracked connection from ``source_ip``."""
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        address = str(self.settings.get("clash_api") or "127.0.0.1:19092")
+        closed = 0
+        for row in self.clash_connections():
+            metadata = row.get("metadata") or {}
+            if str(metadata.get("sourceIP") or "") != source_ip:
+                continue
+            connection_id = str(row.get("id") or "")
+            if not connection_id:
+                continue
+            request = urllib.request.Request(
+                f"http://{address}/connections/{urllib.parse.quote(connection_id, safe='')}",
+                method="DELETE",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=5):
+                    closed += 1
+            except (urllib.error.URLError, TimeoutError, OSError):
+                continue
+        return closed

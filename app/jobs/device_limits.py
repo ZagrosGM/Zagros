@@ -1,10 +1,8 @@
-"""Scheduler shim for the global device-limit / unified-online pass
-(app.platform.device_limits).
+"""Five-second scheduler tick for independent source-IP enforcement.
 
-ONE limit across every core: the 4th device on a 3-device plan is rejected
-(user suspends on ALL cores) until the count drops — plus the unified
-``online_at`` the dashboard and portal both read. Business logic lives in
-the platform service; drivers only report sessions.
+The service reads the configured review interval and skips intermediate ticks
+when an operator chooses a value above five seconds. HWID enrollment is
+request-time and therefore needs no polling job.
 """
 from __future__ import annotations
 
@@ -13,26 +11,25 @@ import asyncio
 from app import logger, scheduler
 
 
-def review_device_limits() -> None:
-    """Sync entry point — safe no-op without a platform runtime."""
+def review_ip_limits() -> None:
     try:
         import app as _app
-
         runtime = getattr(_app.app.state, "zagros", None)
-    except Exception:  # noqa: BLE001 — jobs must never crash the scheduler
+    except Exception:  # jobs must never crash the scheduler
         runtime = None
     if runtime is None:
         return
     try:
-        from app.platform.device_limits import run_once
-
+        from app.platform.ip_limits import run_once
         asyncio.run(run_once(runtime))
     except Exception as exc:  # noqa: BLE001
-        logger.warning("device-limit pass failed: %s", exc)
+        logger.warning("IP-limit pass failed: %s", exc)
 
 
-scheduler.add_job(review_device_limits, 'interval',
-                  seconds=30, id='device_limits',
+# Keep the historical job id so an in-process upgrade replaces rather than
+# duplicates it. Minimum supported detection time is five seconds.
+scheduler.add_job(review_ip_limits, "interval",
+                  seconds=5, id="device_limits", replace_existing=True,
                   coalesce=True, max_instances=1)
 
-logger.info("device-limit reconciler scheduled (30s)")
+logger.info("cross-core IP-limit reconciler scheduled (5s base tick)")

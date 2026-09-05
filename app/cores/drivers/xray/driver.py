@@ -40,6 +40,7 @@ from app.cores.types import (
     CoreStatus,
     DeviceSession,
     HealthStatus,
+    ListenerClaim,
     UsageRecord,
     UserAccount,
 )
@@ -777,9 +778,25 @@ class XrayDriver(BaseCoreDriver):
             if info.get("protocol") == account.protocol and tag not in excluded
         }
 
-    # ------------------------------------------------------------------ #
-    # lifecycle
-    # ------------------------------------------------------------------ #
+    async def listener_claims(self) -> list[ListenerClaim]:
+        claims: list[ListenerClaim] = []
+        for tag, inbound in (await self._inbounds()).items():
+            port = int(inbound.get("port") or 0)
+            if not port:
+                continue
+            network = str(inbound.get("network") or "tcp").lower()
+            transports = ("tcp", "udp") if inbound.get("protocol") in {"shadowsocks", "socks"} else (
+                ("udp",) if network in {"quic", "kcp", "mkcp"} else ("tcp",))
+            for transport in transports:
+                claims.append(ListenerClaim(
+                    core_id=self.metadata.id,
+                    protocol=str(inbound.get("protocol") or "xray"),
+                    transport=transport,
+                    address=str(inbound.get("listen") or "0.0.0.0"),
+                    port=port, label=str(tag),
+                ))
+        return claims
+
     # ------------------------------------------------------------------ #
     # lifecycle: install / update / uninstall (real SELF_INSTALL)
     # ------------------------------------------------------------------ #
@@ -930,14 +947,60 @@ class XrayDriver(BaseCoreDriver):
     async def get_online_devices(
         self, account_ids: list[str] | None = None
     ) -> list[DeviceSession]:
-        online = await asyncio.to_thread(self._backend.online_accounts)
         now = datetime.now(timezone.utc)
+        detail_getter = getattr(self._backend, "online_device_details", None)
+        if callable(detail_getter):
+            detailed = await asyncio.to_thread(detail_getter)
+            if detailed:
+                def seen_at(value: int) -> datetime:
+                    stamp = float(value or 0)
+                    # Accept milliseconds defensively; current Xray uses seconds.
+                    if stamp > 10_000_000_000:
+                        stamp /= 1000
+                    try:
+                        return datetime.fromtimestamp(stamp, tz=timezone.utc)
+                    except (OverflowError, OSError, ValueError):
+                        return now
+                return [
+                    DeviceSession(
+                        core_id=self.metadata.id,
+                        account_id=email,
+                        ip=ip,
+                        last_activity=seen_at(last_seen),
+                        metadata={"identity": "source_ip", "provider": "xray-online"},
+                    )
+                    for email, ips in detailed.items()
+                    if account_ids is None or email in account_ids
+                    for ip, last_seen in sorted(ips.items())
+                ]
+        native_getter = getattr(self._backend, "online_devices", None)
+        if callable(native_getter):
+            by_email = await asyncio.to_thread(native_getter)
+            if by_email:
+                return [
+                    DeviceSession(
+                        core_id=self.metadata.id,
+                        account_id=email,
+                        ip=ip,
+                        last_activity=now,
+                        metadata={"identity": "source_ip", "provider": "xray-online"},
+                    )
+                    for email, ips in by_email.items()
+                    if account_ids is None or email in account_ids
+                    for ip in sorted(ips)
+                ]
+
+        # Old Xray releases and loopback-only reverse-proxy topologies cannot
+        # expose source IPs. Preserve honest presence as one lower-bound device
+        # per online account; never label that fallback a HWID.
+        online = await asyncio.to_thread(self._backend.online_accounts)
         return [
             DeviceSession(
                 core_id=self.metadata.id,
                 account_id=email,
-                ip=None,  # xray stats API has no per-user IP table
+                ip=None,
                 last_activity=now,
+                metadata={"identity": "account_presence", "provider": "traffic-delta"},
             )
             for email in online
             if account_ids is None or email in account_ids

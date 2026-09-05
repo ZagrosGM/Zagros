@@ -225,6 +225,11 @@ class ZagrosNodeClient:
         """Per-account usage deltas since the previous call."""
         return self._request("GET", "/v1/runtime/usage", timeout=60)
 
+    def push_ip_bans(self, bans: list[dict]) -> dict:
+        """Project panel-owned timed source-IP bans onto this node."""
+        return self._request("PUT", "/v1/ip-bans",
+                             payload={"bans": bans}, timeout=120)
+
     def push_bandwidth_limits(self, limits: dict) -> dict:
         """Hand this node the per-user speed limits it must enforce locally.
 

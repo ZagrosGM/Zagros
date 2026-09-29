@@ -57,10 +57,19 @@ def read_legacy_sqlite(path: str | Path) -> LegacySnapshot:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
+        # f-dbmerge: a merged panel's snapshot stores the legacy tables
+        # under their renamed (non-colliding) names
+        renamed = {"users": "legacy_users", "admins": "legacy_admins",
+                   "nodes": "legacy_nodes"}
         for attr, sql in _TABLES.items():
             table = sql.rsplit(" ", 1)[-1]
             if table not in existing:
-                continue
+                alt = renamed.get(table)
+                if alt and alt in existing:
+                    sql = sql.replace(f"FROM {table}", f"FROM {alt}")
+                    table = alt
+                else:
+                    continue
             rows = [dict(r) for r in conn.execute(sql)]
             setattr(snapshot, attr, rows)
         if "system" in existing:

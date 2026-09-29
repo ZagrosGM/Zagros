@@ -210,6 +210,10 @@ class PortalUserView(BaseModel):
     online_at: datetime | None = None
     sub_updated_at: datetime | None = None
     sub_last_user_agent: str | None = None
+    # Mode-2 app-login username (None = never issued). The password hash is
+    # deliberately NOT part of the view — the plaintext exists only at the
+    # one-time issuance response the operator relays out-of-band.
+    app_username: str | None = None
 
     @property
     def remaining_bytes(self) -> int | None:
@@ -242,3 +246,7 @@ class PortalPage(BaseModel):
     # the URL this page was fetched from — operator templates print it, QR
     # it and hand it to clients (Marzban's ``user.subscription_url``)
     subscription_url: str | None = None
+    # One-time app credentials freshly issued to the subscriber (the
+    # page's reissue button rotated them): rendered once, never stored
+    # beyond this response.
+    reissued_credentials: tuple[str, str] | None = None

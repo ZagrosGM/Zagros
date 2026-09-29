@@ -255,6 +255,8 @@ class SoftEtherDriver(BaseCoreDriver):
                 "native_port": {"type": "integer", "default": 5555},
                 "sstp_port": {"type": "integer", "enum": [443], "default": 443,
                               "description": "MS-SSTP interoperability is fixed to TCP/443"},
+                "sstp_tls_sha256": {"type": "string", "default": "",
+                                    "description": "SHA-256 of the SSTP TLS server certificate (DER). Delivered to clients as a pin; empty disables pinning (system CAs only)."},
                 "ovpn_ports": {"type": "string", "default": "1194"},
                 "secure_nat": {"type": "boolean", "default": True,
                                "description": "enable the hub's Virtual NAT + DHCP so remote-access clients receive an IP; policy routing automatically switches NAT to routed TAP while keeping DHCP"},
@@ -294,6 +296,7 @@ class SoftEtherDriver(BaseCoreDriver):
             "ipsec_psk": "",
             "native_port": 5555,
             "sstp_port": 443,
+            "sstp_tls_sha256": "",
             "ovpn_ports": "1194",
             "secure_nat": True,
             "policy_tap_device": "zgsoft",
@@ -919,7 +922,9 @@ class SoftEtherDriver(BaseCoreDriver):
                 text = str(exc).lower()
                 if ignore_exists and any(marker in text for marker in (
                     "exist", "already", "not found", "not exist",
-                    "error code 52", "error code 54",
+                    # Stable vpncmd returns 53 for an absent listener — the
+                    # same idempotent condition the backend helper maps.
+                    "error code 52", "error code 53", "error code 54",
                 )):
                     return
                 raise
@@ -954,6 +959,10 @@ class SoftEtherDriver(BaseCoreDriver):
             # old rows that only created a custom generic TLS listener.
             await command("SstpEnable yes")
             await command("ListenerCreate 443", ignore_exists=True)
+            # Optional client-side certificate pin delivered in the SSTP
+            # client config (studio inbound key: tls_sha256).
+            inbound_pin = str(wanted["sstp"].get("tls_sha256") or "").strip().lower()
+            s["sstp_tls_sha256"] = inbound_pin
         elif live is None or live.sstp or bool(s.get("feature_sstp")):
             # The factory vpn_server.config ships with the clone ON: judge by
             # the live switch, not by a settings flag that was never true.
@@ -1249,6 +1258,9 @@ class SoftEtherDriver(BaseCoreDriver):
                                             session.session_name)
         except CoreError:
             pass  # server momentarily unreachable; expiry/auth still blocks access
+
+    def account_teardown_capability(self) -> str:
+        return "targeted"
 
     async def create_account(self, account: UserAccount) -> None:
         self._ensure_supported(account.protocol)
@@ -1557,6 +1569,35 @@ class SoftEtherDriver(BaseCoreDriver):
             out.append((proto, tag))
         return out
 
+    @staticmethod
+    def _transport_share_link(proto: str, facts: dict, *, server: str,
+                              hub: str, username: str, password: str,
+                              feature_on: bool, psk: str) -> str | None:
+        """Share-URI for the L2TP transports; None when not emittable.
+
+        Only raw L2TP and L2TP/IPsec have a client-parseable URI form (the
+        app parses ``l2tp://`` and ``l2tp+ipsec://``); native/SSTP/OpenVPN
+        compatibility stay portal-fields-only. A link is emitted only when
+        the server address, the hub feature flag and (for IPsec) the PSK are
+        all concrete — never a dead link next to a "configure X" note.
+        """
+        from urllib.parse import quote
+
+        if proto not in ("l2tp", "l2tp_raw") or not server or not feature_on:
+            return None
+        if proto == "l2tp" and not psk:
+            return None
+        host_part = f"[{server}]" if ":" in server else server
+        userinfo = f"{quote(username, safe='')}:{quote(password, safe='')}"
+        query = f"hub={quote(hub, safe='')}"
+        if proto == "l2tp":
+            scheme = "l2tp+ipsec"
+            query += f"&psk={quote(psk, safe='')}"
+        else:
+            scheme = "l2tp"
+        return (f"{scheme}://{userinfo}@{host_part}:1701?{query}"
+                f"#{quote(str(facts.get('title') or proto), safe='')}")
+
     async def describe_delivery(
         self,
         account: UserAccount,
@@ -1578,7 +1619,9 @@ class SoftEtherDriver(BaseCoreDriver):
         self._ensure_supported(account.protocol)
         self._provision_credentials(account)
         s = self.settings
-        server = s.get("advertise_host")
+        from app.cores.delivery import resolve_delivery_host
+
+        server = resolve_delivery_host(s.get("advertise_host"), context)
         password = str(account.settings["password"])
         profile = DeliveryProfile(core_id=self.metadata.id)
 
@@ -1631,6 +1674,16 @@ class SoftEtherDriver(BaseCoreDriver):
             for text in notes:
                 artifacts.append(DeliveryArtifact(
                     kind=ArtifactKind.NOTE, label="Attention", note=text))
+            share = self._transport_share_link(
+                proto, facts, server=str(server or ""),
+                hub=str(s.get("hub") or ""),
+                username=str(account.account_id), password=password,
+                feature_on=bool(s.get(facts["feature"])),
+                psk=str(s.get("ipsec_psk") or "") if proto == "l2tp" else "")
+            if share is not None:
+                artifacts.append(DeliveryArtifact(
+                    kind=ArtifactKind.LINK, label=facts["title"],
+                    content=share, qr=True))
             profile.sections.append(DeliverySection(
                 protocol=proto, title=f"{self.metadata.name} · {facts['title']}",
                 engine="softether", inbound_tag=inbound_tag,
@@ -1657,27 +1710,33 @@ class SoftEtherDriver(BaseCoreDriver):
         self._ensure_credentials(account)
         s = self.settings
         server = s.get("advertise_host")
-        password = str(account.settings["password"])
+        password = str(account.settings.get("password") or account.credentials.get("password") or "")
         if account.protocol == "sstp":
             if not server:
                 raise CoreError(
                     "SSTP client config requires settings.advertise_host — clients "
                     "dial the SSTP TLS endpoint by hostname."
                 )
+            payload = {
+                "format": "sstp",
+                "server": server,
+                "port": int(s.get("sstp_port") or 443),
+                "username": account.account_id,
+                "password": password,
+                "hub": s["hub"],
+                "note": "SSTP listener must be enabled on the SoftEther server "
+                        "(SecureNAT with the fixed SSTP listener on TCP/443).",
+            }
+            pin = str(s.get("sstp_tls_sha256") or "").strip().lower()
+            if pin:
+                # Clients pin the exact server certificate; SoftEther ships a
+                # self-signed cert, so the pin is the trust anchor.
+                payload["tls_sha256"] = pin
             return ClientConfig(
                 core_id=self.metadata.id,
                 protocol="sstp",
                 engine="sstp",
-                payload={
-                    "format": "sstp",
-                    "server": server,
-                    "port": int(s.get("sstp_port") or 443),
-                    "username": account.account_id,
-                    "password": password,
-                    "hub": s["hub"],
-                    "note": "SSTP listener must be enabled on the SoftEther server "
-                            "(SecureNAT with the fixed SSTP listener on TCP/443).",
-                },
+                payload=payload,
                 display_name="VPN (SSTP)",
             )
         if account.protocol == "ovpn":
@@ -1722,6 +1781,33 @@ class SoftEtherDriver(BaseCoreDriver):
                     "warning": "Raw L2TP has no IPsec encryption.",
                 },
                 display_name="VPN (Raw L2TP)",
+            )
+        if account.protocol == "softether":
+            # Native SoftEther SSL-VPN client (Zagros embedded engine):
+            # TLS block stream on the same listener SSTP uses (443/5555).
+            if not server:
+                raise CoreError(
+                    "SoftEther native client config requires settings.advertise_host."
+                )
+            payload = {
+                "format": "softether",
+                "server": server,
+                "port": int(s.get("softether_port") or 443),
+                "username": account.account_id,
+                "password": password,
+                "hub": s["hub"],
+            }
+            pin = str(s.get("sstp_tls_sha256") or "").strip().lower()
+            if pin:
+                # Same self-signed certificate as the SSTP listener; the pin
+                # is the trust anchor for the native client too.
+                payload["tls_sha256"] = pin
+            return ClientConfig(
+                core_id=self.metadata.id,
+                protocol="softether",
+                engine="softether",
+                payload=payload,
+                display_name="VPN (SoftEther)",
             )
         if account.protocol != "l2tp":
             raise CoreError(

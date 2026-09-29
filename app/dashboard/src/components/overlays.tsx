@@ -31,6 +31,31 @@ function useEscape(onClose: () => void, active: boolean) {
   }, [active, onClose]);
 }
 
+// f-panel-5: dialog-over-dialog blur. Dialogs portal to <body> (outside
+// #root), so the root-level blur can never dim a dialog sitting BEHIND
+// another dialog (e.g. Trigger build over the app card). Every open layer
+// registers here; all but the TOPMOST get the blur class themselves.
+const blurLayers: HTMLElement[] = [];
+function applyDialogBlur() {
+  const root = document.getElementById("root");
+  root?.classList.toggle("dialog-behind-blur", blurLayers.length > 0);
+  blurLayers.forEach((el, i) =>
+    el.classList.toggle("dialog-behind-blurred", i < blurLayers.length - 1));
+}
+function useDialogBlur(active: boolean, el: HTMLElement | null) {
+  useEffect(() => {
+    if (!active || !el) return;
+    blurLayers.push(el);
+    applyDialogBlur();
+    return () => {
+      const i = blurLayers.indexOf(el);
+      if (i >= 0) blurLayers.splice(i, 1);
+      applyDialogBlur();
+    };
+  }, [active, el]);
+}
+
+
 // Reference-counted body scroll lock (nested overlays stay safe) with
 // layout-shift compensation for the removed scrollbar.
 let lockCount = 0;
@@ -45,6 +70,7 @@ function useBodyScrollLock(active: boolean) {
       body.style.overflow = "hidden";
       if (scrollbar > 0) body.style.paddingRight = `${scrollbar}px`;
     }
+      // Root blur is owned by useDialogBlur (layer-stack) since f-panel-5.
     lockCount += 1;
     return () => {
       lockCount -= 1;
@@ -60,7 +86,7 @@ function Backdrop({ onClose }: { onClose: () => void }) {
   return (
     <div
       // FULL-viewport sibling layer — impervious to container scrolling.
-      className="fixed inset-0 z-[70] bg-black/55 backdrop-blur-sm"
+      className="fixed inset-0 z-[70] bg-black/60 backdrop-blur-md"
       onClick={onClose}
       aria-hidden
     />
@@ -74,27 +100,30 @@ export function Dialog({ open, onClose, title, subtitle, headerActions, children
 }) {
   useEscape(onClose, open);
   useBodyScrollLock(open);
-  const panelRef = useRef<HTMLDivElement>(null);
+  const [panelEl, setPanelEl] = useState<HTMLDivElement | null>(null);
+  useDialogBlur(open, panelEl);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
   useEffect(() => {
     if (open) setTimeout(() => panelRef.current?.querySelector<HTMLElement>("input,select,textarea,button:not([aria-label=Close])")?.focus(), 60);
   }, [open]);
   if (!mounted) return null;
+  // The backdrop intentionally lives OUTSIDE the framer-motion subtree:
+  // an animating ancestor (opacity/transform) scopes backdrop-filter to
+  // that subtree, so the page behind never blurred.
   return createPortal(
-    <AnimatePresence>
-      {open && (
-        <>
-          <motion.div key="bd" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-            <Backdrop onClose={onClose} />
-          </motion.div>
+    <>
+      {open && <Backdrop onClose={onClose} />}
+      <AnimatePresence>
+        {open && (
           <motion.div
             key="scroller"
             className="fixed inset-0 z-[71] grid place-items-center overflow-y-auto overscroll-contain p-4"
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
           >
             <motion.div
-              ref={panelRef}
+              ref={(el) => { panelRef.current = el; setPanelEl(el); }}
               role="dialog" aria-modal="true"
               initial={{ opacity: 0, y: 18, scale: 0.97 }}
               animate={{ opacity: 1, y: 0, scale: 1, transition: { type: "spring", stiffness: 380, damping: 30 } }}
@@ -120,9 +149,9 @@ export function Dialog({ open, onClose, title, subtitle, headerActions, children
               {footer && <div className="mt-5 flex shrink-0 justify-end gap-2 border-t border-border pt-4">{footer}</div>}
             </motion.div>
           </motion.div>
-        </>
       )}
-    </AnimatePresence>,
+    </AnimatePresence>
+    </>,
     document.body,
   );
 }
@@ -132,16 +161,19 @@ export function Drawer({ open, onClose, title, children, footer }: {
 }) {
   useEscape(onClose, open);
   useBodyScrollLock(open);
+  const [panelEl, setPanelEl] = useState<HTMLDivElement | null>(null);
+  useDialogBlur(open, panelEl);
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
   if (!mounted) return null;
+  // The backdrop intentionally lives OUTSIDE the framer-motion subtree:
+  // an animating ancestor (opacity/transform) scopes backdrop-filter to
+  // that subtree, so the page behind never blurred.
   return createPortal(
-    <AnimatePresence>
-      {open && (
-        <>
-          <motion.div key="bd" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-            <Backdrop onClose={onClose} />
-          </motion.div>
+    <>
+      {open && <Backdrop onClose={onClose} />}
+      <AnimatePresence>
+        {open && (
           <motion.div
             key="panel"
             role="dialog" aria-modal="true"
@@ -149,6 +181,7 @@ export function Drawer({ open, onClose, title, children, footer }: {
             className="fixed inset-0 z-[71] pointer-events-none"
           >
             <motion.div
+              ref={setPanelEl}
               initial={{ x: "100%" }} animate={{ x: 0 }} exit={{ x: "100%" }}
               transition={{ type: "spring", stiffness: 320, damping: 34 }}
               className="pointer-events-auto absolute inset-y-0 end-0 flex h-[100dvh] w-full max-w-xl flex-col border-s border-border bg-surface-1 shadow-pop"
@@ -163,9 +196,9 @@ export function Drawer({ open, onClose, title, children, footer }: {
               {footer && <div className="shrink-0 border-t border-border p-4">{footer}</div>}
             </motion.div>
           </motion.div>
-        </>
       )}
-    </AnimatePresence>,
+    </AnimatePresence>
+    </>,
     document.body,
   );
 }

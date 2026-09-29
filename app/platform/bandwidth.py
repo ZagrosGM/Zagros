@@ -14,6 +14,8 @@ No Python or database access occurs in the packet path.
 """
 from __future__ import annotations
 
+from app.platform.account_ownership import account_owners as all_account_owners
+
 import ipaddress
 import json
 import logging
@@ -237,7 +239,7 @@ class BandwidthLimiter:
                 )
                 for row in rows
             }
-        owners = self.runtime.users.account_owners()
+        owners = all_account_owners(self.runtime)
         self._owners = {
             account_id: user_id for (core_id, account_id), user_id in owners.items()
             if core_id == "softether"
@@ -842,7 +844,7 @@ class BandwidthLimiter:
         """Suspend only affected users and durably remember the intervention."""
         try:
             desired = self._desired()
-            owners = self.runtime.users.account_owners()
+            owners = all_account_owners(self.runtime)
         except Exception:  # noqa: BLE001
             logger.exception("cannot enumerate limited accounts for fail-closed")
             return

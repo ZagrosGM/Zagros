@@ -7,6 +7,8 @@ HWIDs. The collection helpers remain for dashboard presence compatibility.
 """
 from __future__ import annotations
 
+from app.platform.account_ownership import account_owners as all_account_owners
+
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -28,7 +30,7 @@ async def collect_devices_diag(runtime) -> tuple[dict[int, set[str]], list[str],
     from app.cores.types import Capability
 
     manager = runtime.core_manager
-    owners = await asyncio.to_thread(runtime.users.account_owners)
+    owners = await asyncio.to_thread(all_account_owners, runtime)
     devices: dict[int, set[str]] = {}
     failed: list[str] = []
     probed = 0

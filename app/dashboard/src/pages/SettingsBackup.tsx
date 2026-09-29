@@ -79,10 +79,15 @@ export default function SettingsBackup() {
 
   const [form, setForm] = useState<ServiceSettings | null>(null);
   const settings: ServiceSettings | null = form ?? service.data?.settings ?? null;
+  // The bot token is write-only (the API returns a masked placeholder). Keep
+  // the typing buffer separate so the field can SHOW what is being typed
+  // while blank still means "keep the stored token" on save.
+  const [tokenDraft, setTokenDraft] = useState("");
 
   const invalidate = () => {
     void qc.invalidateQueries({ queryKey: ["zagros", "backup"] });
     setForm(null);
+    setTokenDraft("");
   };
 
   const create = useMutation({
@@ -208,8 +213,10 @@ export default function SettingsBackup() {
             <Field label={t("Telegram chat id")} hint={t("numeric — e.g. -1001234567890")}>
               <Input value={settings.chat_id} onChange={(e) => setForm({ ...settings, chat_id: e.target.value })} dir="ltr" />
             </Field>
-            <Field label={t("bot token")} hint={settings.has_token ? "stored encrypted — leave blank to keep it" : "from @BotFather"}>
-              <Input type="password" value={""} onChange={(e) => setForm({ ...settings, bot_token: e.target.value })} placeholder={settings.has_token ? "••••••••" : ""} dir="ltr" autoComplete="new-password" />
+            <Field label={t("bot token")} hint={settings.has_token ? "stored — type a new one to replace it; blank keeps it" : "from @BotFather"}>
+              <Input type="text" value={tokenDraft}
+                onChange={(e) => { setTokenDraft(e.target.value); setForm({ ...settings, bot_token: e.target.value }); }}
+                placeholder={settings.has_token ? "stored — blank keeps it" : "123456:AA…"} dir="ltr" autoComplete="off" />
             </Field>
             <Field label={t("archives kept")} hint={t("older ones are pruned")}>
               <Input type="number" min={0} value={settings.keep} onChange={(e) => setForm({ ...settings, keep: Number(e.target.value) })} dir="ltr" />

@@ -24,6 +24,10 @@ import time
 logger = logging.getLogger(__name__)
 
 from app.adminapi.dashboard import DashboardService
+from app.applicationapi.repository import ApplicationAuthRepository
+from app.applicationapi.resource_service import ApplicationResourceService
+from app.applicationapi.service import ApplicationAuthService
+from app.applicationapi.tokens import ApplicationAccessTokenService
 from app.clientapi.service import ClientApiService
 from app.clientapi.tokens import SignedTokenService
 from app.cores.manager import CoreManager
@@ -44,6 +48,7 @@ from app.persistence import (
     SQLBaselineStore,
     UserRepository,
     create_session_factory,
+    derive_key,
 )
 from app.persistence.base import Base
 from app.portal.service import PortalService
@@ -161,6 +166,47 @@ class PlatformRuntime:
             self.online_data, self.refresh_tokens, InMemoryConnectTokenStore(),
             self.tokens,
         )
+        # Application API secrets are purpose-separated from legacy client
+        # tokens and core-account encryption. The database sees only encrypted
+        # Application private keys and one-way identifier/token hashes.
+        self.application_key_cipher = SecretsCipher(derive_key(
+            master_secret, info=b"zagros/application-keys/v1"))
+        self.application_auth_repository = ApplicationAuthRepository(
+            self.session_factory, self.application_key_cipher,
+            derive_key(master_secret, info=b"zagros/application-identifiers/v1"),
+            SecretsCipher(derive_key(
+                master_secret, info=b"zagros/application-leases/v1")),
+        )
+        self.application_access_tokens = ApplicationAccessTokenService(
+            derive_key(master_secret, info=b"zagros/application-access-tokens/v1"),
+            ttl_seconds=min(300, client_token_ttl),
+        )
+        self.application_auth = ApplicationAuthService(
+            self.application_auth_repository, self.application_access_tokens)
+        self.application_resources = ApplicationResourceService(
+            self.application_auth, self.application_auth_repository,
+            self.online_data)
+        from app.applicationapi.connection_service import ApplicationConnectionService
+
+        self.application_connections = ApplicationConnectionService(
+            self.application_auth, self.application_auth_repository,
+            self.online_data, self)
+        # White-label build system: SQL truth + RQ dispatch + file store.
+        # Build credentials get their own purpose-separated data key; the
+        # queue/store degrade honestly when Redis/dirs are not configured.
+        from app.builder.artifacts import FileArtifactStore
+        from app.builder.queue import BuildQueue
+        from app.builder.repository import BuildRepository
+        from app.builder.service import BuildService
+
+        self.build_store = BuildRepository(
+            self.session_factory,
+            SecretsCipher(derive_key(
+                master_secret, info=b"zagros/build-credentials/v1")))
+        self.build_queue = BuildQueue.from_env()
+        self.build_artifacts = FileArtifactStore.from_env()
+        self.build_service = BuildService(
+            self.build_store, self.build_queue, self.build_artifacts)
         self.studio = ConfigStudioService(self.studio_store)
         self.dashboard = DashboardService(
             self.core_manager,
@@ -231,6 +277,36 @@ class PlatformRuntime:
             session.commit()
         return {name: mapping[name] for name in wanted}
 
+    # Background boot-retry tasks are held here so the event loop cannot
+    # garbage-collect them mid-flight. One entry per boot; the set is tiny
+    # and process-local on purpose.
+    _bg_boot_tasks = set()
+
+    @staticmethod
+    def _log_boot_retry_outcome(task) -> None:
+        """Done-callback: a background retry must never die silently."""
+        try:
+            task.result()
+        except Exception as exc:  # noqa: BLE001 — boot served; log only
+            logger.error("background boot retry failed: %s", exc)
+
+    async def _retry_deferred_in_background(self, studio_pending: set[str],
+                                            account_pending: set[str]) -> None:
+        """Foreground-detached twin of the old inline retry block.
+
+        Replays both deferred sets in the original order, then rewrites the
+        boot report so ``zagros repair`` sees the FINAL verdict, not the
+        pre-retry one the foreground boot wrote.
+        """
+        if studio_pending:
+            studio_pending = await self._retry_deferred_boot_work(
+                self._hydrate_studio_documents, studio_pending, label="studio")
+        if account_pending:
+            account_pending = await self._retry_deferred_boot_work(
+                self._restore_core_accounts, account_pending, label="account")
+        routing = set(getattr(self, "_boot_routing_deferred", set()) or set())
+        await self._write_boot_report(studio_pending, account_pending, routing)
+
     async def _retry_deferred_boot_work(
         self,
         operation,
@@ -286,16 +362,19 @@ class PlatformRuntime:
         # or user state until their daemon is up. Retry only the operations
         # that honestly failed offline; successful config cores are not
         # restarted a second time.
-        if studio_deferred:
-            studio_deferred = await self._retry_deferred_boot_work(
-                self._hydrate_studio_documents, studio_deferred,
-                label="studio",
+        # Deferred retries must never hold the bind: one unreachable core
+        # (SoftEther's daemon lagging the panel, a dead vpncmd channel) burned
+        # 30x2s of FOREGROUND sleep per set on every start. A single
+        # background task replays both sets and rewrites the boot report when
+        # it lands; uvicorn serves immediately either way.
+        if studio_deferred or account_deferred:
+            task = asyncio.create_task(
+                self._retry_deferred_in_background(
+                    set(studio_deferred), set(account_deferred)),
+                name="zagros-boot-deferred-retry",
             )
-        if account_deferred:
-            account_deferred = await self._retry_deferred_boot_work(
-                self._restore_core_accounts, account_deferred,
-                label="account",
-            )
+            task.add_done_callback(self._log_boot_retry_outcome)
+            self._bg_boot_tasks.add(task)
         await self._attach_builtin_xray()
         # Xray is attached after add-on auto-start so CoreManager never starts
         # it twice. Its SQL Studio document must nevertheless be replayed: in
@@ -322,6 +401,7 @@ class PlatformRuntime:
         except Exception as exc:  # limiter already fail-closes affected accounts
             logger.critical("bandwidth limiter boot reconciliation failed: %s", exc)
             routing_deferred.add("bandwidth")
+        self._boot_routing_deferred = set(routing_deferred)
         await self._write_boot_report(
             studio_deferred, account_deferred, routing_deferred)
 
@@ -528,6 +608,25 @@ class PlatformRuntime:
                 # the canonicalised ss cipher) is persisted, not dropped.
                 originals[account.account_id] = (
                     stored_enabled, copy.deepcopy(raw_settings))
+            # Render/reconcile drivers replace their entire in-memory account
+            # set. Include still-live Application leases so a panel restart or
+            # normal user edit cannot silently erase device-scoped authority.
+            lease_repository = getattr(
+                self, "application_auth_repository", None)
+            leases = ([] if lease_repository is None else
+                      await asyncio.to_thread(
+                          lease_repository.active_lease_accounts,
+                          core_id=core_id, node_id=None))
+            for lease in leases:
+                owner = await asyncio.to_thread(self.users.get_user, lease.user_id)
+                if owner is None:
+                    continue
+                accounts.append(UserAccount(
+                    user_id=lease.user_id, username=lease.account_id,
+                    account_id=lease.account_id, protocol=lease.protocol,
+                    enabled=True, expire_at=lease.not_after,
+                    settings=dict(lease.settings),
+                ))
             try:
                 await self.core_manager.sync_accounts(core_id, accounts)
                 logger.info("account hydration: %s restored %d account(s)",
@@ -544,6 +643,8 @@ class PlatformRuntime:
                 # failure. Persist only real changes; do not churn ciphertext
                 # for byte-identical rows on every reboot.
                 for account in accounts:
+                    if account.account_id not in originals:
+                        continue  # lease credentials live in their own sealed table
                     stored_enabled, before = originals[account.account_id]
                     if account.settings == before:
                         continue

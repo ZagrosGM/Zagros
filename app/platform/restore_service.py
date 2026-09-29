@@ -151,6 +151,24 @@ def inspect(archive: Path, source: str, *,
     """Report what a restore would do; writes nothing (except staging)."""
     report = RestoreReport(source=source, archive=Path(archive).name, dry_run=True)
     if source == "zagros":
+        # A Zagros *backup archive* goes through the swap/full path. Anything
+        # else the operator realistically uploads — a bare platform sqlite
+        # (zagros.db), a zip holding one, a .sql dump — is not an error: it
+        # imports at row level like a foreign panel would (inspect previews it).
+        try:
+            backup_store.meta_of(Path(archive))
+        except Exception:  # noqa: BLE001 — not our archive format
+            try:
+                return _inspect_foreign(Path(archive), "zagros", report,
+                                        session_factory=session_factory,
+                                        cipher=cipher, users_repo=users_repo,
+                                        legacy_session_factory=legacy_session_factory,
+                                        apply=False)
+            except RestoreError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — a refusal is an answer, not a 500
+                raise RestoreError(f"this file cannot be imported as a Zagros "
+                                   f"database: {exc}") from exc
         return _inspect_zagros(Path(archive), report)
     if source not in restore_sources.FOREIGN_SOURCES:
         raise RestoreError(f"unsupported restore source: {source}")
@@ -172,13 +190,23 @@ def _inspect_zagros(archive: Path, report: RestoreReport) -> RestoreReport:
         report.warnings.append(
             f"archive declares kind={meta.get('kind')!r} — expected "
             f"{backup_store.BACKUP_KIND!r}; restore it as a foreign source instead.")
-    verification = backup_store.verify(archive)
+    try:
+        verification = backup_store.verify(archive)
+    except Exception as exc:  # noqa: BLE001 — unreadable archive: honest report, never a 500
+        report.ok = False
+        report.warnings.append(
+            f"the file could not be read as a Zagros backup archive: {exc} — "
+            "upload a panel backup (.tar.gz) or the database file itself")
+        return report
     report.steps.append(f"archive verified ({verification['files']} files)")
     if not verification["ok"]:
         report.ok = False
         report.warnings.extend(verification["problems"][:10])
     names = backup_store.archive_names(archive)
-    for member, note in (("db/zagros.sqlite3", "platform database"),
+    db_members = backup_store.db_member_map(names)
+    if db_members["platform"] is None:
+        report.warnings.append("no database member in the archive")
+    for member, note in ((db_members["platform"], "platform database"),
                          ("data/panel-data.tar.gz", "panel data"),
                          ("config/.env", "deployment configuration")):
         report.steps.append(
@@ -347,6 +375,31 @@ def _inspect_foreign(archive: Path, source: str, report: RestoreReport, *,
                 f"{panel['created']} user(s) would appear in the user list "
                 f"({panel['proxies_created']} proxies)")
 
+        # f-import-links: users keep the subscription URLs they already have.
+        source_secret = (notes or {}).get("source_jwt_secret")
+        if source_secret and snapshot.users:
+            if apply:
+                try:
+                    from app.utils.jwt import install_imported_sub_secret
+
+                    added = install_imported_sub_secret(str(source_secret))
+                    report.steps.append(
+                        "old subscription links keep working: the source "
+                        "panel's signing secret is accepted alongside ours "
+                        + ("(installed now)" if added else "(already installed)"))
+                except Exception as exc:  # noqa: BLE001 - never fail the import here
+                    report.warnings.append(
+                        f"could not install the source subscription secret: {exc}")
+            else:
+                report.steps.append(
+                    "applying will also accept the source panel's signing "
+                    "secret so existing subscription links keep working")
+        if report.source == "3x-ui" and snapshot.users:
+            report.warnings.append(
+                "3x-ui subscription links point at the OLD panel's separate "
+                "sub server (its own host:port, unsigned ids) — they cannot "
+                "be served here. Imported users keep their proxy credentials; "
+                "share their new Zagros subscription links.")
         report.steps.append("import applied" if apply else "import previewed (dry run)")
         if apply:
             report.credentials = dict(notes.get("generated_admin_passwords") or {})
@@ -378,7 +431,7 @@ def restore_foreign(archive: Path, source: str, *, session_factory, cipher,
                 f"the {source} import stopped at the database: {detail} — "
                 "nothing after that row was written; fix the offending record "
                 "in the source and upload the archive again") from exc
-        raise
+        raise RestoreError(f"the {source} import failed: {exc}") from exc
     result.restart = {"required": False,
                       "reason": "an import changes rows, not the deployment"}
     return result
@@ -402,6 +455,15 @@ def restore_zagros(archive: Path, *, data_dir: str | os.PathLike[str],
     """
     archive = Path(archive)
     report = RestoreReport(source="zagros", archive=archive.name, dry_run=False)
+    # Not a Zagros backup archive (bare sqlite / zip holding one / sql dump)?
+    # Apply as a row-level import instead of refusing — same contract inspect
+    # previews.
+    try:
+        backup_store.meta_of(archive)
+    except Exception:  # noqa: BLE001 — not our archive format
+        return restore_foreign(archive, "zagros", session_factory=session_factory,
+                               cipher=cipher, users_repo=users_repo,
+                               legacy_session_factory=legacy_session_factory)
     data_root = Path(data_dir)
     staging = archive.parent / ".extract"
     if staging.exists():
@@ -431,8 +493,14 @@ def restore_zagros(archive: Path, *, data_dir: str | os.PathLike[str],
         # 3. databases
         engines_match = _engine_of(database_url) == "sqlite"
         if engines_match:
-            for member, url in (("db/zagros.sqlite3", database_url),
-                                ("db/legacy.sqlite3", legacy_database_url)):
+            present = {f"db/{entry.name}" for entry in (staging / "db").iterdir()} \
+                if (staging / "db").is_dir() else set()
+            db_members = backup_store.db_member_map(present)
+            swapped = set()
+            for member, url in ((db_members["platform"], database_url),
+                                (db_members["legacy"], legacy_database_url)):
+                if member is None:
+                    continue
                 dumped = staging / member
                 if not dumped.is_file() or not url:
                     continue
@@ -440,7 +508,10 @@ def restore_zagros(archive: Path, *, data_dir: str | os.PathLike[str],
                 if target is None:
                     report.warnings.append(f"{member}: non-SQLite database URL — not restored")
                     continue
+                if target in swapped:
+                    continue
                 _swap_database(dumped, target)
+                swapped.add(target)
                 report.steps.append(f"restored database → {target}")
         else:
             imported = _import_rows(staging, report, session_factory=session_factory,
@@ -507,11 +578,16 @@ def _import_rows(staging: Path, report: RestoreReport, *, session_factory,
 
     service = LegacyImportService(session_factory, users_repo, cipher)
     imported_any = False
-    for member in ("db/zagros.sqlite3", "db/legacy.sqlite3"):
+    present = {f"db/{entry.name}" for entry in (staging / "db").iterdir()} \
+        if (staging / "db").is_dir() else set()
+    db_members = backup_store.db_member_map(present)
+    for role, source in (("platform", "zagros"), ("legacy", "marzban")):
+        member = db_members[role]
+        if member is None:
+            continue
         dumped = staging / member
         if not dumped.is_file():
             continue
-        source = "zagros" if member.endswith("zagros.sqlite3") else "marzban"
         try:
             snapshot, notes = restore_sources.read_snapshot(source, dumped)
         except RestoreError as exc:

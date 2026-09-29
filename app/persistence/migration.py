@@ -69,9 +69,27 @@ class MigrationPlan:
 
 
 def _epoch_to_dt(value: Any) -> datetime | None:
+    """Epoch seconds — or an already-parsed/stored datetime (a Zagros
+    platform source stores ``expire_at`` as a DATETIME string, while
+    Marzban-style sources carry unix seconds)."""
     if value in (None, 0, ""):
         return None
-    return datetime.fromtimestamp(int(value), tz=timezone.utc)
+    if isinstance(value, datetime):
+        return _naive_to_utc(value)
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            return datetime.fromtimestamp(int(text), tz=timezone.utc)
+        except ValueError:
+            pass
+        try:
+            return _naive_to_utc(datetime.fromisoformat(text))
+        except ValueError:
+            return None
+    try:
+        return datetime.fromtimestamp(int(value), tz=timezone.utc)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
 
 
 def _naive_to_utc(value: Any) -> datetime | None:
@@ -320,6 +338,10 @@ class LegacyImportService:
                     download_limit_mbps=u.get("download_limit_mbps", 0),
                     upload_limit_mbps=u.get("upload_limit_mbps", 0),
                     note=u["note"],
+                    # keep the user's ORIGINAL creation date: old subscription
+                    # tokens embed timestamps from the source panel and the
+                    # link validation refuses tokens older than the row.
+                    created_at=u.get("created_at"),
                 )
                 usage = s.get(UserUsageModel, user_id)
                 used = next((x["used_bytes"] for x in plan.usage

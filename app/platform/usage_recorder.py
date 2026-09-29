@@ -18,6 +18,8 @@ single tick is logged and skipped — one bad core never blocks the others.
 """
 from __future__ import annotations
 
+from app.platform.account_ownership import account_owners as all_account_owners
+
 import asyncio
 import logging
 import threading
@@ -70,7 +72,7 @@ def _account_ids_for_core(
 async def restore_baselines(runtime) -> None:
     """Boot-time: hand persisted cumulative baselines back to driver trackers."""
     owners = _provider_owner_aliases(
-        await asyncio.to_thread(runtime.users.account_owners)
+        await asyncio.to_thread(all_account_owners, runtime)
     )
     by_core: dict[str, dict[str, tuple[int, int]]] = {}
     for (core_id, account_id) in owners:
@@ -126,7 +128,7 @@ async def record_once(runtime) -> int:
 
     manager = runtime.core_manager
     owners = _provider_owner_aliases(
-        await asyncio.to_thread(runtime.users.account_owners)
+        await asyncio.to_thread(all_account_owners, runtime)
     )
     applied: list = []
     per_user: dict[int, list[int]] = {}

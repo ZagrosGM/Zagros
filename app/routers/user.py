@@ -6,6 +6,37 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from sqlalchemy.exc import IntegrityError
 
 from app import logger, xray
+from app.admin_permissions import fastapi_dep
+
+
+def _restrict_inbounds(model, admin):
+    """f-panel-5: a restricted admin only grants inbounds they may see.
+
+    Applied to BOTH the legacy ``inbounds`` selection and the multi-core
+    ``core_access`` grants (same tag namespace). A selection that collapses
+    to nothing is rejected loudly — direct API callers must not silently
+    receive fewer inbounds than they asked for.
+    """
+    from app import admin_permissions as _ap
+    allowed = None if admin.is_sudo else _ap.allowed_inbounds(admin.permissions)
+    if allowed is None:
+        return
+    inb = getattr(model, "inbounds", None) or {}
+    if inb:
+        filtered = {p: [tg for tg in (tags or []) if tg in allowed]
+                    for p, tags in inb.items()}
+        filtered = {p: t for p, t in filtered.items() if t}
+        asked = sum(len(v or []) for v in inb.values())
+        kept = sum(len(v) for v in filtered.values())
+        if asked > kept:
+            raise HTTPException(
+                422, "Selected inbounds are not permitted for your account")
+        model.inbounds = filtered
+    ca = getattr(model, "core_access", None)
+    if ca:
+        filtered = {c: [tg for tg in (tags or []) if tg in allowed]
+                    for c, tags in ca.items()}
+        model.core_access = {c: t for c, t in filtered.items() if t}
 from app.db import Session, crud, get_db
 from app.dependencies import get_expired_users_list, get_validated_user, validate_dates
 from app.models.admin import Admin
@@ -151,7 +182,7 @@ def add_user(
     bg: BackgroundTasks,
     request: Request,
     db: Session = Depends(get_db),
-    admin: Admin = Depends(Admin.get_current),
+    admin: Admin = Depends(fastapi_dep("users", "edit")),
 ):
     """
     Add a new user
@@ -179,6 +210,7 @@ def add_user(
                 status_code=400,
                 detail=f"Protocol {proxy_type} is disabled on your server",
             )
+    _restrict_inbounds(new_user, admin)
 
     try:
         dbuser = crud.create_user(
@@ -216,6 +248,33 @@ def add_user(
         except Exception:
             db.rollback()
         raise
+    # f-panel-4: optional per-user delivery mode at creation. 'default'
+    # (or omitted) leaves both columns NULL -> the user follows the
+    # panel-wide Subscriptions setting. Runs AFTER _bridge_sync projected
+    # the row into the platform DB (platform_id) — applying it earlier is
+    # impossible (separate databases). Failures are logged but never fail
+    # the creation itself.
+    _mode = (getattr(new_user, "access_mode", None) or "").strip().lower()
+    if _mode in ("subscription", "application") and platform_id:
+        _runtime = _platform_runtime(request)
+        if _runtime is not None:
+            try:
+                _hint = None
+                try:
+                    from app.persistence.models import SettingModel as _SM
+                    with _runtime.session_factory() as _s:
+                        _row = _s.get(_SM, "portal.settings")
+                        _raw = ((_row.value_json or {}).get("client_auth_mode")
+                                if _row is not None else "") or ""
+                    _hint = ("application" if _raw == "application_login"
+                             else "subscription")
+                except Exception:  # noqa: BLE001 — hint is best-effort
+                    _hint = None
+                _runtime.users.set_access_mode(
+                    platform_id, _mode, default_mode_hint=_hint)
+            except Exception:  # noqa: BLE001 — never fail user creation
+                logger.warning("access_mode apply failed for new user %s",
+                               getattr(dbuser, "username", "?"), exc_info=True)
     user = UserResponse.model_validate(dbuser)
     user.core_access = _bridge_grants(request, dbuser.username) or new_user.core_access
     report.user_created(user=user, user_id=dbuser.id, by=admin, user_admin=dbuser.admin)
@@ -239,7 +298,7 @@ def modify_user(
     request: Request,
     db: Session = Depends(get_db),
     dbuser: UsersResponse = Depends(get_validated_user),
-    admin: Admin = Depends(Admin.get_current),
+    admin: Admin = Depends(fastapi_dep('users', 'edit')),
 ):
     """
     Modify an existing user
@@ -265,6 +324,7 @@ def modify_user(
                 status_code=400,
                 detail=f"Protocol {proxy_type} is disabled on your server",
             )
+    _restrict_inbounds(modified_user, admin)
 
     old_status = dbuser.status
     old_download_limit = int(getattr(dbuser, "download_limit_mbps", 0) or 0)
@@ -337,7 +397,7 @@ def remove_user(
     request: Request,
     db: Session = Depends(get_db),
     dbuser: UserResponse = Depends(get_validated_user),
-    admin: Admin = Depends(Admin.get_current),
+    admin: Admin = Depends(fastapi_dep("users", "edit")),
 ):
     """Remove a user"""
     _bridge_remove(request, dbuser.username)
@@ -440,7 +500,7 @@ def get_users(
     status: UserStatus = None,
     sort: str = None,
     db: Session = Depends(get_db),
-    admin: Admin = Depends(Admin.get_current),
+    admin: Admin = Depends(fastapi_dep("users", "view")),
 ):
     """Get all users"""
     if sort is not None:

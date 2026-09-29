@@ -108,7 +108,9 @@ def pick_database(root: Path, source: str) -> Path:
         raise RestoreSourceError(
             f"no SQLite database found in the archive (looked under {root})")
     preferred = {"3x-ui": ("x-ui.db",), "marzban": ("db.sqlite3", "marzban.db"),
-                 "pasarguard": ("db.sqlite3", "pasarguard.db")}.get(source, ())
+                 "pasarguard": ("db.sqlite3", "pasarguard.db"),
+                 "zagros": ("zagros.db", "database.sqlite3",
+                            "zagros.sqlite3")}.get(source, ())
     for name in preferred:
         for candidate in candidates:
             if candidate.name == name:
@@ -748,6 +750,21 @@ def read_marzban_like(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
     snapshot = reader(db_path)
     tables = _table_names(db_path)
     notes = {"tables": sorted(tables), "skipped": [], "generated_admin_passwords": {}}
+    # f-import-links: the source panel's JWT signing secret — installed on
+    # apply so users' EXISTING subscription URLs keep validating here.
+    try:
+        if "jwt" in tables:
+            import sqlite3 as _sqlite3
+
+            con = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                row = con.execute("SELECT secret_key FROM jwt LIMIT 1").fetchone()
+            finally:
+                con.close()
+            if row and row[0]:
+                notes["source_jwt_secret"] = str(row[0])
+    except Exception:  # noqa: BLE001 - panels without the jwt table
+        pass
     from app.persistence.migration import is_verifiable_hash
 
     for admin in snapshot.admins:

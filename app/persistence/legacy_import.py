@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -90,6 +91,23 @@ def _coerce_strategy(raw: Any) -> str:
     """An unrecognised reset strategy must not become a failed INSERT."""
     value = str(raw or "no_reset").strip().lower()
     return value if value in VALID_RESET_STRATEGIES else "no_reset"
+
+
+def _as_dt(value: Any) -> datetime | None:
+    """Source panels store DATETIME strings (Marzban) or epochs; normalise."""
+    if value in (None, "", 0):
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    text = str(value).strip()
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        pass
+    try:
+        return datetime.utcfromtimestamp(int(text))
+    except (ValueError, OSError, OverflowError):
+        return None
 
 
 def _as_int(value: Any) -> int | None:
@@ -203,6 +221,10 @@ def import_users(snapshot: Any, session_factory, *, admin_id: int | None = None,
                 upload_limit_mbps=_as_int(entry.get("upload_limit_mbps")) or 0,
                 note=(entry.get("note") or "")[:500] or None,
                 admin_id=admin_id,
+                # f-import-links: keep the original creation date so the
+                # source panel's existing subscription links stay valid
+                # (link validation refuses tokens older than the row).
+                created_at=_as_dt(entry.get("created_at")),
             )
             for proxy in usable:
                 row = Proxy(

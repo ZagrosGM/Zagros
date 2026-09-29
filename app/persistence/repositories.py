@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from sqlalchemy import delete, desc, select, update
 
+from app.applicationapi.models import canonical_access_mode, legacy_client_auth_mode
 from app.cores.devices import DeviceInfo
 from app.cores.quota import QuotaEntry
 from app.cores.sessions import SessionRecord
@@ -22,6 +23,8 @@ from app.cores.types import CoreState, UsageRecord
 from app.portal.models import PortalSettings
 from app.persistence.cipher import SecretsCipher
 from app.persistence.models import (
+    ApplicationActivationTicketModel,
+    ApplicationConfigGrantModel,
     CoreHostModel,
     CoreModel,
     DeviceModel,
@@ -37,9 +40,41 @@ from app.persistence.models import (
     UserUsageModel,
 )
 
+if TYPE_CHECKING:
+    from app.portal.hostengine import HostEntry
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def _revoke_user_application_authorities(
+    session, *, user_id: int, now: datetime, reason: str,
+    include_legacy_refresh: bool = False,
+) -> None:
+    """Invalidate every unconsumed Application child of a user authority."""
+    refresh_scope = [
+        RefreshTokenModel.user_id == user_id,
+        RefreshTokenModel.revoked.is_(False),
+    ]
+    if not include_legacy_refresh:
+        refresh_scope.append(RefreshTokenModel.application_id.isnot(None))
+    session.execute(update(RefreshTokenModel).where(*refresh_scope).values(
+        revoked=True, revoked_at=now, revoked_reason=reason))
+    session.execute(update(ApplicationConfigGrantModel).where(
+        ApplicationConfigGrantModel.user_id == user_id,
+        ApplicationConfigGrantModel.consumed_at.is_(None),
+        ApplicationConfigGrantModel.revoked_at.is_(None),
+    ).values(revoked_at=now, revoked_reason=reason))
+    session.execute(update(ApplicationActivationTicketModel).where(
+        ApplicationActivationTicketModel.user_id == user_id,
+        ApplicationActivationTicketModel.consumed_at.is_(None),
+        ApplicationActivationTicketModel.revoked_at.is_(None),
+    ).values(revoked_at=now, revoked_reason=reason))
 
 
 # --------------------------------------------------------------------- #
@@ -608,12 +643,13 @@ class SQLRefreshTokenStore:
 
     async def revoke_all_for_user(self, user_id: int) -> None:
         def _sync() -> None:
+            now = _utcnow()
             with self._sf() as s:
-                s.execute(
-                    update(RefreshTokenModel)
-                    .where(RefreshTokenModel.user_id == user_id)
-                    .values(revoked=True)
-                )
+                # Legacy credentials and every Application descendant rotate
+                # as one user-level security event.
+                _revoke_user_application_authorities(
+                    s, user_id=user_id, now=now,
+                    reason="credentials_rotated", include_legacy_refresh=True)
                 s.commit()
         await asyncio.to_thread(_sync)
 
@@ -642,22 +678,44 @@ class UserRepository:
                     download_limit_mbps: int | None = None,
                     upload_limit_mbps: int | None = None,
                     note: str | None = None,
+                    access_mode: str | None = None,
                     client_auth_mode: str | None = None,
-                    admin_id: int | None = None) -> int:
+                    admin_id: int | None = None,
+                    created_at: datetime | None = None) -> int:
         """Idempotent by username (migration-safe); returns user id.
 
         Update semantics: ``None`` for an optional field means *keep the
         existing value* — an upsert carrying partial data must never wipe
         limits/expiry. Explicit clearing is a separate admin operation.
+        Canonical and legacy access-mode spellings are accepted and dual-
+        written without touching ``app_username`` or ``app_password_hash``.
         """
+        canonical_mode = canonical_access_mode(
+            access_mode if access_mode is not None else client_auth_mode)
+        if access_mode is not None and client_auth_mode is not None:
+            if canonical_access_mode(access_mode) != canonical_access_mode(client_auth_mode):
+                raise ValueError("access_mode and client_auth_mode disagree")
+
         with self._sf() as s:
             row = s.execute(
                 select(UserModel).where(UserModel.username == username)
             ).scalar_one_or_none()
             if row is None:
                 row = UserModel(username=username)
+                # f-import-links: a migration carries the user's ORIGINAL
+                # creation date so tokens issued by the source panel (which
+                # embed that era's timestamps) stay valid here. Never touched
+                # on updates — only a genuine delete+recreate resets it.
+                if created_at is not None:
+                    # the platform column is a UtcDateTime: keep it AWARE
+                    # (naive values are rejected); normalise naive input.
+                    row.created_at = (created_at.replace(tzinfo=__import__("datetime").timezone.utc)
+                                      if created_at.tzinfo is None else created_at)
                 s.add(row)
                 s.flush()
+            prior_status = row.status
+            prior_mode = canonical_access_mode(
+                row.access_mode or row.client_auth_mode)
             row.status = status
             if data_limit_bytes is not None:
                 row.data_limit_bytes = data_limit_bytes
@@ -675,10 +733,41 @@ class UserRepository:
                 # VARCHAR(500): MySQL refuses longer values (1406) and a
                 # migration/import must not die on an oversized remark.
                 row.note = str(note)[:500] or None
-            if client_auth_mode is not None:
-                row.client_auth_mode = client_auth_mode
+            if canonical_mode is not None:
+                row.access_mode = canonical_mode.value
+                row.client_auth_mode = legacy_client_auth_mode(canonical_mode)
             if admin_id is not None:
                 row.admin_id = admin_id
+            leaves_application_mode = (
+                prior_mode is not None
+                and prior_mode.value == "application"
+                and canonical_mode is not None
+                and canonical_mode.value != "application"
+            )
+            loses_active_status = (
+                prior_status == "active" and row.status != "active")
+            now = _utcnow()
+            becomes_expired = (
+                row.expire_at is not None
+                and _as_utc(row.expire_at) <= now)
+            usage = s.get(UserUsageModel, row.id)
+            used_bytes = 0 if usage is None else (
+                usage.uplink_bytes + usage.downlink_bytes)
+            becomes_quota_denied = (
+                row.data_limit_bytes is not None
+                and row.data_limit_bytes <= used_bytes)
+            if (leaves_application_mode or loses_active_status
+                    or becomes_expired or becomes_quota_denied):
+                if leaves_application_mode:
+                    reason = "access_mode_changed"
+                elif loses_active_status:
+                    reason = "user_status_changed"
+                elif becomes_expired:
+                    reason = "user_expired"
+                else:
+                    reason = "quota_exhausted"
+                _revoke_user_application_authorities(
+                    s, user_id=row.id, now=now, reason=reason)
             s.commit()
             return row.id
 
@@ -707,10 +796,63 @@ class UserRepository:
                 s.expunge(row)
             return rows
 
+    def set_access_mode(self, user_id: int, mode: str, *,
+                        default_mode_hint: str | None = None) -> None:
+        """Switch delivery mode without rotating or clearing app credentials.
+
+        ``mode`` also accepts ``'default'``: BOTH per-user columns are
+        cleared (NULL) so the row follows the panel-wide setting again.
+        When that clears an ``application`` override while the panel-wide
+        default is NOT application, app authorities are revoked — callers
+        pass the current panel default via ``default_mode_hint``
+        ('application' | 'subscription'); without a hint the conservative
+        'subscription' is assumed.
+        """
+
+        requested = (mode or "").strip().lower()
+        if requested in ("", "default"):
+            target: str | None = None
+            effective = ("application"
+                         if (default_mode_hint or "").strip().lower()
+                         == "application" else "subscription")
+        else:
+            canonical = canonical_access_mode(requested)
+            if canonical is None:  # defensive: non-optional upstream
+                raise ValueError("access mode is required")
+            target = canonical.value
+            effective = target
+        with self._sf() as s:
+            row = s.get(UserModel, user_id)
+            if row is None:
+                raise KeyError(user_id)
+            prior = canonical_access_mode(
+                row.access_mode or row.client_auth_mode)
+            if target is None:
+                row.access_mode = None
+                row.client_auth_mode = None
+            else:
+                row.access_mode = target
+                row.client_auth_mode = legacy_client_auth_mode(canonical)
+            if (prior is not None and prior.value == "application"
+                    and effective != "application"):
+                now = _utcnow()
+                _revoke_user_application_authorities(
+                    s, user_id=user_id, now=now,
+                    reason="access_mode_changed")
+            s.commit()
+
     def set_status(self, user_id: int, status: str) -> None:
         with self._sf() as s:
-            s.execute(update(UserModel).where(UserModel.id == user_id)
-                      .values(status=status))
+            row = s.get(UserModel, user_id)
+            if row is None:
+                raise KeyError(user_id)
+            loses_authority = row.status == "active" and status != "active"
+            row.status = status
+            if loses_authority:
+                now = _utcnow()
+                _revoke_user_application_authorities(
+                    s, user_id=user_id, now=now,
+                    reason="user_status_changed")
             s.commit()
 
     def set_app_credentials(self, user_id: int, app_username: str,

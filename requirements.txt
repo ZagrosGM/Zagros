@@ -28,6 +28,7 @@ websocket-client>=1.8  # app/xray/node.py REST-node transport (`from websocket i
 click
 pyopenssl
 PySocks
+paramiko>=3.0  # build-wizard external-host probe (SSH)
 qrcode
 passlib
 bcrypt>=4.2,<5  # passlib 1.7.x hard-fails with bcrypt 5.x (72-byte probe); 4.2.x is verified working
@@ -44,3 +45,7 @@ pillow_heif<2,>=0.16.0
 # Zagros deployment databases (installer-supported engine URLs)
 PyMySQL>=1.1
 psycopg[binary]>=3.1
+# White-label build system: RQ dispatch + Redis transport/live logs (panel
+# boots without a running Redis; only dispatch and live logs 503 then)
+rq>=2.0
+redis>=5.0

@@ -13,6 +13,7 @@ import { CommandPalette, useCommands } from "../components/CommandPalette";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Toaster, toast } from "../components/feedback";
 import { auth, getToken } from "../lib/api";
+import { useAdminPerms } from "../lib/perms";
 import { useT } from "../lib/i18n";
 import { applyUiState, useUI } from "../stores/ui";
 
@@ -24,6 +25,7 @@ const NAV = [
   ]},
   { section: "nav.section.management", items: [
     { to: "/users", icon: Users, key: "nav.users" },
+    { to: "/applications", icon: Boxes, key: "nav.applications" },
     { to: "/admins", icon: ShieldCheck, key: "nav.admins" },
     { to: "/templates", icon: LayoutTemplate, key: "nav.templates" },
   ]},
@@ -47,11 +49,40 @@ const NAV = [
   ]},
 ] as const;
 
+// f-panel-5: route path -> permission section (mirrors the backend map)
+const NAV_SECTION: Record<string, string> = {
+  "/": "overview", "/subscriptions": "subscriptions", "/nodes": "nodes",
+  "/users": "users", "/applications": "applications", "/admins": "admins",
+  "/templates": "templates", "/cores": "cores", "/inbounds": "inbounds",
+  "/outbounds": "outbounds", "/routing": "routing", "/hosts": "hosts",
+  "/certificates": "certificates", "/dns": "dns", "/monitoring": "monitoring",
+  "/statistics": "statistics", "/support": "support", "/settings": "settings",
+  "/advanced": "advanced",
+};
+
 export default function AppLayout() {
   const t = useT();
   const navigate = useNavigate();
   const location = useLocation();
   const { theme, locale, sidebarCollapsed, setTheme, setLocale, toggleSidebar, advancedMode } = useUI();
+  const perms = useAdminPerms();
+  const visibleNav = useMemo(() => NAV
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((it) => {
+        if (it.to === "/admins") return perms.isSudo;
+        const sec = NAV_SECTION[it.to as string];
+        return sec ? perms.can(sec, "view") : true;
+      }),
+    }))
+    .filter((g) => g.items.length > 0), [perms.isSudo, perms.loaded]);
+  // A hidden section deep-linked directly bounces to the dashboard.
+  useEffect(() => {
+    if (!perms.loaded) return;
+    const sec = NAV_SECTION[location.pathname] ?? "overview";
+    if (sec === "admins") { if (!perms.isSudo) navigate("/"); return; }
+    if (!perms.can(sec, "view")) navigate("/");
+  }, [perms.loaded, location.pathname]);
   const [palette, setPalette] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
 
@@ -93,7 +124,7 @@ export default function AppLayout() {
         )}
       </div>
       <nav aria-label={t("Primary")} className="flex-1 space-y-4 overflow-y-auto p-2.5">
-        {NAV.map((group) => (
+        {visibleNav.map((group) => (
           <div key={group.section ?? group.items[0].to}>
             {!sidebarCollapsed && group.section && (
               <p className="px-2.5 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-wider text-content-3">

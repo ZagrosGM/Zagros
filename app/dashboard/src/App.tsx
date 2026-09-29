@@ -10,6 +10,7 @@ const Users = lazy(() => import("./pages/Users"));
 const Admins = lazy(() => import("./pages/Admins"));
 const Templates = lazy(() => import("./pages/Templates"));
 const Subscriptions = lazy(() => import("./pages/Subscriptions"));
+const Applications = lazy(() => import("./pages/Applications"));
 const Nodes = lazy(() => import("./pages/Nodes"));
 const Cores = lazy(() => import("./pages/Cores"));
 const Support = lazy(() => import("./pages/Support"));
@@ -50,6 +51,7 @@ export default function App() {
           <Route path="admins" element={<Suspense fallback={<PageFallback />}><Admins /></Suspense>} />
           <Route path="templates" element={<Suspense fallback={<PageFallback />}><Templates /></Suspense>} />
           <Route path="subscriptions" element={<Suspense fallback={<PageFallback />}><Subscriptions /></Suspense>} />
+          <Route path="applications" element={<Suspense fallback={<PageFallback />}><Applications /></Suspense>} />
           <Route path="nodes" element={<Suspense fallback={<PageFallback />}><Nodes /></Suspense>} />
           <Route path="cores" element={<Suspense fallback={<PageFallback />}><Cores /></Suspense>} />
           <Route path="routing" element={<Suspense fallback={<PageFallback />}><Routing /></Suspense>} />

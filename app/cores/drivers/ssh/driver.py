@@ -551,6 +551,9 @@ class SSHTunnelDriver(BaseCoreDriver):
         return str(account.settings.get("password")
                    or self.settings.get("default_password") or "")
 
+    def account_teardown_capability(self) -> str:
+        return "targeted"
+
     async def create_account(self, account: UserAccount) -> None:
         self._ensure_supported(account.protocol)
         self._provision_credentials(account)
@@ -798,6 +801,7 @@ class SSHTunnelDriver(BaseCoreDriver):
             DeliveryProfile,
             DeliverySection,
         )
+        from urllib.parse import quote
 
         self._ensure_supported(account.protocol)
         self._ensure_credentials(account)
@@ -813,12 +817,22 @@ class SSHTunnelDriver(BaseCoreDriver):
         password = self._account_password(account)
         sections: list[DeliverySection] = []
         for listener in self._granted_listeners(account):
+            host_part = f"[{host}]" if ":" in host else host
+            remark = quote(f"{listener['tag']} \u00b7 SSH Tunnel", safe="")
+            link = (f"ssh://{quote(username, safe='')}:{quote(password, safe='')}"
+                    f"@{host_part}:{int(listener['port'])}#{remark}")
             sections.append(DeliverySection(
                 protocol="ssh",
                 title=f"{listener['tag']} · SSH Tunnel",
                 engine="ssh",
                 inbound_tag=listener["tag"],
                 artifacts=[
+                    DeliveryArtifact(
+                        kind=ArtifactKind.LINK,
+                        label=f"{listener['tag']} \u00b7 SSH",
+                        content=link,
+                        qr=True,
+                    ),
                     DeliveryArtifact(
                         kind=ArtifactKind.FIELDS,
                         label="Connection",

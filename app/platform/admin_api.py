@@ -94,6 +94,10 @@ def _check_sudo_admin(request: Request):
     return Admin.check_sudo_admin(db=db, token=token)
 from app.platform.routers import get_runtime, zagros_admin_router
 
+import app.db  # noqa: F401  — breaks the app.models.admin import cycle
+from app import admin_permissions as _ap
+from app.models.admin import Admin
+
 _STARTED_MONO = time.monotonic()
 logger = logging.getLogger("zagros.admin")
 _TEST_LOG = logging.getLogger("zagros.admin.outbound_test")
@@ -797,7 +801,9 @@ async def _save_outbounds(runtime, outbounds: list[Outbound]) -> list[Outbound]:
 
 
 @zagros_admin_router.get("/inbounds")
-async def unified_inbound_catalog(runtime=Depends(get_runtime)):
+async def unified_inbound_catalog(runtime=Depends(get_runtime),
+                                  admin: Admin = Depends(
+                                      _ap.fastapi_dep("inbounds", "view"))):
     """Every selectable inbound across ALL enabled cores (multi-core picker).
 
     Studio cores contribute their live config inbounds; service cores
@@ -808,6 +814,16 @@ async def unified_inbound_catalog(runtime=Depends(get_runtime)):
     from app.platform.inbounds import catalog as _catalog
 
     groups = await _catalog(runtime)
+    allowed = None if admin.is_sudo else _ap.allowed_inbounds(admin.permissions)
+    if allowed is not None:
+        out = []
+        for g in groups:
+            d = g.as_dict()
+            d["inbounds"] = [i for i in (d.get("inbounds") or [])
+                             if i.get("tag") in allowed]
+            if d["inbounds"]:
+                out.append(d)
+        return {"groups": out}
     return {"groups": [g.as_dict() for g in groups]}
 
 
@@ -3418,6 +3434,14 @@ def _audit(runtime, action: str, target: str = "", *, detail: dict | None = None
 # Backup & Restore — on-demand archives, scheduled delivery, and imports
 # from other panels (Zagros / Marzban / Pasarguard / 3x-ui)
 # --------------------------------------------------------------------- #
+def _effective_legacy_url() -> str | None:
+    # f-dbmerge: after the one-time merge the legacy engine serves the MAIN
+    # database — pass the EFFECTIVE url so the deduped two-member snapshot
+    # branch in backup_store.create fires (same as the scheduled path).
+    from app.dbmerge import effective_legacy_url
+    return effective_legacy_url(os.environ.get("SQLALCHEMY_DATABASE_URL"))
+
+
 def _backup_data_dir(runtime) -> str:
     url = getattr(runtime, "database_url", "") or ""
     if url.startswith("sqlite:///"):
@@ -3450,7 +3474,7 @@ async def create_backup(body: dict | None = None, runtime=Depends(get_runtime)):
         return backup_store.create(
             data_dir=data_dir,
             database_url=getattr(runtime, "database_url", None),
-            legacy_database_url=os.environ.get("SQLALCHEMY_DATABASE_URL"),
+            legacy_database_url=_effective_legacy_url(),
             panel_version=getattr(runtime, "version", "") or "",
             include_logs=include_logs)
 

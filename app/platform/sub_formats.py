@@ -215,7 +215,8 @@ def to_clash_meta(links: list[str], extra_notes: list[str] | None = None) -> tup
     import yaml
 
     parsed, notes = parse_named(links)
-    notes = list(extra_notes or []) + notes
+    notes = [n for n in (extra_notes or [])
+             if not n.startswith("zagros-file:")] + notes
 
     proxies: list[dict[str, Any]] = []
     names: list[str] = []
@@ -389,7 +390,8 @@ def to_sing_box(links: list[str], extra_notes: list[str] | None = None) -> tuple
     unbootable subscription config for every sing-box client).
     """
     parsed, notes = parse_named(links)
-    notes = list(extra_notes or []) + notes
+    notes = [n for n in (extra_notes or [])
+             if not n.startswith("zagros-file:")] + notes
 
     outbounds: list[dict[str, Any]] = []
     tags: list[str] = []

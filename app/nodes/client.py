@@ -207,6 +207,21 @@ class ZagrosNodeClient:
                              payload={"accounts": accounts, "replace": replace},
                              timeout=300)
 
+    def apply_connection_lease(self, core_id: str, lease_id: str,
+                               payload: dict) -> dict:
+        """Apply/renew one temporary device identity without replacing users."""
+        return self._request(
+            "PUT", f"/v1/cores/{core_id}/leases/{lease_id}",
+            payload=payload, timeout=120)
+
+    def revoke_connection_lease(self, core_id: str, lease_id: str) -> dict:
+        return self._request(
+            "DELETE", f"/v1/cores/{core_id}/leases/{lease_id}", timeout=120)
+
+    def connection_lease_status(self, core_id: str, lease_id: str) -> dict:
+        return self._request(
+            "GET", f"/v1/cores/{core_id}/leases/{lease_id}", timeout=30)
+
     def apply_identity(self, core_id: str, material: dict[str, str]) -> dict:
         """Hand the master's SERVER identity to a node.
 

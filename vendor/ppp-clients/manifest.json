@@ -2,7 +2,7 @@
   "schema": 1,
   "distribution": "Debian 13 (trixie)",
   "architecture": "amd64",
-  "captured_at": "2026-08-19T11:48:25Z",
+  "captured_at": "2026-09-09T00:35:00Z",
   "repository": "https://deb.debian.org/debian trixie/main and https://deb.debian.org/debian-security trixie-security/main",
   "packages": [
     {
@@ -39,25 +39,25 @@
     },
     {
       "package": "strongswan-charon",
-      "version": "6.0.1-6+deb13u6",
-      "filename": "strongswan-charon_6.0.1-6+deb13u6_amd64.deb",
-      "sha256": "b1816c11f46be4b9209b2cc32e7f3024d8a1ed4a01befe4f17792e1e68840b66",
+      "version": "6.0.1-6+deb13u7",
+      "filename": "strongswan-charon_6.0.1-6+deb13u7_amd64.deb",
+      "sha256": "732e382c607023e782fe985298dc2b676619566b5c05c51cfc1a4fccaeab2c46",
       "upstream": "https://www.strongswan.org/",
       "license": "GPL-2+ with OpenSSL exception plus documented component licenses"
     },
     {
       "package": "strongswan-swanctl",
-      "version": "6.0.1-6+deb13u6",
-      "filename": "strongswan-swanctl_6.0.1-6+deb13u6_amd64.deb",
-      "sha256": "0f1263231b9fd6dfe5015adf6a3cc5a43a95a5d1d65d3cfd25cfcdd2b41160d1",
+      "version": "6.0.1-6+deb13u7",
+      "filename": "strongswan-swanctl_6.0.1-6+deb13u7_amd64.deb",
+      "sha256": "2d3c77dfe953d20a53b731afce72093cb8b1ffa28af9a6b953711d8d396f91f3",
       "upstream": "https://www.strongswan.org/",
       "license": "GPL-2+ with OpenSSL exception plus documented component licenses"
     },
     {
       "package": "libstrongswan-standard-plugins",
-      "version": "6.0.1-6+deb13u6",
-      "filename": "libstrongswan-standard-plugins_6.0.1-6+deb13u6_amd64.deb",
-      "sha256": "e624a2ce6f08159c1fa5250832f68d8058af08be4a1df2da7d42121ebbdf485e",
+      "version": "6.0.1-6+deb13u7",
+      "filename": "libstrongswan-standard-plugins_6.0.1-6+deb13u7_amd64.deb",
+      "sha256": "3e7734276e9f548be33f7a651312964c2668f9b38bfee993fa0f7f3205123e05",
       "upstream": "https://www.strongswan.org/",
       "license": "GPL-2+ with OpenSSL exception plus documented component licenses"
     }

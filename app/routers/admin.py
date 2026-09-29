@@ -84,10 +84,15 @@ def modify_admin(
     current_admin: Admin = Depends(Admin.check_sudo_admin),
 ):
     """Modify an existing admin's details."""
-    if (dbadmin.username != current_admin.username) and dbadmin.is_sudo:
+    # f-panel-5: a sudo admin may now edit OTHER sudoers (incl. demotion —
+    # is_sudo=False was silently dropped by the CRUD before). The one
+    # remaining guard is self-demotion: the last sudoer locking themselves
+    # out has no one left to re-promote them.
+    if (dbadmin.username == current_admin.username and dbadmin.is_sudo
+            and not modified_admin.is_sudo):
         raise HTTPException(
             status_code=403,
-            detail="You're not allowed to edit another sudoer's account. Use zagros-cli instead.",
+            detail="You cannot revoke your own sudo — ask another sudo admin or use zagros-cli.",
         )
 
     updated_admin = crud.update_admin(db, dbadmin, modified_admin)

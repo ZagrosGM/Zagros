@@ -11,6 +11,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
+from app.applicationapi.models import canonical_access_mode
 from app.cores.manager import CoreManager
 from app.cores.types import UserAccount
 from app.persistence.repositories import SQLQuotaStore, UserRepository
@@ -33,6 +34,10 @@ def _user_record_view(row, used: int) -> dict[str, Any]:
         "online": online,
         "app_username": row.app_username,
         "app_password_hash": row.app_password_hash,
+        "access_mode": (
+            canonical_access_mode(row.access_mode or row.client_auth_mode).value
+            if (row.access_mode or row.client_auth_mode) else None
+        ),
         "client_auth_mode": row.client_auth_mode,
         "used_bytes": used,
         "data_limit_bytes": row.data_limit_bytes,
@@ -198,5 +203,6 @@ class SQLOnlineDataAdapter:
             online_at=_aware(record.get("online_at")),
             sub_updated_at=_aware(extras.get("sub_updated_at")),
             sub_last_user_agent=extras.get("sub_last_user_agent"),
+            app_username=record.get("app_username"),
         )
         return SubscriptionContext(user=view, accounts=pairs)

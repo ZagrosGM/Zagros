@@ -10,7 +10,7 @@ import asyncio
 import logging
 import time
 
-__version__ = "1.0.5"
+__version__ = "1.1.0"
 
 
 _building = False
@@ -132,8 +132,12 @@ def _build_app_inner():
     try:
         from app.platform.runtime import PlatformRuntime
         from app.platform.routers import zagros_admin_router, zagros_router
+        from app.applicationapi.router import router as application_api_router
         from app.platform import admin_api as _zagros_admin_api  # noqa: F401
         # (registers the unified-dashboard admin endpoints on the same router)
+        from app.builder import admin_endpoints as _builder_admin  # noqa: F401
+        # (registers the white-label build endpoints on zagros_admin_router)
+        from app.builder.worker_router import builder_worker_router
 
         def _try_build_runtime():
             """Build the runtime, or return the reason it is not available yet."""
@@ -176,6 +180,8 @@ def _build_app_inner():
         # such as /api/zagros/settings/api-defaults is interpreted as a bad
         # subscription path and returns the catch-all's 404.
         app.include_router(zagros_admin_router)
+        app.include_router(builder_worker_router)
+        app.include_router(application_api_router)
         app.include_router(zagros_router)
 
         async def _zagros_boot_sequence(runtime) -> None:
@@ -316,6 +322,12 @@ def _build_app_inner():
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content=jsonable_encoder({"detail": details}),
         )
+
+    # Bearer tokens live in subscription URL paths; keep them out of the
+    # uvicorn access log (see app/utils/access_log_redaction.py).
+    from app.utils.access_log_redaction import install_access_log_redaction
+
+    install_access_log_redaction()
 
     return app, scheduler
 

@@ -747,6 +747,18 @@ class XrayDriver(BaseCoreDriver):
             )
         return protocol
 
+    @staticmethod
+    def _provision_credentials(account: UserAccount) -> None:
+        """Mint protocol credentials when a device lease starts empty."""
+        import uuid
+
+        if account.protocol in {"vless", "vmess"}:
+            account.settings.setdefault("id", str(uuid.uuid4()))
+        elif account.protocol in {"trojan", "shadowsocks"}:
+            account.settings.setdefault("password", secrets.token_urlsafe(24))
+        if account.protocol == "shadowsocks":
+            account.settings.setdefault("method", "chacha20-ietf-poly1305")
+
     def _clean_settings(self, account: UserAccount) -> dict[str, Any]:
         """Keep only the keys the xray account model understands."""
         keys = _PROTOCOL_SETTINGS_KEYS[account.protocol]
@@ -888,6 +900,7 @@ class XrayDriver(BaseCoreDriver):
     # ------------------------------------------------------------------ #
     async def create_account(self, account: UserAccount) -> None:
         protocol = self._ensure_supported(account.protocol)
+        self._provision_credentials(account)
         if not account.enabled:
             return  # suspended users must not exist on the core
 
@@ -1118,13 +1131,14 @@ class XrayDriver(BaseCoreDriver):
             variables = defaultdict(lambda: "<missing>")
         settings = self._apply_flow_policy(settings, inbound)
         addresses = host.get("address") or []
-        if addresses:
+        force_target = bool(getattr(context, "force_public_host", False))
+        if addresses and not force_target:
             server = self._render_host_value(
                 random.choice(addresses), variables, wild=True)
         else:
-            # Fresh Studio inbounds need not have a legacy Host row yet.  Use
-            # the same public subscription-origin fallback as other drivers
-            # rather than exposing a wildcard listener or withholding a link.
+            # Fresh Studio inbounds and node-targeted Application leases use
+            # the same public-host resolver. A forced node target intentionally
+            # overrides legacy Host rows from the master.
             from app.cores.delivery import resolve_delivery_host
 
             server = resolve_delivery_host(None, context, inbound.get("listen")) or None
@@ -1245,7 +1259,7 @@ class XrayDriver(BaseCoreDriver):
         variables["PROTOCOL"] = self._protocol_display(protocol)
         variables["TRANSPORT"] = inbound.get("network", "")
         outbound = self._compose_outbound(protocol, settings, tag, inbound,
-                                          host, variables)
+                                          host, variables, node)
         remark = self._render_host_value(
             host.get("remark") or f"{protocol} · {tag}", variables)
 

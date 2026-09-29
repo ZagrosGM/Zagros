@@ -10,11 +10,12 @@ import asyncio
 import hashlib
 import hmac
 import ipaddress
+from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Mapping
 
 from sqlalchemy import delete, select
 
+from app.persistence.device_authority import occupying_devices
 from app.persistence.models import SubscriptionDeviceModel, UserModel
 
 
@@ -76,7 +77,14 @@ def _enroll_sync(runtime, user_id: int, headers: Mapping[str, str],
     except ValueError:
         source_ip = None
     with runtime.session_factory() as session:
-        user = session.get(UserModel, user_id)
+        # Use the same cross-mode allocation lock as Application enrollment.
+        # The in-process asyncio lock below is insufficient across workers and
+        # must never permit subscription + Application requests to race past
+        # one shared global device limit.
+        if session.get_bind().dialect.name == "sqlite":
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        user = session.execute(select(UserModel).where(
+            UserModel.id == user_id).with_for_update()).scalar_one_or_none()
         if user is None:
             raise DeviceEnrollmentError("subscription user not found")
         limit = max(0, int(user.device_limit or 0))
@@ -88,12 +96,7 @@ def _enroll_sync(runtime, user_id: int, headers: Mapping[str, str],
                 "this subscription requires X-Device-ID or X-HWID")
 
         digest = _digest(device_id)
-        rows = list(session.execute(
-            select(SubscriptionDeviceModel)
-            .where(SubscriptionDeviceModel.user_id == user_id)
-            .order_by(SubscriptionDeviceModel.first_seen,
-                      SubscriptionDeviceModel.id)
-        ).scalars())
+        rows = occupying_devices(session, user_id)
         for position, row in enumerate(rows):
             if hmac.compare_digest(row.device_hash, digest):
                 # Lowering the limit immediately excludes devices beyond the
@@ -136,7 +139,10 @@ def list_devices(runtime, user_id: int) -> list[dict]:
     with runtime.session_factory() as session:
         rows = session.execute(
             select(SubscriptionDeviceModel)
-            .where(SubscriptionDeviceModel.user_id == user_id)
+            .where(
+                SubscriptionDeviceModel.user_id == user_id,
+                SubscriptionDeviceModel.application_id.is_(None),
+            )
             .order_by(SubscriptionDeviceModel.first_seen,
                       SubscriptionDeviceModel.id)
         ).scalars()
@@ -152,8 +158,13 @@ def list_devices(runtime, user_id: int) -> list[dict]:
 
 def remove_device(runtime, user_id: int, device_id: int | None = None) -> int:
     with runtime.session_factory() as session:
+        # This legacy admin operation owns only non-Application HWIDs.
+        # Cryptographic Application devices require audited revocation so
+        # their refresh/config descendants are invalidated consistently.
         stmt = delete(SubscriptionDeviceModel).where(
-            SubscriptionDeviceModel.user_id == user_id)
+            SubscriptionDeviceModel.user_id == user_id,
+            SubscriptionDeviceModel.application_id.is_(None),
+        )
         if device_id is not None:
             stmt = stmt.where(SubscriptionDeviceModel.id == device_id)
         result = session.execute(stmt)

@@ -20,6 +20,8 @@ export interface AdminUser {
   users_count?: number | null;
   users_lifetime_usage?: number | null;
   users_allocated_traffic?: number | null;
+  /** f-panel-5 permission matrix (null = panel default) */
+  permissions?: { sections?: Record<string, string>; inbounds?: string[] | null } | null;
 }
 
 export type UserStatus = "active" | "disabled" | "limited" | "expired" | "on_hold";

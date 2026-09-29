@@ -10,8 +10,8 @@ Layout::
     ├── manifest.json        {"manifest_version", "created_utc", "files":[{path,sha256,bytes}]}
     ├── manifest.meta        key=value lines (kind, cli, panel, image_tag, db_kind, ...)
     ├── db/
-    │   ├── zagros.sqlite3   hot (WAL-safe) copy of the platform database
-    │   └── legacy.sqlite3   hot copy of the legacy database, when present
+    │   ├── database.sqlite3  ONE database snapshot (both layers once merged)
+    │   └── legacy.sqlite3    only on a genuinely un-merged panel (and old archives)
     ├── config/
     │   ├── .env             the deployment — the single source of truth
     │   ├── docker-compose.yml
@@ -300,6 +300,35 @@ def _write_manifest_meta(staging: Path, fields: dict[str, str]) -> None:
 # --------------------------------------------------------------------------- #
 # create
 # --------------------------------------------------------------------------- #
+MAIN_DB_MEMBER = "db/database.sqlite3"
+PLATFORM_DB_MEMBER = "db/zagros.sqlite3"   # pre-dbmerge archives
+LEGACY_DB_MEMBER = "db/legacy.sqlite3"
+
+
+def db_member_map(names) -> dict:
+    """Resolve which archive members carry the platform / legacy data.
+
+    Layouts understood:
+    * single (f-dbmerge: merged panel or fresh install) —
+      ``db/database.sqlite3`` alone; the legacy layer lives in the
+      ``legacy_*`` tables of the SAME file.
+    * dual un-merged (new writer on a panel with a separate legacy DB) —
+      ``db/database.sqlite3`` + ``db/legacy.sqlite3``.
+    * dual pre-dbmerge (old archives) —
+      ``db/zagros.sqlite3`` + ``db/legacy.sqlite3``.
+    """
+    present = set(names)
+    if MAIN_DB_MEMBER in present:
+        return {"platform": MAIN_DB_MEMBER,
+                "legacy": LEGACY_DB_MEMBER
+                if LEGACY_DB_MEMBER in present else MAIN_DB_MEMBER}
+    if PLATFORM_DB_MEMBER in present:
+        return {"platform": PLATFORM_DB_MEMBER,
+                "legacy": LEGACY_DB_MEMBER
+                if LEGACY_DB_MEMBER in present else None}
+    return {"platform": None, "legacy": None}
+
+
 def create(
     *,
     data_dir: str | os.PathLike[str],
@@ -329,14 +358,34 @@ def create(
 
     missing: list[str] = []
     try:
-        # 1. databases — hot copies, never a plain file copy
+        # 1. databases — hot copies, never a plain file copy.
+        # Server engines (MySQL/MariaDB/PostgreSQL) are SNAPSHOTTED into the
+        # same db/*.sqlite3 members the restore paths consume (f-backup-1);
+        # a dump failure fails the backup loudly instead of shipping an
+        # archive with an empty db/ directory.
         db_dir = staging / "db"
         db_dir.mkdir()
-        platform_db = hot_copy_sqlite(database_url, db_dir / "zagros.sqlite3")
-        if not platform_db:
-            missing.append("db/zagros.sqlite3")
-        if legacy_database_url:
-            legacy_db = hot_copy_sqlite(legacy_database_url, db_dir / "legacy.sqlite3")
+        # f-dbmerge single-file layout: ONE database member. After the merge
+        # (and on fresh installs) a single snapshot carries BOTH layers, so
+        # duplicating it under a second name added nothing. A second member
+        # is written ONLY when the panel is genuinely un-merged (separate
+        # legacy database URL) so its legacy data is not lost.
+        if _db_kind(database_url) == "sqlite":
+            platform_db = hot_copy_sqlite(database_url,
+                                          db_dir / "database.sqlite3")
+            if not platform_db:
+                missing.append("db/database.sqlite3")
+        else:
+            snapshot_via_sqlalchemy(database_url, db_dir / "database.sqlite3")
+        dual_layout = bool(legacy_database_url
+                           and legacy_database_url != database_url)
+        if dual_layout:
+            if _db_kind(legacy_database_url) == "sqlite":
+                legacy_db = hot_copy_sqlite(legacy_database_url,
+                                            db_dir / "legacy.sqlite3")
+            else:
+                legacy_db = snapshot_via_sqlalchemy(legacy_database_url,
+                                                    db_dir / "legacy.sqlite3")
             if not legacy_db:
                 missing.append("db/legacy.sqlite3")
 
@@ -365,6 +414,7 @@ def create(
             "panel": panel_version or "unknown",
             "image_tag": image_tag or "",
             "db_kind": _db_kind(database_url),
+            "db_layout": "dual" if dual_layout else "single",
             "created_utc": timestamp,
             "include_logs": "yes" if include_logs else "no",
             **({"missing": ",".join(missing)} if missing else {}),
@@ -399,6 +449,134 @@ def create(
     )
 
 
+def _sqlite_portable_table(table, meta_out):
+    """Clone a reflected (server-dialect) table with GENERIC column types.
+
+    MySQL/MariaDB/PostgreSQL dialect types cannot be DDL-compiled by SQLite
+    (mysql.BOOLEAN, ENUM, SET, …). Walk the MRO to the dialect-free base and
+    adapt; special-case the enum family (generic Enum needs its values as
+    constructor args) to String. Primary keys and FKs are kept so the
+    snapshot doubles as a runnable schema on a SQLite panel; server-specific
+    uniques/indexes are intentionally skipped.
+    """
+    from sqlalchemy import Column, ForeignKey, Table
+    from sqlalchemy import types as st
+
+    def port(col_type):
+        if isinstance(col_type, st.Enum) or type(col_type).__name__ in ("ENUM", "SET"):
+            return st.String(255)
+        for klass in type(col_type).__mro__:
+            mod = getattr(klass, "__module__", "") or ""
+            if mod.startswith("sqlalchemy.dialects"):
+                continue
+            if issubclass(klass, st.TypeEngine) and klass is not st.TypeEngine:
+                try:
+                    adapted = col_type.adapt(klass)
+                    # server collations (utf8mb4_unicode_ci, …) are unknown
+                    # to SQLite and survive adapt() — drop them
+                    if getattr(adapted, "collation", None):
+                        adapted.collation = None
+                    return adapted
+                except Exception:  # noqa: BLE001 — try the next base
+                    continue
+        return st.Text()
+
+    cols = []
+    for col in table.columns:
+        fks = []
+        for fk in col.foreign_keys:
+            try:
+                fks.append(ForeignKey(fk.target_fullname))
+            except Exception:  # noqa: BLE001 — composite/exotic FK: skip
+                pass
+        cols.append(Column(col.name, port(col.type), *fks,
+                           nullable=col.nullable,
+                           primary_key=col.primary_key,
+                           autoincrement=False))
+    return Table(table.name, meta_out, *cols)
+
+
+def snapshot_via_sqlalchemy(url: str | None, out: Path) -> bool:
+    """Consistent SQLite snapshot of a SERVER database (MySQL/MariaDB/…).
+
+    The archive layout is engine-agnostic by contract: ``db/*.sqlite3`` is
+    what verify lists, what the SQLite restore path swaps into place, and
+    what the row-level import reads on non-SQLite panels. Server engines
+    therefore get every table read through ONE transaction (a REPEATABLE
+    READ snapshot — mid-backup writes are not seen) and written into a
+    fresh SQLite file at the same member path.
+
+    Raises :class:`BackupError` on failure — a backup silently missing its
+    databases is worse than a failed one. ``False`` is returned only for
+    non-server URLs (let the SQLite hot-copy handle those).
+    """
+    kind = _db_kind(url)
+    if kind not in ("mysql", "postgresql") or not url:
+        return False
+
+    from sqlalchemy import MetaData, create_engine, select
+    from sqlalchemy.pool import NullPool
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(out.name + ".in-progress")
+    if tmp.exists():
+        tmp.unlink()
+
+    src_engine = create_engine(url, poolclass=NullPool)
+    try:
+        conn = src_engine.connect()
+        try:
+            if kind == "postgresql":
+                conn = conn.execution_options(
+                    isolation_level="REPEATABLE READ")
+            trans = conn.begin()  # snapshot spans every read below
+            meta = MetaData()
+            meta.reflect(bind=conn)
+            sqlite_meta = MetaData()
+            name_map = {}
+            for table in meta.sorted_tables:  # FK-safe order
+                portable = _sqlite_portable_table(table, sqlite_meta)
+                name_map[table.name] = portable
+            tmp_engine = create_engine(f"sqlite:///{tmp}")
+            try:
+                sqlite_meta.create_all(tmp_engine)
+                with tmp_engine.begin() as dst:
+                    for table in meta.sorted_tables:
+                        target = name_map[table.name]
+                        result = conn.execute(
+                            select(table).execution_options(stream_results=True))
+                        while True:
+                            chunk = result.fetchmany(1000)
+                            if not chunk:
+                                break
+                            payload = [dict(row._mapping) for row in chunk]
+                            dst.execute(target.insert(), payload)
+                trans.commit()
+            finally:
+                tmp_engine.dispose()
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 — surfaced as a failed backup
+        if tmp.exists():
+            tmp.unlink()
+        raise BackupError(
+            f"{kind} database snapshot failed: {exc}") from exc
+
+    check = sqlite3.connect(str(tmp))
+    try:
+        status = check.execute("PRAGMA integrity_check").fetchone()[0]
+    finally:
+        check.close()
+    if status != "ok":
+        if tmp.exists():
+            tmp.unlink()
+        raise BackupError(f"{kind} snapshot failed integrity_check: {status}")
+    os.replace(tmp, out)
+    return True
+
+
+
+
 def _copy_deployment_config(dest: Path, config_dir: str | os.PathLike[str] | None,
                             data_root: Path) -> bool:
     """Copy ``.env`` / ``docker-compose.yml`` / ``.state`` when reachable."""
@@ -408,7 +586,10 @@ def _copy_deployment_config(dest: Path, config_dir: str | os.PathLike[str] | Non
     env_home = os.environ.get("ZAGROS_HOME")
     if env_home:
         candidates.append(Path(env_home))
-    candidates += [Path("/opt/zagros"), data_root.parent / "zagros", data_root]
+    # Panel containers mount the deployment .env read-only at /code/.env —
+    # without this candidate a dashboard backup could never carry the config.
+    candidates += [Path("/code"), Path("/opt/zagros"),
+                   data_root.parent / "zagros", data_root]
     copied = False
     for candidate in candidates:
         try:

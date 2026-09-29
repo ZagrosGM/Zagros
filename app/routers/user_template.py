@@ -7,6 +7,7 @@ from app.db import Session, crud, get_db
 from app.models.admin import Admin
 from app.models.user_template import (UserTemplateCreate, UserTemplateModify,
                                       UserTemplateResponse)
+from app.admin_permissions import fastapi_dep
 from app.dependencies import get_user_template
 
 router = APIRouter(tags=['User Template'], prefix='/api')
@@ -15,7 +16,7 @@ router = APIRouter(tags=['User Template'], prefix='/api')
 def add_user_template(
     new_user_template: UserTemplateCreate,
     db: Session = Depends(get_db),
-    admin: Admin = Depends(Admin.check_sudo_admin)
+    admin: Admin = Depends(fastapi_dep("templates", "edit"))
 ):
     """
     Add a new user template
@@ -44,7 +45,7 @@ def get_user_template_endpoint(
 def modify_user_template(
     modify_user_template: UserTemplateModify,
     db: Session = Depends(get_db),
-    admin: Admin = Depends(Admin.check_sudo_admin),
+    admin: Admin = Depends(fastapi_dep("templates", "edit")),
     dbuser_template: UserTemplateResponse = Depends(get_user_template)
 ):
     """
@@ -65,7 +66,7 @@ def modify_user_template(
 @router.delete("/user_template/{template_id}")
 def remove_user_template(
     db: Session = Depends(get_db),
-    admin: Admin = Depends(Admin.check_sudo_admin),
+    admin: Admin = Depends(fastapi_dep("templates", "edit")),
     dbuser_template: UserTemplateResponse = Depends(get_user_template)
 ):
     """Remove a User Template by its ID"""

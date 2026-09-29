@@ -53,7 +53,7 @@ class PortalService:
         self._host_engine = HostSettingsEngine()
 
     @staticmethod
-    def _delivery_context(settings, request_host: str | None) -> DeliveryContext:
+    def delivery_context(settings, request_host: str | None) -> DeliveryContext:
         from urllib.parse import urlsplit
 
         # QR/client profiles may use an explicit public base, otherwise every
@@ -68,6 +68,11 @@ class PortalService:
             host = str(request_host or "").strip()
         return DeliveryContext(brand=settings.brand,
                                public_host=host or None)
+
+    @staticmethod
+    def _delivery_context(settings, request_host: str | None) -> DeliveryContext:
+        """Compatibility alias for existing callers and tests."""
+        return PortalService.delivery_context(settings, request_host)
 
     async def _expand_hosts(self, core_id: str, profile, variables):
         """Widen one delivery profile through the admin's Host Settings
@@ -109,7 +114,7 @@ class PortalService:
         sections: list[DeliverySection] = []
         notes: list[str] = []
         variables = delivery_variables(ctx.user)
-        delivery_context = self._delivery_context(settings, public_host)
+        delivery_context = self.delivery_context(settings, public_host)
         for driver, account in ctx.accounts:
             try:
                 profile = await driver.describe_delivery(account, delivery_context)
@@ -149,18 +154,16 @@ class PortalService:
             notes=notes,
         )
 
-    async def build_links(self, user_id: int, *,
-                          public_host: str | None = None) -> tuple[list[str], list[str]] | None:
-        """Every share-link the user's cores can produce — the multi-core
-        subscription payload for non-browser clients (v2rayNG, Streisand,
-        sing-box for Android...).
+    async def describe_file(self, user_id: int, core_id: str, tag: str, *,
+                            public_host: str | None = None
+                            ) -> tuple[str, str, str] | None:
+        """One FILE artifact's (content, filename, mime) — or None.
 
-        Returns ``(links, notes)`` — every LINK artifact across ALL
-        (driver, account) pairs. FILE/FIELDS artifacts (ovpn/wireguard
-        configs and L2TP/SSTP credentials) have no standard URL form; they
-        stay on the HTML portal instead of being fabricated into pseudo
-        links, and the drivers' honest notes are returned so the caller can
-        state why (never silently dropped).
+        Serves the ``zagros-file:`` markers ``build_links`` emits: same
+        account set, same delivery profiles, matched on the raw
+        ``inbound_tag`` (matching pre-host-expansion keeps multi-host cores
+        at one file per listener). Application-login users get nothing —
+        same quarantine as the link list.
         """
         ctx = await self._provider.get_subscription_context(user_id)
         if ctx is None:
@@ -168,13 +171,68 @@ class PortalService:
         settings = await self._settings.get_portal_settings()
         mode = ctx.user.client_auth_mode or settings.client_auth_mode
         if mode is ClientAuthMode.APPLICATION_LOGIN:
+            return None
+        delivery_context = self.delivery_context(settings, public_host)
+        for driver, account in ctx.accounts:
+            if driver.metadata.id != core_id or not account.enabled:
+                continue
+            try:
+                profile = await driver.describe_delivery(account, delivery_context)
+            except Exception:  # noqa: BLE001 — 404, same as missing
+                return None
+            for section_index, section in enumerate(profile.sections):
+                want = section.inbound_tag or f"section-{section_index}"
+                if want != tag:
+                    continue
+                for artifact in section.artifacts:
+                    if (artifact.kind is ArtifactKind.FILE
+                            and artifact.content):
+                        return (artifact.content,
+                                artifact.filename or f"{core_id}-{tag}.bin",
+                                artifact.mime or "application/octet-stream")
+            return None
+        return None
+
+    async def build_links(self, user_id: int, *,
+                          public_host: str | None = None,
+                          token: str | None = None,
+                          bypass_mode_gate: bool = False,
+                          ) -> tuple[list[str], list[str]] | None:
+        """Every share-link the user's cores can produce — the multi-core
+        subscription payload for non-browser clients (v2rayNG, Streisand,
+        sing-box for Android...).
+
+        Returns ``(links, notes)`` — every LINK artifact across ALL
+        (driver, account) pairs. FIELDS artifacts (L2TP/SSTP credentials)
+        have no standard URL form; they stay on the HTML portal instead of
+        being fabricated into pseudo links, and the drivers' honest notes
+        are returned so the caller can state why (never silently dropped).
+        FILE artifacts (OpenVPN/WireGuard profiles) are served by the
+        per-file download endpoint; when the caller's subscription
+        ``token`` is known, one ``zagros-file:`` marker note per file is
+        emitted (a same-server relative path the Zagros app resolves and
+        fetches; generic clients read it as a comment and the
+        clash/sing-box renderers strip it).
+        """
+        from urllib.parse import quote
+
+        ctx = await self._provider.get_subscription_context(user_id)
+        if ctx is None:
+            return None
+        settings = await self._settings.get_portal_settings()
+        mode = ctx.user.client_auth_mode or settings.client_auth_mode
+        if mode is ClientAuthMode.APPLICATION_LOGIN and not bypass_mode_gate:
             # Mode 2 quarantine: not a single byte of configuration material —
             # same gate as the portal page, enforced on the raw list too.
+            # The QR enrollment page passes bypass_mode_gate=True: a
+            # reseller/admin-issued activation ticket is an explicit,
+            # audited, TTL-bounded delivery decision for exactly one user,
+            # which the ambient-subscription quarantine must not swallow.
             return [], []
         links: list[str] = []
         notes: list[str] = []
         variables = delivery_variables(ctx.user)
-        delivery_context = self._delivery_context(settings, public_host)
+        delivery_context = self.delivery_context(settings, public_host)
         for driver, account in ctx.accounts:
             if not account.enabled:
                 continue
@@ -192,10 +250,17 @@ class PortalService:
                     f"{account.protocol}: temporarily unavailable "
                     f"({exc.__class__.__name__}){reason}")
                 continue
-            for section in profile.sections:
+            for section_index, section in enumerate(profile.sections):
                 for artifact in section.artifacts:
                     if artifact.kind is ArtifactKind.LINK and artifact.content:
                         links.append(artifact.content)
+                    elif (artifact.kind is ArtifactKind.FILE and token
+                            and artifact.content):
+                        tag = section.inbound_tag or f"section-{section_index}"
+                        notes.append(
+                            "zagros-file: "
+                            f"/sub/file/{token}/{driver.metadata.id}/"
+                            f"{quote(str(tag), safe='')}")
                     elif artifact.note:
                         notes.append(f"{section.title}: {artifact.note}")
             if profile.note:

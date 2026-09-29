@@ -20,6 +20,8 @@ class Token(BaseModel):
 class Admin(BaseModel):
     username: str
     is_sudo: bool
+    # f-panel-5: permission matrix document (None = historical default)
+    permissions: Optional[dict] = None
     telegram_id: Optional[int] = None
     discord_webhook: Optional[str] = None
     users_usage: Optional[int] = None
@@ -49,6 +51,18 @@ class Admin(BaseModel):
         if expiry.tzinfo is None:
             expiry = expiry.replace(tzinfo=timezone.utc)
         return expiry <= datetime.now(timezone.utc)
+
+    @field_validator("permissions", mode="before")
+    @classmethod
+    def _permissions_from_json(cls, v):
+        """The column is TEXT — decode the JSON document transparently."""
+        if isinstance(v, str):
+            import json as _json
+            try:
+                return _json.loads(v)
+            except Exception:  # noqa: BLE001 — corrupt JSON = default perms
+                return None
+        return v
 
     @field_validator("users_usage",  mode='before')
     def cast_to_int(cls, v):
@@ -132,6 +146,7 @@ class AdminCreate(Admin):
     password: str
     telegram_id: Optional[int] = None
     discord_webhook: Optional[str] = None
+    permissions: Optional[dict] = None
 
     @property
     def hashed_password(self):
@@ -148,6 +163,8 @@ class AdminCreate(Admin):
 class AdminModify(BaseModel):
     password: Optional[str] = None
     is_sudo: bool
+    # Full replacement when present; absent = keep; explicit null = default.
+    permissions: Optional[dict] = None
     telegram_id: Optional[int] = None
     discord_webhook: Optional[str] = None
     # Governance fields. Presence is tracked via model_fields_set so the

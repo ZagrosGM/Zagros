@@ -442,7 +442,8 @@ def _data_dir(runtime) -> str:
 def _legacy_url(runtime) -> str | None:
     import os
 
-    return os.environ.get("SQLALCHEMY_DATABASE_URL")
+    from app.dbmerge import effective_legacy_url
+    return effective_legacy_url(os.environ.get("SQLALCHEMY_DATABASE_URL"))
 
 
 async def run_once_async(runtime) -> dict[str, Any]:

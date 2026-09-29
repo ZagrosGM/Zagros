@@ -98,3 +98,12 @@ html.light, html:not(.dark) {
 }
 
 [dir="rtl"] body { letter-spacing: 0; }
+
+/* f-panel-3: the page behind any dialog/drawer blurs for real (filter on
+   the root element — dialogs portal to <body> so they never blur). */
+#root { transition: filter 200ms ease; }
+#root.dialog-behind-blur { filter: blur(8px) saturate(0.85); }
+/* f-panel-5: stacked dialogs — every open layer except the topmost one */
+.dialog-behind-blurred { filter: blur(8px) saturate(0.85); transition: filter 200ms; }
+/* f-panel-5: stacked dialogs — every open layer except the topmost one */
+.dialog-behind-blurred { filter: blur(8px) saturate(0.85); transition: filter 200ms; }

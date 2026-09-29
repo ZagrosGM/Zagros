@@ -45,6 +45,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "footer_powered": "قدرت‌گرفته از",
         "protocols_hint": "سرویس‌های شما",
         "your_username": "نام کاربری شما",
+        "app_login_user": "نام کاربری ورود به اپ",
+        "app_login_password_note": "گذرواژه فقط یک‌بار هنگام صدور نمایش داده می‌شود — آن را از مدیر سرویس خود بخواهید.",
+        "reissue_btn": "بازتولید نام کاربری و رمز",
+        "reissue_confirm": "نام کاربری و رمز قبلی بلافاصله باطل می‌شود. ادامه می‌دهید؟",
+        "reissued_note": "این مشخصات جدید فقط همین یک بار نمایش داده می‌شود — حفظشان کنید.",
     },
     "en": {
         "subscription_of": "Subscription",
@@ -67,6 +72,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "footer_powered": "Powered by",
         "protocols_hint": "Your services",
         "your_username": "Your username",
+        "app_login_user": "App sign-in username",
+        "app_login_password_note": "The password is shown once at issuance — ask your service administrator for it.",
+        "reissue_btn": "Regenerate username & password",
+        "reissue_confirm": "Your previous app username and password stop working immediately. Continue?",
+        "reissued_note": "These new credentials are shown only this once — save them now.",
     },
 }
 
@@ -382,6 +392,7 @@ def _render_app_page(page: PortalPage) -> str:
         apps_html = f'<div class="apps">{buttons}</div>'
     else:
         apps_html = f'<div class="note">{_esc(_t(page, "app_only_no_apps"))}</div>'
+    app_user = page.user.app_username or page.user.username
     return f"""
 <div class="hero"><h1>{_esc(page.brand)}</h1>
 <div class="sub">{_esc(_t(page, 'subscription_of'))} <b>{_esc(page.user.username)}</b> · {_status_pill(page)}</div></div>
@@ -394,6 +405,13 @@ def _render_app_page(page: PortalPage) -> str:
     <div class="k">{_esc(_t(page, "your_username"))}</div>
     <div class="v">{_esc(page.user.username)}</div>
   </div>
+  <div class="stat" style="max-width:320px;margin:12px auto 0">
+    <div class="k">{_esc(_t(page, "app_login_user"))}</div>
+    <div class="v"><code>{_esc(app_user)}</code></div>
+  </div>
+  <p style="color:var(--zg-muted);max-width:52ch;margin:10px auto 0;font-size:13px">{_esc(_t(page, "app_login_password_note"))}</p>
+  {_reissued_html(page)}
+  {_reissue_form_html(page)}
 </div>
 <div class="card"><div class="section-title"><h2>{_esc(_t(page, "download_app"))}</h2></div>{apps_html}</div>
 """
@@ -495,6 +513,40 @@ class TemplateUser:
 
     def __repr__(self) -> str:
         return f"TemplateUser({self.username!r})"
+
+
+def _reissue_form_html(page: PortalPage) -> str:
+    """POST-to-rotate button. The subscription link itself is the bearer
+    secret; whoever holds it is the subscriber (self-service rotation)."""
+    if not page.subscription_url:
+        return ""
+    action = _esc(page.subscription_url.rstrip("/") + "/reissue-app")
+    return (
+        '<form method="post" action="' + action + '" '
+        'onsubmit="return confirm(\'' + _esc(_t(page, "reissue_confirm")).replace("'", "") + '\');">'
+        '<button type="submit" class="appbtn" style="margin:14px auto 0;'
+        'display:inline-block;cursor:pointer">'
+        + _esc(_t(page, "reissue_btn")) + '</button></form>'
+    )
+
+
+def _reissued_html(page: PortalPage) -> str:
+    """One-time display of freshly rotated credentials."""
+    if not page.reissued_credentials:
+        return ""
+    username, password = page.reissued_credentials
+    return (
+        '<div class="card" style="max-width:360px;margin:16px auto 0;'
+        'padding:14px;border:1px solid #22c55e;background:rgba(34,197,94,.08)">'
+        '<p style="margin:0 0 8px;font-size:13px;color:#22c55e;font-weight:600">'
+        + _esc(_t(page, "reissued_note")) + '</p>'
+        '<div class="stat" style="margin:0 auto"><div class="k">'
+        + _esc(_t(page, "app_login_user")) + '</div>'
+        '<div class="v"><code>' + _esc(username) + '</code></div></div>'
+        '<div class="stat" style="margin:10px auto 0"><div class="k">Password</div>'
+        '<div class="v"><code>' + _esc(password) + '</code></div></div>'
+        '</div>'
+    )
 
 
 def _template_qr_svg(content: Any, *, size: int = 4, border: int = 2) -> str:
@@ -780,3 +832,156 @@ def render_page_html(page: PortalPage, template_name: str | None = None,
 <script>{_JS}</script>
 </body>
 </html>"""
+
+
+# --------------------------------------------------------------------- #
+# QR activation page (item 4): ticket-bound enrollment for external apps
+# --------------------------------------------------------------------- #
+
+_ACTIVATION_STRINGS: dict[str, dict[str, str]] = {
+    "fa": {
+        "title": "فعال‌سازی اشتراک",
+        "for_app": "اپلیکیشن",
+        "expires": "انقضای این لینک",
+        "sub_title": "لینک اشتراک شما",
+        "sub_hint": "این QR را با v2rayNG، Streisand، sing-box یا هر کلاینت استاندارد دیگری اسکن کنید، یا لینک را کپی کنید.",
+        "copy": "کپی", "copied": "کپی شد ✓",
+        "open_client": "باز کردن در کلاینت",
+        "configs": "کانفیگ‌ها",
+        "show_qr": "نمایش QR",
+        "step_n": "کانفیگ {n}",
+        "footer_note": "این صفحه لینک را مصرف نمی‌کند؛ ورود رسمی اپ همچنان با همان بلیت انجام می‌شود.",
+        "no_links": "در حال حاضر کانفیگی برای تحویل وجود ندارد — از مدیر سرویس خود بپرسید.",
+    },
+    "en": {
+        "title": "Subscription activation",
+        "for_app": "Application",
+        "expires": "This link expires",
+        "sub_title": "Your subscription link",
+        "sub_hint": "Scan this QR with v2rayNG, Streisand, sing-box or any standard client, or copy the link.",
+        "copy": "Copy", "copied": "Copied ✓",
+        "open_client": "Open in client",
+        "configs": "Configs",
+        "show_qr": "Show QR",
+        "step_n": "Config {n}",
+        "footer_note": "Viewing this page never consumes the ticket; official app login still uses the same ticket.",
+        "no_links": "No configs are deliverable right now — ask your service admin.",
+    },
+}
+
+
+def render_activation_html(*, app_name: str, username: str,
+                           subscription_url: str, links: list[str],
+                           notes: list[str], expires_at: str,
+                           brand: str = "Zagros",
+                           lang: str = "fa") -> str:
+    """Self-contained enrollment page for one activation ticket.
+
+    External-app onboarding without client changes: the subscription URL
+    as a big scannable QR plus every share-link as its own QR. All
+    dynamic text is escaped; QRs are inline SVG from our own encoder.
+    """
+    # "fa" is the default; only an explicit English request flips.
+    lang = "en" if (lang or "").split("-")[0] == "en" else "fa"
+    direction = "rtl" if lang == "fa" else "ltr"
+    s = _ACTIVATION_STRINGS[lang]
+
+    try:
+        sub_qr = _qr_svg(subscription_url)
+    except Exception:  # noqa: BLE001 — over-long URL: link still works
+        sub_qr = ""
+    blocks = []
+    for index, link in enumerate(links, start=1):
+        try:
+            qr = _qr_svg(link)
+        except Exception:  # noqa: BLE001 — content link still shown
+            qr = ""
+        label = s["step_n"].format(n=index)
+        scheme = _esc(link.split(":", 1)[0] if ":" in link else "")
+        blocks.append(
+            f'<div class="card"><div class="row"><b>{_esc(label)}</b>'
+            f'<span class="pill">{scheme}</span></div>'
+            f'<div class="linkbox"><code>{_esc(link)}</code></div>'
+            f'<div class="row"><button class="btn ghost" '
+            f'onclick="zgCopy(this,{_js(link)})" data-done="{_esc(s["copied"])}">'
+            f'{_esc(s["copy"])}</button>'
+            f'<a class="btn" href="{_esc(link)}">{_esc(s["open_client"])}</a></div>'
+            + (f'<details><summary>{_esc(s["show_qr"])}</summary>'
+               f'<div class="qrbox">{qr}</div></details>' if qr else '')
+            + '</div>')
+    if not blocks:
+        blocks.append(f'<div class="card"><p class="note">{_esc(s["no_links"])}</p></div>')
+    notes_html = "".join(
+        f'<p class="note">{_esc(note)}</p>' for note in notes[:8])
+
+    return f"""<!doctype html>
+<html lang="{_esc(lang)}" dir="{direction}" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{_esc(brand)} · {_esc(s["title"])}</title>
+<style>{_CSS}</style>
+</head>
+<body>
+<div class="wrap">
+<div class="header"><div class="brand">{_LOGO}<span>{_esc(brand)}</span></div>{_THEME_BTN}</div>
+<div class="hero"><h1>{_esc(s["title"])}</h1>
+<p>{_esc(s["for_app"])}: <b>{_esc(app_name)}</b> · {_esc(username)}</p>
+<p class="pill">{_esc(s["expires"])}: {_esc(expires_at)}</p></div>
+<div class="card"><h2>{_esc(s["sub_title"])}</h2>
+<p class="note">{_esc(s["sub_hint"])}</p>
+{sub_qr and f'<div class="qrbox big">{sub_qr}</div>' or ""}
+<div class="linkbox"><code>{_esc(subscription_url)}</code></div>
+<div class="row"><button class="btn ghost" onclick="zgCopy(this,{_js(subscription_url)})" data-done="{_esc(s["copied"])}">{_esc(s["copy"])}</button>
+<a class="btn" href="{_esc(subscription_url)}">{_esc(s["open_client"])}</a></div></div>
+<h2 class="section-title">{_esc(s["configs"])} ({len(links)})</h2>
+{"".join(blocks)}
+{notes_html}
+<div class="footer">{_esc(s["footer_note"])}</div>
+</div>
+<script>{_JS}</script>
+</body>
+</html>"""
+
+
+def _js(text: str) -> str:
+    """Quote text for an inline JS single-quoted string (no raw </script>)."""
+    return ("'" + text.replace("\\", "\\\\").replace("'", "\\'")
+            .replace("<", "\\x3c").replace("\n", "\\n") + "'")
+
+
+def render_activation_expired_html(*, brand: str = "Zagros",
+                                   lang: str = "fa") -> str:
+    """Tiny 410 page: the ticket existed but its TTL ran out."""
+    lang = "en" if (lang or "").split("-")[0] == "en" else "fa"
+    if lang == "fa":
+        title, body = ("لینک منقضی شده",
+                       "این لینک فعال‌سازی منقضی شده است — از فروشنده/مدیر خود لینک تازه بخواهید.")
+    else:
+        title, body = ("Link expired",
+                       "This activation link has expired — ask your reseller/admin for a fresh one.")
+    return f"""<!doctype html>
+<html lang="{_esc(lang)}" dir="{"rtl" if lang == "fa" else "ltr"}" data-theme="light">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{_esc(brand)} · {_esc(title)}</title><style>{_CSS}</style></head>
+<body><div class="wrap">
+<div class="header"><div class="brand">{_LOGO}<span>{_esc(brand)}</span></div>{_THEME_BTN}</div>
+<div class="card"><h1>{_esc(title)}</h1><p class="note">{_esc(body)}</p></div>
+</div><script>{_JS}</script></body></html>"""
+
+
+def activation_quarantine_note(*, lang: str = "fa") -> str:
+    """Honesty note: ambient subscription stays app-only for this user.
+
+    The ticket page delivers configs explicitly, but the bare
+    subscription link (and any client polling it) still serves the
+    app-download surface — auto-update only works inside the official
+    app for application-mode users.
+    """
+    if (lang or "").split("-")[0] == "en":
+        return ("Note: subscription auto-update stays app-only for this "
+                "user — import the configs below into your client, or use "
+                "the official app.")
+    return ("توجه: به‌روزرسانی خودکار اشتراک برای این کاربر فقط داخل اپ رسمی "
+            "کار می‌کند — کانفیگ‌های زیر را در کلاینت خود وارد کنید یا از اپ رسمی استفاده کنید.")

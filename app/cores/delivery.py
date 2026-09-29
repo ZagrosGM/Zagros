@@ -104,6 +104,9 @@ class DeliveryContext(BaseModel):
     # wildcard default. It comes from the configured subscription URL prefix
     # or, failing that, the actual public subscription request Host.
     public_host: str | None = None
+    # Node-targeted Application leases must dial that node even when the
+    # master's driver has an explicit advertise_host/legacy Host row.
+    force_public_host: bool = False
 
 
 def resolve_delivery_host(configured: object, context: DeliveryContext | None,
@@ -134,10 +137,12 @@ def resolve_delivery_host(configured: object, context: DeliveryContext | None,
             return ""
         return host
 
+    ambient = usable(context.public_host if context else "")
+    if context is not None and context.force_public_host:
+        return ambient
     direct = usable(configured, loopback_ok=allow_loopback)
     if direct:
         return direct
-    ambient = usable(context.public_host if context else "")
     if ambient:
         return ambient
     return usable(fallback, loopback_ok=allow_loopback)

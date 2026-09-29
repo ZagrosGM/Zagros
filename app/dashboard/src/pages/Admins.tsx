@@ -13,6 +13,7 @@ import { toast } from "../components/feedback";
 import { ConfirmDialog, Dialog, RowMenu } from "../components/overlays";
 import { Badge, Button, Card, EmptyState, ErrorState, Field, Input, Progress, Skeleton, Switch, cn } from "../components/ui";
 import { api, ApiError } from "../lib/api";
+import { PERM_SECTIONS, type PermLevel } from "../lib/perms";
 import { useDigits, formatBytes, formatDate, formatRelative } from "../lib/format";
 import { useT } from "../lib/i18n";
 import type { AdminUser } from "../lib/types";
@@ -27,11 +28,16 @@ interface AdminForm {
   expire_at: string;
   traffic_alloc_limit_gb: string;
   traffic_consume_limit_gb: string;
+  /** f-panel-5 permission matrix (non-sudo only) */
+  permSections: Record<string, PermLevel>;
+  permInboundMode: "all" | "pick";
+  permInbounds: string[];
 }
 
 const emptyForm: AdminForm = {
   username: "", password: "", is_sudo: false, telegram_id: "", discord_webhook: "",
   max_users: "", expire_at: "", traffic_alloc_limit_gb: "", traffic_consume_limit_gb: "",
+  permSections: {}, permInboundMode: "all", permInbounds: [],
 };
 
 const gbToBytes = (v: string) => (v && Number(v) > 0 ? Math.round(Number(v) * 1024 ** 3) : null);
@@ -251,10 +257,26 @@ function AdminDialog({ mode, admin, onClose, onSaved }: {
         expire_at: admin.expire_at ? admin.expire_at.slice(0, 10) : "",
         traffic_alloc_limit_gb: bytesToGb(admin.traffic_alloc_limit),
         traffic_consume_limit_gb: bytesToGb(admin.traffic_consume_limit),
+        permSections: (admin.permissions?.sections ?? {}) as Record<string, PermLevel>,
+        permInboundMode: admin.permissions?.inbounds?.length ? "pick" : "all",
+        permInbounds: admin.permissions?.inbounds ?? [],
       };
     }
     return emptyForm;
   });
+  // f-panel-5: the inbound picker source (sudo loads the same catalog the
+  // Users dialog uses; the backend already filters it for restricted admins).
+  const permCatalogQ = useQuery({
+    queryKey: ["zagros", "inbounds-catalog"],
+    queryFn: () => api.get<{ groups: Array<{ core_id: string; name: string; inbounds: Array<{ tag: string }> }> }>("/zagros/inbounds"),
+    enabled: !form.is_sudo,
+  });
+  const allInboundTags = useMemo(() => {
+    const seen = new Set<string>();
+    for (const g of permCatalogQ.data?.groups ?? [])
+      for (const i of g.inbounds ?? []) if (i.tag) seen.add(i.tag);
+    return [...seen];
+  }, [permCatalogQ.data]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -266,6 +288,11 @@ function AdminDialog({ mode, admin, onClose, onSaved }: {
       traffic_alloc_limit: gbToBytes(form.traffic_alloc_limit_gb),
       traffic_consume_limit: gbToBytes(form.traffic_consume_limit_gb),
     };
+    const permissions = form.is_sudo ? null : {
+      v: 1,
+      sections: Object.fromEntries(PERM_SECTIONS.map((s) => [s, form.permSections[s] ?? "edit"])),
+      inbounds: form.permInboundMode === "pick" && form.permInbounds.length ? form.permInbounds : null,
+    };
     try {
       if (mode === "create") {
         await api.post("/admin", {
@@ -274,6 +301,7 @@ function AdminDialog({ mode, admin, onClose, onSaved }: {
           is_sudo: form.is_sudo,
           telegram_id: form.telegram_id ? Number(form.telegram_id) : null,
           discord_webhook: form.discord_webhook || null,
+          permissions,
           ...governance,
         });
         toast.ok(`${form.username} created`);
@@ -283,6 +311,7 @@ function AdminDialog({ mode, admin, onClose, onSaved }: {
           password: form.password || null,
           telegram_id: form.telegram_id ? Number(form.telegram_id) : null,
           discord_webhook: form.discord_webhook || null,
+          permissions,
           ...governance,
         });
         toast.ok(t("common.saved"));
@@ -356,6 +385,58 @@ function AdminDialog({ mode, admin, onClose, onSaved }: {
         <label className="flex items-center gap-2.5 text-sm text-content-2">
           <Switch checked={form.is_sudo} onChange={(v) => setForm({ ...form, is_sudo: v })} label="sudo" />{t("sudo — full panel access")}</label>
       </div>
+
+      {!form.is_sudo && (
+        <div className="mt-4 space-y-3 rounded-xl border border-border p-3.5">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-content-3">{t("perms.title")}</p>
+            <p className="mt-0.5 text-[11px] text-content-3">{t("perms.hint")}</p>
+          </div>
+          <p className="text-[11px] font-semibold text-content-3">{t("perms.sectionsTitle")}</p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {PERM_SECTIONS.map((sec) => (
+              <div key={sec} className="flex items-center justify-between gap-2 rounded-lg border border-line/60 px-2.5 py-1.5">
+                <span className="truncate text-[11.5px]">{t(`nav.${sec}`)}</span>
+                <select
+                  className="h-7 shrink-0 rounded-lg border border-border bg-surface-1 px-1.5 text-[11px]"
+                  value={form.permSections[sec] ?? "edit"}
+                  onChange={(e) => setForm({ ...form, permSections: { ...form.permSections, [sec]: e.target.value as PermLevel } })}
+                >
+                  <option value="hidden">{t("perms.level.hidden")}</option>
+                  <option value="view">{t("perms.level.view")}</option>
+                  <option value="edit">{t("perms.level.edit")}</option>
+                </select>
+              </div>
+            ))}
+          </div>
+          <div className="pt-1">
+            <p className="text-[11px] font-semibold text-content-3">{t("perms.inboundsTitle")}</p>
+            <div className="mt-1.5 flex gap-2">
+              <Button type="button" size="sm" variant={form.permInboundMode === "all" ? "primary" : "secondary"}
+                onClick={() => setForm({ ...form, permInboundMode: "all" })}>{t("perms.inboundsAll")}</Button>
+              <Button type="button" size="sm" variant={form.permInboundMode === "pick" ? "primary" : "secondary"}
+                onClick={() => setForm({ ...form, permInboundMode: "pick" })}>{t("perms.inboundsPick")}</Button>
+            </div>
+            {form.permInboundMode === "pick" && (
+              <div className="mt-2 flex max-h-40 flex-wrap gap-1.5 overflow-y-auto rounded-lg border border-line/60 p-2">
+                {allInboundTags.length === 0 && (
+                  <p className="text-[11px] text-content-3">…</p>
+                )}
+                {allInboundTags.map((tag) => {
+                  const on = form.permInbounds.includes(tag);
+                  return (
+                    <button key={tag} type="button" dir="ltr"
+                      onClick={() => setForm({ ...form, permInbounds: on ? form.permInbounds.filter((x) => x !== tag) : [...form.permInbounds, tag] })}
+                      className={`rounded-md border px-2 py-0.5 text-[10.5px] ${on ? "border-brand bg-brand/15 text-brand" : "border-line text-content-3"}`}>
+                      {tag}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       {error && <p role="alert" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
     </Dialog>
   );

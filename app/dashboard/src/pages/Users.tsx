@@ -7,6 +7,7 @@ import {
   Plus, RefreshCcw, Search, Trash2, UserPlus, Users as UsersIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import { DataTable, type Column } from "../components/DataTable";
 import { toast } from "../components/feedback";
 import { ConfirmDialog, Dialog, RowMenu } from "../components/overlays";
@@ -20,6 +21,7 @@ import { randomUsername } from "../lib/username";
 import { useDigits, formatBytes, formatDate, formatRelative, usagePercent } from "../lib/format";
 import { useT , useTDynamic } from "../lib/i18n";
 import type { User, UsersResponse, UserStatus, UserTemplate , InboundCatalogGroup } from "../lib/types";
+import { useAdminPerms } from "../lib/perms";
 
 const STATUS_TONE: Record<UserStatus, "ok" | "muted" | "warn" | "danger" | "info"> = {
   active: "ok", disabled: "muted", limited: "warn", expired: "danger", on_hold: "info",
@@ -45,6 +47,8 @@ interface UserForm {
   inbounds: Record<string, string[]>;
   /** multi-core grants: core_id -> inbound tags ([] revokes that core) */
   coreAccess: Record<string, string[]>;
+  /** delivery mode: default (panel-wide) | subscription | application */
+  accessMode: string;
   telegramId: string;
 }
 
@@ -52,6 +56,7 @@ const emptyForm: UserForm = {
   username: "", note: "", status: "active", dataLimitGB: "", ipLimit: "", deviceLimit: "",
   downloadLimitMbps: "0", uploadLimitMbps: "0", expireDate: "",
   mode: "manual", templateId: null, inbounds: {}, coreAccess: {}, telegramId: "",
+  accessMode: "default",
 };
 
 // Mirror the backend's creation constraint closely enough to stop a known
@@ -397,7 +402,7 @@ export default function Users() {
         <Button variant="ghost" size="icon" onClick={() => refetch()} aria-label={t("common.refresh")}>
           <RefreshCcw size={15} className={cn(isFetching && "animate-spin")} />
         </Button>
-        <Button size="sm" onClick={() => setDialog({ mode: "create" })}><UserPlus size={14} />{t("users.new")}</Button>
+        <CreateUserButton onClick={() => setDialog({ mode: "create" })} />
         <div className="relative">
           <Button variant="secondary" size="sm" onClick={(e) => setMoreAnchor(e.currentTarget)}>
             <MoreHorizontal size={14} /> <span className="hidden sm:inline">{t("More")}</span>
@@ -450,7 +455,7 @@ export default function Users() {
           loading={isLoading}
           onRowClick={(u) => setDialog({ mode: "edit", user: u })}
           empty={<EmptyState title={search || statusFilter !== "all" ? "No users match the current filter" : "No users yet"}
-            action={!search && statusFilter === "all" ? <Button size="sm" onClick={() => setDialog({ mode: "create" })}><Plus size={14} />{t("users.new")}</Button> : undefined} />}
+            action={!search && statusFilter === "all" ? <CreateUserButton onClick={() => setDialog({ mode: "create" })} /> : undefined} />}
         />
       )}
       {rowMenu}
@@ -518,6 +523,17 @@ function MenuItem({ icon, label, onClick, danger }: { icon: React.ReactNode; lab
 
 // ---------------------------------------------------------------- dialog ---
 
+function CreateUserButton({ onClick }: { onClick: () => void }) {
+  const t = useT();
+  const perms = useAdminPerms();
+  if (!perms.can("users", "edit")) return null;
+  return (
+    <Button size="sm" onClick={onClick}>
+      <UserPlus size={14} />{t("users.new")}
+    </Button>
+  );
+}
+
 function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
   mode: "create" | "edit"; user?: User;
   catalog: InboundCatalogGroup[]; templates: UserTemplate[];
@@ -558,6 +574,74 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
     ),
     enabled: mode === "edit" && Boolean(user?.username),
   });
+  const appOverviewQ = useQuery({
+    queryKey: ["zagros", "application-overview", user?.username],
+    queryFn: () => api.get<{
+      user_id: number; username: string; access_mode: string;
+      app_username: string | null;
+      has_app_credentials: boolean;
+      grants: Array<{ application_id: string; name: string; bound_at: string | null }>;
+      latest_builds: Record<string, {
+        build_id: string; version: string | null; build_number: number | null;
+        status: string; progress: number | null; created_at: string | null;
+        file_count: number;
+        artifacts: Array<{ platform: string; arch: string; artifact: string;
+          filename: string; rel_path: string; sha256: string; size_bytes: number }>;
+      } | null>;
+    }>(`/zagros/users/by-username/${encodeURIComponent(user!.username)}/application-overview`),
+    enabled: mode === "edit" && Boolean(user?.username),
+  });
+  // f-panel-4: 'default' users follow the panel-wide Subscriptions setting,
+  // so the Application-login card renders only when the EFFECTIVE mode is
+  // application (explicit override, or default + panel set to app login).
+  const globalSettingsQ = useQuery({
+    queryKey: ["zagros", "portal"],
+    queryFn: () => api.get<{ client_auth_mode?: string }>("/zagros/settings/portal"),
+    enabled: mode === "edit",
+  });
+  const effectiveAppLogin =
+    appOverviewQ.data?.access_mode === "application"
+    || (appOverviewQ.data?.access_mode === "default"
+        && globalSettingsQ.data?.client_auth_mode === "application_login");
+  const [issuedCreds, setIssuedCreds] = useState<{ app_username: string; app_password: string } | null>(null);
+  const [issueBusy, setIssueBusy] = useState(false);
+  const issueAppCreds = async () => {
+    const platformId = appOverviewQ.data?.user_id;
+    if (!user || platformId == null) return;
+    setIssueBusy(true);
+    try {
+      const res = await api.post<{ username: string; password: string }>(
+        `/zagros/users/${platformId}/app-credentials`, {});
+      setIssuedCreds({ app_username: res.username, app_password: res.password });
+      await appOverviewQ.refetch();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : t("common.error"));
+    } finally {
+      setIssueBusy(false);
+    }
+  };
+  const [accessBusy, setAccessBusy] = useState(false);
+  const setAccessMode = async (next: string) => {
+    const platformId = appOverviewQ.data?.user_id;
+    const current = appOverviewQ.data?.access_mode;
+    if (!user || platformId == null || next === current) return;
+    if (current === "application" && next !== "application"
+        && !window.confirm(t("users.accessModeLeaveConfirm"))) return;
+    setAccessBusy(true);
+    try {
+      await api.post(`/zagros/users/${platformId}/access-mode`, { mode: next });
+      toast.ok(t("users.accessModeUpdated"));
+      await appOverviewQ.refetch();
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : t("common.error"));
+    } finally {
+      setAccessBusy(false);
+    }
+  };
+  const copyIssued = async (text: string) => {
+    if (await copyText(text)) toast.ok("copied");
+    else toast.error(t("common.error"));
+  };
   const removeEnrolledDevice = async (id?: number) => {
     if (!user) return;
     try {
@@ -668,6 +752,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
       if (mode === "create") {
         await api.post("/user", {
           username: form.username.trim(), status: form.status,
+          access_mode: form.accessMode,
           data_limit, ip_limit, device_limit, download_limit_mbps, upload_limit_mbps, expire,
           note: form.note || null,
           proxies: proxySettings,
@@ -801,6 +886,117 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
             </div>
           </div>
         )}
+        {mode === "create" && (
+          <div className="sm:col-span-2 rounded-xl border border-border bg-surface-2 p-3">
+            <div className="flex items-center justify-between gap-2 rounded-lg border border-line/60 px-2.5 py-2">
+              <div className="min-w-0">
+                <p className="text-[11px] font-medium">{t("users.accessMode")}</p>
+                <p className="text-[10.5px] text-content-3">{t("users.accessModeCreateHint")}</p>
+              </div>
+              <Select value={form.accessMode}
+                onChange={(e) => setForm((prev) => ({ ...prev, accessMode: e.target.value }))}>
+                <option value="default">{t("users.accessModeDefault")}</option>
+                <option value="subscription">{t("users.accessModeSubscription")}</option>
+                <option value="application">{t("users.accessModeApplication")}</option>
+              </Select>
+            </div>
+          </div>
+        )}
+        {mode === "edit" && (
+          <div className="sm:col-span-2 rounded-xl border border-border bg-surface-2 p-3">
+            <div className="mb-2 flex items-center justify-between gap-2 rounded-lg border border-line/60 px-2.5 py-2">
+              <div className="min-w-0">
+                <p className="text-[11px] font-medium">{t("users.accessMode")}</p>
+                <p className="text-[10.5px] text-content-3">{t("users.accessModeHint")}</p>
+              </div>
+              <Select value={appOverviewQ.data?.access_mode ?? "default"}
+                disabled={accessBusy || appOverviewQ.data?.user_id == null}
+                onChange={(e) => void setAccessMode(e.target.value)}>
+                <option value="default">{t("users.accessModeDefault")}</option>
+                <option value="subscription">{t("users.accessModeSubscription")}</option>
+                <option value="application">{t("users.accessModeApplication")}</option>
+              </Select>
+            </div>
+            {effectiveAppLogin && (
+            <>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div>
+                <p className="text-xs font-medium">{t("users.appLogin")}</p>
+                <p className="text-[11px] text-content-3">{t("users.appLoginHint")}</p>
+              </div>
+              <Button type="button" size="sm" variant="secondary" onClick={() => void issueAppCreds()}
+                loading={issueBusy} disabled={appOverviewQ.data?.user_id == null}>
+                {appOverviewQ.data?.has_app_credentials ? t("users.reissueAppCreds") : t("users.issueAppCreds")}
+              </Button>
+            </div>
+            {issuedCreds && (
+              <div className="mb-2 space-y-1.5 rounded-lg border border-border p-2.5">
+                <p className="text-[11px] font-medium">{t("users.appCredsIssued")}</p>
+                {([["users.appUsername", issuedCreds.app_username],
+                    ["users.appPassword", issuedCreds.app_password]] as const).map(([key, value]) => (
+                  <div key={key} className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-[10.5px] text-content-3">{t(key)}</p>
+                      <code className="break-all text-[11px]" dir="ltr">{value}</code>
+                    </div>
+                    <Button type="button" size="sm" variant="ghost" onClick={() => void copyIssued(value)}>
+                      <Copy size={13} />
+                    </Button>
+                  </div>
+                ))}
+                <div className="flex justify-end">
+                  <Button type="button" size="sm" variant="ghost" onClick={() => setIssuedCreds(null)}>
+                    {t("common.cancel")}
+                  </Button>
+                </div>
+              </div>
+            )}
+            {appOverviewQ.data && (
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2 rounded-lg border border-line/60 px-2.5 py-2">
+                  <div className="min-w-0">
+                    <p className="text-[11px] text-content-3">{t("users.appUsername")}</p>
+                    {appOverviewQ.data.app_username ? (
+                      <code className="text-[11px]" dir="ltr">{appOverviewQ.data.app_username}</code>
+                    ) : (
+                      <p className="text-[11px]">{t("users.appNoCreds")}</p>
+                    )}
+                  </div>
+                  {appOverviewQ.data.app_username && (
+                    <Button type="button" size="sm" variant="ghost" aria-label="copy username"
+                      onClick={() => void copyIssued(appOverviewQ.data!.app_username!)}>
+                      <Copy size={13} />
+                    </Button>
+                  )}
+                </div>
+                <div className="rounded-lg border border-line/60 px-2.5 py-2">
+                  <p className="text-[11px] text-content-3">{t("users.appBoundTo")}</p>
+                  {appOverviewQ.data.grants.length === 0 ? (
+                    <p className="text-[11px]">{t("users.appNoGrants")}</p>
+                  ) : (
+                    <div className="mt-1 space-y-1">
+                      {appOverviewQ.data.grants.map((g) => {
+                        const build = appOverviewQ.data!.latest_builds[g.application_id];
+                        return (
+                          <div key={g.application_id} className="flex items-center justify-between gap-2">
+                            <span className="truncate text-[11px] font-medium">{g.name}</span>
+                            <span className="shrink-0 text-[10.5px] text-content-3">
+                              {build
+                                ? `${t("users.appLatestBuild")}: ${build.version ?? build.build_id} (${build.file_count})`
+                                : t("users.appNoBuild")}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+            </>
+            )}
+          </div>
+        )}
         <Field label={t("Download Limit (Mbps)")} hint={t("0 = Unlimited · aggregate across all cores")}>
           <Input id="downloadLimitMbps" type="number" min="0" max="100000" step="1"
             value={form.downloadLimitMbps}
@@ -882,11 +1078,16 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
         {mode === "edit" && subUrl && (
           <div className="sm:col-span-2 rounded-xl border border-border bg-surface-2 p-3">
             <p className="mb-1.5 text-[11px] font-medium text-content-3">{t("users.qr")} — every core, one link</p>
-            <div className="flex items-center gap-2">
-              <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-content-2" dir="ltr">{subUrl}</code>
-              <Button variant="secondary" size="sm" onClick={async () => (await copyText(subUrl)) ? toast.ok(t("common.copied")) : toast.error(t("common.error"))}>
-                <Copy size={13} /> {t("common.copy")}
-              </Button>
+            <div className="flex items-start gap-2.5">
+              <QRCodeSVG value={subUrl} size={104} level="M"
+                bgColor="transparent" fgColor="currentColor"
+                aria-label={t("users.qr")} />
+              <div className="min-w-0 flex-1">
+                <code className="mb-1.5 block truncate font-mono text-[11px] text-content-2" dir="ltr">{subUrl}</code>
+                <Button variant="secondary" size="sm" onClick={async () => (await copyText(subUrl)) ? toast.ok(t("common.copied")) : toast.error(t("common.error"))}>
+                  <Copy size={13} /> {t("common.copy")}
+                </Button>
+              </div>
             </div>
           </div>
         )}

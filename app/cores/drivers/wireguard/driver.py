@@ -955,6 +955,9 @@ class WireGuardDriver(BaseCoreDriver):
                 f"WireGuard core only serves protocol 'wireguard', got '{protocol}'."
             )
 
+    def account_teardown_capability(self) -> str:
+        return "targeted"
+
     async def create_account(self, account: UserAccount) -> None:
         self._ensure_supported(account.protocol)
         async with self._account_lock:

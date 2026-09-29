@@ -196,6 +196,20 @@ class BaseCoreDriver(abc.ABC):
     async def delete_account(self, account_id: str) -> None:
         """Remove a user from this core (missing user must not raise)."""
 
+    def device_scoped_leases_supported(self) -> bool:
+        """Whether this configured adapter can mint an independent identity."""
+        return Capability.USER_MANAGEMENT in self.metadata.capabilities
+
+    def account_teardown_capability(self) -> str:
+        """How honestly this adapter can stop one device-scoped account.
+
+        ``targeted`` means delete_account also removes the matching live peer
+        or sessions. ``authorization_only`` means new authentication is denied
+        but an already-established stream may survive until it closes; lease
+        expiry remains the fail-closed bound.
+        """
+        return "authorization_only"
+
     async def suspend_account(self, account_id: str) -> None:
         """Default suspend = list+disable; override with a cheap native switch."""
         self._require(Capability.SUSPEND_RESUME)

@@ -42,6 +42,26 @@ class GrantError(RuntimeError):
     """A driver or catalog rejected a grant — message must name the core."""
 
 
+async def _local_lease_accounts(runtime, core_id: str) -> list[UserAccount]:
+    repository = getattr(runtime, "application_auth_repository", None)
+    if repository is None:
+        return []
+    leases = await asyncio.to_thread(
+        repository.active_lease_accounts, core_id=core_id, node_id=None)
+    accounts: list[UserAccount] = []
+    for lease in leases:
+        owner = await asyncio.to_thread(runtime.users.get_user, lease.user_id)
+        if owner is None:
+            continue
+        accounts.append(UserAccount(
+            user_id=lease.user_id, username=lease.account_id,
+            account_id=lease.account_id, protocol=lease.protocol,
+            enabled=True, expire_at=lease.not_after,
+            settings=dict(lease.settings),
+        ))
+    return accounts
+
+
 async def _drop_usage_baseline(runtime, core_id: str, account_id: str) -> None:
     key = f"{core_id}:{account_id}"
     drop_prefix = getattr(runtime.baselines, "drop_prefix", None)
@@ -306,7 +326,8 @@ async def apply_grants(runtime, user: Any, platform_id: int,
                 ))
             try:
                 driver = runtime.core_manager.get(core_id)
-                await driver.sync_accounts(desired_accounts)
+                leases = await _local_lease_accounts(runtime, core_id)
+                await driver.sync_accounts([*desired_accounts, *leases])
             except Exception as exc:  # noqa: BLE001
                 raise GrantError(
                     f"core '{core_id}' failed to batch-provision accounts: {exc}") from exc

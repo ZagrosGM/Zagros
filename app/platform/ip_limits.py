@@ -8,6 +8,8 @@ ports are not listener claims and therefore remain reachable.
 """
 from __future__ import annotations
 
+from app.platform.account_ownership import account_owners as all_account_owners
+
 import asyncio
 import ipaddress
 import logging
@@ -85,7 +87,7 @@ async def collect_observations(runtime) -> tuple[
     """
     from app.cores.types import Capability
 
-    owners = await asyncio.to_thread(runtime.users.account_owners)
+    owners = await asyncio.to_thread(all_account_owners, runtime)
     now = datetime.now(timezone.utc)
     settings = await asyncio.to_thread(load_settings, runtime)
     reset_after = max(15, settings["review_interval_seconds"] * 2)

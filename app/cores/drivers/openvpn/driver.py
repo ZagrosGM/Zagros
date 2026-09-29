@@ -956,6 +956,13 @@ want_pass="${creds#*:}"
         except CoreError:
             pass  # mgmt down or never connected — desired state already updated
 
+    def device_scoped_leases_supported(self) -> bool:
+        # Static auth deliberately shares one credential across all clients.
+        return str(self.settings.get("auth_mode") or "management") != "static"
+
+    def account_teardown_capability(self) -> str:
+        return "targeted"
+
     async def create_account(self, account: UserAccount) -> None:
         self._ensure_supported(account.protocol)
         self._provision_credentials(account)

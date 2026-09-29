@@ -1514,13 +1514,31 @@ class LocalSoftEtherBackend:
         selected_hub = self._validate_hub_name(self.hub)
         from app.cores.routing.softether_client import run_vpncmd_pty
 
-        transcript = run_vpncmd_pty(
-            [executable, self.server, "/SERVER", f"/HUB:{selected_hub}"],
-            commands=[f"UserGet {username}" for username in wanted],
-            administrator_password=self.password,
-            prompt="VPN Server",
-            timeout=max(self.timeout, 30.0),
-        )
+        # Bare `self.server` means vpncmd's default TCP/443, which is not
+        # the management listener on a panel-managed install. Walk the same
+        # 5555/992/1194/443 fallback `_cmd` uses — without it every usage
+        # batch died with "exited during client login" and softether usage
+        # was never recorded.
+        transcript: str | None = None
+        candidates = self._server_candidates()
+        for index, candidate in enumerate(candidates):
+            try:
+                transcript = run_vpncmd_pty(
+                    [executable, candidate, "/SERVER", f"/HUB:{selected_hub}"],
+                    commands=[f"UserGet {username}" for username in wanted],
+                    administrator_password=self.password,
+                    prompt="VPN Server",
+                    timeout=max(self.timeout, 30.0),
+                )
+            except CoreError as exc:
+                if index + 1 < len(candidates) and self._is_endpoint_failure(exc):
+                    if candidate == self._active_server:
+                        self._active_server = None
+                    continue
+                raise
+            self._active_server = candidate
+            break
+        assert transcript is not None
         # Every UserGet table starts with its stable English "User Name" row.
         # Split there so parse_user_get cannot overwrite an earlier table with
         # fields from the following command in the shared transcript.
@@ -1608,21 +1626,33 @@ class LocalSoftEtherBackend:
 
         from app.cores.routing.softether_client import run_vpncmd_pty
 
-        argv = [executable, self.server, "/SERVER", f"/HUB:{selected_hub}", "/CSV"]
-        try:
-            run_vpncmd_pty(
-                argv,
-                commands=["UserList"],
-                administrator_password=self.password,
-                prompt="VPN Server",
-                secrets=secret_values,
-                timeout=self.timeout,
-                followup_factory=followup,
-            )
-        except CoreError as exc:
-            raise CoreError(
-                "vpncmd SoftEther account reconciliation failed: "
-                f"{self._safe_command(str(exc))}") from exc
+        # Same listener fallback as `_cmd` (see users_get): without it the
+        # reconcile always dialled vpncmd's default TCP/443, failed with
+        # "exited during client login", left softether accounts unprovisioned,
+        # and burned 30 foreground boot retries on every panel start.
+        candidates = self._server_candidates()
+        for index, candidate in enumerate(candidates):
+            argv = [executable, candidate, "/SERVER", f"/HUB:{selected_hub}", "/CSV"]
+            try:
+                run_vpncmd_pty(
+                    argv,
+                    commands=["UserList"],
+                    administrator_password=self.password,
+                    prompt="VPN Server",
+                    secrets=secret_values,
+                    timeout=self.timeout,
+                    followup_factory=followup,
+                )
+            except CoreError as exc:
+                if index + 1 < len(candidates) and self._is_endpoint_failure(exc):
+                    if candidate == self._active_server:
+                        self._active_server = None
+                    continue
+                raise CoreError(
+                    "vpncmd SoftEther account reconciliation failed: "
+                    f"{self._safe_command(str(exc))}") from exc
+            self._active_server = candidate
+            break
 
     def session_list(self) -> list[SESession]:
         return parse_session_list(self._cmd("SessionList", csv=True))

@@ -119,13 +119,14 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends \
        iptables nftables iproute2 conntrack openvpn wireguard-tools procps busybox-static \
        openssh-client openssh-server certbot libpcre2-8-0 ca-certificates \
+       libncurses6 \
        /tmp/ppp-client-debs/*.deb; \
     cp /tmp/ppp-client-manifest.json /usr/share/doc/zagros/ppp-client-manifest.json; \
     test "$(dpkg-query -W -f='${Version}' ppp)" = "2.5.2-1+1"; \
     test "$(dpkg-query -W -f='${Version}' xl2tpd)" = "1.3.18-1+b1"; \
     test "$(dpkg-query -W -f='${Version}' sstp-client)" = "1.0.20-1+b2"; \
     test "$(dpkg-query -W -f='${Version}' pptp-linux)" = "1.10.0-2"; \
-    test "$(dpkg-query -W -f='${Version}' strongswan-charon)" = "6.0.1-6+deb13u6"; \
+    test "$(dpkg-query -W -f='${Version}' strongswan-charon)" = "6.0.1-6+deb13u7"; \
     test -x /usr/sbin/pppd; test -x /usr/sbin/xl2tpd; \
     test -x /usr/sbin/sstpc; \
     test -f /usr/lib/pppd/2.5.2/sstp-pppd-plugin.so; \
@@ -160,4 +161,4 @@ RUN ln -s /code/zagros-cli.py /usr/bin/zagros-cli \
 # then migrate, then serve. Running Alembic before the database answers left
 # every fresh managed-database install with an empty schema and a panel that
 # spent a minute retrying before it would even bind its port.
-CMD ["bash", "-c", "python3 -m app.bootwait; alembic upgrade head; python main.py"]
+CMD ["bash", "-c", "python3 -m app.bootwait; python3 -m app.dbmerge || echo dbmerge-failed; alembic upgrade head; python main.py"]

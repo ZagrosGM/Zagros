@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     String,
     Table,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -22,6 +23,12 @@ from sqlalchemy.sql.expression import select, text
 
 from app import xray
 from app.db.base import Base
+from app.db.base import legacy_table_name
+
+T_USERS = legacy_table_name("users")
+T_ADMINS = legacy_table_name("admins")
+T_NODES = legacy_table_name("nodes")
+T_NEXT_PLANS = legacy_table_name("next_plans")
 from app.models.node import NodeStatus
 
 
@@ -47,7 +54,7 @@ from app.models.user import ReminderType, UserDataLimitResetStrategy, UserStatus
 
 
 class Admin(Base):
-    __tablename__ = "admins"
+    __tablename__ = T_ADMINS
 
     id = Column(Integer, primary_key=True)
     username = Column(String(34), unique=True, index=True)
@@ -58,6 +65,9 @@ class Admin(Base):
     password_reset_at = Column(DateTime, nullable=True)
     telegram_id = Column(BigInteger, nullable=True, default=None)
     discord_webhook = Column(String(1024), nullable=True, default=None)
+    # f-panel-5: JSON document {"v":1,"sections":{sec:level},"inbounds":[tags]|null}
+    # NULL = historical default (every non-sudo section, sudo-only areas excluded).
+    permissions = Column(Text, nullable=True, default=None)
     users_usage = Column(BigInteger, nullable=False, default=0)
     usage_logs = relationship("AdminUsageLogs", back_populates="admin")
     # ------------------------------------------------------------- #
@@ -82,14 +92,14 @@ class AdminUsageLogs(Base):
     __tablename__ = "admin_usage_logs"
 
     id = Column(Integer, primary_key=True)
-    admin_id = Column(Integer, ForeignKey("admins.id"))
+    admin_id = Column(Integer, ForeignKey(T_ADMINS + ".id"))
     admin = relationship("Admin", back_populates="usage_logs")
     used_traffic_at_reset = Column(BigInteger, nullable=False)
     reset_at = Column(DateTime, default=datetime.utcnow)
 
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = T_USERS
 
     id = Column(Integer, primary_key=True)
     username = Column(case_insensitive_string(34), unique=True, index=True)
@@ -106,7 +116,7 @@ class User(Base):
     )
     usage_logs = relationship("UserUsageResetLogs", back_populates="user")  # maybe rename it to reset_usage_logs?
     expire = Column(Integer, nullable=True)
-    admin_id = Column(Integer, ForeignKey("admins.id"))
+    admin_id = Column(Integer, ForeignKey(T_ADMINS + ".id"))
     admin = relationship("Admin", back_populates="users")
     sub_revoked_at = Column(DateTime, nullable=True, default=None)
     sub_updated_at = Column(DateTime, nullable=True, default=None)
@@ -210,10 +220,10 @@ template_inbounds_association = Table(
 
 
 class NextPlan(Base):
-    __tablename__ = 'next_plans'
+    __tablename__ = T_NEXT_PLANS
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    user_id = Column(Integer, ForeignKey(T_USERS + ".id"), nullable=False)
     data_limit = Column(BigInteger, nullable=False)
     expire = Column(Integer, nullable=True)
     add_remaining_traffic = Column(Boolean, nullable=False, default=False, server_default='0')
@@ -244,7 +254,7 @@ class UserUsageResetLogs(Base):
     __tablename__ = "user_usage_logs"
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(Integer, ForeignKey(T_USERS + ".id"))
     user = relationship("User", back_populates="usage_logs")
     used_traffic_at_reset = Column(BigInteger, nullable=False)
     reset_at = Column(DateTime, default=datetime.utcnow)
@@ -254,7 +264,7 @@ class Proxy(Base):
     __tablename__ = "proxies"
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(Integer, ForeignKey(T_USERS + ".id"))
     user = relationship("User", back_populates="proxies")
     type = Column(Enum(ProxyTypes), nullable=False)
     settings = Column(JSON, nullable=False)
@@ -344,7 +354,7 @@ class TLS(Base):
 
 
 class Node(Base):
-    __tablename__ = "nodes"
+    __tablename__ = T_NODES
 
     id = Column(Integer, primary_key=True)
     name = Column(case_insensitive_string(256), unique=True)
@@ -371,9 +381,9 @@ class NodeUserUsage(Base):
 
     id = Column(Integer, primary_key=True)
     created_at = Column(DateTime, unique=False, nullable=False)  # one hour per record
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(Integer, ForeignKey(T_USERS + ".id"))
     user = relationship("User", back_populates="node_usages")
-    node_id = Column(Integer, ForeignKey("nodes.id"))
+    node_id = Column(Integer, ForeignKey(T_NODES + ".id"))
     node = relationship("Node", back_populates="user_usages")
     used_traffic = Column(BigInteger, default=0)
 
@@ -386,7 +396,7 @@ class NodeUsage(Base):
 
     id = Column(Integer, primary_key=True)
     created_at = Column(DateTime, unique=False, nullable=False)  # one hour per record
-    node_id = Column(Integer, ForeignKey("nodes.id"))
+    node_id = Column(Integer, ForeignKey(T_NODES + ".id"))
     node = relationship("Node", back_populates="usages")
     uplink = Column(BigInteger, default=0)
     downlink = Column(BigInteger, default=0)
@@ -396,7 +406,7 @@ class NotificationReminder(Base):
     __tablename__ = "notification_reminders"
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(Integer, ForeignKey(T_USERS + ".id"))
     user = relationship("User", back_populates="notification_reminders")
     type = Column(Enum(ReminderType), nullable=False)
     threshold = Column(Integer, nullable=True)

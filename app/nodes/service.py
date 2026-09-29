@@ -18,6 +18,8 @@ Two invariants this module protects:
 """
 from __future__ import annotations
 
+from app.platform.account_ownership import account_owners as all_account_owners
+
 import asyncio
 import base64
 import copy
@@ -1292,7 +1294,7 @@ def bandwidth_limits_payload(runtime) -> dict[str, dict]:
 
     def read(session):
         rows = session.execute(select(UserModel)).scalars().all()
-        owners = runtime.users.account_owners()
+        owners = all_account_owners(runtime)
         by_user: dict[int, dict[str, list[str]]] = {}
         for (core_id, account_id), user_id in owners.items():
             by_user.setdefault(int(user_id), {}).setdefault(
@@ -1363,6 +1365,41 @@ def paired_nodes(runtime) -> list[Any]:
         logger.debug("node telemetry: cannot enumerate nodes")
         return []
     return list(rows or [])
+
+
+async def apply_connection_lease(runtime, node_id: int, *, core_id: str,
+                                 lease_id: str, connection_id: str, account,
+                                 not_after) -> dict[str, Any]:
+    """Apply/renew one lease over the existing pinned, signed node channel."""
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+    payload = {
+        "connection_id": connection_id,
+        "not_after": not_after.isoformat(),
+        "account": account.model_dump(mode="json"),
+    }
+    return await asyncio.to_thread(
+        _client(runtime, row).apply_connection_lease,
+        core_id, lease_id, payload)
+
+
+async def revoke_connection_lease(runtime, node_id: int, *, core_id: str,
+                                  lease_id: str) -> dict[str, Any]:
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+    return await asyncio.to_thread(
+        _client(runtime, row).revoke_connection_lease, core_id, lease_id)
+
+
+async def connection_lease_status(runtime, node_id: int, *, core_id: str,
+                                  lease_id: str) -> dict[str, Any]:
+    row = await asyncio.to_thread(_get_row, runtime, node_id)
+    if row is None:
+        raise KeyError(node_id)
+    return await asyncio.to_thread(
+        _client(runtime, row).connection_lease_status, core_id, lease_id)
 
 
 async def collect_node_devices(runtime) -> tuple[list[dict], list[str]]:

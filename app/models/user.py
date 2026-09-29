@@ -180,6 +180,11 @@ class User(BaseModel):
 class UserCreate(User):
     username: str
     status: UserStatusCreate = None
+    # f-panel-4: optional delivery mode at creation
+    # ('default' | 'subscription' | 'application'); 'default'/None leaves
+    # both per-user columns NULL so the user follows the panel-wide
+    # Subscriptions setting.
+    access_mode: str | None = None
     # Marzban parity fix (pydantic-v2 migration regression): in v1 the
     # inbounds validator ran with ``always=True``, so an omitted ``inbounds``
     # meant "include every inbound of the selected protocols". In v2

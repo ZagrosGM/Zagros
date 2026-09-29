@@ -1139,6 +1139,11 @@ def get_admin(db: Session, username: str) -> Admin:
     return db.query(Admin).filter(Admin.username == username).first()
 
 
+def _dump_perms(v) -> str | None:
+    import json as _json
+    return _json.dumps(v) if v is not None else None
+
+
 def create_admin(db: Session, admin: AdminCreate) -> Admin:
     """
     Creates a new admin in the database.
@@ -1154,6 +1159,7 @@ def create_admin(db: Session, admin: AdminCreate) -> Admin:
         username=admin.username,
         hashed_password=admin.hashed_password,
         is_sudo=admin.is_sudo,
+        permissions=_dump_perms(getattr(admin, "permissions", None)),
         telegram_id=admin.telegram_id if admin.telegram_id else None,
         discord_webhook=admin.discord_webhook if admin.discord_webhook else None,
         max_users=(admin.max_users or None),
@@ -1199,8 +1205,11 @@ def update_admin(db: Session, dbadmin: Admin, modified_admin: AdminModify) -> Ad
     Returns:
         Admin: The updated admin object.
     """
-    if modified_admin.is_sudo:
-        dbadmin.is_sudo = modified_admin.is_sudo
+    # f-panel-5: is_sudo is a REQUIRED bool on AdminModify — honoring only
+    # truthy values made sudo a one-way door (no demotion was ever stored).
+    dbadmin.is_sudo = modified_admin.is_sudo
+    if "permissions" in modified_admin.model_fields_set:
+        dbadmin.permissions = _dump_perms(modified_admin.permissions)
     if modified_admin.password is not None and dbadmin.hashed_password != modified_admin.hashed_password:
         dbadmin.hashed_password = modified_admin.hashed_password
         dbadmin.password_reset_at = datetime.utcnow()

@@ -109,7 +109,14 @@ def _bridge_sync(request: Request, dbuser, grants) -> int | None:
     from app.platform import provisioning
 
     try:
-        platform_id = asyncio.run(provisioning.sync_user(runtime, dbuser, grants))
+        # An explicitly-present core_access mapping is FULL-STATE (the
+        # dashboard always sends the complete desired selection): cores the
+        # admin un-selected must actually lose their accounts. A mapping
+        # that is absent (None) stays keep-everything PATCH (status/limit
+        # paths and Marzban-style bots never send the key).
+        platform_id = asyncio.run(provisioning.sync_user(
+            runtime, dbuser, grants,
+            revoke_missing=grants is not None))
         runtime.bandwidth.reconcile()
         return platform_id
     except provisioning.GrantError as exc:

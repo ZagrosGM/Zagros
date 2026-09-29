@@ -269,18 +269,45 @@ def _resolve_tag_protocols(core_id: str, tags: list[str],
 
 async def apply_grants(runtime, user: Any, platform_id: int,
                        grants: dict[str, list[str]], *,
-                       repair: bool = False) -> None:
+                       repair: bool = False,
+                       revoke_missing: bool = False) -> None:
     """Converge the per-core accounts to exactly ``grants`` (non-xray cores).
 
-    ``grants`` maps core_id → selected inbound tags. cores absent from the
-    mapping keep their current accounts (PATCH semantics); an explicit empty
-    list revokes that core's accounts. ``repair=True`` (storage-healing
-    paths only — never the strict fresh-payload validation) drops dangling
-    tags instead of raising, per item 6B.
+    ``grants`` maps core_id → selected inbound tags. An explicit empty list
+    revokes that core's accounts. ``repair=True`` (storage-healing paths
+    only — never the strict fresh-payload validation) drops dangling tags
+    instead of raising, per item 6B.
+
+    ``revoke_missing`` (Edit/Save full-state semantics — the dashboard
+    always sends the COMPLETE desired mapping): cores ABSENT from the
+    mapping are revoked too. Default False keeps the per-core PATCH
+    semantics for callers that intentionally send partial mappings.
     """
     catalog = await _catalog_map(runtime)
     active = _legacy_status(user.status) == "active"
     current = await asyncio.to_thread(runtime.users.accounts_of, platform_id)
+
+    if revoke_missing:
+        # Full-state Edit/Save: a core the admin no longer selected is gone
+        # from the mapping — its accounts must go, exactly like an explicit
+        # empty list would. (Without this, un-selecting a core's inbound
+        # in the dashboard saved "successfully" and silently kept it.)
+        wanted_cores = {c for c in grants if c != LEGACY_CORE_ID}
+        for acc in current:
+            if acc["core_id"] == LEGACY_CORE_ID or acc["core_id"] in wanted_cores:
+                continue
+            try:
+                await runtime.core_manager.get(acc["core_id"]).delete_account(
+                    acc["account_id"])
+            except Exception as exc:  # noqa: BLE001 — keep converging others
+                raise GrantError(
+                    f"core '{acc['core_id']}' failed to delete account: {exc}"
+                ) from exc
+            await asyncio.to_thread(
+                runtime.users.delete_account,
+                user_id=platform_id, core_id=acc["core_id"],
+                account_id=acc["account_id"])
+            await _drop_usage_baseline(runtime, acc["core_id"], acc["account_id"])
 
     for core_id, tags in grants.items():
         if core_id == LEGACY_CORE_ID:
@@ -429,18 +456,23 @@ async def sync_grants_enabled(runtime, user: Any, platform_id: int) -> None:
 
 
 async def sync_user(runtime, user: Any,
-                    grants: dict[str, list[str]] | None = None) -> int:
+                    grants: dict[str, list[str]] | None = None, *,
+                    revoke_missing: bool = False) -> int:
     """Full convergence: projection + xray mirror + grant diff + status.
 
     ``grants=None`` keeps current grants (used by status/limit paths);
     an explicit mapping applies the diff (used by create/modify).
+    ``revoke_missing`` turns the mapping into FULL-STATE semantics
+    (cores absent from it are revoked) — Edit/Save sends the complete
+    desired selection, so its removals must actually remove.
     """
     platform_id = await sync_platform_user(runtime, user)
     await sync_legacy_accounts(runtime, user, platform_id)
     if grants is not None:
         # repair=True: Edit/Save re-sends the STORED selection — a grant that
         # dangled since (inbound deleted) must self-heal, not 422 (item 6B).
-        await apply_grants(runtime, user, platform_id, grants, repair=True)
+        await apply_grants(runtime, user, platform_id, grants, repair=True,
+                           revoke_missing=revoke_missing)
     await sync_grants_enabled(runtime, user, platform_id)
     return platform_id
 

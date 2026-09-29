@@ -395,6 +395,30 @@ class ApplicationAuthRepository:
                 "user_access_mode": app.user_access_mode,
             }
 
+    def active_signing_seed(self, *, application_public_id: str) -> str | None:
+        """b64url Ed25519 seed of the application's ACTIVE signing key.
+
+        f-panel-8: serves ONLY the white-label build pipeline — the panel
+        attaches it to a job-token-authenticated worker fetch so an
+        official build can attest enrollments. Never returned by any
+        admin API and never persisted outside the encrypted column.
+        """
+        with self._sf() as session:
+            app = session.execute(select(ApplicationModel).where(
+                ApplicationModel.public_id == application_public_id,
+            )).scalar_one_or_none()
+            if (app is None or app.status != _ACTIVE
+                    or not app.active_signing_kid):
+                return None
+            key = session.execute(select(ApplicationKeyModel).where(
+                ApplicationKeyModel.application_id == app.id,
+                ApplicationKeyModel.kid == app.active_signing_kid,
+                ApplicationKeyModel.purpose == "signing",
+            )).scalar_one_or_none()
+            if key is None or key.status != _ACTIVE:
+                return None
+            return b64url_encode(self._decrypt_private(key, app.public_id))
+
     def grant_user(self, *, application_public_id: str, user_id: int) -> dict:
         with self._sf() as session:
             app = session.execute(select(ApplicationModel).where(

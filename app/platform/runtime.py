@@ -206,7 +206,9 @@ class PlatformRuntime:
         self.build_queue = BuildQueue.from_env()
         self.build_artifacts = FileArtifactStore.from_env()
         self.build_service = BuildService(
-            self.build_store, self.build_queue, self.build_artifacts)
+            self.build_store, self.build_queue, self.build_artifacts,
+            signing_seed_resolver=(
+                self.application_auth_repository.active_signing_seed))
         self.studio = ConfigStudioService(self.studio_store)
         self.dashboard = DashboardService(
             self.core_manager,

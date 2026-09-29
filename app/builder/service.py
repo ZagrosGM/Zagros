@@ -7,6 +7,7 @@ method is synchronous — routers run the service via ``asyncio.to_thread``.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import Any, BinaryIO
 
 from app.builder import JOB_CONTRACT_VERSION
@@ -150,15 +151,46 @@ def _parse_probe(text: str, result: dict[str, Any]) -> None:
 
 
 
+def _app_signing_credential(build_public_id: str, application: dict,
+                            resolver: Callable[[Any], str | None] | None,
+                            ) -> dict | None:
+    """Synthetic per-job signing_key credential (f-panel-8).
+
+    Present only when the build targets an application that has an ACTIVE
+    signing key and the runtime injected a resolver. Rides the
+    job-token-authenticated fetch (never Redis, never any admin API); the
+    worker stages it as a 0600 workspace file consumed by the build tool.
+    """
+    if resolver is None:
+        return None
+    app_public_id = str((application or {}).get("public_id") or "")
+    if not app_public_id:
+        return None
+    seed = resolver(application_public_id=app_public_id)
+    if not seed:
+        return None
+    return {
+        "public_id": f"{build_public_id}-app-signing",
+        "kind": "signing_key",
+        "label": "application attestation seed (per-job)",
+        "material": {"seed": seed},
+    }
+
+
 class BuildService:
     def __init__(self, repository: BuildRepository, queue: BuildQueue,
                  artifacts: FileArtifactStore, *,
                  source_allowlist: tuple[str, ...] | list[str] | None = None,
                  sdk_allowlist: tuple[str, ...] | list[str] | None = None,
+                 signing_seed_resolver: Callable[[Any], str | None] | None = None,
                  ) -> None:
         self._repo = repository
         self._queue = queue
         self._artifacts = artifacts
+        # f-panel-8: resolves the application's ACTIVE signing seed at
+        # job-fetch time (injected from the platform runtime; optional so
+        # tests can build the service without the application domain).
+        self._signing_seed_resolver = signing_seed_resolver
         if source_allowlist is None:
             raw = os.environ.get("ZAGROS_BUILD_SOURCE_ALLOWLIST", "")
             entries = [entry.strip() for entry in raw.split(",") if entry.strip()]
@@ -343,6 +375,10 @@ class BuildService:
                 "material": self._repo.load_material(meta["public_id"]),
             })
         application = build["application"] or {}
+        app_signing = _app_signing_credential(
+            build["public_id"], application, self._signing_seed_resolver)
+        if app_signing is not None:
+            credentials.append(app_signing)
         pack_ref = self._repo.job_icon_ref(build_public_id)
         icon_doc: dict[str, object] = {"present": pack_ref is not None}
         if pack_ref is not None:

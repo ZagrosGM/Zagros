@@ -19,12 +19,16 @@ class ApplicationCreateBody(BaseModel):
     api_base_url: str = Field(min_length=1, max_length=2048)
     default_lang: str = Field(default="fa", min_length=2, max_length=16)
     branding: dict = Field(default_factory=dict)
+    # f-panel-7: 'all_users' (default) or 'bound_only'
+    user_access_mode: str = Field(default="all_users",
+                                  pattern="^(all_users|bound_only)$")
 
 
 class ApplicationBootstrap(BaseModel):
     application_id: str
     name: str
     status: str
+    user_access_mode: str = "all_users"
     signing_key_id: str
     signing_public_key: str
     config_key_id: str
@@ -41,6 +45,7 @@ class ApplicationListItem(BaseModel):
     status: str
     api_base_url: str
     default_lang: str
+    user_access_mode: str = "all_users"
     active_signing_kid: str | None = None
     active_config_kid: str | None = None
 

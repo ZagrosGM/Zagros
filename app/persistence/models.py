@@ -68,6 +68,15 @@ class ApplicationModel(Base):
     api_base_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     default_lang: Mapped[str] = mapped_column(
         String(16), nullable=False, default="fa", server_default="fa")
+    # f-panel-7: who may sign in to this application.
+    #   all_users  — every user with app credentials may enroll/sign in
+    #                (default; the Bound-users list becomes an allowlist
+    #                that is not required for access)
+    #   bound_only — only users with an ACTIVE grant (Bound users) may
+    #                enroll/sign in; un-granted sessions fail closed
+    user_access_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="all_users",
+        server_default="all_users")
     branding: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     # KIDs, not secret/private-key data. Purpose/algorithm are checked by the
     # key-rotation service before these pointers are changed.

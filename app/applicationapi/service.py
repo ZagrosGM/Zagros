@@ -71,12 +71,18 @@ class ApplicationAuthService:
 
     @staticmethod
     def _validate_user_context(context: UserAuthContext, now: datetime) -> None:
+        # f-panel-7: the Bound-users grant is required only when the
+        # application is explicitly in 'bound_only' mode. The default
+        # ('all_users', also the backfill for pre-existing applications)
+        # lets every user with app credentials enroll and sign in.
+        grant_required = (
+            (context.application_access_mode or "all_users") == "bound_only")
         if (context.application_status != "active"
                 or context.application_key_status != "active"
                 or context.user_status != "active"
                 or context.access_mode != "application"
-                or context.grant_id is None
-                or context.grant_status != "active"
+                or (grant_required and (context.grant_id is None
+                                        or context.grant_status != "active"))
                 or (context.device_db_id is not None
                     and (context.device_status != "active"
                          or not context.device_within_limit))):

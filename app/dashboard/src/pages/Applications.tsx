@@ -20,6 +20,7 @@ const APP_QK = ["zagros", "applications"];
 interface AppListItem {
   id: number; public_id: string; owner_admin_id: number; name: string;
   status: string; api_base_url: string; default_lang: string;
+  user_access_mode?: "all_users" | "bound_only";
   active_signing_kid: string | null; active_config_kid: string | null;
 }
 interface AppDetail extends AppListItem {
@@ -280,6 +281,7 @@ function DetailDialog({ publicId, onClose, onChanged }: {
           </div>
           <IconSection app={app} disabled={!active} />
           <KeysSection publicId={publicId} />
+          <AccessModeSection app={app} disabled={!active} />
           <GrantsSection publicId={publicId} disabled={!active} />
           <TicketsSection publicId={publicId} disabled={!active} />
           <BuildsSection app={app} disabled={!active} />
@@ -412,6 +414,47 @@ function KeysSection({ publicId }: { publicId: string }) {
             })}
           </div>
         )}
+    </section>
+  );
+}
+
+// ------------------------------------------------------------- access mode ---
+
+function AccessModeSection({ app, disabled }: { app: AppDetail; disabled: boolean }) {
+  const t = useT();
+  const qc = useQueryClient();
+  const current = app.user_access_mode ?? "all_users";
+  const [mode, setMode] = useState<"all_users" | "bound_only">(current);
+  const dirty = mode !== current;
+  const save = useMutation({
+    mutationFn: () =>
+      api.put(`/zagros/applications/${app.public_id}/access-mode`, { user_access_mode: mode }),
+    onSuccess: () => {
+      toast.ok(t("apps.accessModeSaved"));
+      void qc.invalidateQueries({ queryKey: [...APP_QK, app.public_id] });
+    },
+    onError: (e) => toast.error(errMsg(e, t("common.error"))),
+  });
+  return (
+    <section className="rounded-xl border border-border bg-surface-2 p-3">
+      <p className="text-xs font-medium">{t("apps.accessMode")}</p>
+      <div className="mb-1.5 mt-2 flex gap-2">
+        <Select value={mode} disabled={disabled}
+          onChange={(e) => setMode(e.target.value as "all_users" | "bound_only")}
+          className="max-w-72">
+          <option value="all_users">{t("apps.accessModeAll")}</option>
+          <option value="bound_only">{t("apps.accessModeBound")}</option>
+        </Select>
+        {dirty && (
+          <Button type="button" size="sm" disabled={disabled} loading={save.isPending}
+            onClick={() => save.mutate()}>
+            {t("common.save")}
+          </Button>
+        )}
+      </div>
+      <p className="text-[11px] text-content-3">
+        {mode === "all_users" ? t("apps.accessModeAllHint") : t("apps.accessModeBoundHint")}
+      </p>
     </section>
   );
 }

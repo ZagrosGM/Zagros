@@ -125,6 +125,9 @@ class RequestKeyContext:
     key_id: str
     key_status: str
     private_key: bytes = field(repr=False)
+    # f-panel-7: the application's user access mode ('all_users' default /
+    # 'bound_only') — decides whether an ACTIVE grant is required to sign in.
+    application_access_mode: str = "all_users"
     device_db_id: int | None = None
     device_key_id: str | None = None
     device_public_key: bytes | None = None
@@ -151,6 +154,9 @@ class UserAuthContext:
     device_limit: int | None
     grant_id: int | None
     grant_status: str | None
+    # f-panel-7: carried so validation can require the grant only when the
+    # application is in 'bound_only' mode.
+    application_access_mode: str = "all_users"
     device_db_id: int | None = None
     device_key_id: str | None = None
     device_status: str | None = None
@@ -260,7 +266,7 @@ class ApplicationAuthRepository:
         # Explicit allow-list prevents future callers from putting raw configs,
         # credentials, tokens, or key material in an audit record.
         safe_extra = {}
-        for key in ("count", "core_id"):
+        for key in ("count", "core_id", "from", "to"):
             value = ((extra_detail or {}).get(key)
                      if isinstance(extra_detail, dict) else None)
             if isinstance(value, str):
@@ -302,7 +308,10 @@ class ApplicationAuthRepository:
     # ------------------------------------------------------------------
     def create_application(self, *, owner_admin_id: int, name: str,
                            api_base_url: str, default_lang: str,
-                           branding: dict) -> dict:
+                           branding: dict,
+                           user_access_mode: str = "all_users") -> dict:
+        if user_access_mode not in ("all_users", "bound_only"):
+            raise ApplicationForbidden("user access mode is invalid")
         public_id = str(uuid4())
         signing_kid = "sig-" + secrets.token_hex(8)
         config_kid = "cfg-" + secrets.token_hex(8)
@@ -328,6 +337,7 @@ class ApplicationAuthRepository:
                 name=name.strip(), status=_ACTIVE,
                 api_base_url=api_base_url.strip(), default_lang=default_lang.strip(),
                 branding=dict(branding or {}),
+                user_access_mode=user_access_mode,
                 active_signing_kid=signing_kid,
                 active_config_kid=config_kid,
             )
@@ -356,11 +366,34 @@ class ApplicationAuthRepository:
         return {
             "application_id": public_id,
             "name": name.strip(), "status": _ACTIVE,
+            "user_access_mode": user_access_mode,
             "signing_key_id": signing_kid,
             "signing_public_key": b64url_encode(signing_public),
             "config_key_id": config_kid,
             "config_public_key": b64url_encode(config_public),
         }
+
+    def set_user_access_mode(self, *, application_public_id: str,
+                             user_access_mode: str) -> dict:
+        """f-panel-7: switch who may sign in ('all_users' | 'bound_only')."""
+        if user_access_mode not in ("all_users", "bound_only"):
+            raise ApplicationForbidden("user access mode is invalid")
+        with self._sf() as session:
+            app = session.execute(select(ApplicationModel).where(
+                ApplicationModel.public_id == application_public_id,
+            )).scalar_one_or_none()
+            if app is None:
+                raise ApplicationForbidden("Application does not exist")
+            previous = app.user_access_mode or "all_users"
+            app.user_access_mode = user_access_mode
+            self._audit(session, "application.access_mode.changed",
+                        application_id=app.id,
+                        detail={"from": previous, "to": user_access_mode})
+            session.commit()
+            return {
+                "application_id": app.public_id, "name": app.name,
+                "user_access_mode": app.user_access_mode,
+            }
 
     def grant_user(self, *, application_public_id: str, user_id: int) -> dict:
         with self._sf() as session:
@@ -400,6 +433,7 @@ class ApplicationAuthRepository:
                 "owner_admin_id": app.owner_admin_id, "name": app.name,
                 "status": app.status, "api_base_url": app.api_base_url,
                 "default_lang": app.default_lang,
+                "user_access_mode": app.user_access_mode or "all_users",
                 "active_signing_kid": app.active_signing_kid,
                 "active_config_kid": app.active_config_kid,
             } for app in rows]
@@ -433,6 +467,7 @@ class ApplicationAuthRepository:
                 "owner_admin_id": app.owner_admin_id, "name": app.name,
                 "status": app.status, "api_base_url": app.api_base_url,
                 "default_lang": app.default_lang,
+                "user_access_mode": app.user_access_mode or "all_users",
                 "active_signing_kid": app.active_signing_kid,
                 "active_config_kid": app.active_config_kid,
                 "branding": dict(app.branding or {}),
@@ -848,6 +883,7 @@ class ApplicationAuthRepository:
                 application_status=app.status, key_db_id=key.id,
                 key_id=key.kid, key_status=key.status,
                 private_key=self._decrypt_private(key, app.public_id),
+                application_access_mode=app.user_access_mode or "all_users",
             )
 
     def device_request_key(self, application_public_id: str, key_id: str,
@@ -877,6 +913,7 @@ class ApplicationAuthRepository:
                 application_status=app.status, key_db_id=key.id,
                 key_id=key.kid, key_status=key.status,
                 private_key=self._decrypt_private(key, app.public_id),
+                application_access_mode=app.user_access_mode or "all_users",
                 device_db_id=device.id, device_key_id=device.device_key_id,
                 device_public_key=public_key, device_status=device.device_status,
                 user_id=device.user_id,
@@ -1013,6 +1050,7 @@ class ApplicationAuthRepository:
             if row is None:
                 return None
             user, grant, up, down = row
+            app = session.get(ApplicationModel, context.application_db_id)
             return UserAuthContext(
                 application_db_id=context.application_db_id,
                 application_public_id=context.application_public_id,
@@ -1030,6 +1068,8 @@ class ApplicationAuthRepository:
                 device_limit=user.device_limit,
                 grant_id=(grant.id if grant else None),
                 grant_status=(grant.status if grant else None),
+                application_access_mode=(
+                    app.user_access_mode if app else "all_users") or "all_users",
             )
 
     def device_user_context(self, *, context: RequestKeyContext,
@@ -1054,6 +1094,7 @@ class ApplicationAuthRepository:
             if row is None:
                 return None
             user, grant, up, down = row
+            app = session.get(ApplicationModel, context.application_db_id)
             return UserAuthContext(
                 application_db_id=context.application_db_id,
                 application_public_id=context.application_public_id,
@@ -1071,6 +1112,8 @@ class ApplicationAuthRepository:
                 device_limit=user.device_limit,
                 grant_id=(grant.id if grant else None),
                 grant_status=(grant.status if grant else None),
+                application_access_mode=(
+                    app.user_access_mode if app else "all_users") or "all_users",
                 device_db_id=context.device_db_id,
                 device_key_id=context.device_key_id,
                 device_status=context.device_status,
@@ -1109,8 +1152,14 @@ class ApplicationAuthRepository:
                 RefreshTokenModel.revoked.is_(False),
             ))
             usage = session.get(UserUsageModel, user_id)
+            # f-panel-7: a missing grant only disqualifies the context when
+            # the application actually requires bound users; in the default
+            # 'all_users' mode the grant row is optional bookkeeping.
+            grant_required = (
+                (app.user_access_mode if app else "all_users") or "all_users"
+            ) == "bound_only"
             if (app is None or user is None or device is None or key is None
-                    or grant is None or not active_family
+                    or (grant is None and grant_required) or not active_family
                     or app.public_id != application_public_id
                     or device.application_id != application_id
                     or device.user_id != user_id
@@ -1140,6 +1189,8 @@ class ApplicationAuthRepository:
                 used_bytes=((usage.uplink_bytes + usage.downlink_bytes) if usage else 0),
                 device_limit=user.device_limit,
                 grant_id=grant.id, grant_status=grant.status,
+                application_access_mode=(
+                    app.user_access_mode or "all_users"),
                 device_db_id=device.id, device_key_id=device.device_key_id,
                 device_status=device.device_status,
                 token_family_id=token_family_id,

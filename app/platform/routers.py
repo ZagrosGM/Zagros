@@ -1338,9 +1338,43 @@ async def create_application(body: ApplicationCreateBody,
             owner_admin_id=owner_admin_id, name=body.name,
             api_base_url=body.api_base_url, default_lang=body.default_lang,
             branding=body.branding,
+            user_access_mode=body.user_access_mode,
         )
     except ApplicationApiError as exc:
         raise _application_admin_error(exc) from exc
+
+
+class ApplicationAccessModeBody(BaseModel):
+    # f-panel-7: 'all_users' (default — every user with app credentials may
+    # sign in) or 'bound_only' (only Bound users may sign in).
+    user_access_mode: str = Field(pattern="^(all_users|bound_only)$")
+
+
+@zagros_admin_router.put("/applications/{application_id}/access-mode",
+                         response_model=ApplicationDetail)
+async def set_application_access_mode(application_id: str,
+                                      body: ApplicationAccessModeBody,
+                                      runtime=Depends(get_runtime)):
+    """Switch who may sign in to this application (f-panel-7).
+
+    ``all_users`` (default) — every user with issued app credentials may
+    enroll/sign in; ``bound_only`` — only Bound users. Flipping to
+    ``bound_only`` fails existing un-bound sessions closed on their next
+    token validation; flipping back re-opens them without re-enrollment.
+    """
+    try:
+        await asyncio.to_thread(
+            runtime.application_auth_repository.set_user_access_mode,
+            application_public_id=application_id,
+            user_access_mode=body.user_access_mode)
+        row = await asyncio.to_thread(
+            runtime.application_auth_repository.get_application,
+            application_id)
+    except ApplicationApiError as exc:
+        raise _application_admin_error(exc) from exc
+    if row is None:
+        raise HTTPException(404, "application not found")
+    return row
 
 
 @zagros_admin_router.get("/applications",

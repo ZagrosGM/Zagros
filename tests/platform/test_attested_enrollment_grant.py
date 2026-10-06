@@ -17,7 +17,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -167,3 +167,54 @@ def test_all_users_enrolls_without_a_grant_and_bound_only_requires_it(tmp_path: 
         device_name="probe", platform="android", app_version="1.0.1",
         source_ip="127.0.0.1", user_agent="pytest", now=now)
     assert device_b.device_key_id.startswith("dev-")
+
+
+def test_access_user_context_without_grant_does_not_crash(tmp_path: Path) -> None:
+    """f-applogin-2b: the access-token path validated the missing grant
+    correctly but then dereferenced it unconditionally — a 500 on every
+    authenticated profile/config/connections call for grant-less users
+    (the app showed 'operation not completed' right after a successful
+    login)."""
+    db = tmp_path / "main.db"
+    _migrate(db)
+    _insert_admin(db)
+
+    repo = _repository(db)
+    app_all = repo.create_application(
+        owner_admin_id=1, name="all-mode", api_base_url="https://panel.test",
+        default_lang="fa", branding={},
+        user_access_mode="all_users")
+    _insert_user(db, 21)
+
+    now = datetime.now(timezone.utc)
+    context = _context(repo, app_all, 21)
+    device = repo.enroll_attested_device(
+        context=context, device_public_key=os.urandom(32),
+        device_name="probe", platform="android", app_version="1.0.1",
+        source_ip="127.0.0.1", user_agent="pytest", now=now)
+
+    # an active refresh-token family, as issued by a real login
+    import hashlib as _hashlib
+
+    from app.applicationapi.repository import RefreshIssue
+
+    family = "fam-" + os.urandom(8).hex()
+    secret = "refresh-" + os.urandom(8).hex()
+    repo.save_initial_refresh(
+        context=context, device_id=device.id,
+        issue=RefreshIssue(
+            secret=secret,
+            token_hash=_hashlib.sha256(secret.encode()).hexdigest(),
+            family_id=family,
+            expires_at=now + timedelta(hours=1)),
+        now=now, user_agent="pytest")
+
+    loaded = repo.access_user_context(
+        application_id=context.application_db_id,
+        application_public_id=context.application_public_id,
+        user_id=21, device_id=device.id,
+        device_key_id=device.device_key_id,
+        application_key_id=context.application_key_db_id,
+        token_family_id=family, now=now)
+    assert loaded is not None, "grant-less user must load, not be denied"
+    assert loaded.grant_id is None and loaded.grant_status is None

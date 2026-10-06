@@ -1231,7 +1231,12 @@ class ApplicationAuthRepository:
                 data_limit_bytes=user.data_limit_bytes,
                 used_bytes=((usage.uplink_bytes + usage.downlink_bytes) if usage else 0),
                 device_limit=user.device_limit,
-                grant_id=grant.id, grant_status=grant.status,
+                # f-applogin-2b: in all_users mode the grant row may be
+                # absent (validation above only requires it in bound_only);
+                # dereferencing it unconditionally 500'd every authenticated
+                # profile/config/connections request for grant-less users.
+                grant_id=(grant.id if grant is not None else None),
+                grant_status=(grant.status if grant is not None else None),
                 application_access_mode=(
                     app.user_access_mode or "all_users"),
                 device_db_id=device.id, device_key_id=device.device_key_id,

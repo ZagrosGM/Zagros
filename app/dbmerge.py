@@ -73,6 +73,70 @@ def merged(main_url: str) -> bool:
         return False
 
 
+def sqlite_path(url: str) -> str | None:
+    """File path of a sqlite URL, None for anything else."""
+    if not url.startswith("sqlite:///"):
+        return None
+    path = url[len("sqlite:///"):]
+    if path.startswith("/"):  # sqlite:////absolute -> '//absolute' remainder
+        path = path.lstrip("/")
+        return "/" + path
+    return path or None
+
+
+def legacy_source_exists(url: str) -> bool:
+    """Whether a legacy database with real content exists RIGHT NOW.
+
+    sqlite: the file must exist (creating it just to look would be the
+    two-database bug this module exists to prevent). Server DBs: the
+    server must accept a connection; an unreachable server is treated as
+    "absent" so a fresh install never fabricates a legacy database.
+    """
+    path = sqlite_path(url or "")
+    if path is not None:
+        return os.path.isfile(path)
+    return probe(url) is None
+
+
+def remove_legacy_source(url: str) -> str:
+    """Retire the merged legacy database (f-dbmerge-3).
+
+    sqlite: the file is renamed next to itself (``<name>.merged``) — the
+    database no longer exists for any engine, while the operator keeps a
+    byte-identical rollback copy at zero risk. Server DBs: the legacy
+    tables are dropped inside the legacy database (the server keeps other
+    databases untouched). Returns a human-readable outcome.
+    """
+    path = sqlite_path(url or "")
+    if path is not None:
+        if not os.path.isfile(path):
+            return "already absent"
+        target = path + ".merged"
+        os.replace(path, target)
+        for suffix in ("-wal", "-shm"):
+            side = path + suffix
+            if os.path.isfile(side):
+                os.remove(side)
+        return f"renamed to {target}"
+    engine = create_engine(url, pool_pre_ping=True)
+    try:
+        meta = MetaData()
+        tables = [
+            Table(name, meta, autoload_with=engine)
+            for name in inspect(engine).get_table_names()
+        ]
+        with engine.begin() as conn:
+            if conn.dialect.name in ("mysql", "mariadb"):
+                conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
+            for table in reversed(tables):
+                table.drop(bind=conn, checkfirst=True)
+            if conn.dialect.name in ("mysql", "mariadb"):
+                conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
+        return f"dropped {len(tables)} legacy table(s) in place"
+    finally:
+        engine.dispose()
+
+
 def effective_legacy_url(configured: str | None) -> str | None:
     """The URL the legacy engine should serve RIGHT NOW."""
     main_url = os.environ.get("ZAGROS_DATABASE_URL") or ""
@@ -80,6 +144,30 @@ def effective_legacy_url(configured: str | None) -> str | None:
             and merged(main_url)):
         return main_url
     return configured
+
+
+def _provision_legacy_into_main(main_url: str) -> None:
+    """Create the legacy schema inside the MAIN database when it is absent.
+
+    f-dbmerge-3 fresh-install path: there is no legacy database at all, so
+    the merged layout needs the legacy tables to exist in the main database
+    before the marker flips the legacy engine over. Existing tables are
+    never dropped — a guarded create-only, so real operator data is
+    untouchable on every path that reaches this.
+    """
+    os.environ["ZAGROS_FORCE_LEGACY_RENAMES"] = "1"
+    from app.db import models as legacy_models  # renamed tablenames
+
+    meta = legacy_models.Base.metadata
+    dst = create_engine(main_url, pool_pre_ping=True)
+    try:
+        existing = set(inspect(dst).get_table_names())
+        missing = [t for t in meta.tables if t not in existing]
+        if not missing:
+            return  # schema already provisioned (e.g. by an earlier merge)
+        meta.create_all(dst, tables=[meta.tables[t] for t in missing])
+    finally:
+        dst.dispose()
 
 
 def _set_marker(conn, counts: dict) -> None:
@@ -114,7 +202,43 @@ def main() -> int:
         return 0
     if merged(main_url):
         print("dbmerge: marker present — legacy engine serves the main database")
+        if legacy_source_exists(legacy_url):
+            # f-dbmerge-3: a merge from an earlier panel version left the
+            # legacy database behind as a rollback copy; the operator asked
+            # for one database, so retire it now (idempotent).
+            try:
+                print(f"dbmerge: retiring the legacy database — "
+                      f"{remove_legacy_source(legacy_url)}")
+            except Exception as exc:  # noqa: BLE001 — never block the boot
+                print(f"dbmerge: legacy cleanup failed (non-fatal): {exc}")
         return 0
+    path = sqlite_path(legacy_url)
+    if path is not None and not os.path.isfile(path):
+        # f-dbmerge-3: fresh install (or the operator removed the empty
+        # legacy file). A MISSING SQLITE FILE is definitive — there is
+        # nothing to migrate. Provision the legacy schema inside the main
+        # database, write the marker so the legacy engine serves it from
+        # this boot on, and never create a second database. Server legacy
+        # databases never take this branch: an unreachable server is
+        # transient and must fail the boot (below), never be declared
+        # "fresh" — that would merge nothing and hide the legacy data.
+        print("dbmerge: no legacy database exists — provisioning a single "
+              "merged database")
+        _provision_legacy_into_main(main_url)
+        dst = create_engine(main_url, pool_pre_ping=True)
+        try:
+            with dst.begin() as dconn:
+                _set_marker(dconn, {"fresh_install": True})
+        finally:
+            dst.dispose()
+        print("dbmerge: marker written — the legacy layer serves the main "
+              "database (single database)")
+        return 0
+
+    if path is None and probe(legacy_url) is not None:
+        print("dbmerge: legacy server unreachable — failing this boot so it "
+              "retries (never declaring a reachable-only main database merged)")
+        return 1
 
     os.environ["ZAGROS_FORCE_LEGACY_RENAMES"] = "1"
     from app.db import models as legacy_models  # renamed tablenames
@@ -123,10 +247,25 @@ def main() -> int:
     dst = create_engine(main_url, pool_pre_ping=True)
     try:
         src_tables = set(inspect(src).get_table_names())
-        has_source = bool(src_tables & set(RENAMES))
-        if not has_source and not (src_tables & set(INVERSE)):
-            print("dbmerge: legacy database carries no legacy tables — "
-                  "nothing to merge")
+        if not src_tables:
+            # f-dbmerge-3: a completely EMPTY legacy database carries no
+            # operator data by definition — fold it into the single-database
+            # layout instead of keeping two files forever. A database with
+            # ANY table takes the full merge below, so seeded singleton rows
+            # (jwt/tls/system/admin) are always copied, never dropped.
+            print("dbmerge: legacy database is empty — "
+                  "folding the empty file into the main database")
+            src.dispose()
+            dst.dispose()
+            _provision_legacy_into_main(main_url)
+            dst = create_engine(main_url, pool_pre_ping=True)
+            try:
+                with dst.begin() as dconn:
+                    _set_marker(dconn, {"schema_only_legacy": True})
+            finally:
+                dst.dispose()
+            print(f"dbmerge: marker written — retiring the legacy database: "
+                  f"{remove_legacy_source(legacy_url)}")
             return 0
 
         meta = legacy_models.Base.metadata
@@ -168,8 +307,12 @@ def main() -> int:
                 src_conn.close()
         print(f"dbmerge: merged {copied} legacy table(s) into the main "
               f"database ({skipped} absent) — rows: {json.dumps(counts)}")
-        print("dbmerge: the old legacy database was NOT modified — "
-              "keep it as the rollback copy")
+        try:
+            print(f"dbmerge: retiring the legacy database — "
+                  f"{remove_legacy_source(legacy_url)}")
+        except Exception as exc:  # noqa: BLE001 — data is already merged
+            print(f"dbmerge: legacy cleanup failed (non-fatal, the merge "
+                  f"itself is committed): {exc}")
         return 0
     except Exception as exc:  # noqa: BLE001 — no marker → panel boots un-merged
         print(f"dbmerge: FAILED — the panel will boot on the old two-database "

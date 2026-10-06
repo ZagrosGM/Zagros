@@ -254,6 +254,10 @@ class ApplicationConfigGrantModel(Base):
     # migration; Phase 6 never issues an unscoped selector.
     protocol: Mapped[str | None] = mapped_column(String(32), nullable=True)
     source_account_id: Mapped[str | None] = mapped_column(String(190), nullable=True)
+    # f-appinbounds-2: with several inbounds sharing one protocol the app
+    # gets one item PER inbound; this pins the item to its listener. NULL
+    # keeps the historical "driver picks the first usable inbound" behavior.
+    inbound_tag: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Bound atomically by connections/start. Config delivery rejects an
     # unbound selector, so a permanent user/core identity is never delivered.
     connection_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

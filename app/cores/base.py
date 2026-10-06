@@ -301,6 +301,19 @@ class BaseCoreDriver(abc.ABC):
         (see docs §7.3) — never through plain serialization.
         """
 
+    async def client_config_items(
+        self, account: UserAccount, node: Any | None = None
+    ) -> list[ClientConfig]:
+        """Every distinct config item the Application list should advertise.
+
+        f-appinbounds-2: cores with several inbounds per protocol override
+        this to return one item per listener, so an operator running two
+        hysteria2 inbounds sees two usable entries in the app instead of a
+        silent "first inbound only". The default keeps the historical
+        single-item behavior for cores that do not expose the concept.
+        """
+        return [await self.build_client_config(account, node)]
+
     # ------------------------------------------------------------------ #
     # delivery description — powers the Subscription Portal dynamically
     # ------------------------------------------------------------------ #

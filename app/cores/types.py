@@ -248,6 +248,9 @@ class ClientConfig(BaseModel):
     engine: str                              # client engine hint: sing-box / wireguard / openvpn / ssh
     payload: dict[str, Any] = Field(repr=False)
     display_name: str = ""
+    # f-appinbounds-2: which listener this item was built for (None when the
+    # core exposes a single/aggregate item per protocol).
+    inbound_tag: str | None = None
 
     def __repr__(self) -> str:  # pragma: no cover - safety guard
         return (

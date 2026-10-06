@@ -24,6 +24,7 @@ from app.applicationapi.resource_models import (
 )
 from app.applicationapi.security import SignedRequest
 from app.applicationapi.service import ApplicationAuthService
+from app.cores.exceptions import CoreError
 from app.cores.types import Capability
 
 
@@ -109,25 +110,30 @@ class ApplicationResourceService:
                 })
                 continue
             try:
-                config = await driver.build_client_config(account)
-                if config.core_id != core_id:
-                    raise ValueError("driver returned a mismatched core ID")
-                public = config.public_view()
-                metadata.append({
-                    "config_id": None, "core_id": core_id,
-                    "protocol": public["protocol"],
-                    "engine": public["engine"],
-                    "display_name": public["display_name"],
-                    "status": "active", "expires_at": None,
-                })
-                row = metadata[-1]
-                row["_source_account_id"] = account.account_id
-                selectors.append({
-                    "core_id": core_id,
-                    "protocol": account.protocol,
-                    "source_account_id": account.account_id,
-                })
-                del config
+                # f-appinbounds-2: one item per usable inbound — an operator
+                # with two hysteria2 inbounds gets two entries, each pinned
+                # to its listener through the grant's inbound_tag.
+                items = await driver.client_config_items(account)
+                if not items:
+                    raise CoreError("no usable inbound advertised")
+                for config in items:
+                    public = config.public_view()
+                    metadata.append({
+                        "config_id": None, "core_id": core_id,
+                        "protocol": public["protocol"],
+                        "engine": public["engine"],
+                        "display_name": public["display_name"],
+                        "status": "active", "expires_at": None,
+                    })
+                    row = metadata[-1]
+                    row["_source_account_id"] = account.account_id
+                    row["_inbound_tag"] = config.inbound_tag
+                    selectors.append({
+                        "core_id": core_id,
+                        "protocol": account.protocol,
+                        "source_account_id": account.account_id,
+                        "inbound_tag": config.inbound_tag,
+                    })
             except Exception:  # noqa: BLE001 - never expose driver/secret detail
                 metadata.append({
                     "config_id": None, "core_id": core_id,
@@ -149,16 +155,19 @@ class ApplicationResourceService:
             context=context, selectors=selectors,
             now=now, expires_at=expires_at)
         by_selector = {
-            (grant.core_id, grant.protocol, grant.source_account_id): grant
+            (grant.core_id, grant.protocol, grant.source_account_id,
+             grant.inbound_tag): grant
             for grant in grants
         }
         for row in metadata:
             grant = by_selector.get((
-                row["core_id"], row["protocol"], row.get("_source_account_id")))
+                row["core_id"], row["protocol"], row.get("_source_account_id"),
+                row.get("_inbound_tag")))
             if row["status"] == "active" and grant is not None:
                 row["config_id"] = grant.public_id
                 row["expires_at"] = grant.expires_at
             row.pop("_source_account_id", None)
+            row.pop("_inbound_tag", None)
         return ApplicationConfigList(configs=[
             ApplicationConfigView.model_validate(row) for row in metadata])
 
@@ -211,6 +220,11 @@ class ApplicationResourceService:
             data_limit_bytes=context.data_limit_bytes,
             settings=dict(lease.settings),
         )
+        if grant.inbound_tag:
+            # f-appinbounds-2: the delivered envelope is built for exactly
+            # the listener this config item was listed for — never silently
+            # the driver's first pick.
+            account.settings["inbound_tags"] = [grant.inbound_tag]
         target_context = delivery_context
         if lease.target_kind == "node":
             address = (await asyncio.to_thread(

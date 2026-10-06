@@ -2016,24 +2016,36 @@ class SingBoxDriver(BaseCoreDriver):
     ) -> ClientConfig:
         """Sealed single-config view (first usable inbound) — kept for the
         generic ClientConfig consumers; the rich view is describe_delivery."""
-        self._ensure_supported(account.protocol)
-        account = self._normalize_account(account)
-        triples = self._selected_inbounds(account)
-        if not triples:
+        items = await self.client_config_items(account, node)
+        if not items:
             raise CoreError(
                 f"No sing-box inbound available for protocol '{account.protocol}' "
                 "(grant selection empty or no such listener configured)."
             )
-        tag, ib, meta = triples[0]
+        return items[0]
+
+    async def client_config_items(
+        self, account: UserAccount, node: Any | None = None
+    ) -> list[ClientConfig]:
+        """f-appinbounds-2: one sealed item per usable inbound, so several
+        same-protocol listeners all appear in the app (first-inbound-only
+        build_client_config keeps its contract on top of this)."""
+        self._ensure_supported(account.protocol)
+        account = self._normalize_account(account)
+        triples = self._selected_inbounds(account)
         display = self._protocol_display(account.protocol)
-        outbound = self._compose_outbound(account, tag, ib, meta, node)
-        return ClientConfig(
-            core_id=self.metadata.id,
-            protocol=account.protocol,
-            engine="sing-box",
-            payload={"outbounds": [outbound]},
-            display_name=f"{display} · {tag}",
-        )
+        items: list[ClientConfig] = []
+        for tag, ib, meta in triples:
+            outbound = self._compose_outbound(account, tag, ib, meta, node)
+            items.append(ClientConfig(
+                core_id=self.metadata.id,
+                protocol=account.protocol,
+                engine="sing-box",
+                payload={"outbounds": [outbound]},
+                display_name=f"{display} · {tag}",
+                inbound_tag=tag,
+            ))
+        return items
 
 
 

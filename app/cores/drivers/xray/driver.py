@@ -1245,32 +1245,43 @@ class XrayDriver(BaseCoreDriver):
     async def build_client_config(
         self, account: UserAccount, node: Any | None = None
     ) -> ClientConfig:
-        protocol = self._ensure_supported(account.protocol)
-        settings = self._clean_settings(account)
-        targets = await self._target_inbounds(account)
-        if not targets:
+        items = await self.client_config_items(account, node)
+        if not items:
+            protocol = self._ensure_supported(account.protocol)
             raise CoreError(
                 f"No xray inbound available for protocol '{protocol}'."
             )
-        tag, inbound = next(iter(targets.items()))
-        hosts = await asyncio.to_thread(self._backend.host_options, tag)
-        host = hosts[0] if hosts else {}
-        variables = defaultdict(lambda: "<missing>",
-                                await self._format_variables(account))
-        variables["PROTOCOL"] = self._protocol_display(protocol)
-        variables["TRANSPORT"] = inbound.get("network", "")
-        outbound = self._compose_outbound(protocol, settings, tag, inbound,
-                                          host, variables, node)
-        remark = self._render_host_value(
-            host.get("remark") or f"{protocol} · {tag}", variables)
+        return items[0]
 
-        return ClientConfig(
-            core_id=self.metadata.id,
-            protocol=protocol,
-            engine="sing-box",
-            payload={"outbounds": [outbound]},
-            display_name=remark,
-        )
+    async def client_config_items(
+        self, account: UserAccount, node: Any | None = None
+    ) -> list[ClientConfig]:
+        """f-appinbounds-2: one sealed item per usable xray inbound."""
+        protocol = self._ensure_supported(account.protocol)
+        settings = self._clean_settings(account)
+        targets = await self._target_inbounds(account)
+        variables_base = defaultdict(lambda: "<missing>",
+                                     await self._format_variables(account))
+        items: list[ClientConfig] = []
+        for tag, inbound in targets.items():
+            hosts = await asyncio.to_thread(self._backend.host_options, tag)
+            host = hosts[0] if hosts else {}
+            variables = defaultdict(lambda: "<missing>", variables_base)
+            variables["PROTOCOL"] = self._protocol_display(protocol)
+            variables["TRANSPORT"] = inbound.get("network", "")
+            outbound = self._compose_outbound(protocol, settings, tag,
+                                              inbound, host, variables, node)
+            remark = self._render_host_value(
+                host.get("remark") or f"{protocol} · {tag}", variables)
+            items.append(ClientConfig(
+                core_id=self.metadata.id,
+                protocol=protocol,
+                engine="sing-box",
+                payload={"outbounds": [outbound]},
+                display_name=remark,
+                inbound_tag=tag,
+            ))
+        return items
 
     async def describe_delivery(
         self,

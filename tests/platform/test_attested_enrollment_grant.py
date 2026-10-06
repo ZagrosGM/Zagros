@@ -218,3 +218,10 @@ def test_access_user_context_without_grant_does_not_crash(tmp_path: Path) -> Non
         token_family_id=family, now=now)
     assert loaded is not None, "grant-less user must load, not be denied"
     assert loaded.grant_id is None and loaded.grant_status is None
+
+    # the resource gate (_assert_resource_authority) must accept the same
+    # grant-less context — this is the exact 403 the operator's app hit
+    profile = repo.application_profile(context=loaded, now=now)
+    assert profile["username"] == "u21.test"
+    assert profile["application"]["application_id"] == (
+        app_all["application_id"])

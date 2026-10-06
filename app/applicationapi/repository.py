@@ -1538,8 +1538,17 @@ class ApplicationAuthRepository:
                 RefreshTokenModel.revoked.is_(False),
             ))
         used = (usage.uplink_bytes + usage.downlink_bytes) if usage else 0
+        # f-applogin-2b: the Bound-users grant is an authority only in
+        # explicit bound_only mode; in the default all_users mode the row
+        # is optional bookkeeping (f-panel-7) and its absence must not deny
+        # profile/config/connections — that gated EVERY resource call for
+        # grant-less users behind a silent 403 right after login.
+        grant_required = (
+            (app.user_access_mode if app else "all_users") or "all_users"
+        ) == "bound_only"
         if (app is None or user is None or device is None or key is None
-                or grant is None or not context.token_family_id or not active_family
+                or (grant_required and grant is None)
+                or not context.token_family_id or not active_family
                 or app.id != context.application_db_id
                 or app.public_id != context.application_public_id
                 or app.status != _ACTIVE
@@ -1557,9 +1566,10 @@ class ApplicationAuthRepository:
                 or key.kid != context.application_key_id
                 or key.purpose != "config_encryption"
                 or key.status != _ACTIVE
-                or grant.application_id != app.id
-                or grant.user_id != user.id
-                or grant.status != _ACTIVE
+                or (grant is not None and (
+                    grant.application_id != app.id
+                    or grant.user_id != user.id
+                    or grant.status != _ACTIVE))
                 or (_aware(user.expire_at) is not None
                     and _aware(user.expire_at) <= now)
                 or (user.data_limit_bytes is not None

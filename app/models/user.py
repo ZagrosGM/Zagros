@@ -29,9 +29,16 @@ class UserStatus(str, Enum):
 
 
 class UserStatusModify(str, Enum):
+    # 'limited'/'expired' are accepted as read-back values: dashboards and
+    # Marzban-style bots echo the user's CURRENT status on modify. Sending
+    # back what the panel itself reports must never be a 422 — the expire/
+    # data-limit re-evaluation in crud.update_user decides the effective
+    # state (e.g. expired + future expire => active again).
     active = "active"
     disabled = "disabled"
     on_hold = "on_hold"
+    limited = "limited"
+    expired = "expired"
 
 
 class UserStatusCreate(str, Enum):

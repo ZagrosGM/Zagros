@@ -33,6 +33,10 @@ SETTINGS_KEY = "backup_service"
 _AAD = "backup-service.token"
 TELEGRAM_MAX_BYTES = 50 * 1024 * 1024  # Bot API hard limit
 _TELEGRAM_API = "https://api.telegram.org"
+# Telegram caps a sendDocument caption at 1024 characters; leave room for
+# the fixed "Zagros backup <utc> (<kb> KB)" footer line.
+_CAPTION_MAX = 200
+_DESC_MAX = 700
 _CRON_FIELDS = 5
 _CRON_TOKEN = re.compile(r"^[\d*/,\-\s]+$")
 
@@ -58,6 +62,10 @@ class BackupServiceSettings:
     bot_token: str = ""              # write-only; stored encrypted
     include_logs: bool = False
     keep: int = 7                    # archives retained on the server
+    # f-panel-9: free-form labels delivered WITH the archive so multi-panel
+    # operators can tell the chats apart (Telegram caption, 1024-char cap).
+    caption: str = ""                # short label, e.g. "Tehran - main panel"
+    description: str = ""            # longer note under the caption
 
     # ---- schedule helpers ---- #
     def normalized(self) -> "BackupServiceSettings":
@@ -70,7 +78,9 @@ class BackupServiceSettings:
                        weekday=weekday, keep=keep,
                        cron=(self.cron or "0 3 * * *").strip(),
                        chat_id=str(self.chat_id or "").strip(),
-                       bot_token=(self.bot_token or "").strip())
+                       bot_token=(self.bot_token or "").strip(),
+                       caption=str(self.caption or "").strip()[:_CAPTION_MAX],
+                       description=str(self.description or "").strip()[:_DESC_MAX])
 
     def cron_expression(self) -> str:
         """The effective expression — presets are expanded to cron."""
@@ -95,6 +105,10 @@ class BackupServiceSettings:
                 problems.append("Telegram chat id must be numeric")
             if not self.bot_token and not self.has_stored_token:
                 problems.append("a bot token is required to deliver backups")
+        if len(self.caption) > _CAPTION_MAX or len(self.description) > _DESC_MAX:
+            problems.append(
+                f"caption must be <= {_CAPTION_MAX} and description "
+                f"<= {_DESC_MAX} characters (Telegram caption limit)")
         return problems
 
     has_stored_token: bool = False   # set by the store; never persisted
@@ -141,6 +155,8 @@ class BackupServiceSettings:
             "has_token": bool(token),
             "include_logs": self.include_logs,
             "keep": self.keep,
+            "caption": self.caption,
+            "description": self.description,
             "next_run_at": self.next_run_at(),
             "telegram_max_bytes": TELEGRAM_MAX_BYTES,
         }
@@ -217,6 +233,8 @@ class SQLBackupServiceStore:
             chat_id=str(payload.get("chat_id", "") or ""),
             include_logs=bool(payload.get("include_logs", False)),
             keep=int(payload.get("keep", 7) or 0),
+            caption=str(payload.get("caption", "") or ""),
+            description=str(payload.get("description", "") or ""),
         ).normalized()
         settings.bot_token = self._open(str(payload.get("bot_token_enc", "") or ""))
         settings.has_stored_token = bool(settings.bot_token)
@@ -246,6 +264,8 @@ class SQLBackupServiceStore:
                 "chat_id": settings.chat_id,
                 "include_logs": settings.include_logs,
                 "keep": settings.keep,
+                "caption": settings.caption,
+                "description": settings.description,
                 "bot_token_enc": self._seal(token),
             })
             if row is None:
@@ -274,6 +294,15 @@ class SQLBackupServiceStore:
 # --------------------------------------------------------------------------- #
 # delivery
 # --------------------------------------------------------------------------- #
+def delivery_caption(settings: "BackupServiceSettings", created_utc: str,
+                     size_bytes: int) -> str:
+    """The Telegram caption: operator label lines + the fixed footer."""
+    footer = f"Zagros backup {created_utc} ({size_bytes // 1024} KB)"
+    label = "\n".join(
+        part for part in (settings.caption, settings.description) if part)
+    return f"{label}\n{footer}" if label else footer
+
+
 def send_to_telegram(token: str, chat_id: str, path: Path, *,
                      caption: str = "") -> dict[str, Any]:
     """Upload one archive; returns Telegram's answer or a raised error."""
@@ -415,8 +444,9 @@ def run_once(runtime) -> dict[str, Any]:
 
     try:
         send_to_telegram(settings.bot_token, settings.chat_id, path,
-                         caption=f"Zagros backup {artifact.created_utc} "
-                                 f"({artifact.size_bytes // 1024} KB)")
+                         caption=delivery_caption(
+                             settings, artifact.created_utc,
+                             artifact.size_bytes))
         state.delivered = True
     except Exception as exc:  # noqa: BLE001
         state.delivered = False

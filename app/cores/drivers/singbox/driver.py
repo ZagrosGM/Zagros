@@ -27,6 +27,7 @@ from typing import Any, ClassVar
 
 logger = logging.getLogger("zagros.cores.drivers.singbox")
 
+from app.cores.outbounds.stream_render import singbox_tls_and_transport
 from app.cores.base import BaseCoreDriver
 from app.cores.exceptions import CoreError
 from app.cores.stats import DeltaTracker
@@ -1670,18 +1671,36 @@ class SingBoxDriver(BaseCoreDriver):
                       "server_port": int(s["server_port"]), "uuid": str(s["uuid"])}
             if s.get("flow"):
                 native["flow"] = s["flow"]
+            # f-panel-9: TLS/REALITY + transport reach the deployed config.
+            tls, transport = singbox_tls_and_transport(s)
+            if tls is not None:
+                native["tls"] = tls
+            if transport is not None:
+                native["transport"] = transport
             return native, None
         if kind is OutboundKind.VMESS:
             if gap := need("server", "server_port", "uuid"):
                 return None, gap
-            return {"type": "vmess", "tag": name, "server": s["server"],
-                    "server_port": int(s["server_port"]), "uuid": str(s["uuid"]),
-                    "security": s.get("security", "auto"), "alter_id": 0}, None
+            native = {"type": "vmess", "tag": name, "server": s["server"],
+                      "server_port": int(s["server_port"]), "uuid": str(s["uuid"]),
+                      "security": s.get("security", "auto"), "alter_id": 0}
+            tls, transport = singbox_tls_and_transport(s)
+            if tls is not None:
+                native["tls"] = tls
+            if transport is not None:
+                native["transport"] = transport
+            return native, None
         if kind is OutboundKind.TROJAN:
             if gap := need("server", "server_port", "password"):
                 return None, gap
-            return {"type": "trojan", "tag": name, "server": s["server"],
-                    "server_port": int(s["server_port"]), "password": s["password"]}, None
+            native = {"type": "trojan", "tag": name, "server": s["server"],
+                      "server_port": int(s["server_port"]), "password": s["password"]}
+            tls, transport = singbox_tls_and_transport(s)
+            if tls is not None:
+                native["tls"] = tls
+            if transport is not None:
+                native["transport"] = transport
+            return native, None
         if kind is OutboundKind.SHADOWSOCKS:
             if gap := need("server", "server_port", "password", "method"):
                 return None, gap

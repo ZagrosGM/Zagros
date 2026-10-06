@@ -49,24 +49,37 @@ def upgrade() -> None:
                         ["core_id", "inbound_tag"])
     # widen multi-value columns (marzban hosts learned the same lesson at
     # e7b869e999b4); a dialect that refuses keeps the old width — inert.
+    # f-panel-9: PostgreSQL aborts the WHOLE transaction when a statement
+    # fails, so each best-effort statement is isolated in a SAVEPOINT —
+    # a refusal now rolls back only that statement, not the migration.
     for col in ("sni", "host_header"):
         try:
-            op.alter_column("core_hosts", col,
-                            type_=sa.String(length=1000),
-                            existing_type=sa.String(length=256))
+            with conn.begin_nested():
+                op.alter_column("core_hosts", col,
+                                type_=sa.String(length=1000),
+                                existing_type=sa.String(length=256))
         except Exception:  # noqa: BLE001
             pass
-    # backfill from the marzban-era extras blob (json_extract is JSON1; on
-    # engines without JSON1 the expression errors loudly instead of
-    # silently writing wrong tags — caught only to stay portable, and the
-    # migration then leaves tags empty (= inert) rather than guessing).
+    # backfill from the marzban-era extras blob. json_extract exists on
+    # SQLite/MySQL but NOT on PostgreSQL (there the native JSON ->> operator
+    # applies); on engines with neither the tags stay '' (inert) instead of
+    # guessing. The savepoint keeps any failure from aborting the migration.
     try:
-        op.execute(sa.text(
-            "UPDATE core_hosts SET inbound_tag = "
-            "COALESCE(json_extract(extras, '$.inbound_tag'), '') "
-            "WHERE (inbound_tag IS NULL OR inbound_tag = '') AND extras IS NOT NULL"
-        ))
-    except Exception:  # noqa: BLE001 — non-JSON1 engine: tags stay '' (inert)
+        with conn.begin_nested():
+            if conn.dialect.name == "postgresql":
+                op.execute(sa.text(
+                    "UPDATE core_hosts SET inbound_tag = "
+                    "COALESCE(extras::json->>'inbound_tag', '') "
+                    "WHERE (inbound_tag IS NULL OR inbound_tag = '') "
+                    "AND extras IS NOT NULL"
+                ))
+            else:
+                op.execute(sa.text(
+                    "UPDATE core_hosts SET inbound_tag = "
+                    "COALESCE(json_extract(extras, '$.inbound_tag'), '') "
+                    "WHERE (inbound_tag IS NULL OR inbound_tag = '') AND extras IS NOT NULL"
+                ))
+    except Exception:  # noqa: BLE001 — non-JSON engine: tags stay '' (inert)
         pass
 
 

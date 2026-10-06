@@ -467,6 +467,12 @@ const en = {
   "backup source": "backup source",
   "bind address": "bind address",
   "bot token": "bot token",
+  "Telegram caption": "Telegram caption",
+  "Telegram description": "Telegram description",
+  "short label sent with every backup — e.g. Tehran main panel":
+    "short label sent with every backup — e.g. Tehran main panel",
+  "extra note under the caption — helps tell multiple panels apart":
+    "extra note under the caption — helps tell multiple panels apart",
   "build an archive on a schedule and send it to Telegram": "build an archive on a schedule and send it to Telegram",
   "certificate chain (PEM)": "certificate chain (PEM)",
   "certificate source": "certificate source",
@@ -1327,6 +1333,12 @@ const fa: Record<Key, string> = {
   "backup source": "منبع پشتیبان",
   "bind address": "آدرس bind",
   "bot token": "توکن ربات",
+  "Telegram caption": "کپشن تلگرام",
+  "Telegram description": "توضیحات تلگرام",
+  "short label sent with every backup — e.g. Tehran main panel":
+    "برچسب کوتاهی که با هر بکاپ ارسال می‌شود — مثلاً پنل اصلی تهران",
+  "extra note under the caption — helps tell multiple panels apart":
+    "یادداشت تکمیلی زیر کپشن — برای تشخیص پنل‌های مختلف از هم",
   "build an archive on a schedule and send it to Telegram": "ساخت آرشیو طبق زمان‌بندی و ارسال آن به تلگرام",
   "certificate chain (PEM)": "زنجیرهٔ گواهی (PEM)",
   "certificate source": "منبع گواهی",

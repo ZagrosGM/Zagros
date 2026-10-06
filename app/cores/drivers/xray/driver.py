@@ -23,6 +23,7 @@ from typing import Any, ClassVar
 
 from app.cores.base import BaseCoreDriver
 from app.cores.exceptions import CoreError
+from app.cores.outbounds.stream_render import xray_stream_settings
 from app.cores.outbounds.model import Outbound, OutboundKind, TranslatedOutbound, UnsupportedOutbound
 from app.cores.routing.model import (
     RouteContext,
@@ -1499,15 +1500,26 @@ class XrayDriver(BaseCoreDriver):
             user = {"id": str(s["uuid"]), "encryption": "none"}
             if s.get("flow"):
                 user["flow"] = s["flow"]
-            return {"protocol": "vless", "tag": name,
-                    "settings": {"vnext": [{"address": s["server"], "port": int(s["server_port"]), "users": [user]}]}}, None
+            native = {"protocol": "vless", "tag": name,
+                      "settings": {"vnext": [{"address": s["server"], "port": int(s["server_port"]), "users": [user]}]}}
+            # f-panel-9: TLS/REALITY + transport must reach the deployed
+            # config — a bare vless outbound against a TLS upstream dies.
+            if (stream := xray_stream_settings(s)) is not None:
+                native["streamSettings"] = stream
+            return native, None
         if kind is OutboundKind.VMESS:
-            return {"protocol": "vmess", "tag": name,
-                    "settings": {"vnext": [{"address": s["server"], "port": int(s["server_port"]),
-                                            "users": [{"id": str(s["uuid"]), "alterId": 0, "security": s.get("security", "auto")}]}]}}, None
+            native = {"protocol": "vmess", "tag": name,
+                      "settings": {"vnext": [{"address": s["server"], "port": int(s["server_port"]),
+                                              "users": [{"id": str(s["uuid"]), "alterId": 0, "security": s.get("security", "auto")}]}]}}
+            if (stream := xray_stream_settings(s)) is not None:
+                native["streamSettings"] = stream
+            return native, None
         if kind is OutboundKind.TROJAN:
-            return {"protocol": "trojan", "tag": name,
-                    "settings": {"servers": [{"address": s["server"], "port": int(s["server_port"]), "password": s["password"]}]}}, None
+            native = {"protocol": "trojan", "tag": name,
+                      "settings": {"servers": [{"address": s["server"], "port": int(s["server_port"]), "password": s["password"]}]}}
+            if (stream := xray_stream_settings(s)) is not None:
+                native["streamSettings"] = stream
+            return native, None
         if kind is OutboundKind.SHADOWSOCKS:
             return {"protocol": "shadowsocks", "tag": name,
                     "settings": {"servers": [{"address": s["server"], "port": int(s["server_port"]),

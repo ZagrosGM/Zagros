@@ -767,13 +767,17 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
         toast.ok(`${form.username} created`);
       } else if (user) {
         const body: Record<string, unknown> = {
-          status: form.status, data_limit,
+          data_limit,
           // The compatibility update model treats null as "field omitted";
           // explicit zero is the API spelling for clearing either limit.
           ip_limit: ip_limit ?? 0, device_limit: device_limit ?? 0,
           download_limit_mbps, upload_limit_mbps, expire, note: form.note || null,
           telegram_id: form.telegramId ? Number(form.telegramId) : null,
         };
+        // Send status only when the admin actually changed it: an expired
+        // user's dialog echoes status='expired' back, and a future expire
+        // date alone must reactivate the user server-side (f-panel-9).
+        if (form.status !== user.status) body.status = form.status;
         if (chosen.length) { body.proxies = proxySettings; body.inbounds = inboundSel; }
         if (Object.keys(form.coreAccess).length || Object.keys(user.core_access ?? {}).length) {
           body.core_access = form.coreAccess;

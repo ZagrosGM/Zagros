@@ -20,7 +20,8 @@ interface BackupArtifact {
 interface ServiceSettings {
   enabled: boolean; schedule: string; cron: string; at_hour: number; at_minute: number;
   weekday: number; chat_id: string; bot_token: string; has_token: boolean;
-  include_logs: boolean; keep: number; next_run_at: number | null; telegram_max_bytes: number;
+  include_logs: boolean; keep: number; caption: string; description: string;
+  next_run_at: number | null; telegram_max_bytes: number;
 }
 interface ServiceState {
   last_run_at: number | null; last_status: string; last_size_bytes: number;
@@ -220,6 +221,12 @@ export default function SettingsBackup() {
             </Field>
             <Field label={t("archives kept")} hint={t("older ones are pruned")}>
               <Input type="number" min={0} value={settings.keep} onChange={(e) => setForm({ ...settings, keep: Number(e.target.value) })} dir="ltr" />
+            </Field>
+            <Field label={t("Telegram caption")} hint={t("short label sent with every backup — e.g. Tehran main panel")}>
+              <Input value={settings.caption} maxLength={200} onChange={(e) => setForm({ ...settings, caption: e.target.value })} />
+            </Field>
+            <Field label={t("Telegram description")} hint={t("extra note under the caption — helps tell multiple panels apart")}>
+              <Input value={settings.description} maxLength={700} onChange={(e) => setForm({ ...settings, description: e.target.value })} />
             </Field>
             <label className="flex items-center gap-2.5 text-sm text-content-2">
               <Switch checked={settings.include_logs} onChange={(v) => setForm({ ...settings, include_logs: v })} label={t("include logs")} />{t("include logs")}</label>

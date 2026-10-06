@@ -1448,10 +1448,20 @@ class ApplicationAuthRepository:
             app = session.execute(select(ApplicationModel).where(
                 ApplicationModel.id == context.application_db_id).with_for_update()
             ).scalar_one_or_none()
-            if (user is None or grant is None or app is None
-                    or app.status != _ACTIVE or grant.status != _ACTIVE
+            # f-applogin-2: the attestation flow serves EVERY application —
+            # the Bound-users grant is required only in explicit bound_only
+            # mode (mirrors _validate_user_context). The hard grant check
+            # from the bound_only era made every enrollment on the default
+            # all_users mode fail with a traceless 401 AFTER a correct
+            # password, which the app surfaces as "wrong username/password".
+            grant_required = ((app.user_access_mode if app else None)
+                              or "all_users") == "bound_only"
+            if (user is None or app is None
+                    or app.status != _ACTIVE
                     or user.status != _ACTIVE
-                    or user.access_mode != _APPLICATION_MODE):
+                    or user.access_mode != _APPLICATION_MODE
+                    or (grant_required and (grant is None
+                                            or grant.status != _ACTIVE))):
                 raise ApplicationAuthFailed("enrollment request is invalid")
             existing = session.execute(select(SubscriptionDeviceModel).where(
                 SubscriptionDeviceModel.user_id == user.id,

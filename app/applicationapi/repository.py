@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -172,6 +173,9 @@ class RefreshIssue:
     expires_at: datetime
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True, slots=True)
 class ConfigGrantContext:
     public_id: str
@@ -180,6 +184,10 @@ class ConfigGrantContext:
     source_account_id: str | None = field(repr=False)
     connection_id: str | None
     expires_at: datetime
+    # f-appinbounds-2: required (not defaulted) because ConfigDeliveryMaterial
+    # subclasses this dataclass with non-default fields of its own; every
+    # construction site is keyword-based and passes it explicitly.
+    inbound_tag: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -900,6 +908,13 @@ class ApplicationAuthRepository:
                        ApplicationKeyModel.purpose == "config_encryption")
             ).one_or_none()
             if pair is None:
+                # f-applogin-1: this 401 used to be completely silent, which
+                # made "app built for another panel" undiagnosable. The ids
+                # below are public references, safe to log.
+                logger.warning(
+                    "application request rejected: unknown application/key "
+                    "pair (application_id=%r, key_id=%r)",
+                    application_public_id, key_id)
                 raise ApplicationAuthFailed("request authentication failed")
             app, key = pair
             return RequestKeyContext(
@@ -925,6 +940,10 @@ class ApplicationAuthRepository:
                        SubscriptionDeviceModel.device_key_id == device_key_id)
             ).one_or_none()
             if row is None:
+                logger.warning(
+                    "application request rejected: unknown device "
+                    "(application_id=%r, key_id=%r, device_key_id=%r)",
+                    application_public_id, key_id, device_key_id)
                 raise EnrollmentRequired("device enrollment required")
             app, key, device = row
             try:
@@ -1687,7 +1706,7 @@ class ApplicationAuthRepository:
             for core_id in (core_ids or [])
         ]
         unique: list[dict] = []
-        seen: set[tuple[str, str | None, str | None]] = set()
+        seen: set[tuple[str, str | None, str | None, str | None]] = set()
         for raw in requested:
             item = {
                 "core_id": str(raw.get("core_id") or "")[:32],
@@ -1695,8 +1714,11 @@ class ApplicationAuthRepository:
                              if raw.get("protocol") else None),
                 "source_account_id": (str(raw.get("source_account_id"))[:190]
                                       if raw.get("source_account_id") else None),
+                "inbound_tag": (str(raw.get("inbound_tag"))[:64]
+                                if raw.get("inbound_tag") else None),
             }
-            key = (item["core_id"], item["protocol"], item["source_account_id"])
+            key = (item["core_id"], item["protocol"],
+                   item["source_account_id"], item["inbound_tag"])
             if item["core_id"] and key not in seen:
                 seen.add(key)
                 unique.append(item)
@@ -1738,6 +1760,7 @@ class ApplicationAuthRepository:
                     core_id=selector["core_id"],
                     protocol=selector["protocol"],
                     source_account_id=selector["source_account_id"],
+                    inbound_tag=selector["inbound_tag"],
                     issued_at=now, expires_at=expires_at,
                 )
                 session.add(row)
@@ -1752,6 +1775,7 @@ class ApplicationAuthRepository:
             return [ConfigGrantContext(
                 public_id=row.public_id, core_id=row.core_id,
                 protocol=row.protocol, source_account_id=row.source_account_id,
+                inbound_tag=row.inbound_tag,
                 connection_id=row.connection_id,
                 expires_at=_aware(row.expires_at) or expires_at,
             ) for row in rows]
@@ -1780,6 +1804,7 @@ class ApplicationAuthRepository:
             return ConfigGrantContext(
                 public_id=row.public_id, core_id=row.core_id,
                 protocol=row.protocol, source_account_id=row.source_account_id,
+                inbound_tag=row.inbound_tag,
                 connection_id=row.connection_id,
                 expires_at=_aware(row.expires_at) or now)
 
@@ -1869,6 +1894,7 @@ class ApplicationAuthRepository:
                 public_id=row.public_id, core_id=row.core_id,
                 protocol=row.protocol, source_account_id=row.source_account_id,
                 connection_id=row.connection_id, expires_at=expires_at,
+                inbound_tag=row.inbound_tag,
                 application_public_id=app.public_id,
                 config_key_id=config_key.kid,
                 config_private_key=config_private,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 import time
 from collections.abc import Callable
@@ -59,7 +60,15 @@ class ApplicationAuthService:
         return datetime.fromtimestamp(self._now(), tz=timezone.utc)
 
     def _check_timestamp(self, signed: SignedRequest, now: datetime) -> None:
-        if abs(int(now.timestamp()) - int(signed.timestamp)) > self.request_window_seconds:
+        skew = abs(int(now.timestamp()) - int(signed.timestamp))
+        if skew > self.request_window_seconds:
+            # f-applogin-1: a phone clock outside the signing window is
+            # indistinguishable from any other 401 for the user; log the skew
+            # so support can name it. No secret material in these values.
+            logging.getLogger(__name__).warning(
+                "application request rejected: timestamp skew %ds exceeds "
+                "window %ds (application_id=%r)",
+                skew, self.request_window_seconds, signed.application_id)
             raise ApplicationAuthFailed("signed request is invalid")
 
     @staticmethod

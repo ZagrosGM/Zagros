@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
@@ -83,6 +84,15 @@ async def _signed_request(request: Request) -> SignedRequest:
     except (KeyError, TypeError, ValueError) as exc:
         from app.applicationapi.errors import ApplicationAuthFailed
 
+        # f-applogin-1: missing/garbled signing headers were silently 401;
+        # log which header failed so a mis-provisioned build is diagnosable.
+        logging.getLogger(__name__).warning(
+            "application request rejected: signing headers invalid "
+            "(app_id=%r, key_id=%r, has_nonce=%s, has_signature=%s)",
+            headers.get("x-zagros-application-id"),
+            headers.get("x-zagros-application-key-id"),
+            bool(headers.get("x-zagros-nonce")),
+            bool(headers.get("x-zagros-signature")))
         raise _error(ApplicationAuthFailed("signed request is invalid")) from exc
     raw_path = request.scope.get("raw_path") or request.url.path.encode("ascii")
     try:

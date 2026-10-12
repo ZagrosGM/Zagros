@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from app.builder.errors import (
@@ -771,9 +771,24 @@ def _job_by_ref(session, build_public_id: str, platform: str, arch: str,
 
 
 def _worker_by_id(session, worker_id: str) -> BuildWorkerModel:
-    row = session.scalars(select(BuildWorkerModel).where(
-        BuildWorkerModel.worker_id == (worker_id or "").strip().lower())
-    ).one_or_none()
+    worker_key = (worker_id or "").strip().lower()
+    try:
+        row = session.scalars(select(BuildWorkerModel).where(
+            BuildWorkerModel.worker_id == worker_key)).one_or_none()
+    except (ValueError, TypeError):
+        # f-buildworker-1: DateTime hydration parses the stored string, so
+        # any non-ISO value in ``last_seen_at`` (manual edit, partial
+        # restore) would fail EVERY heartbeat/claim with a 500 and silently
+        # wedge the build queue (jobs stay 'queued', the worker only logs a
+        # PanelError). Heal the column once and retry; the next heartbeat
+        # immediately persists a real timestamp.
+        session.rollback()
+        session.execute(text(
+            "UPDATE build_workers SET last_seen_at = NULL "
+            "WHERE worker_id = :w"), {"w": worker_key})
+        session.commit()
+        row = session.scalars(select(BuildWorkerModel).where(
+            BuildWorkerModel.worker_id == worker_key)).one_or_none()
     if row is None:
         raise WorkerNotFound(f"worker '{worker_id}' does not exist")
     return row

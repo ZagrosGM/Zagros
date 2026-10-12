@@ -1322,25 +1322,37 @@ want_pass="${creds#*:}"
     async def build_client_config(
         self, account: UserAccount, node: Any | None = None
     ) -> ClientConfig:
+        items = await self.client_config_items(account, node)
+        if not items:
+            protocol = self._ensure_supported(account.protocol)
+            raise CoreError(
+                f"No openvpn inbound available for protocol '{protocol}'."
+            )
+        return items[0]
+
+    async def client_config_items(
+        self, account: UserAccount, node: Any | None = None
+    ) -> list[ClientConfig]:
+        """f-appinbounds-3: one sealed item per granted openvpn listener."""
         self._ensure_supported(account.protocol)
         listeners = self._granted_listeners(account)
-        if not listeners:
-            raise CoreError(
-                f"openvpn account '{account.account_id}' has no granted inbound."
-            )
-        profile = self.render_client_profile(account, listeners[0], node)
         static = str(self.settings.get("auth_mode") or "management") == "static"
         username = (str(self.settings.get("static_user") or "")
                     if static else account.account_id)
         password = (str(self.settings.get("static_pass") or "")
                     if static else str(account.settings["password"]))
-        return ClientConfig(
-            core_id=self.metadata.id,
-            protocol="ovpn",
-            engine="openvpn",
-            payload={
-                "format": "ovpn", "profile": profile, "auth": "user-pass",
-                "username": username, "password": password,
-            },
-            display_name=f"OpenVPN · {listeners[0]['tag']}",
-        )
+        items: list[ClientConfig] = []
+        for listener in listeners:
+            profile = self.render_client_profile(account, listener, node)
+            items.append(ClientConfig(
+                core_id=self.metadata.id,
+                protocol="ovpn",
+                engine="openvpn",
+                payload={
+                    "format": "ovpn", "profile": profile, "auth": "user-pass",
+                    "username": username, "password": password,
+                },
+                display_name=f"OpenVPN · {listener['tag']}",
+                inbound_tag=listener["tag"],
+            ))
+        return items

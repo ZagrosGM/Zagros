@@ -861,6 +861,18 @@ class SSHTunnelDriver(BaseCoreDriver):
     async def build_client_config(
         self, account: UserAccount, node: Any | None = None
     ) -> ClientConfig:
+        items = await self.client_config_items(account, node)
+        if not items:
+            protocol = self._ensure_supported(account.protocol)
+            raise CoreError(
+                f"No ssh inbound available for protocol '{protocol}'."
+            )
+        return items[0]
+
+    async def client_config_items(
+        self, account: UserAccount, node: Any | None = None
+    ) -> list[ClientConfig]:
+        """f-appinbounds-3: one sealed item per granted ssh listener."""
         self._ensure_supported(account.protocol)
         self._ensure_credentials(account)
         s = self.settings
@@ -872,24 +884,24 @@ class SSHTunnelDriver(BaseCoreDriver):
         if not host:
             raise CoreError("no public endpoint is configured for SSH delivery")
         listeners = self._granted_listeners(account)
-        if not listeners:
-            raise CoreError(
-                f"ssh account '{account.account_id}' has no granted inbound."
-            )
-        return ClientConfig(
-            core_id=self.metadata.id,
-            protocol="ssh",
-            engine="ssh",
-            payload={
-                "format": "ssh",
-                "host": host,
-                "port": int(listeners[0]["port"]),
-                "username": self._unix_name(account),
-                "password": self._account_password(account),
-                "hint": "ssh -D 1080 (SOCKS) or ssh -L/-R port forwards",
-            },
-            display_name=f"SSH Tunnel · {listeners[0]['tag']}",
-        )
+        items: list[ClientConfig] = []
+        for listener in listeners:
+            items.append(ClientConfig(
+                core_id=self.metadata.id,
+                protocol="ssh",
+                engine="ssh",
+                payload={
+                    "format": "ssh",
+                    "host": host,
+                    "port": int(listener["port"]),
+                    "username": self._unix_name(account),
+                    "password": self._account_password(account),
+                    "hint": "ssh -D 1080 (SOCKS) or ssh -L/-R port forwards",
+                },
+                display_name=f"SSH Tunnel · {listener['tag']}",
+                inbound_tag=listener["tag"],
+            ))
+        return items
 
     # ------------------------------------------------------------------ #
     # chain ingress — native ssh outbounds (xray ssh outbound)

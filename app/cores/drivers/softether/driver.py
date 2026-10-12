@@ -1792,7 +1792,12 @@ class SoftEtherDriver(BaseCoreDriver):
             payload = {
                 "format": "softether",
                 "server": server,
-                "port": int(s.get("softether_port") or 443),
+                # f-seport-1: the native SSL-VPN block stream dials the same
+                # multi-protocol listener the SE management surface binds
+                # (native_port, default 5555) — never the SSTP-only 443,
+                # which has no listener unless an operator binds one.
+                "port": int(s.get("softether_port")
+                            or s.get("native_port") or 5555),
                 "username": account.account_id,
                 "password": password,
                 "hub": s["hub"],

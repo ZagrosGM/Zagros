@@ -171,6 +171,16 @@ def _provision_legacy_into_main(main_url: str) -> None:
 
 
 def _set_marker(conn, counts: dict) -> None:
+    # f-dbmerge-4: the marker store is the P3 `settings` table, but the boot
+    # order runs dbmerge BEFORE alembic — on a truly fresh install that
+    # table does not exist yet and the marker write died with
+    # "no such table: settings", silently keeping the two-database layout.
+    # The schema matches the platform's SettingModel exactly; alembic's
+    # create_all is checkfirst and will not touch an existing table.
+    conn.execute(text(
+        'CREATE TABLE IF NOT EXISTS settings ('
+        '"key" VARCHAR(128) NOT NULL PRIMARY KEY, '
+        'value_json JSON, updated_at DATETIME)'))
     payload = json.dumps({
         "v": 1,
         "merged_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

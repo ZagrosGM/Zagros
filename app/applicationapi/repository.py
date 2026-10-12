@@ -2509,7 +2509,15 @@ class ApplicationAuthRepository:
                         and _aware(key.not_before) > now)
                     or (_aware(key.not_after) is not None
                         and _aware(key.not_after) <= now)
-                    or grant is None or grant.status != _ACTIVE
+                    # f-applease-1: mirror _assert_resource_authority — the
+                    # Bound-users grant is an authority only in explicit
+                    # bound_only mode. In the default all_users mode the row
+                    # is optional bookkeeping (f-panel-7); demanding it here
+                    # revoked EVERY fresh lease at the next sweep tick
+                    # ("authority_revoked" seconds after issuance), so
+                    # application connections never carried traffic.
+                    or ((app.user_access_mode or "all_users") == "bound_only"
+                        and grant is None)
                     or (_aware(user.expire_at) is not None
                         and _aware(user.expire_at) <= now)
                     or (user.data_limit_bytes is not None

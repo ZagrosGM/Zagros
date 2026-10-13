@@ -140,11 +140,19 @@ class ClientApiService:
     async def refresh(self, refresh_token: str) -> AuthTokens:
         row = await self._refresh.get(hash_token(refresh_token))
         now = _epoch_to_dt(self._now())
-        if row is None or row.revoked or row.expires_at < now:
+        if row is None or row.expires_at < now:
             raise AuthFailedError("refresh token invalid")
+        # f-sessgrace-1: rotation-race grace. A refresh whose RESPONSE was
+        # lost on a flaky mobile network leaves the app holding a token this
+        # call has already rotated+revoked; the app's next attempt used to
+        # get 401 and hard-logout (observed: forced re-login every few
+        # minutes). As long as the presented token is within its original
+        # lifetime, heal instead: issue fresh tokens. The old row stays
+        # revoked, so after it expires this degenerates to strict mode.
         new = await self._issue_tokens(row.user_id)
-        await self._refresh.revoke(row.token_hash, rotated_to=hash_token(new.refresh_token))
-        self._emit("token.rotated", {"user_id": row.user_id})
+        if not row.revoked:
+            await self._refresh.revoke(row.token_hash, rotated_to=hash_token(new.refresh_token))
+            self._emit("token.rotated", {"user_id": row.user_id})
         return new
 
     async def logout(self, refresh_token: str) -> None:

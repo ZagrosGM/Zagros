@@ -238,7 +238,16 @@ class PlatformRuntime:
                or os.environ.get("SQLALCHEMY_DATABASE_URL")
                or "sqlite:///zagros.db")
         secret = os.environ.get("ZAGROS_SECRET_KEY", "")
-        return cls(database_url=url, master_secret=secret)
+        # f-sessttl-1: client access tokens were hardwired to 900s, forcing a
+        # token refresh every 15 minutes — on flaky mobile networks each
+        # refresh is a logout risk (rotation race). Default raised to 12h and
+        # configurable; ZAGROS_CLIENT_TOKEN_TTL is in seconds.
+        try:
+            client_ttl = int(os.environ.get("ZAGROS_CLIENT_TOKEN_TTL", "43200"))
+        except ValueError:
+            client_ttl = 43200
+        return cls(database_url=url, master_secret=secret,
+                   client_token_ttl=client_ttl)
 
     def _bandwidth_ids_by_username(self, usernames: list[str]) -> dict[str, int]:
         """Resolve Xray legacy identities to canonical platform User IDs."""

@@ -1767,6 +1767,9 @@ class AcmeIssueBody(BaseModel):
     email: str | None = None
     provider: str | None = None  # certbot | acme.sh | lego (auto = first found)
     force: bool = False
+    # f-acmewild-1: wildcard (*.dom) issuance runs DNS-01 on lego with these.
+    dns_provider: str | None = None   # lego provider id, e.g. "cloudflare"
+    dns_credentials: dict[str, str] | None = None  # credential env vars
 
 
 @zagros_admin_router.get("/certificates/acme")
@@ -1787,7 +1790,11 @@ async def certificates_acme_issue(body: AcmeIssueBody, runtime=Depends(get_runti
     try:
         return await asyncio.to_thread(
             acme.issue, _data_dir(runtime), body.domain,
-            email=body.email, provider_id=body.provider, force=body.force)
+            email=body.email, provider_id=body.provider, force=body.force,
+            dns_provider=body.dns_provider,
+            dns_env=body.dns_credentials,
+            seal=lambda env: runtime.cipher.encrypt_json(
+                env, aad="acme-dns-env"))
     except acme.ACMEError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -1804,7 +1811,9 @@ async def certificates_acme_renew(domain: str, body: AcmeRenewBody | None = None
     try:
         return await asyncio.to_thread(
             acme.renew, _data_dir(runtime), domain,
-            force=bool(body and body.force))
+            force=bool(body and body.force),
+            unseal=lambda blob: runtime.cipher.decrypt_json(
+                blob, aad="acme-dns-env"))
     except acme.ACMEError as exc:
         raise HTTPException(422, str(exc)) from exc
     except FileNotFoundError as exc:

@@ -771,7 +771,10 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
           // The compatibility update model treats null as "field omitted";
           // explicit zero is the API spelling for clearing either limit.
           ip_limit: ip_limit ?? 0, device_limit: device_limit ?? 0,
-          download_limit_mbps, upload_limit_mbps, expire, note: form.note || null,
+          download_limit_mbps, upload_limit_mbps,
+          // f-expireclear-1: the API treats null as "field omitted" —
+          // explicit zero is the spelling for clearing the expiry.
+          expire: expire ?? 0, note: form.note || null,
           telegram_id: form.telegramId ? Number(form.telegramId) : null,
         };
         // Send status only when the admin actually changed it: an expired
@@ -1011,7 +1014,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
             value={form.uploadLimitMbps}
             onChange={(e) => setForm({ ...form, uploadLimitMbps: e.target.value })} />
         </Field>
-        <Field label={t("users.expire")} hint={t("empty = never")}>
+        <Field label={t("users.expire")} hint={t("empty = never (clearing the date removes the expiry)")}>
           <Input type="date" value={form.expireDate}
             onChange={(e) => setForm({ ...form, expireDate: e.target.value })} />
         </Field>

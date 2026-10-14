@@ -72,6 +72,9 @@ class Discovery(BaseModel):
     pending_token: bool | None = None
     control_plane_port: int | None = None
     already_paired: bool = False
+    # f-nodedns-1: when the operator addressed the node by DOMAIN, this is
+    # the IP the name resolves to (informational; the pin secures either).
+    resolved_ip: str | None = None
     error: str | None = None
 
 

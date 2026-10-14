@@ -69,10 +69,10 @@ def validate_domain(domain: str) -> str:
     d = (domain or "").strip().rstrip(".").lower()
     if not d:
         raise ACMEError("domain is required")
-    if d.startswith("*."):
-        raise ACMEError(
-            "wildcard certificates need DNS-01 automation — the standalone "
-            "HTTP-01 flow cannot issue them (issue per-host FQDNs instead)")
+    wildcard = d.startswith("*.")
+    base = d[2:] if wildcard else d
+    if not base or base.startswith("*.") or "*" in base:
+        raise ACMEError(f"'{domain}' is not a valid certificate domain")
     try:
         ipaddress.ip_address(d)
         raise ACMEError("an IP address cannot be issued by a public ACME CA "
@@ -80,20 +80,25 @@ def validate_domain(domain: str) -> str:
     except ValueError:
         pass  # not an IP literal — the expected path
     try:
-        ascii_d = d.encode("idna").decode("ascii")
+        ascii_base = base.encode("idna").decode("ascii")
     except UnicodeError as exc:
         raise ACMEError(f"'{domain}' is not a valid DNS name: {exc}") from exc
-    labels = ascii_d.split(".")
-    if len(ascii_d) > 253 or len(labels) < 2 or any(
+    labels = ascii_base.split(".")
+    if len(ascii_base) > 253 or len(labels) < 2 or any(
             not _DOMAIN_LABEL.match(lbl) for lbl in labels):
         raise ACMEError(f"'{domain}' is not a valid fully-qualified domain name")
-    return ascii_d
+    # f-acmewild-1: wildcard domains ARE allowed — they are issued via the
+    # DNS-01 solver (lego, auto-provisioned) instead of HTTP-01.
+    return ("*." + ascii_base) if wildcard else ascii_base
 
 
-def _default_run(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess:
+def _default_run(argv: list[str], *, timeout: int,
+                 env_extra: dict | None = None) -> subprocess.CompletedProcess:
     env = {"PATH": os.environ.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
            "HOME": os.environ.get("HOME", "/root"),
            "LANG": "C", "LC_ALL": "C"}
+    if env_extra:
+        env.update({str(k): str(v) for k, v in env_extra.items()})
     try:
         return subprocess.run(argv, capture_output=True, text=True,
                               timeout=timeout, env=env, shell=False, check=False)
@@ -262,9 +267,19 @@ def list_acme(data_dir: str) -> list[dict]:
 # provider command lines (the REAL tool invocations, per provider)
 # --------------------------------------------------------------------- #
 
-def _issue_commands(p: ProviderInfo, domain: str, email: str | None) -> list[list[str]]:
+def _issue_commands(p: ProviderInfo, domain: str, email: str | None,
+                    dns_provider: str | None = None) -> list[list[str]]:
     """Command(s) a provider runs to ISSUE, in order (acme.sh registers the
-    account first when a contact email is supplied)."""
+    account first when a contact email is supplied).
+
+    ``dns_provider`` selects the DNS-01 solver (wildcard certificates) and
+    is only supported by lego."""
+    if dns_provider:
+        # lego REQUIRES an email; the caller enforces it before building args
+        assert email, "lego issue without email"
+        return [[p.path, "--accept-tos", "--email", email, "--domains", domain,
+                 "--dns", dns_provider, "--key-type", "rsa2048",
+                 "--path", _lego_home(), "run"]]
     if p.id == "certbot":
         args = [p.path, "certonly", "--standalone", "--non-interactive",
                 "--agree-tos", "--preferred-challenges", "http",
@@ -294,6 +309,60 @@ def _lego_home(data_dir: str | None = None) -> str:
     return str(Path(base) / "acme" / "lego")
 
 
+def _lego_bin(data_dir: str | None = None) -> Path:
+    base = data_dir or os.environ.get("ZAGROS_ACME_HOME", "/var/lib/zagros")
+    return Path(base) / "acme" / "lego-bin" / "lego"
+
+
+def _lego_cert_key(domain: str) -> str:
+    """lego's on-disk key for a domain: leading '*.' becomes '_.'."""
+    return ("_." + domain[2:]) if domain.startswith("*.") else domain
+
+
+# f-acmewild-1: DNS-01 wildcard issuance runs on lego. The panel image ships
+# certbot only, whose DNS-01 plugins are per-provider OS packages — a static
+# lego binary is provisioned on first wildcard use instead (no apt, no deps).
+_LEGO_PINNED_VERSION = "v4.14.2"
+
+
+def ensure_lego(data_dir: str | None = None, run=_default_run) -> str:
+    """Path to a runnable lego binary: PATH → panel dir → pinned download."""
+    found = shutil.which("lego")
+    if found:
+        return found
+    target = _lego_bin(data_dir)
+    if target.is_file() and os.access(target, os.X_OK):
+        return str(target)
+    version = _LEGO_PINNED_VERSION
+    url = (f"https://github.com/go-acme/lego/releases/download/"
+           f"{version}/lego_{version}_linux_amd64.tar.gz")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import tarfile
+        import tempfile
+        import urllib.request
+        req = urllib.request.Request(url, headers={"User-Agent": "zagros-panel"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            payload = resp.read()
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as fh:
+            fh.write(payload)
+            archive = fh.name
+        with tarfile.open(archive, "r:gz") as tar:
+            member = next(m for m in tar.getmembers()
+                          if m.isfile() and m.name.split("/")[-1] == "lego")
+            extracted = tar.extractfile(member)
+            target.write_bytes(extracted.read())
+        os.chmod(target, 0o700)
+    except Exception as exc:  # noqa: BLE001 — re-raised as an honest ACMEError
+        raise ACMEError(
+            f"cannot provision the lego ACME client needed for wildcard "
+            f"(DNS-01) issuance from {url}: {exc}") from exc
+    proc = run([str(target), "--version"], timeout=30)
+    if proc.returncode != 0:
+        raise ACMEError(f"provisioned lego is not runnable: {_tail(proc)}")
+    return str(target)
+
+
 def _export_paths(p: ProviderInfo, domain: str) -> tuple[Path, Path]:
     """Where the provider materialized (cert, key) after a successful run."""
     if p.id == "certbot":
@@ -304,7 +373,8 @@ def _export_paths(p: ProviderInfo, domain: str) -> tuple[Path, Path]:
         staging = Path(os.environ.get("HOME", "/root")) / ".acme.sh" / ".zagros-export" / domain
         return staging / "fullchain.pem", staging / "key.pem"
     home = Path(_lego_home()) / "certificates"
-    return home / f"{domain}.crt", home / f"{domain}.key"
+    key = _lego_cert_key(domain)
+    return home / f"{key}.crt", home / f"{key}.key"
 
 
 # --------------------------------------------------------------------- #
@@ -313,14 +383,39 @@ def _export_paths(p: ProviderInfo, domain: str) -> tuple[Path, Path]:
 
 def issue(data_dir: str, domain: str, *, email: str | None = None,
           provider_id: str | None = None, force: bool = False,
-          run=_default_run) -> dict:
+          run=_default_run, dns_provider: str | None = None,
+          dns_env: dict | None = None, seal=None) -> dict:
     """Issue a REAL certificate and deploy it into the managed store.
 
     Existing ACME entries refuse duplicate issuance unless ``force`` (a
     re-issue converges by re-importing, never creates a second entry).
+
+    f-acmewild-1: wildcard names (``*.dom``) are issued through lego's
+    DNS-01 solver: ``dns_provider`` is a lego DNS provider id (e.g.
+    ``cloudflare``) and ``dns_env`` its credential environment (e.g.
+    ``CLOUDFLARE_DNS_API_TOKEN``). ``seal`` stores the credentials
+    encrypted in the bookkeeping sidecar so auto-renewal works; without a
+    seal function they are kept ONLY for this run and renewal requires a
+    re-issue.
     """
     domain = validate_domain(domain)
+    is_dns_mode = bool(domain.startswith("*.") or dns_provider)
+    if is_dns_mode:
+        dns_provider = (dns_provider or "").strip()
+        if not dns_provider:
+            raise ACMEError(
+                "wildcard certificates require a DNS provider for the "
+                "DNS-01 challenge (e.g. 'cloudflare')")
+        if not dns_env:
+            raise ACMEError(
+                f"the '{dns_provider}' DNS solver needs its credential "
+                "environment (e.g. CLOUDFLARE_DNS_API_TOKEN)")
     provider = pick_provider(provider_id)
+    if is_dns_mode:
+        # DNS-01 always runs on lego (auto-provisioned static binary).
+        lego_path = ensure_lego(data_dir, run)
+        provider = ProviderInfo(id="lego", name="lego (panel-provisioned)",
+                                path=lego_path)
     if provider is None:
         raise ACMEError(
             "no ACME client available on this host (looked for certbot, "
@@ -333,12 +428,20 @@ def issue(data_dir: str, domain: str, *, email: str | None = None,
         raise ACMEError(
             f"'{domain}' already has an ACME-managed certificate (provider "
             f"{existing.get('provider')}) — renew it, or re-issue with force")
-    port80_probe()
+    if is_dns_mode:
+        if dns_env and seal:
+            sealed_env = seal(dns_env)
+        else:
+            sealed_env = None
+    else:
+        port80_probe()
 
-    for step in _issue_commands(provider, domain, email):
-        proc = run(step, timeout=_ISSUE_TIMEOUT)
+    dns_kwargs = {"env_extra": dns_env} if is_dns_mode else {}
+    for step in _issue_commands(provider, domain, email, dns_provider):
+        proc = run(step, timeout=_ISSUE_TIMEOUT, **dns_kwargs)
         _require_ok(proc, f"{provider.name} run {step[1] if len(step) > 1 else ''} for {domain}")
-    _wait_port80_listening()
+    if not is_dns_mode:
+        _wait_port80_listening()
 
     if provider.id == "acme.sh":
         staging = _export_paths(provider, domain)[0].parent
@@ -349,9 +452,13 @@ def issue(data_dir: str, domain: str, *, email: str | None = None,
                   timeout=120)
         _require_ok(exp, "acme.sh certificate export")
     cert_path, key_path = _export_paths(provider, domain)
-    _deploy(data_dir, domain, cert_path, key_path, provider=provider.id,
-            email=email, issued_at=datetime.now(timezone.utc).isoformat(),
-            renewed_at=None)
+    deploy_meta = dict(provider=provider.id, email=email,
+                       issued_at=datetime.now(timezone.utc).isoformat(),
+                       renewed_at=None)
+    if is_dns_mode:
+        deploy_meta.update(mode="dns-01", dns_provider=dns_provider,
+                           dns_env_sealed=sealed_env)
+    _deploy(data_dir, domain, cert_path, key_path, **deploy_meta)
     return {"ok": True, "domain": domain, "provider": provider.id,
             "message": f"issued by {provider.name} and deployed to the managed store"}
 
@@ -379,7 +486,7 @@ def _deploy(data_dir: str, domain: str, cert_path: Path, key_path: Path, **meta)
 
 
 def renew(data_dir: str, domain: str, *, force: bool = False,
-          run=_default_run) -> dict:
+          run=_default_run, unseal=None) -> dict:
     """Renew one ACME entry (idempotent: not-due renewals simply re-deploy
     the SAME material — no duplicate anything)."""
     domain = validate_domain(domain)
@@ -391,6 +498,33 @@ def renew(data_dir: str, domain: str, *, force: bool = False,
         raise ACMEError(
             f"the provider that issued '{domain}' ({meta.get('provider')}) is "
             f"no longer available — install it back to renew")
+    if meta.get("mode") == "dns-01":
+        # f-acmewild-1: DNS-01 renewal re-runs lego with the SAME solver and
+        # the sealed credential environment unsealed by the caller.
+        sealed = meta.get("dns_env_sealed")
+        if not sealed or unseal is None:
+            raise ACMEError(
+                f"'{domain}' was issued via DNS-01; renewal needs the stored "
+                "DNS credentials (sealed) and an unseal key — re-issue with "
+                "force if the credentials changed")
+        dns_env = unseal(sealed)
+        lego_path = ensure_lego(data_dir, run)
+        args = [lego_path, "--accept-tos", "--email", meta.get("email") or "",
+                "--domains", domain, "--dns", str(meta.get("dns_provider")),
+                "--path", _lego_home(), "renew", "--days", "90"]
+        if not meta.get("email"):
+            raise ACMEError("lego renew needs the original account email "
+                            "(lost from the sidecar) — re-issue instead")
+        proc = run(args, timeout=_RENEW_TIMEOUT, env_extra=dns_env)
+        _require_ok(proc, f"lego DNS-01 renewal for {domain}")
+        cert_path, key_path = _export_paths(provider, domain)
+        _deploy(data_dir, domain, cert_path, key_path, provider=provider.id,
+                email=meta.get("email"), issued_at=meta.get("issued_at"),
+                renewed_at=datetime.now(timezone.utc).isoformat(),
+                mode="dns-01", dns_provider=meta.get("dns_provider"),
+                dns_env_sealed=sealed)
+        return {"ok": True, "domain": domain, "provider": provider.id,
+                "message": "renewed via DNS-01 and re-deployed"}
     if provider.id == "certbot":
         args = [provider.path, "renew", "--cert-name", domain, "--non-interactive"]
         if force:
@@ -447,8 +581,9 @@ def remove_acme(data_dir: str, domain: str, *, run=_default_run) -> dict:
                 args = []
             try:
                 if provider.id == "lego":
-                    for f in (live / f"{domain}.crt", live / f"{domain}.key",
-                              live / f"{domain}.json", live / f"{domain}.issuer.crt"):
+                    key = _lego_cert_key(domain)
+                    for f in (live / f"{key}.crt", live / f"{key}.key",
+                              live / f"{key}.json", live / f"{key}.issuer.crt"):
                         try:
                             f.unlink()
                         except OSError:
@@ -474,7 +609,8 @@ def acme_status(data_dir: str) -> dict:
     return {**avail, "entries": list_acme(data_dir)}
 
 
-def renew_due(data_dir: str, *, within_days: int = 30, run=_default_run) -> list[dict]:
+def renew_due(data_dir: str, *, within_days: int = 30, run=_default_run,
+              unseal=None) -> list[dict]:
     """Auto-maintenance sweep (scheduler): renew entries whose certificate
     expires soon. One failing entry never blocks the others; every outcome
     is logged. Returns per-domain results."""
@@ -483,7 +619,7 @@ def renew_due(data_dir: str, *, within_days: int = 30, run=_default_run) -> list
         if entry["days_left"] is None or entry["days_left"] > within_days:
             continue
         try:
-            out = renew(data_dir, entry["domain"], run=run)
+            out = renew(data_dir, entry["domain"], run=run, unseal=unseal)
             results.append({"domain": entry["domain"], "ok": True,
                             "message": out["message"]})
             logger.info("acme auto-renew: %s renewed", entry["domain"])

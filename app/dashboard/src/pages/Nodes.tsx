@@ -15,8 +15,8 @@
 // copy the fingerprint straight from the node's console.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity, ClipboardCopy, HardDrive, KeyRound, Plus, RefreshCcw, Server,
-  Terminal, Trash2, Wifi,
+  Activity, ClipboardCopy, HardDrive, KeyRound, Pencil, Plus, RefreshCcw,
+  Server, Terminal, Trash2, Wifi,
 } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
@@ -61,6 +61,7 @@ export default function Nodes() {
     { node: Node; installer: InstallerCommand } | number | null
   >(null);
   const [pairFor, setPairFor] = useState<Node | null>(null);
+  const [editFor, setEditFor] = useState<Node | null>(null);
   const [deleteFor, setDeleteFor] = useState<Node | null>(null);
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["zagros", "nodes"] });
@@ -220,7 +221,9 @@ export default function Nodes() {
                   <Link to={`/cores?node=${node.id}`}
                     className="inline-flex h-8 select-none items-center gap-1.5 rounded-xl px-3 text-xs font-medium text-content-2 transition-colors hover:bg-surface-3 hover:text-content">
                     <Server size={13} />{t("cores")}</Link>
-                  <Button variant="ghost" size="icon" className="ms-auto" aria-label={t("delete node")}
+                  <Button variant="ghost" size="sm" className="ms-auto" aria-label={t("edit node")}
+                    onClick={() => setEditFor(node)}><Pencil size={13} />{t("common.edit")}</Button>
+                  <Button variant="ghost" size="icon" aria-label={t("delete node")}
                     onClick={() => setDeleteFor(node)}><Trash2 size={14} /></Button>
                 </div>
               </Card>
@@ -245,6 +248,9 @@ export default function Nodes() {
       )}
       {pairFor && (
         <PairDialog node={pairFor} onClose={() => { setPairFor(null); invalidate(); }} />
+      )}
+      {editFor && (
+        <EditNodeDialog node={editFor} onClose={() => setEditFor(null)} />
       )}
       <ConfirmDialog
         open={Boolean(deleteFor)} onClose={() => setDeleteFor(null)}
@@ -314,6 +320,86 @@ function AddNodeDialog({ onClose, onCreated }: {
             onChange={(v) => setForm({ ...form, add_as_new_host: v })} />
         </Field>
       </div>
+      {form.port === form.api_port && (
+        <p className="mt-3 text-[11px] text-danger">{t("control-plane port and api port must differ.")}</p>
+      )}
+      {error && <p role="alert" className="mt-3 rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
+    </Dialog>
+  );
+}
+
+// --------------------------------------------------------------------------- //
+function EditNodeDialog({ node, onClose }: { node: Node; onClose: () => void }) {
+  const t = useT();
+  const qc = useQueryClient();
+  const [form, setForm] = useState({
+    name: node.name, address: node.address, port: node.port,
+    api_port: node.api_port, usage_coefficient: node.usage_coefficient,
+    add_as_new_host: node.add_as_new_host,
+  });
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const valid = Boolean(form.name.trim() && form.address.trim()
+    && form.port !== form.api_port);
+  const addressChanged = form.address.trim() !== node.address
+    || Number(form.port) !== node.port;
+
+  const save = async () => {
+    setBusy(true); setError("");
+    try {
+      await api.put(`/zagros/nodes/${node.id}`, {
+        name: form.name.trim(),
+        address: form.address.trim(),
+        port: Number(form.port), api_port: Number(form.api_port),
+        usage_coefficient: Number(form.usage_coefficient) || 1,
+        add_as_new_host: form.add_as_new_host,
+      });
+      qc.invalidateQueries({ queryKey: ["zagros", "nodes"] });
+      toast.ok("node updated");
+      onClose();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : t("common.error"));
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <Dialog open onClose={busy ? () => {} : onClose} title={`${t("common.edit")} — ${node.name}`}
+      subtitle={t("IP or DNS name, both work — the certificate pin secures either. Changing the address or control-plane port un-pairs the node (pair again after the change).")}
+      footer={<>
+        <Button variant="ghost" disabled={busy} onClick={onClose}>{t("common.cancel")}</Button>
+        <Button onClick={save} loading={busy} disabled={!valid}>{t("common.save")}</Button>
+      </>}>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="name" required>
+          <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        </Field>
+        <Field label="address" required hint={t("IP or DNS name the panel reaches the node on")}>
+          <Input dir="ltr" value={form.address}
+            onChange={(e) => setForm({ ...form, address: e.target.value })} />
+        </Field>
+        <Field label={t("control-plane port")} hint={t("HTTPS, signed commands")}>
+          <Input type="number" min={1} max={65535} value={form.port}
+            onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} />
+        </Field>
+        <Field label={t("api port")} hint={t("read-only bootstrap/info endpoint")}>
+          <Input type="number" min={1} max={65535} value={form.api_port}
+            onChange={(e) => setForm({ ...form, api_port: Number(e.target.value) })} />
+        </Field>
+        <Field label={t("usage coefficient")}>
+          <Input type="number" min="0.1" step="0.1" value={form.usage_coefficient}
+            onChange={(e) => setForm({ ...form, usage_coefficient: Number(e.target.value) })} />
+        </Field>
+        <Field label={t("add as host")} hint={t("bind the node address as a Host on sync, so configs can target it")}>
+          <Switch checked={form.add_as_new_host} label={t("add as new host")}
+            onChange={(v) => setForm({ ...form, add_as_new_host: v })} />
+        </Field>
+      </div>
+      {addressChanged && (
+        <p className="mt-3 rounded-xl border border-warn/30 bg-warn-soft px-3 py-2 text-[11px] text-warn">
+          {t("The address or port changed: the node returns to “pending” and must be paired again (re-run the installer or use pair manual).")}
+        </p>
+      )}
       {form.port === form.api_port && (
         <p className="mt-3 text-[11px] text-danger">{t("control-plane port and api port must differ.")}</p>
       )}

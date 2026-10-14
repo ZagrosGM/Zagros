@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 
 from app import scheduler
+from app import app as webapp
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,16 @@ def renew_acme_certificates() -> None:
     try:
         from app.platform.acme import default_data_dir, renew_due
 
-        results = renew_due(default_data_dir())
+        unseal = None
+        try:
+            # DNS-01 entries keep their credentials sealed with the runtime
+            # cipher; the sweep needs the unseal callback to renew them.
+            unseal = lambda blob: webapp.state.zagros.cipher.decrypt_json(
+                blob, aad="acme-dns-env")
+        except Exception:  # noqa: BLE001 — renew HTTP-01 entries regardless
+            unseal = None
+
+        results = renew_due(default_data_dir(), unseal=unseal)
         for r in results:
             if not r["ok"]:
                 logger.warning("acme renewal failed for %s: %s", r["domain"], r["error"])

@@ -29,6 +29,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import threading
 import time
 from pathlib import Path
@@ -368,6 +369,16 @@ async def discover(runtime, node_id: int) -> Discovery:
         return Discovery(reachable=False, error=str(exc))
 
     fingerprint = _normalize_fingerprint(str(info.get("certificate_sha256") or ""))
+    # f-nodedns-1: surface the IP behind a DOMAIN address (informational).
+    resolved_ip = None
+    try:
+        infos = await asyncio.to_thread(
+            socket.getaddrinfo, row.address, None,
+            family=socket.AF_INET, type=socket.SOCK_STREAM)
+        if infos:
+            resolved_ip = infos[0][4][0]
+    except Exception:  # noqa: BLE001 — informational only, never blocks
+        resolved_ip = None
     return Discovery(
         reachable=True,
         node_id=info.get("node_id"),
@@ -378,6 +389,7 @@ async def discover(runtime, node_id: int) -> Discovery:
         registered=bool(info.get("registered")),
         pending_token=bool(info.get("pending_token")),
         control_plane_port=info.get("control_plane_port"),
+        resolved_ip=resolved_ip,
         already_paired=bool(
             row.agent_identity and info.get("node_id") == row.agent_identity),
     )

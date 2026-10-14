@@ -303,20 +303,32 @@ function AcmeIssueDialog({ providers, onClose }: { providers: AcmeProvider[]; on
   const [force, setForce] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [dnsProvider, setDnsProvider] = useState("cloudflare");
+  const [dnsCreds, setDnsCreds] = useState("");
   const d = domain.trim().toLowerCase();
+  const wildcard = d.startsWith("*.");
   // front-door sanity only — the backend validates authoritatively (idna,
-  // wildcard/IP refusal, duplicate entries, the lego email requirement)
-  const invalid = !d || d.includes("*") || !d.includes(".") || d.includes("/") || d.includes(" ");
+  // wildcard IP refusal, duplicate entries, the lego email requirement)
+  const invalid = !d || (d.includes("*") && !wildcard) || !d.includes(".")
+    || d.includes("/") || d.includes(" ");
+  const dnsEnv = Object.fromEntries(dnsCreds.split("\n").map((line) => {
+    const idx = line.indexOf("=");
+    return idx > 0 ? [line.slice(0, idx).trim(), line.slice(idx + 1).trim()] : null;
+  }).filter(Boolean) as [string, string][]);
+  const invalidFinal = invalid
+    || (wildcard && (!dnsProvider.trim() || Object.keys(dnsEnv).length === 0));
   return (
     <Dialog open onClose={busy ? () => {} : onClose} title={t("issue certificate (ACME)")}
       subtitle={t("standalone HTTP-01: DNS for this domain must resolve to THIS host and port 80 must be free. A failed run returns the client's own error tail — nothing is green-lit unless the CA really issued.")}
       footer={<>
         <Button variant="ghost" disabled={busy} onClick={onClose}>{t("common.cancel")}</Button>
-        <Button loading={busy} disabled={invalid} onClick={async () => {
+        <Button loading={busy} disabled={invalidFinal} onClick={async () => {
           setBusy(true); setError("");
           try {
             const r = await api.post<{ ok: boolean; message: string }>("/zagros/certificates/acme/issue", {
-              domain: d, email: email.trim() || null, provider: provider === "auto" ? null : provider, force,
+              domain: d, email: email.trim() || null,
+              provider: provider === "auto" ? null : provider, force,
+              ...(wildcard ? { dns_provider: dnsProvider.trim(), dns_credentials: dnsEnv } : {}),
             });
             toast.ok(r.message || "certificate issued");
             qc.invalidateQueries({ queryKey: ["zagros", "certificates"] });
@@ -326,19 +338,35 @@ function AcmeIssueDialog({ providers, onClose }: { providers: AcmeProvider[]; on
       </>}>
       <div className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label={t("domain")} required hint={t("a public hostname pointing at this server — wildcards need DNS-01 and are refused here")}>
+          <Field label={t("domain")} required hint={wildcard
+            ? t("wildcard: issued via DNS-01 with a lego DNS provider (auto-provisioned)")
+            : t("a public hostname pointing at this server — use *.domain for a wildcard certificate")}>
             <Input value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="panel.example.com" dir="ltr" autoFocus />
           </Field>
           <Field label={t("contact email")} hint={t("expiry notices from Let's Encrypt; required when the provider is lego")}>
             <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="admin@example.com" dir="ltr" />
           </Field>
         </div>
-        <Field label="ACME client" hint={t("auto = first detected on this host")}>
-          <Select value={provider} onChange={(e) => setProvider(e.target.value)}>
-            <option value="auto">auto detect</option>
-            {providers.map((p) => <option key={p.id} value={p.id}>{p.name} — {p.path}</option>)}
-          </Select>
-        </Field>
+        {wildcard && (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="DNS provider" hint={t("any lego provider id — e.g. cloudflare, route53, digitalocean, hetzner, duckdns")}>
+              <Input value={dnsProvider} onChange={(e) => setDnsProvider(e.target.value)} dir="ltr" />
+            </Field>
+            <Field label="DNS credentials" hint={t("one KEY=VALUE per line — e.g. CLOUDFLARE_DNS_API_TOKEN=... (stored encrypted, reused for auto-renew)")}>
+              <textarea dir="ltr" rows={3} className="w-full rounded-xl border border-border bg-surface px-3 py-2 font-mono text-[12px] text-content outline-none focus:border-brand"
+                value={dnsCreds} onChange={(e) => setDnsCreds(e.target.value)}
+                placeholder={"CLOUDFLARE_DNS_API_TOKEN=..."} />
+            </Field>
+          </div>
+        )}
+        {!wildcard && (
+          <Field label="ACME client" hint={t("auto = first detected on this host")}>
+            <Select value={provider} onChange={(e) => setProvider(e.target.value)}>
+              <option value="auto">auto detect</option>
+              {providers.map((p) => <option key={p.id} value={p.id}>{p.name} — {p.path}</option>)}
+            </Select>
+          </Field>
+        )}
         <Switch checked={force} onChange={setForce} label={t("re-issue even if this domain is already ACME-managed (converges onto the same entry — no duplicates)")} />
         {error && <p role="alert" className="max-h-36 overflow-auto whitespace-pre-wrap rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 font-mono text-[11px] text-danger">{error}</p>}
       </div>

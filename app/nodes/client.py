@@ -38,6 +38,40 @@ class NodeClientError(RuntimeError):
     """Any transport-, auth- or node-side failure talking to a node."""
 
 
+class PinnedCertAdapter(requests.adapters.HTTPAdapter):
+    """f-nodedns-1: trust ONLY the pinned leaf certificate, never the DNS name.
+
+    The stock ``requests(..., verify=certfile)`` path performs HOSTNAME
+    verification against the node's self-signed certificate. Node certs are
+    issued for the node's identity at install time (typically the IP), so
+    adding/reaching a node by DOMAIN failed with an SSL certificate error
+    even though the pin itself was perfectly sound. This adapter pins the
+    exact leaf (CERT_REQUIRED against that one cert) and disables hostname
+    matching — the pin, not the name, is the trust anchor, so a domain and
+    its underlying IP are equally valid addresses.
+    """
+
+    def __init__(self, certificate_pem: str, **kwargs) -> None:
+        self._certificate_pem = certificate_pem
+        super().__init__(**kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_REQUIRED
+        context.load_verify_locations(cadata=self._certificate_pem)
+        kwargs["ssl_context"] = context
+        return super().init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_for(self, *args, **kwargs):
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_REQUIRED
+        context.load_verify_locations(cadata=self._certificate_pem)
+        kwargs["ssl_context"] = context
+        return super().proxy_manager_for(*args, **kwargs)
+
+
 def _normalize_fingerprint(value: str) -> str:
     return "".join(char for char in (value or "").lower() if char in "0123456789abcdef")
 
@@ -113,6 +147,13 @@ class ZagrosNodeClient:
         os.chmod(handle.name, 0o600)
         return handle.name
 
+    def _session(self) -> "requests.Session":
+        # f-nodedns-1: pin-based TLS (no hostname matching) so the node can
+        # be reached by IP or by DOMAIN interchangeably.
+        session = requests.Session()
+        session.mount("https://", PinnedCertAdapter(self.certificate_pem))
+        return session
+
     def _request(self, method: str, path: str, *, payload: dict | None = None,
                  timeout: float = DEFAULT_TIMEOUT, signed: bool = True) -> dict:
         body = (json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
@@ -132,8 +173,9 @@ class ZagrosNodeClient:
                     self.signing_key, method, route, timestamp, nonce, body),
             })
         certfile = self._certificate_file()
+        session = self._session()
         try:
-            response = requests.request(
+            response = session.request(
                 method, self.base_url + path, data=body or None,
                 headers=headers, verify=certfile, timeout=timeout)
         except requests.RequestException as exc:

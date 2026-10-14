@@ -1571,7 +1571,8 @@ async def middleproxy_handshake(host, port, reader_tgt, writer_tgt):
     return reader_tgt, writer_tgt, my_ip, my_port
 
 
-async def do_middleproxy_handshake(proto_tag, dc_idx, cl_ip, cl_port):
+async def do_middleproxy_handshake(proto_tag, dc_idx, cl_ip, cl_port,
+                                    ad_tag=None):  # [zagros patch] per-user tag
     global my_ip_info
     global tg_connection_pool
 
@@ -1602,7 +1603,8 @@ async def do_middleproxy_handshake(proto_tag, dc_idx, cl_ip, cl_port):
     else:
         return False
 
-    writer_tgt = ProxyReqStreamWriter(writer_tgt, cl_ip, cl_port, my_ip, my_port, proto_tag)
+    writer_tgt = ProxyReqStreamWriter(writer_tgt, cl_ip, cl_port, my_ip, my_port,
+                                     proto_tag, ad_tag=ad_tag)  # [zagros patch]
     reader_tgt = ProxyReqStreamReader(reader_tgt)
 
     return reader_tgt, writer_tgt
@@ -1671,7 +1673,10 @@ async def handle_client(reader_clt, writer_clt):
         else:
             tg_data = await do_direct_handshake(proto_tag, dc_idx)
     else:
-        tg_data = await do_middleproxy_handshake(proto_tag, dc_idx, cl_ip, cl_port)
+        # [zagros patch] the promoted-channel tag of the CONNECTING user
+        tg_data = await do_middleproxy_handshake(
+            proto_tag, dc_idx, cl_ip, cl_port,
+            ad_tag=config.USERS_TAGS.get(user))
 
     if not tg_data:
         return

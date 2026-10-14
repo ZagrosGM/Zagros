@@ -174,6 +174,19 @@ class MTProtoProxyDriver(BaseCoreDriver):
                 errors.append(f"port {port} is used by more than one MTProto inbound")
             else:
                 ports.add(port)
+        modes, _domain = self._backend._client_modes(
+            [ib for ib in (document or {}).get("inbounds") or []
+             if str(ib.get("protocol") or "") == "mtproto"])
+        if not any(modes.values()):
+            errors.append("all client modes are off — the daemon would have no "
+                          "handshake to serve; enable at least one of "
+                          "classic/secure/fake-TLS")
+        for ib in (document or {}).get("inbounds") or []:
+            raw = str(ib.get("faketls_domain") or "").strip()
+            if raw and not re.fullmatch(r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}", raw):
+                errors.append(
+                    f"inbound '{ib.get('tag')}' has an invalid FakeTLS domain "
+                    f"'{raw}' (expected a real hostname like www.google.com)")
         return errors
 
     def export_config_document(self) -> dict[str, Any]:

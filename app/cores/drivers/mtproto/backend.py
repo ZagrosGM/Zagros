@@ -127,6 +127,21 @@ class LocalMtprotoBackend:
         self._advertise_cache = (host, v4, v6)
         return v4, v6
 
+    @staticmethod
+    def _client_modes(inbounds: list[dict[str, Any]]) -> tuple[dict[str, bool], str]:
+        """(MODES, TLS_DOMAIN) from inbound-level fields; last entry wins,
+        absent flags default to enabled (the daemon's own behaviour)."""
+        def flag(key: str) -> bool:
+            vals = [ib[key] for ib in inbounds
+                    if isinstance(ib.get(key), bool)]
+            return vals[-1] if vals else True
+        domain = next((str(ib["faketls_domain"]).strip()
+                       for ib in inbounds
+                       if str(ib.get("faketls_domain") or "").strip()),
+                      "www.google.com")
+        return ({"classic": flag("mode_classic"), "secure": flag("mode_secure"),
+                 "tls": flag("mode_faketls")}, domain)
+
     def render_config(self, inbounds: list[dict[str, Any]],
                       accounts: list[dict[str, Any]]) -> str:
         """Render config.py. ``accounts`` = [{'account_id','secret','tag'}]."""
@@ -134,6 +149,7 @@ class LocalMtprotoBackend:
         if not ports:
             raise CoreError("MTProto core needs at least one inbound port")
         public4, public6 = self._public_ip_presets()
+        modes, tls_domain = self._client_modes(inbounds)
         lines = ["USERS = {"]
         for a in accounts:
             lines.append('    "%s": {"secret": "%s", "tag": "%s"},' % (
@@ -148,13 +164,14 @@ class LocalMtprotoBackend:
             "USERS_TAGS = {}\n"          # patched daemon derives them from USERS
             f"PUBLIC_IPV4 = {public4!r}\n"
             f"PUBLIC_IPV6 = {public6!r}\n"
+            f"TLS_DOMAIN = {tls_domain!r}\n"
+            f"MODES = {modes!r}\n"
             "AD_TAG = \"\"\n"
             "USE_MIDDLE_PROXY = True\n"  # required for ad-tag delivery
             f"METRICS_PORT = {self.metrics_port}\n"
             "METRICS_LISTEN_ADDR_IPV4 = \"127.0.0.1\"\n"
             "METRICS_LISTEN_ADDR_IPV6 = None\n"
             "STATS_PRINT_PERIOD = 6 * 60 * 60\n"
-            "MODES = {\"classic\": True, \"secure\": True, \"tls\": True}\n"
         )
 
     def write_config(self, inbounds: list[dict[str, Any]],

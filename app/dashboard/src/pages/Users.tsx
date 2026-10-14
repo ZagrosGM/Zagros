@@ -1378,7 +1378,6 @@ function CredDialog({ user, onClose }: { user: User; onClose: () => void }) {
   const [error, setError] = useState("");
   const [adTagFor, setAdTagFor] = useState<string | null>(null);
   const [adTagValue, setAdTagValue] = useState("");
-  const entries = Object.entries(user.proxies ?? {});
 
   // f-panel-keys-1: per-core accounts (vpn cores: ssh/mtproto/...) with
   // their secret material — view, rotate, and (mtproto) per-user ad tag.
@@ -1413,62 +1412,22 @@ function CredDialog({ user, onClose }: { user: User; onClose: () => void }) {
     } finally { setBusy(""); }
   };
 
-  const revoke = async (proxyType: string) => {
-    setBusy(proxyType); setError("");
-    try {
-      await api.post(`/user/${user.username}/revoke_credential/${proxyType}`, {});
-      toast.ok(td("credential revoked for {type}", { type: proxyType }));
-      qc.invalidateQueries({ queryKey: ["users"] });
-      onClose();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : t("common.error"));
-    } finally { setBusy(""); }
-  };
-
   return (
     <Dialog open onClose={onClose}
       title={`${t("auth keys")} — ${user.username}`}
       subtitle={t("One key per assigned inbound. Revoke issues a fresh credential; the old one stops working immediately and every core is updated.")}
       footer={<Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>}>
-      {!entries.length ? (
+      {coreAccounts.isLoading ? (
+        <p className="rounded-xl border border-border px-3 py-4 text-center text-xs text-content-3">…</p>
+      ) : !(coreAccounts.data?.accounts?.length) ? (
         <p className="rounded-xl border border-border px-3 py-4 text-center text-xs text-content-3">{t("no assigned inbound")}</p>
       ) : (
         <div className="space-y-2">
-          {entries.map(([proxyType, settings]) => {
-            const secret = credentialOf(proxyType, settings || {});
-            const shown = revealed[proxyType];
-            return (
-              <div key={proxyType} className="rounded-xl border border-border p-3">
-                <div className="flex items-center gap-2">
-                  <Badge tone="brand">{proxyType}</Badge>
-                  <span className="text-[11px] text-content-3">{t("auth key")}</span>
-                  <div className="ms-auto flex items-center gap-1">
-                    <Button variant="ghost" size="sm" onClick={() => setRevealed((r) => ({ ...r, [proxyType]: !r[proxyType] }))}>
-                      {shown ? t("hide") : t("show")}
-                    </Button>
-                    <Button variant="ghost" size="sm" onClick={async () => { await copyText(secret); toast.ok("copied"); }}>
-                      <Copy size={12} />{t("common.copy")}
-                    </Button>
-                    <Button variant="secondary" size="sm" loading={busy === proxyType}
-                      onClick={() => revoke(proxyType)}>
-                      <RefreshCcw size={12} />{t("revoke")}
-                    </Button>
-                  </div>
-                </div>
-                <p className="mt-2 break-all rounded-lg bg-surface-3 px-2.5 py-1.5 font-mono text-[11px] text-content-2" dir="ltr">
-                  {shown ? secret : "•".repeat(Math.min(28, Math.max(secret.length, 8)))}
-                </p>
-              </div>
-            );
-          })}
-          {coreAccounts.data?.accounts?.length ? (
-            <>
-              <div className="my-1 border-t border-border" />
-              <p className="text-[11px] font-semibold text-content-3">{t("core accounts")}</p>
+          <p className="text-[11px] font-semibold text-content-3">{t("core accounts")}</p>
               {coreAccounts.data.accounts.map((acc) => {
                 const key = `${acc.core_id}/${acc.account_id}`;
                 const secret = String(acc.credentials.secret ?? acc.credentials.password
-                  ?? acc.credentials.uuid ?? "");
+                  ?? acc.credentials.uuid ?? acc.credentials.private_key ?? "");
                 const shown = revealed[key];
                 const tag = String(acc.credentials.ad_tag ?? "");
                 return (
@@ -1483,10 +1442,12 @@ function CredDialog({ user, onClose }: { user: User; onClose: () => void }) {
                         <Button variant="ghost" size="sm" onClick={async () => { await copyText(secret); toast.ok("copied"); }}>
                           <Copy size={12} />{t("common.copy")}
                         </Button>
-                        <Button variant="ghost" size="sm" loading={busy === `tag:${acc.account_id}`}
-                          onClick={() => { setAdTagFor(key); setAdTagValue(tag); }}>
-                          {t("ad tag")}
-                        </Button>
+                        {acc.core_id === "mtproto" && (
+                          <Button variant="ghost" size="sm" loading={busy === `tag:${acc.account_id}`}
+                            onClick={() => { setAdTagFor(key); setAdTagValue(tag); }}>
+                            {t("ad tag")}
+                          </Button>
+                        )}
                         <Button variant="secondary" size="sm" loading={busy === `core:${acc.account_id}`}
                           onClick={() => rotateCore(acc)}>
                           <RefreshCcw size={12} />{t("revoke")}
@@ -1509,8 +1470,6 @@ function CredDialog({ user, onClose }: { user: User; onClose: () => void }) {
                   </div>
                 );
               })}
-            </>
-          ) : null}
           {error && <p role="alert" className="rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
         </div>
       )}

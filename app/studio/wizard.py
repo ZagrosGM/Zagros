@@ -650,8 +650,24 @@ def _mtproto_blueprint() -> list[Protocol]:
     security cells. Per-user ad tags ride the account, not the inbound."""
     return [_proto(
         "mtproto", "MTProto proxy (Telegram)", 8585,
-        [_tr("tcp", "TCP — classic + secure + fake-TLS on the same port",
-             [_none()])],
+        [_tr("tcp", "TCP — classic + secure + fake-TLS on the same port", [
+            _none([
+                _f("mode_classic", "Classic Mode (plain 32-hex secret)", "bool",
+                   default=True, section="general",
+                   help="serves the raw-secret client handshake"),
+                _f("mode_secure", "Secure Mode (dd)", "bool",
+                   default=True, section="general",
+                   help="padded dd-prefixed secrets — beats DPI that classifies the classic header"),
+                _f("mode_faketls", "FakeTLS Mode (ee)", "bool",
+                   default=True, section="general",
+                   help="secrets masked as TLS ClientHello towards censors"),
+                _f("faketls_domain", "FakeTLS Domain", "string",
+                   default="www.google.com", section="general",
+                   placeholder="www.google.com",
+                   help="SNI domain the fake-TLS handshake mimics — must be a real, "
+                        "unblocked domain; core-wide (one daemon serves every port)"),
+            ]),
+        ])],
         reason=None,
     )]
 

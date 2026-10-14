@@ -1954,7 +1954,8 @@ async def nodes_list(runtime=Depends(get_runtime)):
 # Generic over cores: settings keys are surfaced selectively (never the
 # whole blob) and rotation goes through the driver's KEY_ROTATION contract.
 # --------------------------------------------------------------------- #
-_VIEW_KEYS = ("uuid", "id", "password", "secret", "ad_tag", "username")
+_VIEW_KEYS = ("uuid", "id", "password", "secret", "ad_tag", "username",
+             "private_key", "public_key")
 
 
 def _core_account_view(entry: dict) -> dict:

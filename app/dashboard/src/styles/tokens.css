@@ -92,8 +92,8 @@ html.light, html:not(.dark) {
     animation: shimmer 1.6s infinite;
   }
   .kbd {
-    @apply inline-flex h-5 min-w-5 items-center justify-center rounded border border-border-strong
-           bg-surface-2 px-1 font-mono text-[10px] text-content-2;
+    @apply inline-flex h-6 min-w-6 items-center justify-center rounded border border-border-strong
+           bg-surface-2 px-1 font-mono text-[11px] text-content-2;
   }
 }
 
@@ -107,3 +107,18 @@ html.light, html:not(.dark) {
 .dialog-behind-blurred { filter: blur(8px) saturate(0.85); transition: filter 200ms; }
 /* f-panel-5: stacked dialogs — every open layer except the topmost one */
 .dialog-behind-blurred { filter: blur(8px) saturate(0.85); transition: filter 200ms; }
+
+/* f-ui-audit-1: implicit grid tracks must never size to max-content.
+   Every `grid gap-N md:grid-cols-X` without a base grid-cols-1 flows its
+   items into ONE implicit column whose `auto` size follows the WIDEST
+   card — one wide actions row forced a 641px column on 390px phones and
+   the whole page scrolled sideways (ui-test crawl: cores nWide=133). */
+.grid { grid-auto-columns: minmax(0, 1fr); }
+
+/* f-ui-audit-1: native checkboxes rendered at 13px were near-untappable;
+   17px + themed accent keeps them compact but visible. */
+input[type="checkbox"] {
+  width: 1.05rem;
+  height: 1.05rem;
+  accent-color: var(--brand, #22d3ee);
+}

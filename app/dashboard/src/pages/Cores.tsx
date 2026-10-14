@@ -309,7 +309,7 @@ function NodeCoresPanel({ node }: { node: Node }) {
                 </div>
 
                 {core.binary_path && (
-                  <p className="mt-3 truncate font-mono text-[10.5px] text-content-3" dir="ltr"
+                  <p className="mt-3 truncate font-mono text-[11px] text-content-3" dir="ltr"
                     title={core.binary_path}>{core.binary_path}</p>
                 )}
                 {core.message && (
@@ -373,7 +373,7 @@ function NodeCoresPanel({ node }: { node: Node }) {
                   {(entry.protocols ?? []).slice(0, 6).map((p) => <Badge key={p} tone="info">{p}</Badge>)}
                 </div>
                 <div className="mt-4 flex items-center justify-between border-t border-border pt-3.5">
-                  <span className="text-[10.5px] text-content-3">{t("installed on the node")}</span>
+                  <span className="text-[11px] text-content-3">{t("installed on the node")}</span>
                   <Button size="sm" onClick={() => setInstallFor(entry)}>
                     <HardDriveDownload size={13} /> install
                   </Button>
@@ -741,7 +741,7 @@ function MasterCores() {
                           <Badge tone="danger">{t("Legacy / Insecure")}</Badge>
                         )}
                         {c.builtin && (
-                          <span className="rounded-md bg-brand-soft px-1.5 py-0.5 text-[10px] font-semibold text-brand" title={t("cores.builtinHint")}>
+                          <span className="rounded-md bg-brand-soft px-1.5 py-0.5 text-[11px] font-semibold text-brand" title={t("cores.builtinHint")}>
                             {t("cores.builtin")}
                           </span>
                         )}
@@ -773,8 +773,8 @@ function MasterCores() {
                       ? <span title={`user traffic: ${formatBytes(tot.uplink_bytes, digits)} ↑ + ${formatBytes(tot.downlink_bytes, digits)} ↓`}>{formatBytes(tot.total_bytes, digits)}</span>
                       : "—";
                   })()} />
-                  <Meta k={t("binary")} v={<code className="block max-w-full truncate font-mono text-[10.5px]" dir="ltr" title={c.binary_path ?? ""}>{c.binary_path ?? "—"}</code>} />
-                  <Meta k={t("config")} v={<code className="block max-w-full truncate font-mono text-[10.5px]" dir="ltr" title={String(c.settings?.config_path ?? "")}>{c.settings?.config_path ? String(c.settings.config_path) : "—"}</code>} />
+                  <Meta k={t("binary")} v={<code className="block max-w-full truncate font-mono text-[11px]" dir="ltr" title={c.binary_path ?? ""}>{c.binary_path ?? "—"}</code>} />
+                  <Meta k={t("config")} v={<code className="block max-w-full truncate font-mono text-[11px]" dir="ltr" title={String(c.settings?.config_path ?? "")}>{c.settings?.config_path ? String(c.settings.config_path) : "—"}</code>} />
                 </div>
                 {c.message && <p className="mt-2 rounded-lg bg-warn-soft px-2.5 py-1.5 text-[11px] text-warn">{c.message}</p>}
 
@@ -831,7 +831,7 @@ function MasterCores() {
                   {(r.capabilities ?? []).slice(0, 4).map((c) => <Badge key={c} tone="brand">{c}</Badge>)}
                 </div>
                 <div className="mt-4 flex items-center justify-between border-t border-border pt-3.5">
-                  <span className="text-[10.5px] text-content-3">
+                  <span className="text-[11px] text-content-3">
                     {r.driver_version ? `driver ${r.driver_version}` : (r.capabilities ?? []).includes("self_install") ? "" : t("cores.catalog.osManagedHint")}
                   </span>
                   <Button size="sm" onClick={() => setInstallFor(r)} disabled={!(r.capabilities ?? []).includes("self_install")}
@@ -903,7 +903,7 @@ function MasterCores() {
 function Meta({ k, v }: { k: string; v: React.ReactNode }) {
   return (
     <div className="min-w-0">
-      <p className="text-[10px] uppercase tracking-wide text-content-3">{k}</p>
+      <p className="text-[11px] uppercase tracking-wide text-content-3">{k}</p>
       <div className="mt-0.5 truncate">{v}</div>
     </div>
   );

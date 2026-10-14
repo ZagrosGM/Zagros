@@ -55,7 +55,7 @@ function ScalarEditor({ value, onChange }: { value: Json; onChange: (v: Json) =>
 function TypeConvert({ current, onPick }: { current: string; onPick: (t: string) => void }) {
   return (
     <Select value="" onChange={(e) => e.target.value && onPick(e.target.value)}
-      className="h-7 w-16 text-[10.5px] opacity-0 transition-opacity group-hover:opacity-100"
+      className="h-7 w-16 text-[11px] opacity-0 transition-opacity group-hover:opacity-100"
       title={`type: ${current} — convert`}>
       <option value="">⇄</option>
       {Object.keys(EMPTY_OF).filter((t) => t !== current).map((t) => (
@@ -125,7 +125,7 @@ function Node({ value, onChange, depth, label, onDelete }: NodeProps) {
           </span>
         )}
         {composite ? (
-          <span className="text-[10.5px] text-content-3">
+          <span className="text-[11px] text-content-3">
             {type === "array" ? `${entries.length} items` : `${entries.length} keys`}
           </span>
         ) : (
@@ -164,7 +164,7 @@ function Node({ value, onChange, depth, label, onDelete }: NodeProps) {
             </div>
           )}
           {entries.length === 0 && !adding && (
-            <p className="ms-4 border-s border-border/60 ps-3 py-1 text-[10.5px] italic text-content-3">
+            <p className="ms-4 border-s border-border/60 ps-3 py-1 text-[11px] italic text-content-3">
               empty {type}
             </p>
           )}

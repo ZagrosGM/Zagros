@@ -495,7 +495,7 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
             onClick={() => (step === 0 ? pickProto(o as WizardProtocol) : step === 1 ? pickTransport(o as WizardTransport) : pickSecurity(o as WizardSecurity))}
             className={`rounded-xl border p-3 text-start transition-colors ${unavailable ? "cursor-not-allowed border-border opacity-60" : active ? "border-brand bg-brand-soft" : "border-border hover:border-border-strong"}`}>
             <p className="text-[13px] font-semibold">{o.label}</p>
-            {unavailable && <p className="mt-1 text-[10.5px] text-warn">{o.availability?.replace(/_/g, " ")} — {o.reason}</p>}
+            {unavailable && <p className="mt-1 text-[11px] text-warn">{o.availability?.replace(/_/g, " ")} — {o.reason}</p>}
             {/* items 2+7: NO port line on initial protocol cards —
                 neither a fabricated number nor a misleading placeholder. The
                 real port is the suggested editable value in the review
@@ -786,14 +786,14 @@ function WizardDialog({ coreId, existingTags, mode = "create", initial, onClose,
               {preview.data.diff && (
                 <details className="mt-1.5">
                   <summary className="cursor-pointer text-content-3 hover:text-content-2">view diff</summary>
-                  <pre className="mt-1 max-h-44 overflow-auto rounded-lg bg-surface-1 p-2 font-mono text-[10px] text-content-2" dir="ltr">{preview.data.diff}</pre>
+                  <pre className="mt-1 max-h-44 overflow-auto rounded-lg bg-surface-1 p-2 font-mono text-[11px] text-content-2" dir="ltr">{preview.data.diff}</pre>
                 </details>
               )}
             </div>
           ) : preview.data ? (
             <div className="rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-[11.5px] text-danger">
               <p className="flex items-center gap-1.5 font-medium"><XCircle size={13} />{t("server validation rejected this inbound:")}</p>
-              <ul className="mt-1 list-inside list-disc font-mono text-[10.5px]" dir="ltr">
+              <ul className="mt-1 list-inside list-disc font-mono text-[11px]" dir="ltr">
                 {preview.data.errors.map((e) => <li key={e}>{e}</li>)}
               </ul>
             </div>

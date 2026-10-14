@@ -79,7 +79,7 @@ export function DonutChart({ value, size = 96, thickness = 10, label, tone = "va
       <div className="absolute inset-0 grid place-items-center text-center">
         <div>
           <div className="text-lg font-semibold tabular-nums">{Math.round(pct)}%</div>
-          {label && <div className="text-[10px] text-content-3">{label}</div>}
+          {label && <div className="text-[11px] text-content-3">{label}</div>}
         </div>
       </div>
     </div>

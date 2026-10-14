@@ -519,7 +519,7 @@ function GrantsSection({ publicId, disabled }: { publicId: string; disabled: boo
               <div key={g.user_id} className="flex items-center justify-between gap-2 rounded-lg border border-line/60 px-2.5 py-1.5">
                 <div className="min-w-0">
                   <p className="truncate text-[12px] font-medium">{g.username}</p>
-                  <p className="text-[10.5px] text-content-3">
+                  <p className="text-[11px] text-content-3">
                     {g.status}{g.granted_at ? ` · ${formatDate(g.granted_at)}` : ""}
                   </p>
                 </div>
@@ -593,7 +593,7 @@ function TicketsSection({ publicId, disabled }: { publicId: string; disabled: bo
                 aria-label={t("apps.enrollmentQr")} />
               <div className="min-w-0 flex-1">
                 <p className="text-[11px] font-medium">{t("apps.enrollmentQr")}</p>
-                <p className="mb-1.5 text-[10.5px] text-content-3">{t("apps.enrollmentQrHint")}</p>
+                <p className="mb-1.5 text-[11px] text-content-3">{t("apps.enrollmentQrHint")}</p>
                 <CopyButton text={issued.enrollment_url} />
               </div>
             </div>
@@ -658,7 +658,7 @@ function BuildsSection({ app, disabled }: { app: AppDetail; disabled: boolean })
                   </p>
                   <Badge tone={statusTone(b.status)}>{b.status}</Badge>
                 </div>
-                <p className="mt-0.5 text-[10.5px] text-content-3" dir="ltr">
+                <p className="mt-0.5 text-[11px] text-content-3" dir="ltr">
                   {(b.targets ?? []).map((tg) => `${tg.platform}/${tg.arch}/${tg.artifact}`).join(" · ")}
                   {b.created_at ? ` — ${formatDate(b.created_at)}` : ""}
                 </p>
@@ -761,7 +761,7 @@ function BuildDetailDialog({ app, buildId, onClose }: {
           {b.status === "failed" && (
             <div className="rounded-lg border border-danger/30 bg-danger/10 p-2.5">
               <p className="text-[11px] font-medium text-danger">{t("apps.buildFailure")}</p>
-              <p className="mt-1 break-words font-mono text-[10.5px] text-danger/90" dir="ltr">
+              <p className="mt-1 break-words font-mono text-[11px] text-danger/90" dir="ltr">
                 {b.failure_message || b.failure_code || "-"}
               </p>
             </div>
@@ -790,7 +790,7 @@ function BuildDetailDialog({ app, buildId, onClose }: {
                     className="flex items-center justify-between gap-2 rounded-lg border border-line/60 px-2.5 py-1.5">
                     <div className="min-w-0">
                       <code className="block truncate text-[11.5px]" dir="ltr" title={art.sha256}>{art.filename}</code>
-                      <span className="text-[10px] text-content-3" dir="ltr">
+                      <span className="text-[11px] text-content-3" dir="ltr">
                         {art.platform}/{art.arch} · {formatBytes(art.size_bytes)} · sha256:{art.sha256.slice(0, 12)}…
                       </span>
                     </div>
@@ -1036,7 +1036,7 @@ function TriggerBuildDialog({ app, onClose, onQueued }: {
               </div>
               {probe.host_key_pin && (
                 <div>
-                  <code className="block break-all rounded-lg border border-border bg-surface-1 p-2 font-mono text-[10.5px]" dir="ltr">
+                  <code className="block break-all rounded-lg border border-border bg-surface-1 p-2 font-mono text-[11px]" dir="ltr">
                     {probe.host_key_pin}
                   </code>
                   <label className="mt-1 flex items-center gap-2 text-[11.5px]">
@@ -1109,7 +1109,7 @@ function TriggerBuildDialog({ app, onClose, onQueued }: {
         )}
         <div>
           <p className="mb-1 text-[12px] font-medium">{t("apps.credentials")}</p>
-          <p className="mb-1 text-[10.5px] leading-4 text-content-3">{t("apps.credentialsHint")}</p>
+          <p className="mb-1 text-[11px] leading-4 text-content-3">{t("apps.credentialsHint")}</p>
           {credsQ.isLoading ? <Skeleton className="h-8" />
             : creds.length === 0 ? (
               <p className="py-2 text-[11px] text-content-3">{t("apps.noCredentials")}</p>
@@ -1123,7 +1123,7 @@ function TriggerBuildDialog({ app, onClose, onQueued }: {
                         ? [...ids, c.public_id]
                         : ids.filter((id) => id !== c.public_id))} />
                     <span className="truncate">{c.label}</span>
-                    <span className="text-[10.5px] text-content-3">({c.kind})</span>
+                    <span className="text-[11px] text-content-3">({c.kind})</span>
                   </label>
                 ))}
               </div>

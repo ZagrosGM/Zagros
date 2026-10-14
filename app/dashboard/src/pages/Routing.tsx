@@ -294,7 +294,7 @@ function InboundTagSelector({ groups, values, onChange }: {
       <div data-testid="inbound-tag-selector" className="space-y-2 rounded-xl border border-border bg-surface-2 p-3">
         {groups.map((group) => (
           <div key={group.core_id} className="rounded-lg border border-border/70 bg-surface-1 p-2.5">
-            <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-content-3">
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-content-3">
               {group.name} · {group.core_id}
             </p>
             <div className="grid gap-1.5 sm:grid-cols-2">
@@ -313,7 +313,7 @@ function InboundTagSelector({ groups, values, onChange }: {
                       onChange={(event) => toggle(inbound.tag, event.target.checked)} />
                     <span className="min-w-0">
                       <span className="block break-all font-mono">{inbound.tag}</span>
-                      <span className="text-[10px] text-content-3">
+                      <span className="text-[11px] text-content-3">
                         {inbound.protocol ?? "unknown"}{inbound.port ? ` · :${inbound.port}` : ""}
                         {inbound.security_class === "legacy_insecure" ? " · Legacy / Insecure · inventory only" : ""}
                         {duplicate ? " · duplicate tag — rename before use" : ""}

@@ -142,7 +142,7 @@ export default function SettingsGeneral() {
                 <Button onClick={() => applyNetwork.mutate()} loading={applyNetwork.isPending}>{t("common.apply")}</Button>
               </div>
               {networkTransition && <p role="status" className="rounded-xl border border-brand/30 bg-brand-soft px-3 py-2 text-xs text-content-2 sm:col-span-2 lg:col-span-3">{networkTransition}</p>}
-              {networkTest && <pre className="max-h-48 overflow-auto rounded-xl bg-surface p-3 text-[10px] text-content-2 sm:col-span-2 lg:col-span-3" dir="ltr">{JSON.stringify(networkTest, null, 2)}</pre>}
+              {networkTest && <pre className="max-h-48 overflow-auto rounded-xl bg-surface p-3 text-[11px] text-content-2 sm:col-span-2 lg:col-span-3" dir="ltr">{JSON.stringify(networkTest, null, 2)}</pre>}
             </div>
           )}
         </Card>
@@ -165,7 +165,7 @@ export default function SettingsGeneral() {
 function Meta({ k, v }: { k: string; v: React.ReactNode }) {
   return (
     <div className="min-w-0">
-      <dt className="text-[10.5px] uppercase tracking-wide text-content-3">{k}</dt>
+      <dt className="text-[11px] uppercase tracking-wide text-content-3">{k}</dt>
       <dd className="mt-0.5 truncate text-content">{v}</dd>
     </div>
   );

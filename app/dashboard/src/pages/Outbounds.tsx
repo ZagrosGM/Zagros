@@ -460,7 +460,7 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
           if (!fields.length) return null;
           return (
             <div key={g.id} className="sm:col-span-2">
-              <p className="mb-2 text-[10.5px] font-semibold uppercase tracking-wide text-content-3">{g.label}</p>
+              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-content-3">{g.label}</p>
               <div className="grid gap-4 sm:grid-cols-2">
                 {fields.map(([key, f]) => {
                   const widget = f["x-widget"] ?? "text";
@@ -495,7 +495,7 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
                             placeholder={f["x-secret"] && ob.secret_state?.[key] ? "stored securely — blank keeps it" : ""}
                             value={String(value ?? "")} onChange={(e) => setS({ [key]: e.target.value })} />
                           {f["x-secret"] && ob.secret_state?.[key] && !(ob.clear_secret_keys ?? []).includes(key) && (
-                            <button type="button" className="text-[10.5px] text-content-3 underline hover:text-danger"
+                            <button type="button" className="text-[11px] text-content-3 underline hover:text-danger"
                               onClick={() => clearStoredSecret(key)}>{t("clear stored credential")}</button>
                           )}
                         </div>
@@ -508,7 +508,7 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
                             onChange={(e) => setS({ [key]: e.target.value })}
                           />
                           {ob.secret_state?.[key] && !(ob.clear_secret_keys ?? []).includes(key) && (
-                            <button type="button" className="text-[10.5px] text-content-3 underline hover:text-danger"
+                            <button type="button" className="text-[11px] text-content-3 underline hover:text-danger"
                               onClick={() => clearStoredSecret(key)}>{t("clear stored credential")}</button>
                           )}
                         </div>

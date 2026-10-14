@@ -112,7 +112,7 @@ function CopySubButton({ u, copySub }: { u: User; copySub: (u: User) => void }) 
         aria-label={t("users.copySub")}
         disabled={!hasLink}
         onClick={() => { copySub(u); setDone(true); setTimeout(() => setDone(false), 1600); }}
-        className="rounded-lg p-1.5 text-content-3 hover:bg-surface-3 hover:text-content disabled:pointer-events-none disabled:opacity-40"
+        className="grid h-9 w-9 place-items-center rounded-lg text-content-3 hover:bg-surface-3 hover:text-content disabled:pointer-events-none disabled:opacity-40"
       >
         {done ? <Check size={15} className="text-ok" /> : <Link2 size={15} />}
       </button>
@@ -327,7 +327,7 @@ export default function Users() {
       id: "status", header: t("common.status"), width: "130px",
       cell: (u) => (
         <button
-          className="inline-flex items-center gap-1"
+          className="inline-flex min-h-9 items-center gap-1"
           title={t("toggle active/disabled")}
           onClick={(e) => { e.stopPropagation(); setStatus.mutate({ username: u.username, status: u.status === "active" ? "disabled" : "active" }); }}
         >
@@ -364,7 +364,7 @@ export default function Users() {
           <CopySubButton u={u} copySub={copySub} />
           <button aria-label={t("actions")}
             onClick={(e) => setMenu((m) => (m?.user.username === u.username ? null : { user: u, anchor: e.currentTarget }))}
-            className="rounded-lg p-1.5 text-content-3 hover:bg-surface-3 hover:text-content">
+            className="grid h-9 w-9 place-items-center rounded-lg text-content-3 hover:bg-surface-3 hover:text-content">
             <MoreHorizontal size={16} />
           </button>
         </div>
@@ -889,7 +889,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
                 <div key={device.id} className="flex items-center justify-between gap-2 rounded-lg border border-line/60 px-2.5 py-2">
                   <div className="min-w-0">
                     <code className="text-[11px]" dir="ltr">{device.device}</code>
-                    <p className="truncate text-[10.5px] text-content-3">last seen {formatDate(device.last_seen)}</p>
+                    <p className="truncate text-[11px] text-content-3">last seen {formatDate(device.last_seen)}</p>
                   </div>
                   <Button type="button" size="sm" variant="ghost" aria-label="remove device"
                     onClick={() => void removeEnrolledDevice(device.id)}><Trash2 size={13} /></Button>
@@ -906,7 +906,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
             <div className="flex items-center justify-between gap-2 rounded-lg border border-line/60 px-2.5 py-2">
               <div className="min-w-0">
                 <p className="text-[11px] font-medium">{t("users.accessMode")}</p>
-                <p className="text-[10.5px] text-content-3">{t("users.accessModeCreateHint")}</p>
+                <p className="text-[11px] text-content-3">{t("users.accessModeCreateHint")}</p>
               </div>
               <Select value={form.accessMode}
                 onChange={(e) => setForm((prev) => ({ ...prev, accessMode: e.target.value }))}>
@@ -922,7 +922,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
             <div className="mb-2 flex items-center justify-between gap-2 rounded-lg border border-line/60 px-2.5 py-2">
               <div className="min-w-0">
                 <p className="text-[11px] font-medium">{t("users.accessMode")}</p>
-                <p className="text-[10.5px] text-content-3">{t("users.accessModeHint")}</p>
+                <p className="text-[11px] text-content-3">{t("users.accessModeHint")}</p>
               </div>
               <Select value={appOverviewQ.data?.access_mode ?? "default"}
                 disabled={accessBusy || appOverviewQ.data?.user_id == null}
@@ -951,7 +951,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
                     ["users.appPassword", issuedCreds.app_password]] as const).map(([key, value]) => (
                   <div key={key} className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
-                      <p className="text-[10.5px] text-content-3">{t(key)}</p>
+                      <p className="text-[11px] text-content-3">{t(key)}</p>
                       <code className="break-all text-[11px]" dir="ltr">{value}</code>
                     </div>
                     <Button type="button" size="sm" variant="ghost" onClick={() => void copyIssued(value)}>
@@ -995,7 +995,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
                         return (
                           <div key={g.application_id} className="flex items-center justify-between gap-2">
                             <span className="truncate text-[11px] font-medium">{g.name}</span>
-                            <span className="shrink-0 text-[10.5px] text-content-3">
+                            <span className="shrink-0 text-[11px] text-content-3">
                               {build
                                 ? `${t("users.appLatestBuild")}: ${build.version ?? build.build_id} (${build.file_count})`
                                 : t("users.appNoBuild")}
@@ -1457,7 +1457,7 @@ function CredDialog({ user, onClose }: { user: User; onClose: () => void }) {
                     <p className="mt-2 break-all rounded-lg bg-surface-3 px-2.5 py-1.5 font-mono text-[11px] text-content-2" dir="ltr">
                       {shown ? secret : "•".repeat(Math.min(28, Math.max(secret.length, 8)))}
                     </p>
-                    {tag && <p className="mt-1 font-mono text-[10px] text-content-3" dir="ltr">ad_tag: {tag}</p>}
+                    {tag && <p className="mt-1 font-mono text-[11px] text-content-3" dir="ltr">ad_tag: {tag}</p>}
                     {adTagFor === key && (
                       <div className="mt-2 flex items-center gap-1.5">
                         <Input dir="ltr" value={adTagValue} placeholder="32-hex promoted-channel tag (empty = clear)"

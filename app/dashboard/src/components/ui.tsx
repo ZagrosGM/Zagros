@@ -15,7 +15,9 @@ const variants: Record<Variant, string> = {
   danger: "bg-danger/15 text-danger hover:bg-danger/25 border border-danger/30",
   outline: "border border-border-strong text-content hover:border-brand hover:text-brand",
 };
-const sizes = { sm: "h-8 px-3 text-xs gap-1.5", md: "h-9 px-4 text-sm gap-2", icon: "h-8 w-8" };
+// f-ui-audit-1: every interactive control >=36px (tap-target audit);
+// sm and icon were 32px and dominated the crawl's "small" list.
+const sizes = { sm: "h-9 px-3 text-xs gap-1.5", md: "h-9 px-4 text-sm gap-2", icon: "h-9 w-9" };
 
 export const Button = forwardRef<HTMLButtonElement, ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: Variant; size?: keyof typeof sizes; loading?: boolean;
@@ -150,14 +152,20 @@ export function Switch({ checked, onChange, disabled, label }: {
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(
-        "relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-40",
-        checked ? "bg-brand" : "bg-surface-3 border border-border-strong",
+        // f-ui-audit-1: the visible track stays 36x20 but the BUTTON hit
+        // area is a full 36x36 (the crawl's smallest tap targets).
+        "relative grid h-9 w-9 shrink-0 place-items-center rounded-full",
       )}
     >
       <span className={cn(
-        "absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all",
-        checked ? "start-[18px]" : "start-0.5",
-      )} />
+        "relative h-5 w-9 rounded-full transition-colors",
+        checked ? "bg-brand" : "bg-surface-3 border border-border-strong",
+      )}>
+        <span className={cn(
+          "absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all",
+          checked ? "start-[18px]" : "start-0.5",
+        )} />
+      </span>
     </button>
   );
 }

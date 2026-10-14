@@ -220,7 +220,7 @@ export default function SettingsSecurity() {
         {overview.isLoading ? <Skeleton className="h-40" /> : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-[12.5px]">
-              <thead className="text-[10.5px] uppercase tracking-wide text-content-3">
+              <thead className="text-[11px] uppercase tracking-wide text-content-3">
                 <tr>
                   <th className="py-2 pr-3">{t("user")}</th>
                   <th className="py-2 pr-3">created</th>

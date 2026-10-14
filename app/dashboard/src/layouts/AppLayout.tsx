@@ -119,7 +119,7 @@ export default function AppLayout() {
         {!sidebarCollapsed && (
           <div className="min-w-0">
             <p className="truncate text-[15px] font-bold tracking-tight">Zagros</p>
-            <p className="truncate text-[10.5px] text-content-3">{t("app.tagline")}</p>
+            <p className="truncate text-[11px] text-content-3">{t("app.tagline")}</p>
           </div>
         )}
       </div>
@@ -127,7 +127,7 @@ export default function AppLayout() {
         {visibleNav.map((group) => (
           <div key={group.section ?? group.items[0].to}>
             {!sidebarCollapsed && group.section && (
-              <p className="px-2.5 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-wider text-content-3">
+              <p className="px-2.5 pb-1.5 pt-1 text-[11px] font-semibold uppercase tracking-wider text-content-3">
                 {t(group.section as Parameters<typeof t>[0])}
               </p>
             )}
@@ -194,7 +194,7 @@ export default function AppLayout() {
       <div className="flex min-w-0 flex-1 flex-col">
         {/* topbar */}
         <header className="glass z-20 flex h-16 shrink-0 items-center gap-3 border-b border-border px-4">
-          <button className="rounded-lg p-2 text-content-2 hover:bg-surface-2 lg:hidden" onClick={() => setMobileNav(true)} aria-label={t("Menu")}>
+          <button className="grid h-9 w-9 place-items-center rounded-lg text-content-2 hover:bg-surface-2 lg:hidden" onClick={() => setMobileNav(true)} aria-label={t("Menu")}>
             <Menu size={18} />
           </button>
           <button

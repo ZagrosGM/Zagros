@@ -261,7 +261,7 @@ export default function SettingsBackup() {
               <li key={item.name} className="flex items-center justify-between gap-3 rounded-xl border border-line px-3 py-2">
                 <div className="min-w-0">
                   <p className="truncate text-[12.5px] text-content" dir="ltr">{item.name}</p>
-                  <p className="text-[10.5px] text-content-3">
+                  <p className="text-[11px] text-content-3">
                     {humanBytes(item.size_bytes)} · {item.created_utc.replace("T", " ").replace("Z", " UTC")}
                     {item.panel_version ? ` · v${item.panel_version}` : ""}
                   </p>

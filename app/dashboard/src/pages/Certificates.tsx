@@ -102,12 +102,12 @@ export default function Certificates() {
                 <span>{t("expires {date}", { date: formatDate(c.not_after, digits) })}</span>
               </div>
               <div className="mt-3 flex items-center justify-between border-t border-border pt-3">
-                <code className="font-mono text-[10px] text-content-3" dir="ltr">{c.serial ? `serial ${c.serial.slice(0, 18)}…` : ""}</code>
+                <code className="font-mono text-[11px] text-content-3" dir="ltr">{c.serial ? `serial ${c.serial.slice(0, 18)}…` : ""}</code>
                 {acmeNames.has(c.name) ? (
                   // ACME-managed: bare store delete is refused by the API
                   // (409) — deletion belongs to the ACME section so provider
                   // cleanup runs and is reported
-                  <span className="text-[10px] text-content-3">{t("managed by ACME — delete below")}</span>
+                  <span className="text-[11px] text-content-3">{t("managed by ACME — delete below")}</span>
                 ) : (
                   <Button variant="ghost" size="icon" aria-label={t("delete {name}", { name: c.name })} onClick={() => setDeleteFor(c)}><Trash2 size={14} /></Button>
                 )}
@@ -271,7 +271,7 @@ function AcmeSection({ state, loading }: { state?: AcmeState; loading: boolean }
                   </Badge>
                   {!e.expired && !!e.renew_due && <Badge tone="warn">renewal due</Badge>}
                 </div>
-                <p className="mt-0.5 truncate font-mono text-[10px] text-content-3" dir="ltr">
+                <p className="mt-0.5 truncate font-mono text-[11px] text-content-3" dir="ltr">
                   {e.cert_path}
                   {e.renewed_at ? ` · ${t("renewed {date}", { date: formatDate(e.renewed_at, digits) })}` : e.issued_at ? ` · ${t("issued {date}", { date: formatDate(e.issued_at, digits) })}` : ""}
                 </p>

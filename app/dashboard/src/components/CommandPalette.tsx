@@ -97,7 +97,7 @@ export function CommandPalette({ open, onClose, commands }: {
                 const header = c.section && c.section !== lastSection ? (lastSection = c.section) : null;
                 return (
                   <div key={c.id}>
-                    {header && <p className="px-3 pb-1 pt-2.5 text-[10px] font-semibold uppercase tracking-wider text-content-3">{header}</p>}
+                    {header && <p className="px-3 pb-1 pt-2.5 text-[11px] font-semibold uppercase tracking-wider text-content-3">{header}</p>}
                     <button
                       data-idx={i}
                       onClick={() => { c.run(); onClose(); }}

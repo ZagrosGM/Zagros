@@ -128,7 +128,7 @@ export default function Admins() {
             {a.traffic_consume_limit ? (
               <Progress value={pct} tone={pct >= 100 ? "danger" : pct >= 80 ? "warn" : "ok"} />
             ) : null}
-            <p className="mt-1 text-[10px] text-content-3 tabular-nums">
+            <p className="mt-1 text-[11px] text-content-3 tabular-nums">
               alloc: {formatBytes(a.users_allocated_traffic ?? 0, digits)}
               {a.traffic_alloc_limit ? ` / ${formatBytes(a.traffic_alloc_limit, digits)}` : " / ∞"}
             </p>
@@ -427,7 +427,7 @@ function AdminDialog({ mode, admin, onClose, onSaved }: {
                   return (
                     <button key={tag} type="button" dir="ltr"
                       onClick={() => setForm({ ...form, permInbounds: on ? form.permInbounds.filter((x) => x !== tag) : [...form.permInbounds, tag] })}
-                      className={`rounded-md border px-2 py-0.5 text-[10.5px] ${on ? "border-brand bg-brand/15 text-brand" : "border-line text-content-3"}`}>
+                      className={`rounded-md border px-2 py-0.5 text-[11px] ${on ? "border-brand bg-brand/15 text-brand" : "border-line text-content-3"}`}>
                       {tag}
                     </button>
                   );

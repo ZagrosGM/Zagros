@@ -112,9 +112,9 @@ export default function CoreAccessPicker({ groups, value, onChange, xrayValue, o
                   <span className={`truncate text-[12.5px] font-semibold ${state !== "off" ? "text-content" : "text-content-2"}`}>
                     {g.name}
                   </span>
-                  <code className="text-[10px] font-normal text-content-3">{g.core_id}</code>
+                  <code className="text-[11px] font-normal text-content-3">{g.core_id}</code>
                 </button>
-                <span className="text-[10.5px] tabular-nums text-content-3">
+                <span className="text-[11px] tabular-nums text-content-3">
                   {g.inbounds.length ? `${selected.length}/${g.inbounds.length}` : "no inbounds"}
                 </span>
                 <button type="button" aria-label={t("choose {name} inbounds", { name: g.name })}
@@ -153,10 +153,10 @@ export default function CoreAccessPicker({ groups, value, onChange, xrayValue, o
                     <input type="checkbox" readOnly checked={on} tabIndex={-1}
                       className="pointer-events-none h-3.5 w-3.5 accent-brand" />
                     <span className="min-w-0 flex-1 truncate">{inb.tag}</span>
-                    {inb.protocol && <span className={`text-[10px] ${inb.security_class === "legacy_insecure" ? "text-danger" : "text-content-3"}`}>
+                    {inb.protocol && <span className={`text-[11px] ${inb.security_class === "legacy_insecure" ? "text-danger" : "text-content-3"}`}>
                       {inb.protocol}{inb.security_class === "legacy_insecure" ? " · Legacy / Insecure" : ""}
                     </span>}
-                    {inb.port != null && <span className="font-mono text-[10px] text-content-3">:{inb.port}</span>}
+                    {inb.port != null && <span className="font-mono text-[11px] text-content-3">:{inb.port}</span>}
                   </button>
                 );
               })}

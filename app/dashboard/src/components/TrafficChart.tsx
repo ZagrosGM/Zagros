@@ -27,7 +27,7 @@ export function TrafficChart({ points }: { points: TrafficPoint[] }) {
         ]}
         colors={["var(--brand)", "var(--warn)", "var(--info)"]}
         labels={[t("statistics.download"), t("statistics.upload"), t("statistics.total")]} />
-      <div className="flex justify-between gap-3 text-[10.5px] text-content-3 tabular-nums">
+      <div className="flex justify-between gap-3 text-[11px] text-content-3 tabular-nums">
         <span>{formatDate(points[0].bucket_start, digits)}</span>
         <span>{formatDate(points[points.length - 1].bucket_start, digits)}</span>
       </div>

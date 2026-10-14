@@ -53,7 +53,7 @@ export function UserStatisticsDrawer({ user, onClose }: { user: User; onClose: (
                   [t("statistics.remaining"), data?.remaining_bytes],
                 ].map(([label, value]) => (
                   <div key={String(label)} className="rounded-xl bg-surface-2 p-2.5">
-                    <p className="text-[10.5px] text-content-3">{label}</p>
+                    <p className="text-[11px] text-content-3">{label}</p>
                     <p className="mt-1 truncate text-sm font-semibold tabular-nums">
                       {value == null ? t("users.unlimited") : formatBytes(Number(value), digits)}
                     </p>
@@ -111,7 +111,7 @@ function Breakdown({ title, empty, rows }: {
           {rows.map((row) => (
             <div key={row.key} className="py-2.5">
               <div className="mb-1 flex items-center justify-between gap-3"><span className="font-medium">{td(row.name)}</span><span className="font-semibold tabular-nums">{formatBytes(row.total, digits)}</span></div>
-              <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10.5px] text-content-3">
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-content-3">
                 {row.detail && <span>{row.detail}</span>}
                 <span>{t("statistics.download")}: {formatBytes(row.download, digits)}</span>
                 <span>{t("statistics.upload")}: {formatBytes(row.upload, digits)}</span>

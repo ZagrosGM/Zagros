@@ -340,7 +340,7 @@ export default function Subscriptions() {
               <Card>
                 <CardHeader title={t("link shape")} subtitle={t("tokens are issued per user (Users → subscription link)")} />
                 <code className="block overflow-x-auto rounded-xl bg-surface p-3 font-mono text-[11px] text-content-2" dir="ltr">{example}</code>
-                {testResult && <pre className="mt-3 max-h-52 overflow-auto rounded-xl bg-surface p-3 text-[10px] text-content-2" dir="ltr">{JSON.stringify(testResult, null, 2)}</pre>}
+                {testResult && <pre className="mt-3 max-h-52 overflow-auto rounded-xl bg-surface p-3 text-[11px] text-content-2" dir="ltr">{JSON.stringify(testResult, null, 2)}</pre>}
                 <p className="mt-3 text-[11px] leading-5 text-content-3">{t("Links auto-render the right format for v2rayNG / Streisand / Clash / sing-box clients (detected via user-agent). Revoking a user's subscription rotates the token immediately.")}</p>
                 <div className="mt-3 flex items-center gap-2 text-[11px] text-content-3">
                   <ExternalLink size={12} />

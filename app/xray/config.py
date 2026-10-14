@@ -7,7 +7,7 @@ from pathlib import PosixPath
 from typing import Union
 
 import commentjson
-from sqlalchemy import func
+from sqlalchemy import cast, func, String
 
 from app.db import GetDB
 from app.db import models as db_models
@@ -383,12 +383,21 @@ class XRayConfig(dict):
         config = self.copy()
 
         with GetDB() as db:
+            # f-dialect-2: keep this query portable across sqlite/MySQL/PostgreSQL.
+            # PostgreSQL has no group_concat (string_agg instead), lower()
+            # rejects enum columns (cast to text first) and a JSON column may
+            # not appear in GROUP BY (grouping by the proxy PK covers the
+            # selected columns via functional dependency on every backend).
+            is_pg = db.bind.dialect.name == "postgresql"
+            excluded_tag = db_models.excluded_inbounds_association.c.inbound_tag
+            excluded_agg = (func.string_agg(excluded_tag, ",") if is_pg
+                            else func.group_concat(excluded_tag))
             query = db.query(
                 db_models.User.id,
                 db_models.User.username,
-                func.lower(db_models.Proxy.type).label('type'),
+                func.lower(cast(db_models.Proxy.type, String)).label('type'),
                 db_models.Proxy.settings,
-                func.group_concat(db_models.excluded_inbounds_association.c.inbound_tag).label('excluded_inbound_tags')
+                excluded_agg.label('excluded_inbound_tags')
             ).join(
                 db_models.Proxy, db_models.User.id == db_models.Proxy.user_id
             ).outerjoin(
@@ -397,10 +406,9 @@ class XRayConfig(dict):
             ).filter(
                 db_models.User.status.in_([UserStatus.active, UserStatus.on_hold])
             ).group_by(
-                func.lower(db_models.Proxy.type),
+                db_models.Proxy.id,
                 db_models.User.id,
                 db_models.User.username,
-                db_models.Proxy.settings,
             )
             result = query.all()
 

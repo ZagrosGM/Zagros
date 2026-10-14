@@ -27,6 +27,12 @@ from datetime import datetime, timezone
 
 from sqlalchemy import MetaData, Table, create_engine, inspect, text
 
+# f-bootprobe-1: the server-database branches probe reachability through the
+# same one-shot helper bootwait uses. It went missing in the consolidation
+# rework, so EVERY non-sqlite deployment crashed dbmerge at boot with
+# "NameError: name 'probe' is not defined" and the panel came up un-merged.
+from app.bootwait import probe
+
 MARKER_KEY = "dbmerge"
 RENAMES = {
     "users": "legacy_users",

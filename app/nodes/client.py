@@ -56,19 +56,14 @@ class PinnedCertAdapter(requests.adapters.HTTPAdapter):
         super().__init__(**kwargs)
 
     def init_poolmanager(self, *args, **kwargs):
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_REQUIRED
-        context.load_verify_locations(cadata=self._certificate_pem)
-        kwargs["ssl_context"] = context
+        # assert_hostname=False keeps the CA/pin verification (the request's
+        # verify=<pinned leaf>) and drops ONLY the DNS-name match — the pin,
+        # not the name, is the trust anchor (works for IP and DOMAIN alike).
+        kwargs["assert_hostname"] = False
         return super().init_poolmanager(*args, **kwargs)
 
     def proxy_manager_for(self, *args, **kwargs):
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_REQUIRED
-        context.load_verify_locations(cadata=self._certificate_pem)
-        kwargs["ssl_context"] = context
+        kwargs["assert_hostname"] = False
         return super().proxy_manager_for(*args, **kwargs)
 
 

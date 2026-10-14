@@ -1949,6 +1949,130 @@ async def nodes_list(runtime=Depends(get_runtime)):
                       for node in await list_nodes(runtime)]}
 
 
+# --------------------------------------------------------------------- #
+# f-panel-keys-1: per-core-account credential view / rotate / ad-tag.
+# Generic over cores: settings keys are surfaced selectively (never the
+# whole blob) and rotation goes through the driver's KEY_ROTATION contract.
+# --------------------------------------------------------------------- #
+_VIEW_KEYS = ("uuid", "id", "password", "secret", "ad_tag", "username")
+
+
+def _core_account_view(entry: dict) -> dict:
+    settings = entry.get("settings") or {}
+    return {
+        "core_id": entry.get("core_id"),
+        "account_id": entry.get("account_id"),
+        "protocol": entry.get("protocol"),
+        "enabled": entry.get("enabled"),
+        "credentials": {k: settings[k] for k in _VIEW_KEYS if settings.get(k)},
+    }
+
+
+def _platform_user_or_404(runtime, username: str):
+    user = runtime.users.get_user_by_username(username)
+    if user is None:
+        raise HTTPException(404, "user has no platform identity")
+    return user
+
+
+@zagros_admin_router.get("/user/{username}/core-credentials")
+async def user_core_credentials(username: str, runtime=Depends(get_runtime)):
+    user = _platform_user_or_404(runtime, username)
+    entries = await asyncio.to_thread(runtime.users.accounts_of, user.id)
+    return {"accounts": [_core_account_view(e) for e in entries]}
+
+
+class CoreCredentialRotateBody(BaseModel):
+    core_id: str
+    account_id: str
+
+
+@zagros_admin_router.post("/user/{username}/core-credentials/rotate")
+async def user_core_credential_rotate(username: str, body: CoreCredentialRotateBody,
+                                      runtime=Depends(get_runtime)):
+    """Rotate an account's secret material via its driver (KEY_ROTATION)."""
+    import asyncio as _asyncio
+    from app.cores.exceptions import CapabilityNotSupportedError
+
+    user = _platform_user_or_404(runtime, username)
+    entries = await asyncio.to_thread(runtime.users.accounts_of, user.id)
+    entry = next((e for e in entries
+                  if e["core_id"] == body.core_id and e["account_id"] == body.account_id),
+                 None)
+    if entry is None:
+        raise HTTPException(404, "core account not found for this user")
+    from app.cores.types import UserAccount as _UA
+    account = _UA(
+        user_id=user.id, username=username, account_id=body.account_id,
+        protocol=entry["protocol"], enabled=bool(entry["enabled"]),
+        settings=dict(entry["settings"]),
+    )
+    driver = runtime.core_manager.get(body.core_id)
+    try:
+        rotated = await driver.rotate_credentials(account)
+    except CapabilityNotSupportedError as exc:
+        raise HTTPException(422,
+                            f"core '{body.core_id}' does not support key rotation") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"rotation failed: {exc}") from exc
+    await _asyncio.to_thread(
+        runtime.users.upsert_core_account,
+        user_id=user.id, core_id=body.core_id, account_id=body.account_id,
+        protocol=entry["protocol"], enabled=bool(entry["enabled"]),
+        settings=dict(rotated.settings))
+    return {"ok": True, "credentials": _core_account_view(
+        {**entry, "settings": dict(rotated.settings)})["credentials"]}
+
+
+class CoreAdTagBody(BaseModel):
+    core_id: str
+    account_id: str
+    ad_tag: str = Field(min_length=0, max_length=64)
+
+
+@zagros_admin_router.post("/user/{username}/core-credentials/ad-tag")
+async def user_core_credential_adtag(username: str, body: CoreAdTagBody,
+                                     runtime=Depends(get_runtime)):
+    """Set/clear the MTProto promoted-channel tag on ONE user account.
+
+    Empty string clears the tag. The daemon hot-reloads; clients on the same
+    port keep working and new connections carry the new tag."""
+    import asyncio as _asyncio
+
+    tag = (body.ad_tag or "").strip().lower()
+    if tag and (len(tag) != 32 or not all(c in "0123456789abcdef" for c in tag)):
+        raise HTTPException(422, "ad tag must be 32 hex characters (or empty to clear)")
+    user = _platform_user_or_404(runtime, username)
+    entries = await asyncio.to_thread(runtime.users.accounts_of, user.id)
+    entry = next((e for e in entries
+                  if e["core_id"] == body.core_id and e["account_id"] == body.account_id),
+                 None)
+    if entry is None:
+        raise HTTPException(404, "core account not found for this user")
+    settings = dict(entry["settings"])
+    if tag:
+        settings["ad_tag"] = tag
+    else:
+        settings.pop("ad_tag", None)
+    from app.cores.types import UserAccount as _UA
+    account = _UA(
+        user_id=user.id, username=username, account_id=body.account_id,
+        protocol=entry["protocol"], enabled=bool(entry["enabled"]),
+        settings=settings,
+    )
+    driver = runtime.core_manager.get(body.core_id)
+    try:
+        await driver.update_account(account)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"ad tag apply failed: {exc}") from exc
+    await _asyncio.to_thread(
+        runtime.users.upsert_core_account,
+        user_id=user.id, core_id=body.core_id, account_id=body.account_id,
+        protocol=entry["protocol"], enabled=bool(entry["enabled"]),
+        settings=settings)
+    return {"ok": True, "ad_tag": tag}
+
+
 @zagros_admin_router.post("/nodes", status_code=201)
 async def nodes_create(body: NativeNodeCreateBody,
                        runtime=Depends(get_runtime)):

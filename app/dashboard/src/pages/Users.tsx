@@ -3,8 +3,8 @@
 // application login), per-user quick actions. No JSON anywhere.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Ban, BarChart3, Check, ChevronDown, Copy, Dices, ExternalLink, Filter, Link2, MoreHorizontal,
-  Plus, RefreshCcw, Search, Trash2, UserPlus, Users as UsersIcon,
+  Ban, BarChart3, Check, ChevronDown, Copy, Dices, ExternalLink, Filter, KeyRound, Link2,
+  MoreHorizontal, Plus, RefreshCcw, Search, Trash2, UserPlus, Users as UsersIcon, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
@@ -22,6 +22,11 @@ import { useDigits, formatBytes, formatDate, formatRelative, usagePercent } from
 import { useT , useTDynamic } from "../lib/i18n";
 import type { User, UsersResponse, UserStatus, UserTemplate , InboundCatalogGroup } from "../lib/types";
 import { useAdminPerms } from "../lib/perms";
+
+type CoreAccountCred = {
+  core_id: string; account_id: string; protocol: string; enabled: boolean;
+  credentials: Record<string, unknown>;
+};
 
 const STATUS_TONE: Record<UserStatus, "ok" | "muted" | "warn" | "danger" | "info"> = {
   active: "ok", disabled: "muted", limited: "warn", expired: "danger", on_hold: "info",
@@ -128,6 +133,7 @@ export default function Users() {
   const [dialog, setDialog] = useState<{ mode: "create" } | { mode: "edit"; user: User } | null>(null);
   // Statistics queries mount only after this explicit per-user action.
   const [usageUser, setUsageUser] = useState<User | null>(null);
+  const [credUser, setCredUser] = useState<User | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ type: "single"; username: string } | { type: "bulk"; usernames: string[] } | null>(null);
   const [moreAnchor, setMoreAnchor] = useState<HTMLElement | null>(null);
   const [bulkDialog, setBulkDialog] = useState(false);
@@ -375,6 +381,7 @@ export default function Users() {
           <MenuItem icon={<ExternalLink size={14} />} label={t("common.edit")} onClick={() => { setMenu(null); setDialog({ mode: "edit", user: mu }); }} />
           <MenuItem icon={<Copy size={14} />} label={t("users.copySub")} onClick={() => { setMenu(null); copySub(mu); }} />
           <MenuItem icon={<BarChart3 size={14} />} label={t("users.usageStatistics")} onClick={() => { setMenu(null); setUsageUser(mu); }} />
+          <MenuItem icon={<KeyRound size={14} />} label={t("auth keys")} onClick={() => { setMenu(null); setCredUser(mu); }} />
           <MenuItem icon={<RefreshCcw size={14} />} label={t("users.resetUsage")} onClick={() => { setMenu(null); resetUsage.mutate(mu.username); }} />
           <div className="my-1 border-t border-border" />
           <MenuItem icon={<Trash2 size={14} />} label={t("common.delete")} danger
@@ -471,6 +478,7 @@ export default function Users() {
         />
       )}
       {usageUser && <UserStatisticsDrawer user={usageUser} onClose={() => setUsageUser(null)} />}
+      {credUser && <CredDialog user={credUser} onClose={() => setCredUser(null)} />}
 
       <ConfirmDialog
         open={!!confirmDelete}
@@ -1015,8 +1023,16 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
             onChange={(e) => setForm({ ...form, uploadLimitMbps: e.target.value })} />
         </Field>
         <Field label={t("users.expire")} hint={t("empty = never (clearing the date removes the expiry)")}>
-          <Input type="date" value={form.expireDate}
-            onChange={(e) => setForm({ ...form, expireDate: e.target.value })} />
+          <div className="flex items-center gap-1.5">
+            <Input type="date" value={form.expireDate}
+              onChange={(e) => setForm({ ...form, expireDate: e.target.value })} />
+            {form.expireDate && (
+              <Button variant="ghost" size="icon" type="button" aria-label={t("clear expiry")}
+                onClick={() => setForm({ ...form, expireDate: "" })}>
+                <X size={14} />
+              </Button>
+            )}
+          </div>
         </Field>
 
         {mode === "create" && (
@@ -1340,6 +1356,164 @@ function DeleteByStatusDialog({
         </Card>
       </div>
       {error && <p role="alert" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
+    </Dialog>
+  );
+}
+
+
+// --------------------------------------------------------------------------- //
+// f-panel-keys-1: view + revoke per-inbound auth credentials.
+function credentialOf(proxyType: string, settings: Record<string, unknown>): string {
+  if (proxyType === "vmess" || proxyType === "vless") return String(settings.id ?? "");
+  if (proxyType === "trojan" || proxyType === "shadowsocks") return String(settings.password ?? "");
+  return String(settings.password ?? settings.id ?? "");
+}
+
+function CredDialog({ user, onClose }: { user: User; onClose: () => void }) {
+  const t = useT();
+  const td = useTDynamic();
+  const qc = useQueryClient();
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [adTagFor, setAdTagFor] = useState<string | null>(null);
+  const [adTagValue, setAdTagValue] = useState("");
+  const entries = Object.entries(user.proxies ?? {});
+
+  // f-panel-keys-1: per-core accounts (vpn cores: ssh/mtproto/...) with
+  // their secret material — view, rotate, and (mtproto) per-user ad tag.
+  const coreAccounts = useQuery({
+    queryKey: ["zagros", "core-credentials", user.username],
+    queryFn: () => api.get<{ accounts: CoreAccountCred[] }>(
+      `/zagros/user/${encodeURIComponent(user.username)}/core-credentials`),
+  });
+
+  const rotateCore = async (acc: CoreAccountCred) => {
+    setBusy(`core:${acc.account_id}`); setError("");
+    try {
+      await api.post(`/zagros/user/${encodeURIComponent(user.username)}/core-credentials/rotate`,
+        { core_id: acc.core_id, account_id: acc.account_id });
+      toast.ok("credential rotated");
+      qc.invalidateQueries({ queryKey: ["zagros", "core-credentials", user.username] });
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : t("common.error"));
+    } finally { setBusy(""); }
+  };
+
+  const setAdTag = async (acc: CoreAccountCred) => {
+    setBusy(`tag:${acc.account_id}`); setError("");
+    try {
+      await api.post(`/zagros/user/${encodeURIComponent(user.username)}/core-credentials/ad-tag`,
+        { core_id: acc.core_id, account_id: acc.account_id, ad_tag: adTagValue.trim() });
+      toast.ok(adTagValue.trim() ? "ad tag set" : "ad tag cleared");
+      setAdTagFor(null);
+      qc.invalidateQueries({ queryKey: ["zagros", "core-credentials", user.username] });
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : t("common.error"));
+    } finally { setBusy(""); }
+  };
+
+  const revoke = async (proxyType: string) => {
+    setBusy(proxyType); setError("");
+    try {
+      await api.post(`/user/${user.username}/revoke_credential/${proxyType}`, {});
+      toast.ok(td("credential revoked for {type}", { type: proxyType }));
+      qc.invalidateQueries({ queryKey: ["users"] });
+      onClose();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : t("common.error"));
+    } finally { setBusy(""); }
+  };
+
+  return (
+    <Dialog open onClose={onClose}
+      title={`${t("auth keys")} — ${user.username}`}
+      subtitle={t("One key per assigned inbound. Revoke issues a fresh credential; the old one stops working immediately and every core is updated.")}
+      footer={<Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>}>
+      {!entries.length ? (
+        <p className="rounded-xl border border-border px-3 py-4 text-center text-xs text-content-3">{t("no assigned inbound")}</p>
+      ) : (
+        <div className="space-y-2">
+          {entries.map(([proxyType, settings]) => {
+            const secret = credentialOf(proxyType, settings || {});
+            const shown = revealed[proxyType];
+            return (
+              <div key={proxyType} className="rounded-xl border border-border p-3">
+                <div className="flex items-center gap-2">
+                  <Badge tone="brand">{proxyType}</Badge>
+                  <span className="text-[11px] text-content-3">{t("auth key")}</span>
+                  <div className="ms-auto flex items-center gap-1">
+                    <Button variant="ghost" size="sm" onClick={() => setRevealed((r) => ({ ...r, [proxyType]: !r[proxyType] }))}>
+                      {shown ? t("hide") : t("show")}
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={async () => { await copyText(secret); toast.ok("copied"); }}>
+                      <Copy size={12} />{t("common.copy")}
+                    </Button>
+                    <Button variant="secondary" size="sm" loading={busy === proxyType}
+                      onClick={() => revoke(proxyType)}>
+                      <RefreshCcw size={12} />{t("revoke")}
+                    </Button>
+                  </div>
+                </div>
+                <p className="mt-2 break-all rounded-lg bg-surface-3 px-2.5 py-1.5 font-mono text-[11px] text-content-2" dir="ltr">
+                  {shown ? secret : "•".repeat(Math.min(28, Math.max(secret.length, 8)))}
+                </p>
+              </div>
+            );
+          })}
+          {coreAccounts.data?.accounts?.length ? (
+            <>
+              <div className="my-1 border-t border-border" />
+              <p className="text-[11px] font-semibold text-content-3">{t("core accounts")}</p>
+              {coreAccounts.data.accounts.map((acc) => {
+                const key = `${acc.core_id}/${acc.account_id}`;
+                const secret = String(acc.credentials.secret ?? acc.credentials.password
+                  ?? acc.credentials.uuid ?? "");
+                const shown = revealed[key];
+                const tag = String(acc.credentials.ad_tag ?? "");
+                return (
+                  <div key={key} className="rounded-xl border border-border p-3">
+                    <div className="flex items-center gap-2">
+                      <Badge tone="info">{acc.core_id}</Badge>
+                      <span className="text-[11px] text-content-3" dir="ltr">{acc.protocol}</span>
+                      <div className="ms-auto flex items-center gap-1">
+                        <Button variant="ghost" size="sm" onClick={() => setRevealed((r) => ({ ...r, [key]: !r[key] }))}>
+                          {shown ? t("hide") : t("show")}
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={async () => { await copyText(secret); toast.ok("copied"); }}>
+                          <Copy size={12} />{t("common.copy")}
+                        </Button>
+                        <Button variant="ghost" size="sm" loading={busy === `tag:${acc.account_id}`}
+                          onClick={() => { setAdTagFor(key); setAdTagValue(tag); }}>
+                          {t("ad tag")}
+                        </Button>
+                        <Button variant="secondary" size="sm" loading={busy === `core:${acc.account_id}`}
+                          onClick={() => rotateCore(acc)}>
+                          <RefreshCcw size={12} />{t("revoke")}
+                        </Button>
+                      </div>
+                    </div>
+                    <p className="mt-2 break-all rounded-lg bg-surface-3 px-2.5 py-1.5 font-mono text-[11px] text-content-2" dir="ltr">
+                      {shown ? secret : "•".repeat(Math.min(28, Math.max(secret.length, 8)))}
+                    </p>
+                    {tag && <p className="mt-1 font-mono text-[10px] text-content-3" dir="ltr">ad_tag: {tag}</p>}
+                    {adTagFor === key && (
+                      <div className="mt-2 flex items-center gap-1.5">
+                        <Input dir="ltr" value={adTagValue} placeholder="32-hex promoted-channel tag (empty = clear)"
+                          onChange={(e) => setAdTagValue(e.target.value)} />
+                        <Button size="sm" loading={busy === `tag:${acc.account_id}`} onClick={() => setAdTag(acc)}>
+                          {t("common.save")}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </>
+          ) : null}
+          {error && <p role="alert" className="rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
+        </div>
+      )}
     </Dialog>
   );
 }

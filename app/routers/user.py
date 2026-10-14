@@ -40,6 +40,7 @@ def _restrict_inbounds(model, admin):
 from app.db import Session, crud, get_db
 from app.dependencies import get_expired_users_list, get_validated_user, validate_dates
 from app.models.admin import Admin
+from app.models.proxy import ProxySettings, ProxyTypes
 from app.models.user import (
     UserCreate,
     UserModify,
@@ -448,6 +449,58 @@ def reset_user_data_usage(
 
     logger.info(f'User "{dbuser.username}"\'s usage was reset')
     return dbuser
+
+
+@router.post(
+    "/user/{username}/revoke_credential/{proxy_type}",
+    response_model=UserResponse,
+    responses={400: responses._400, 403: responses._403, 404: responses._404},
+)
+def revoke_user_credential(
+    proxy_type: str,
+    bg: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db),
+    dbuser: UserResponse = Depends(get_validated_user),
+    admin: Admin = Depends(fastapi_dep('users', 'edit')),
+):
+    """Rotate ONE assigned inbound credential (f-panel-keys-1).
+
+    ``vless``/``vmess`` → new uuid, ``trojan``/``shadowsocks`` → new
+    password. The old secret stops working immediately; the replacement is
+    converged onto every core (xray reload + platform projection + nodes)
+    exactly like a user edit, and the new value is returned so the admin
+    can re-deliver it.
+    """
+    if proxy_type not in ProxyTypes.__members__ and proxy_type not in {p.value for p in ProxyTypes}:
+        raise HTTPException(status_code=400, detail=f"unknown proxy type '{proxy_type}'")
+    proxy = next((p for p in dbuser.proxies if str(p.type) == proxy_type), None)
+    if proxy is None:
+        raise HTTPException(status_code=404,
+                            detail=f"user has no '{proxy_type}' inbound assigned")
+    settings = ProxySettings.from_dict(ProxyTypes(proxy_type), dict(proxy.settings or {}))
+    settings.revoke()
+    proxy.settings = settings.dict(no_obj=True)
+    db.add(proxy)
+    db.commit()
+    db.refresh(dbuser)
+
+    # Converge every consumer of the credential (same tail as modify_user).
+    if dbuser.status in [UserStatus.active, UserStatus.on_hold]:
+        bg.add_task(xray.operations.update_user, dbuser=dbuser)
+    else:
+        bg.add_task(xray.operations.remove_user, dbuser=dbuser)
+    bg.add_task(_sync_nodes_after_user_change, request)
+    try:
+        _bridge_sync(request, dbuser, None)
+    except HTTPException as exc:
+        # The rotation itself committed; projection failure is surfaced as a
+        # warning path, never a fake total success.
+        logger.warning("credential rotation projection failed for %s: %s",
+                       dbuser.username, exc.detail)
+    user = UserResponse.model_validate(dbuser)
+    logger.info('User "%s" credential revoked for %s', dbuser.username, proxy_type)
+    return user
 
 
 @router.post("/user/{username}/revoke_sub", response_model=UserResponse, responses={403: responses._403, 404: responses._404})

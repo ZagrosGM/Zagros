@@ -203,9 +203,9 @@ export function Drawer({ open, onClose, title, children, footer }: {
   );
 }
 
-export function ConfirmDialog({ open, onClose, onConfirm, title, body, confirmLabel, danger, loading }: {
+export function ConfirmDialog({ open, onClose, onConfirm, title, body, confirmLabel, danger, loading, extra }: {
   open: boolean; onClose: () => void; onConfirm: () => void; title: ReactNode; body?: ReactNode;
-  confirmLabel?: string; danger?: boolean; loading?: boolean;
+  confirmLabel?: string; danger?: boolean; loading?: boolean; extra?: ReactNode;
 }) {
   return (
     <Dialog open={open} onClose={onClose} title={title}
@@ -218,6 +218,7 @@ export function ConfirmDialog({ open, onClose, onConfirm, title, body, confirmLa
         </>
       }>
       {body && <p className="text-sm text-content-2">{body}</p>}
+      {extra && <div className="mt-3">{extra}</div>}
     </Dialog>
   );
 }

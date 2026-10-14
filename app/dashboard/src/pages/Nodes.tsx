@@ -63,6 +63,7 @@ export default function Nodes() {
   const [pairFor, setPairFor] = useState<Node | null>(null);
   const [editFor, setEditFor] = useState<Node | null>(null);
   const [deleteFor, setDeleteFor] = useState<Node | null>(null);
+  const [forceDelete, setForceDelete] = useState(false);
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["zagros", "nodes"] });
 
@@ -253,11 +254,15 @@ export default function Nodes() {
         <EditNodeDialog node={editFor} onClose={() => setEditFor(null)} />
       )}
       <ConfirmDialog
-        open={Boolean(deleteFor)} onClose={() => setDeleteFor(null)}
-        onConfirm={() => deleteFor && remove.mutate({ id: deleteFor.id, force: false })}
+        open={Boolean(deleteFor)} onClose={() => { setDeleteFor(null); setForceDelete(false); }}
+        onConfirm={() => deleteFor && remove.mutate({ id: deleteFor.id, force: forceDelete })}
         danger loading={remove.isPending}
         title={`revoke and delete — ${deleteFor?.name ?? ""}`}
-        body="The panel first sends a signed revoke to the agent. If the node is offline, deletion fails closed — use force only after isolating the node."
+        body="The panel first sends a signed revoke to the agent. If the node is offline or was wiped, revoke fails closed — tick force to delete without revoking (safe once the node is isolated or reinstalled)."
+        extra={
+          <Switch checked={forceDelete} onChange={setForceDelete}
+            label={t("force delete (node is offline / already wiped — skip the revoke call)")} />
+        }
       />
     </div>
   );

@@ -161,4 +161,13 @@ RUN ln -s /code/zagros-cli.py /usr/bin/zagros-cli \
 # then migrate, then serve. Running Alembic before the database answers left
 # every fresh managed-database install with an empty schema and a panel that
 # spent a minute retrying before it would even bind its port.
-CMD ["bash", "-c", "python3 -m app.bootwait; python3 -m app.dbmerge || echo dbmerge-failed; alembic upgrade head; python main.py"]
+#
+# f-instlock-1: the whole dbmerge+alembic section runs under an flock taken
+# on /tmp/.zagros-migrate.lock. The management CLI migrates via
+# `compose exec … alembic upgrade head` while this boot pipeline is still
+# running; unsynchronized, the two raced on fresh installs (observed on
+# v1.1.1: the CLI's 0004 inspected the legacy schema a moment AFTER the
+# boot-time dbmerge had dropped it → NoSuchTableError: admins → install
+# rolled back). Both sides take the SAME in-container lock, so the boot
+# migration completes first and the CLI's exec becomes a no-op re-run.
+CMD ["bash", "-c", "python3 -m app.bootwait; ( exec 9>/.zagros-migrate.lock; flock 9; python3 -m app.dbmerge || echo dbmerge-failed; alembic upgrade head ); python main.py"]

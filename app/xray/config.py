@@ -388,7 +388,9 @@ class XRayConfig(dict):
             # rejects enum columns (cast to text first) and a JSON column may
             # not appear in GROUP BY (grouping by the proxy PK covers the
             # selected columns via functional dependency on every backend).
-            is_pg = db.bind.dialect.name == "postgresql"
+            _bind = (db.get_bind() if hasattr(db, "get_bind")
+                     else getattr(db, "bind", None))
+            is_pg = _bind is not None and _bind.dialect.name == "postgresql"
             excluded_tag = db_models.excluded_inbounds_association.c.inbound_tag
             excluded_agg = (func.string_agg(excluded_tag, ",") if is_pg
                             else func.group_concat(excluded_tag))

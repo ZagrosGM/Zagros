@@ -59,7 +59,15 @@ def _ensure_wide_revision_column(connection) -> None:
     'version_num'". Widening here covers fresh installs (the table is
     pre-created wide) and upgraded installs (an existing narrow column is
     altered before any migration runs).
+
+    f-release-fix: NEVER touch the connection on sqlite — the reflection
+    opened by inspecting ``alembic_version`` left alembic's own version
+    stamp and in-transaction backfills uncommitted on re-upgrades (the
+    v1.1.1 release gate caught real databases migrating without a stamped
+    version). sqlite ignores lengths, so there is nothing to do there.
     """
+    if connection.dialect.name == "sqlite":
+        return
     import sqlalchemy as sa
 
     def _commit():

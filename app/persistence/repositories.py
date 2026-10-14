@@ -13,7 +13,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol
 
-from sqlalchemy import delete, desc, select, update
+from sqlalchemy import delete, desc, func, select, update
 
 from app.applicationapi.models import canonical_access_mode, legacy_client_auth_mode
 from app.cores.devices import DeviceInfo
@@ -627,6 +627,7 @@ class SQLRefreshTokenStore:
                     user_id=row.user_id, token_hash=row.token_hash,
                     expires_at=row.expires_at, revoked=row.revoked,
                     created_at=row.created_at, rotated_to=row.rotated_to,
+                    revoked_at=row.revoked_at,
                 )
         return await asyncio.to_thread(_sync)
 
@@ -636,7 +637,8 @@ class SQLRefreshTokenStore:
                 s.execute(
                     update(RefreshTokenModel)
                     .where(RefreshTokenModel.token_hash == token_hash)
-                    .values(revoked=True, rotated_to=rotated_to)
+                    .values(revoked=True, rotated_to=rotated_to,
+                            revoked_at=func.now())
                 )
                 s.commit()
         await asyncio.to_thread(_sync)

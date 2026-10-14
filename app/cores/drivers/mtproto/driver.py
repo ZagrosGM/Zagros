@@ -139,9 +139,12 @@ class MTProtoProxyDriver(BaseCoreDriver):
         stop_when_no_inbounds=True,
     )
 
-    def __init__(self, settings: dict[str, Any] | None = None):
+    def __init__(self, settings: dict[str, Any] | None = None,
+                 backend: Any | None = None):
         super().__init__(settings)
-        self._backend = LocalMtprotoBackend(self.settings)
+        # DI by convention (f-release-fix): tests inject a fake backend so the
+        # contract suite runs without the vendored mtprotoproxy daemon.
+        self._backend = backend or LocalMtprotoBackend(self.settings)
         self._usage = DeltaTracker()
 
     # ------------------------------------------------------------------ #

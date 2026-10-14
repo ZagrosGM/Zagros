@@ -11,7 +11,7 @@ import json
 import secrets
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.clientapi.errors import (
@@ -137,22 +137,40 @@ class ClientApiService:
             refresh_expires_at=_epoch_to_dt(refresh_exp),
         )
 
+    #: f-release-fix — how long a rotated refresh token still answers a
+    #: lost-response retry (the mobile network race f-sessgrace-1 fixed).
+    ROTATION_GRACE_SECONDS = 120
+
     async def refresh(self, refresh_token: str) -> AuthTokens:
         row = await self._refresh.get(hash_token(refresh_token))
         now = _epoch_to_dt(self._now())
         if row is None or row.expires_at < now:
             raise AuthFailedError("refresh token invalid")
-        # f-sessgrace-1: rotation-race grace. A refresh whose RESPONSE was
-        # lost on a flaky mobile network leaves the app holding a token this
-        # call has already rotated+revoked; the app's next attempt used to
-        # get 401 and hard-logout (observed: forced re-login every few
-        # minutes). As long as the presented token is within its original
-        # lifetime, heal instead: issue fresh tokens. The old row stays
-        # revoked, so after it expires this degenerates to strict mode.
-        new = await self._issue_tokens(row.user_id)
-        if not row.revoked:
-            await self._refresh.revoke(row.token_hash, rotated_to=hash_token(new.refresh_token))
+        if row.revoked:
+            # f-release-fix (v1.1.1 gate): the round-7 grace accepted ANY
+            # unexpired presented token — logged-out sessions stayed
+            # refreshable until expiry and rotated tokens replayed forever.
+            # The grace is now bounded to EXACTLY the rotation race:
+            #   * logout-revoked rows carry no successor -> dead, always;
+            #   * a rotated token answers within ROTATION_GRACE_SECONDS and
+            #     only while its successor is alive (unused); serving the
+            #     retry advances the chain, so the token answers at most
+            #     once — the third presentation is a hard 401.
+            if not row.rotated_to or row.revoked_at is None                     or now > row.revoked_at + timedelta(seconds=self.ROTATION_GRACE_SECONDS):
+                raise AuthFailedError("refresh token invalid")
+            successor = await self._refresh.get(row.rotated_to)
+            if successor is None or successor.revoked:
+                raise AuthFailedError("refresh token invalid")
+            new = await self._issue_tokens(row.user_id)
+            # Dead-end the successor (no successor link of its own): the
+            # grace is therefore ONE-SHOT per chain — presenting the old
+            # token again, or ANY token it produced, is a hard 401.
+            await self._refresh.revoke(successor.token_hash)
             self._emit("token.rotated", {"user_id": row.user_id})
+            return new
+        new = await self._issue_tokens(row.user_id)
+        await self._refresh.revoke(row.token_hash, rotated_to=hash_token(new.refresh_token))
+        self._emit("token.rotated", {"user_id": row.user_id})
         return new
 
     async def logout(self, refresh_token: str) -> None:

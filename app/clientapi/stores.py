@@ -57,6 +57,7 @@ class RefreshTokenRecord:
     revoked: bool = False
     created_at: datetime = field(default_factory=_utcnow)
     rotated_to: str | None = None
+    revoked_at: datetime | None = None
 
 
 class RefreshTokenStore(Protocol):
@@ -85,6 +86,7 @@ class InMemoryRefreshTokenStore:
             if token_hash in self._rows:
                 self._rows[token_hash].revoked = True
                 self._rows[token_hash].rotated_to = rotated_to
+                self._rows[token_hash].revoked_at = _utcnow()
 
     async def revoke_all_for_user(self, user_id: int) -> None:
         async with self._lock:

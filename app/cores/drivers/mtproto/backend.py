@@ -15,8 +15,10 @@ daemon's own Prometheus exporter (per-user octets + live connections).
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
+import time
 import shutil
 import signal
 import socket
@@ -61,17 +63,32 @@ class LocalMtprotoBackend:
             return 0
 
     def accounts_on_disk(self) -> dict[str, dict[str, str]]:
-        """Parse the rendered config back (read-only inspection helper)."""
+        """The driver's account store (work_dir/accounts.json) — the source
+        the config renderer uses. Falls back to parsing the rendered config
+        for pre-store deployments."""
+        try:
+            return json.loads(
+                Path(self.work_dir, "accounts.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
         try:
             text = Path(self.config_path).read_text(encoding="utf-8")
         except OSError:
             return {}
         accounts: dict[str, dict[str, str]] = {}
         for m in re.finditer(
-                r'"(zg-[^"]+)":\s*\{"secret":\s*"([0-9a-f]{32})",'
-                r'"tag":\s*"([0-9a-f]{0,32})"\}', text):
+                r'"([^"]+)":\s*\{"secret":\s*"([0-9a-f]{32})",'
+                r'\s*"tag":\s*"([0-9a-f]{0,32})"\}', text):
             accounts[m.group(1)] = {"secret": m.group(2), "tag": m.group(3)}
         return accounts
+
+    def save_accounts(self, accounts: dict[str, dict[str, str]]) -> None:
+        """Atomically persist the account store next to the rendered config."""
+        self._ensure_dir()
+        tmp = Path(self.work_dir, "accounts.json.tmp")
+        tmp.write_text(json.dumps(accounts, indent=1, sort_keys=True),
+                       encoding="utf-8")
+        tmp.replace(Path(self.work_dir, "accounts.json"))
 
     def render_config(self, inbounds: list[dict[str, Any]],
                       accounts: list[dict[str, Any]]) -> str:
@@ -122,11 +139,26 @@ class LocalMtprotoBackend:
         python = shutil.which("python3") or shutil.which("python")
         if not python:
             raise CoreError("no python3 available on this host")
+        # the vendored daemon imports the config via runpy.run_module, which
+        # resolves through sys.path — the script dir (vendor/) wins over the
+        # cwd, so the work dir must be on PYTHONPATH explicitly.
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [self.work_dir, env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
+        # argv[1] = explicit config path — the daemon's own "launch with own
+        # config" mode (runpy.run_path); no cwd/sys.path trickery needed.
         self._proc = ManagedProcess(
-            [python, "-u", str(VENDOR_DIR / "mtprotoproxy.py")],
-            cwd=self.work_dir,
+            [python, "-u", str(VENDOR_DIR / "mtprotoproxy.py"),
+             str(self.config_path)],
+            cwd=self.work_dir, env=env,
         )
         self._proc.start()
+        # crash-latch: give the daemon a moment and fail LOUD with its own
+        # log tail instead of reporting a phantom "running" state.
+        time.sleep(1.5)
+        if not self._proc.is_running:
+            tail = "; ".join(self._proc.logs(20))
+            raise CoreError(f"MTProto daemon exited immediately: {tail}")
 
     def stop(self) -> None:
         if self._proc is not None:

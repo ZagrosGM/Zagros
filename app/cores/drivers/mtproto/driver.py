@@ -58,7 +58,8 @@ from app.cores.drivers.mtproto.backend import (
 logger = logging.getLogger("zagros.cores.drivers.mtproto")
 
 _METRIC_RE = re.compile(
-    r'^(user_octets(?:_from|_to)?|user_connects_curr)\{user="([^"]+)"\}\s+(\d+)')
+    r'^mtprotoproxy_(?:user_octets|user_octets_from|user_octets_to|'
+    r'user_connects_curr)\{user="([^"]+)"\}\s+(\d+)')
 
 
 class MTProtoProxyDriver(BaseCoreDriver):
@@ -192,11 +193,24 @@ class MTProtoProxyDriver(BaseCoreDriver):
             await asyncio.to_thread(self._backend.reload)
 
     def _persisted_accounts(self) -> list[dict[str, str]]:
-        """The account entries currently on disk (source of truth while the
-        driver has no account store of its own — accounts are re-rendered
-        from config)."""
+        """The account store (work_dir/accounts.json) — the daemon-facing
+        source of truth. The panel DB stays authoritative for ownership; the
+        service layer mirrors changes here through the account methods."""
         return [{"account_id": aid, "secret": a["secret"], "tag": a.get("tag", "")}
                 for aid, a in sorted(self._backend.accounts_on_disk().items())]
+
+    def _store_upsert(self, account: UserAccount) -> None:
+        store = self._backend.accounts_on_disk()
+        store[account.account_id] = {
+            "secret": str(account.settings.get("secret") or ""),
+            "tag": str(account.settings.get("ad_tag") or ""),
+        }
+        self._backend.save_accounts(store)
+
+    def _store_remove(self, account_id: str) -> None:
+        store = self._backend.accounts_on_disk()
+        if store.pop(account_id, None) is not None:
+            self._backend.save_accounts(store)
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -272,17 +286,11 @@ class MTProtoProxyDriver(BaseCoreDriver):
         self._backend.write_config(self._inbounds(), self._persisted_accounts())
         self._backend.bump_generation()
 
-    async def _apply(self, *, hard: bool) -> None:
-        self._write_current()
-        if not self._backend.is_running():
-            return
-        if hard:
-            await asyncio.to_thread(self._backend.reload)
-        else:
-            await asyncio.to_thread(self._backend.reload)
+
 
     async def create_account(self, account: UserAccount) -> None:
-        self._ensure_secret(account)          # minted in place → persisted by the service layer
+        self._ensure_secret(account)          # minted in place → service persists it
+        self._store_upsert(account)
         self._write_current()
         if self._backend.is_running():
             await asyncio.to_thread(self._backend.reload)
@@ -292,12 +300,14 @@ class MTProtoProxyDriver(BaseCoreDriver):
         await self.create_account(account)
 
     async def delete_account(self, account_id: str) -> None:
+        self._store_remove(account_id)
         self._write_current()
         if self._backend.is_running():
             await asyncio.to_thread(self._backend.reload)
 
     async def suspend_account(self, account_id: str) -> None:
         # entry removed → new handshakes with that secret fail instantly
+        self._store_remove(account_id)
         self._write_current()
         if self._backend.is_running():
             await asyncio.to_thread(self._backend.reload)
@@ -311,8 +321,14 @@ class MTProtoProxyDriver(BaseCoreDriver):
         return account
 
     async def sync_accounts(self, accounts: list[UserAccount]) -> None:
+        store: dict[str, dict[str, str]] = {}
         for account in accounts:
             self._ensure_secret(account)
+            store[account.account_id] = {
+                "secret": str(account.settings.get("secret") or ""),
+                "tag": str(account.settings.get("ad_tag") or ""),
+            }
+        self._backend.save_accounts(store)
         self._write_current()
         if self._backend.is_running():
             await asyncio.to_thread(self._backend.reload)
@@ -329,12 +345,14 @@ class MTProtoProxyDriver(BaseCoreDriver):
             m = _METRIC_RE.match(line.strip())
             if not m:
                 continue
-            name, user, value = m.group(1), m.group(2), int(m.group(3))
-            if name == "user_octets":
+            user, value = m.group(1), int(m.group(2))
+            name = m.group(0).split("{", 1)[0]
+            if name.endswith("user_octets"):
+                # user_octets already sums both relay directions
                 octets[user] = max(octets.get(user, 0), value)
-            elif name in ("user_octets_from", "user_octets_to"):
+            elif name.endswith(("user_octets_from", "user_octets_to")):
                 octets[user] = max(octets.get(user, 0), value)
-            elif name == "user_connects_curr":
+            else:  # user_connects_curr gauge
                 live[user] = value
         return octets, live
 

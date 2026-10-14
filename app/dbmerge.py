@@ -183,10 +183,23 @@ def _set_marker(conn, counts: dict) -> None:
     # "no such table: settings", silently keeping the two-database layout.
     # The schema matches the platform's SettingModel exactly; alembic's
     # create_all is checkfirst and will not touch an existing table.
-    conn.execute(text(
-        'CREATE TABLE IF NOT EXISTS settings ('
-        '"key" VARCHAR(128) NOT NULL PRIMARY KEY, '
-        'value_json JSON, updated_at DATETIME)'))
+    # f-dbmerge-6: per-dialect DDL — PostgreSQL has no DATETIME type and no
+    # INSERT OR REPLACE; MySQL/MariaDB need backtick quoting.
+    if conn.dialect.name == "postgresql":
+        conn.execute(text(
+            'CREATE TABLE IF NOT EXISTS settings ('
+            '"key" VARCHAR(128) NOT NULL PRIMARY KEY, '
+            'value_json JSON, updated_at TIMESTAMPTZ)'))
+    elif conn.dialect.name in ("mysql", "mariadb"):
+        conn.execute(text(
+            'CREATE TABLE IF NOT EXISTS settings ('
+            '`key` VARCHAR(128) NOT NULL PRIMARY KEY, '
+            'value_json JSON, updated_at DATETIME)'))
+    else:
+        conn.execute(text(
+            'CREATE TABLE IF NOT EXISTS settings ('
+            '"key" VARCHAR(128) NOT NULL PRIMARY KEY, '
+            'value_json JSON, updated_at DATETIME)'))
     payload = json.dumps({
         "v": 1,
         "merged_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -198,6 +211,13 @@ def _set_marker(conn, counts: dict) -> None:
             "INSERT INTO settings (`key`, value_json, updated_at) "
             "VALUES (:k, :j, :t) ON DUPLICATE KEY UPDATE "
             "value_json = VALUES(value_json), updated_at = VALUES(updated_at)"
+        ), {"k": MARKER_KEY, "j": payload, "t": now})
+    elif conn.dialect.name == "postgresql":
+        conn.execute(text(
+            'INSERT INTO settings ("key", value_json, updated_at) '
+            "VALUES (:k, :j, :t) "
+            'ON CONFLICT ("key") DO UPDATE SET '
+            "value_json = EXCLUDED.value_json, updated_at = EXCLUDED.updated_at"
         ), {"k": MARKER_KEY, "j": payload, "t": now})
     else:
         conn.execute(text(

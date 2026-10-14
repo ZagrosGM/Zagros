@@ -50,7 +50,13 @@ jobs:
           git clone --depth 1 \
             "https://x-access-token:${DEVKIT_TOKEN}@github.com/ZagrosGM/zagros-devkit.git" \
             "${RUNNER_TEMP}/devkit"
-          cp -a "${RUNNER_TEMP}/devkit/Zagros/tests" tests
+          # Copy the suite's CONTENTS into tests/ — a bare `cp -a src tests`
+          # NESTS when the panel tree itself ships a tests/ directory (it
+          # does since the round-8 regression tests), which broke every
+          # suite helper that resolves the repo root via parents[2]
+          # (alembic.ini not found → collection errors → release blocked).
+          mkdir -p tests
+          cp -a "${RUNNER_TEMP}/devkit/Zagros/tests"/. tests/
           echo "available=true" >> "$GITHUB_OUTPUT"
 
       - name: Run the test suite

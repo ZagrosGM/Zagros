@@ -34,6 +34,12 @@ def _upgrade_users(conn, users: str = "users") -> None:
     inspector = sa.inspect(conn)
     if users not in inspector.get_table_names():
         return
+    # f-dialect-1: device_limit_disabled is a native BOOLEAN on PostgreSQL —
+    # integer comparisons/assignments are hard type errors there.
+    pg = conn.dialect.name == "postgresql"
+    disabled_on = "device_limit_disabled IS TRUE" if pg \
+        else "device_limit_disabled = 1"
+    disabled_off = "FALSE" if pg else "0"
     columns = {c["name"] for c in inspector.get_columns(users)}
     if "ip_limit" not in columns:
         conn.execute(sa.text(f"ALTER TABLE {users} ADD COLUMN ip_limit INTEGER"))
@@ -47,7 +53,7 @@ def _upgrade_users(conn, users: str = "users") -> None:
     if "device_limit_disabled" in columns:
         # Undo only statuses provably created by the retired limiter. Manual,
         # quota and expiry disables have different flags/statuses and remain.
-        conditions = ["device_limit_disabled = 1", "status = 'limited'"]
+        conditions = [disabled_on, "status = 'limited'"]
         if {"data_limit", "used_traffic"}.issubset(columns):
             conditions.append("(data_limit IS NULL OR used_traffic < data_limit)")
         if "expire" in columns:
@@ -55,7 +61,8 @@ def _upgrade_users(conn, users: str = "users") -> None:
         conn.execute(sa.text(
             f"UPDATE {users} SET status = 'active' WHERE " + " AND ".join(conditions)
         ), {"now_epoch": int(time.time())})
-        conn.execute(sa.text(f"UPDATE {users} SET device_limit_disabled = 0"))
+        conn.execute(sa.text(
+            f"UPDATE {users} SET device_limit_disabled = {disabled_off}"))
 
 
 def _legacy_url() -> str:

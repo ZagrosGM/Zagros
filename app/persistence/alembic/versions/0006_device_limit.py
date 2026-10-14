@@ -52,8 +52,12 @@ def upgrade() -> None:
             from app.persistence.alembic._legacy import table as _t
             users = _t("users")
             existing = _existing_columns(conn, users)
+            # f-dialect-1: PostgreSQL booleans reject an integer DEFAULT.
+            pg = engine.dialect.name == "postgresql"
             for name, ddl in _COLUMNS:
                 if name not in existing:
+                    if pg:
+                        ddl = ddl.replace("DEFAULT 0", "DEFAULT FALSE")
                     conn.execute(text(f"ALTER TABLE {users} ADD COLUMN {name} {ddl}"))
                     print(f"device limit column added: users.{name}")
     finally:

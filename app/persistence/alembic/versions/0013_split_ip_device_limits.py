@@ -26,22 +26,24 @@ branch_labels = None
 depends_on = None
 
 
-def _upgrade_users(conn) -> None:
+def _upgrade_users(conn, users: str = "users") -> None:
+    """f-dbmerge-5: *users* is the plain platform table for the P3 bind and
+    the (possibly ``legacy_*`` renamed) legacy table for the legacy pass."""
     import sqlalchemy as sa
 
     inspector = sa.inspect(conn)
-    if "users" not in inspector.get_table_names():
+    if users not in inspector.get_table_names():
         return
-    columns = {c["name"] for c in inspector.get_columns("users")}
+    columns = {c["name"] for c in inspector.get_columns(users)}
     if "ip_limit" not in columns:
-        conn.execute(sa.text("ALTER TABLE users ADD COLUMN ip_limit INTEGER"))
+        conn.execute(sa.text(f"ALTER TABLE {users} ADD COLUMN ip_limit INTEGER"))
     # Preserve a pre-existing ip_limit if an interrupted/replayed migration
     # already populated it. Only positive old values represented a real cap.
     conn.execute(sa.text(
-        "UPDATE users SET ip_limit = device_limit "
+        f"UPDATE {users} SET ip_limit = device_limit "
         "WHERE (ip_limit IS NULL OR ip_limit = 0) AND device_limit > 0"
     ))
-    conn.execute(sa.text("UPDATE users SET device_limit = NULL"))
+    conn.execute(sa.text(f"UPDATE {users} SET device_limit = NULL"))
     if "device_limit_disabled" in columns:
         # Undo only statuses provably created by the retired limiter. Manual,
         # quota and expiry disables have different flags/statuses and remain.
@@ -51,13 +53,14 @@ def _upgrade_users(conn) -> None:
         if "expire" in columns:
             conditions.append("(expire IS NULL OR expire > :now_epoch)")
         conn.execute(sa.text(
-            "UPDATE users SET status = 'active' WHERE " + " AND ".join(conditions)
+            f"UPDATE {users} SET status = 'active' WHERE " + " AND ".join(conditions)
         ), {"now_epoch": int(time.time())})
-        conn.execute(sa.text("UPDATE users SET device_limit_disabled = 0"))
+        conn.execute(sa.text(f"UPDATE {users} SET device_limit_disabled = 0"))
 
 
 def _legacy_url() -> str:
-    return os.environ.get("SQLALCHEMY_DATABASE_URL") or "sqlite:///db.sqlite3"
+    from app.persistence.alembic._legacy import legacy_url as _shared
+    return _shared()
 
 
 def upgrade() -> None:
@@ -71,10 +74,11 @@ def upgrade() -> None:
     legacy_url = sa.engine.make_url(_legacy_url())
     current_url = current.engine.url
     if legacy_url != current_url:
+        from app.persistence.alembic._legacy import table as _t
         legacy = sa.create_engine(legacy_url)
         try:
             with legacy.begin() as conn:
-                _upgrade_users(conn)
+                _upgrade_users(conn, users=_t("users"))
         finally:
             legacy.dispose()
 

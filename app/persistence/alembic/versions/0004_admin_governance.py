@@ -49,7 +49,8 @@ _MYSQL_DEFAULT_FIX = (
 
 
 def _legacy_url() -> str:
-    return os.environ.get("SQLALCHEMY_DATABASE_URL") or _LEGACY_URL_FALLBACK
+    from app.persistence.alembic._legacy import legacy_url as _shared
+    return _shared()
 
 
 def _existing_columns(conn, table: str) -> set[str]:
@@ -58,7 +59,8 @@ def _existing_columns(conn, table: str) -> set[str]:
     return {c["name"] for c in inspect(conn).get_columns(table)}
 
 
-def _add_columns(conn, table: str, columns, *, mysql: bool) -> list[str]:
+def _add_columns(conn, table: str, columns, *, mysql: bool,
+                 base: str | None = None) -> list[str]:
     from sqlalchemy import text as _text
 
     added: list[str] = []
@@ -66,7 +68,7 @@ def _add_columns(conn, table: str, columns, *, mysql: bool) -> list[str]:
     for name, ddl in columns:
         if name in existing:
             continue  # fresh create_all already shipped the column
-        if mysql and table == "users":
+        if mysql and (base or table) == "users":
             ddl = dict(_MYSQL_DEFAULT_FIX).get(name, ddl)
         conn.execute(_text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
         added.append(f"{table}.{name}")
@@ -80,8 +82,11 @@ def upgrade() -> None:
     mysql = engine.dialect.name in ("mysql", "mariadb")
     try:
         with engine.begin() as conn:
-            added = _add_columns(conn, "admins", _ADMIN_COLUMNS, mysql=mysql)
-            added += _add_columns(conn, "users", _USER_COLUMNS, mysql=mysql)
+            from app.persistence.alembic._legacy import table as _t
+            added = _add_columns(conn, _t("admins"), _ADMIN_COLUMNS,
+                                 mysql=mysql, base="admins")
+            added += _add_columns(conn, _t("users"), _USER_COLUMNS,
+                                  mysql=mysql, base="users")
             if added:
                 print(f"admin governance columns added: {', '.join(added)}")
     finally:
@@ -94,15 +99,16 @@ def downgrade() -> None:
     engine = create_engine(_legacy_url())
     try:
         with engine.begin() as conn:
-            existing_admins = _existing_columns(conn, "admins")
-            existing_users = _existing_columns(conn, "users")
+            from app.persistence.alembic._legacy import table as _t
+            existing_admins = _existing_columns(conn, _t("admins"))
+            existing_users = _existing_columns(conn, _t("users"))
             from sqlalchemy import text as _text
 
             for name, _ddl in _ADMIN_COLUMNS:
                 if name in existing_admins:
-                    conn.execute(_text(f"ALTER TABLE admins DROP COLUMN {name}"))
+                    conn.execute(_text(f"ALTER TABLE {_t('admins')} DROP COLUMN {name}"))
             for name, _ddl in _USER_COLUMNS:
                 if name in existing_users:
-                    conn.execute(_text(f"ALTER TABLE users DROP COLUMN {name}"))
+                    conn.execute(_text(f"ALTER TABLE {_t('users')} DROP COLUMN {name}"))
     finally:
         engine.dispose()

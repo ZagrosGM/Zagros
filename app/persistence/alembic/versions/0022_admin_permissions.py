@@ -28,7 +28,8 @@ _LEGACY_URL_FALLBACK = "sqlite:///db.sqlite3"  # identical to config.py
 
 
 def _legacy_url() -> str:
-    return os.environ.get("SQLALCHEMY_DATABASE_URL") or _LEGACY_URL_FALLBACK
+    from app.persistence.alembic._legacy import legacy_url as _shared
+    return _shared()
 
 
 def upgrade() -> None:
@@ -37,11 +38,13 @@ def upgrade() -> None:
     engine = create_engine(_legacy_url())
     try:
         with engine.begin() as conn:
-            existing = {c["name"] for c in inspect(conn).get_columns("admins")}
+            from app.persistence.alembic._legacy import table as _t
+            admins = _t("admins")
+            existing = {c["name"] for c in inspect(conn).get_columns(admins)}
             if "permissions" in existing:
                 return  # fresh create_all already shipped the column
             conn.execute(text(
-                "ALTER TABLE admins ADD COLUMN permissions TEXT NULL"))
+                f"ALTER TABLE {admins} ADD COLUMN permissions TEXT NULL"))
             print("admins.permissions column added")
     finally:
         engine.dispose()
@@ -53,7 +56,9 @@ def downgrade() -> None:
     engine = create_engine(_legacy_url())
     try:
         with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE admins DROP COLUMN permissions"))
+            from app.persistence.alembic._legacy import table as _t
+            conn.execute(text(
+                f"ALTER TABLE {_t('admins')} DROP COLUMN permissions"))
     except Exception:  # noqa: BLE001 — best-effort reverse
         pass
     finally:

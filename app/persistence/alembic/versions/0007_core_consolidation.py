@@ -56,7 +56,8 @@ _LEGACY_URL_FALLBACK = "sqlite:///db.sqlite3"  # identical to config.py
 
 
 def _legacy_url() -> str:
-    return os.environ.get("SQLALCHEMY_DATABASE_URL") or _LEGACY_URL_FALLBACK
+    from app.persistence.alembic._legacy import legacy_url as _shared
+    return _shared()
 
 
 def _as_json(value):

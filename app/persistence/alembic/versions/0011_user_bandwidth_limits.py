@@ -27,7 +27,8 @@ def _existing(bind, table: str) -> set[str]:
 
 
 def _legacy_url() -> str:
-    return os.environ.get("SQLALCHEMY_DATABASE_URL") or _LEGACY_URL_FALLBACK
+    from app.persistence.alembic._legacy import legacy_url as _shared
+    return _shared()
 
 
 def upgrade() -> None:
@@ -40,14 +41,16 @@ def upgrade() -> None:
                 sa.Column(name, sa.Integer(), nullable=False, server_default="0"),
             )
 
+    from app.persistence.alembic._legacy import table as _t
+    legacy_users = _t("users")
     legacy = sa.create_engine(_legacy_url())
     try:
         with legacy.begin() as connection:
-            current = _existing(connection, "users")
+            current = _existing(connection, legacy_users)
             for name in _COLUMNS:
                 if name not in current:
                     connection.execute(sa.text(
-                        f"ALTER TABLE users ADD COLUMN {name} "
+                        f"ALTER TABLE {legacy_users} ADD COLUMN {name} "
                         "INTEGER NOT NULL DEFAULT 0"
                     ))
     finally:
@@ -61,14 +64,16 @@ def downgrade() -> None:
         if name in current:
             op.drop_column("users", name)
 
+    from app.persistence.alembic._legacy import table as _t
+    legacy_users = _t("users")
     legacy = sa.create_engine(_legacy_url())
     try:
         with legacy.begin() as connection:
-            current = _existing(connection, "users")
+            current = _existing(connection, legacy_users)
             for name in reversed(_COLUMNS):
                 if name in current:
                     connection.execute(sa.text(
-                        f"ALTER TABLE users DROP COLUMN {name}"
+                        f"ALTER TABLE {legacy_users} DROP COLUMN {name}"
                     ))
     finally:
         legacy.dispose()

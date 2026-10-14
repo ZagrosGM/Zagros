@@ -33,7 +33,8 @@ _COLUMNS = (
 
 
 def _legacy_url() -> str:
-    return os.environ.get("SQLALCHEMY_DATABASE_URL") or _LEGACY_URL_FALLBACK
+    from app.persistence.alembic._legacy import legacy_url as _shared
+    return _shared()
 
 
 def _existing_columns(conn, table: str) -> set[str]:
@@ -48,10 +49,12 @@ def upgrade() -> None:
     engine = create_engine(_legacy_url())
     try:
         with engine.begin() as conn:
-            existing = _existing_columns(conn, "users")
+            from app.persistence.alembic._legacy import table as _t
+            users = _t("users")
+            existing = _existing_columns(conn, users)
             for name, ddl in _COLUMNS:
                 if name not in existing:
-                    conn.execute(text(f"ALTER TABLE users ADD COLUMN {name} {ddl}"))
+                    conn.execute(text(f"ALTER TABLE {users} ADD COLUMN {name} {ddl}"))
                     print(f"device limit column added: users.{name}")
     finally:
         engine.dispose()
@@ -63,9 +66,11 @@ def downgrade() -> None:
     engine = create_engine(_legacy_url())
     try:
         with engine.begin() as conn:
-            existing = _existing_columns(conn, "users")
+            from app.persistence.alembic._legacy import table as _t
+            users = _t("users")
+            existing = _existing_columns(conn, users)
             for name, _ddl in _COLUMNS:
                 if name in existing:
-                    conn.execute(text(f"ALTER TABLE users DROP COLUMN {name}"))
+                    conn.execute(text(f"ALTER TABLE {users} DROP COLUMN {name}"))
     finally:
         engine.dispose()

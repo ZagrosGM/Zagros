@@ -31,7 +31,8 @@ _COLUMN = ("core_access", "JSON")
 
 
 def _legacy_url() -> str:
-    return os.environ.get("SQLALCHEMY_DATABASE_URL") or _LEGACY_URL_FALLBACK
+    from app.persistence.alembic._legacy import legacy_url as _shared
+    return _shared()
 
 
 def _existing_columns(conn, table: str) -> set[str]:

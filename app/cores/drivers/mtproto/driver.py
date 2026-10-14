@@ -57,6 +57,13 @@ from app.cores.drivers.mtproto.backend import (
 
 logger = logging.getLogger("zagros.cores.drivers.mtproto")
 
+# Seeded at install so the core starts (and is startable) out of the box —
+# the operator can edit/delete it like any other inbound afterwards.
+DEFAULT_INBOUNDS: list[dict[str, Any]] = [
+    {"tag": "mtproto-8585", "protocol": "mtproto", "listen": "0.0.0.0",
+     "port": 8585},
+]
+
 _METRIC_RE = re.compile(
     r'^mtprotoproxy_(?:user_octets|user_octets_from|user_octets_to|'
     r'user_connects_curr)\{user="([^"]+)"\}\s+(\d+)')
@@ -122,7 +129,7 @@ class MTProtoProxyDriver(BaseCoreDriver):
             "work_dir": "/var/lib/zagros/cores/mtproto",
             "advertise_host": "",
             "metrics_port": 23456,
-            "inbounds": [],
+            "inbounds": [dict(ib) for ib in DEFAULT_INBOUNDS],
         },
         driver_version="1.0.0",
         homepage="https://github.com/alexbers/mtprotoproxy",
@@ -183,13 +190,27 @@ class MTProtoProxyDriver(BaseCoreDriver):
             raise CoreError("; ".join(errors))
         inbounds = [dict(ib) for ib in (document or {}).get("inbounds") or []
                     if str(ib.get("protocol") or "") == "mtproto"]
-        # re-render with the CURRENT account set (persisted via the panel's
-        # encrypted core-account store, mirrored into settings by sync)
-        accounts = self._persisted_accounts()
+        old_ports = {int(ib["port"]) for ib in self._inbounds()}
+        new_ports = {int(ib["port"]) for ib in inbounds}
         self.settings["inbounds"] = inbounds
+        if not inbounds:
+            # empty document + stop_when_no_inbounds contract: deleting the
+            # LAST inbound must stop the listener, never 422 the operator
+            # (the manager flips the recorded state to STOPPED after this).
+            await asyncio.to_thread(self._backend.stop)
+            self._backend.bump_generation()
+            return
+        accounts = self._persisted_accounts()
+        running = await asyncio.to_thread(self._backend.is_running)
+        if running and old_ports != new_ports:
+            # SIGUSR2 re-reads USERS/tags but does NOT re-bind sockets —
+            # a port add/remove needs a real restart (the manager's apply
+            # path then auto-starts the driver again and reports RUNNING).
+            await asyncio.to_thread(self._backend.stop)
+            running = False
         self._backend.write_config(inbounds, accounts)
         self._backend.bump_generation()
-        if self._backend.is_running():
+        if running:
             await asyncio.to_thread(self._backend.reload)
 
     def _persisted_accounts(self) -> list[dict[str, str]]:
@@ -218,6 +239,13 @@ class MTProtoProxyDriver(BaseCoreDriver):
     async def install(self) -> None:
         # the daemon is vendored inside the package — nothing to download
         self._backend._ensure_dir()
+        if not self._inbounds():
+            # field-reported bug: a fresh install refused to start with a
+            # bare "no inbound" error. Seed the default listener so the
+            # very first start succeeds; edit/delete it freely afterwards.
+            self.settings["inbounds"] = [dict(ib) for ib in DEFAULT_INBOUNDS]
+            logger.info("mtproto: seeded default inbound on port %s",
+                        DEFAULT_INBOUNDS[0]["port"])
 
     async def uninstall(self, purge: bool = False) -> None:
         await self.stop()

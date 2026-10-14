@@ -30,7 +30,7 @@ from app.cores.exceptions import CoreError
 from app.cores.process import ManagedProcess
 
 VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
-DAEMON_VERSION = "3.1.304-zagros.2"  # upstream base + zagros patches
+DAEMON_VERSION = "3.1.304-zagros.3"  # upstream base + zagros patches (PORTS, per-user ad tag, PUBLIC_IP preset)
 
 _TAG_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 _SECRET_RE = re.compile(r"^[0-9a-fA-F]{32}$")
@@ -90,12 +90,50 @@ class LocalMtprotoBackend:
                        encoding="utf-8")
         tmp.replace(Path(self.work_dir, "accounts.json"))
 
+    def _public_ip_presets(self) -> tuple[str | None, str | None]:
+        """(ipv4, ipv6) presets for the daemon's PUBLIC_IPV4/PUBLIC_IPV6.
+
+        Resolves settings.advertise_host (IP literal or hostname) with a
+        small per-process cache; (None, None) when unknown — the daemon
+        then falls back to its own (blocking, often unreachable) lookup
+        services."""
+        cached = getattr(self, "_advertise_cache", None)
+        if cached is not None and cached[0] == str(
+                self.settings.get("advertise_host") or ""):
+            return cached[1], cached[2]
+        host = str(self.settings.get("advertise_host") or "").strip()
+        v4: str | None = None
+        v6: str | None = None
+        if host:
+            try:
+                import ipaddress as _ip
+                addr = _ip.ip_address(host)
+                if addr.version == 6:
+                    v6 = str(addr)
+                else:
+                    v4 = str(addr)
+            except ValueError:
+                try:
+                    import socket as _s
+                    infos = _s.getaddrinfo(host, None, proto=_s.IPPROTO_TCP)
+                    for family, _typ, _proto, _canon, sockaddr in infos:
+                        ip = sockaddr[0]
+                        if family == _s.AF_INET6 and v6 is None and ":" in ip:
+                            v6 = ip
+                        elif family == _s.AF_INET and v4 is None:
+                            v4 = ip
+                except OSError:
+                    pass
+        self._advertise_cache = (host, v4, v6)
+        return v4, v6
+
     def render_config(self, inbounds: list[dict[str, Any]],
                       accounts: list[dict[str, Any]]) -> str:
         """Render config.py. ``accounts`` = [{'account_id','secret','tag'}]."""
         ports = sorted({int(ib["port"]) for ib in inbounds if ib.get("port")})
         if not ports:
             raise CoreError("MTProto core needs at least one inbound port")
+        public4, public6 = self._public_ip_presets()
         lines = ["USERS = {"]
         for a in accounts:
             lines.append('    "%s": {"secret": "%s", "tag": "%s"},' % (
@@ -108,6 +146,8 @@ class LocalMtprotoBackend:
             f"PORTS = {ports!r}\n"
             f"{users_block}\n"
             "USERS_TAGS = {}\n"          # patched daemon derives them from USERS
+            f"PUBLIC_IPV4 = {public4!r}\n"
+            f"PUBLIC_IPV6 = {public6!r}\n"
             "AD_TAG = \"\"\n"
             "USE_MIDDLE_PROXY = True\n"  # required for ad-tag delivery
             f"METRICS_PORT = {self.metrics_port}\n"
@@ -164,6 +204,35 @@ class LocalMtprotoBackend:
         if self._proc is not None:
             self._proc.stop()
             self._proc = None
+        # a daemon leaked by a crashed panel/test process still holds the
+        # ports — stop() must leave NOTHING listening from this work dir
+        self._sweep_orphans()
+
+    def _sweep_orphans(self) -> None:
+        """SIGTERM (then SIGKILL after a 3s grace) any vendored daemon whose
+        cwd is OUR work dir but which this backend does not own."""
+        try:
+            out = subprocess_run(["pgrep", "-f", "mtprotoproxy.py"])
+        except Exception:  # noqa: BLE001 — stop must never raise
+            return
+        work = Path(self.work_dir).resolve()
+        for token in out.split():
+            try:
+                pid = int(token)
+            except ValueError:
+                continue
+            try:
+                if Path(f"/proc/{pid}/cwd").resolve() != work:
+                    continue
+                os.kill(pid, signal.SIGTERM)
+                for _ in range(30):
+                    if not Path(f"/proc/{pid}").exists():
+                        break
+                    time.sleep(0.1)
+                else:
+                    os.kill(pid, signal.SIGKILL)
+            except OSError:  # already gone / permission — nothing to do
+                continue
 
     def is_running(self) -> bool:
         if self._proc is not None and self._proc.is_running:

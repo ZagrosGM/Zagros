@@ -642,6 +642,20 @@ def _softether_blueprint() -> list[Protocol]:
     ]
 
 
+def _mtproto_blueprint() -> list[Protocol]:
+    """MTProto proxy (vendored daemon). One TCP port serves every client
+    mode at once — classic DD-plane, secure (RANDOM padding) and fake-TLS
+    (secret<hex> / ee… links) are selected by the CLIENT's secret format,
+    not by server config — so the wizard has exactly one transport and no
+    security cells. Per-user ad tags ride the account, not the inbound."""
+    return [_proto(
+        "mtproto", "MTProto proxy (Telegram)", 8585,
+        [_tr("tcp", "TCP — classic + secure + fake-TLS on the same port",
+             [_none()])],
+        reason=None,
+    )]
+
+
 # --------------------------------------------------------------------- #
 # registry — keyed by the CORES' canonical ids (their `metadata.id`),
 # with accepted aliases. Field-reported bug: this used
@@ -659,6 +673,7 @@ _BLUEPRINTS = {
     "ssh": _ssh_blueprint,
     "softether": _softether_blueprint,
     "pptp": _pptp_blueprint,
+    "mtproto": _mtproto_blueprint,
 }
 
 _ALIASES = {

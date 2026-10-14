@@ -2148,8 +2148,18 @@ def init_ip_info():
     IPV6_URL1 = "http://v6.ident.me/"
     IPV6_URL2 = "http://ipv6.icanhazip.com/"
 
-    my_ip_info["ipv4"] = get_ip_from_url(IPV4_URL1) or get_ip_from_url(IPV4_URL2)
-    my_ip_info["ipv6"] = get_ip_from_url(IPV6_URL1) or get_ip_from_url(IPV6_URL2)
+    # Zagros patch (upstreamable): the panel knows the host's public IP and
+    # renders it as PUBLIC_IPV4/PUBLIC_IPV6 — outbound IP-lookup services
+    # (ident.me/icanhazip) are frequently unreachable from hosted panels,
+    # and the 4 blocking lookups stalled the daemon's startup by up to 20s.
+    preset_v4 = getattr(config, "PUBLIC_IPV4", None)
+    preset_v6 = getattr(config, "PUBLIC_IPV6", None)
+    if preset_v4 or preset_v6:
+        my_ip_info["ipv4"] = preset_v4
+        my_ip_info["ipv6"] = preset_v6 if (preset_v6 and ":" in preset_v6) else None
+    else:
+        my_ip_info["ipv4"] = get_ip_from_url(IPV4_URL1) or get_ip_from_url(IPV4_URL2)
+        my_ip_info["ipv6"] = get_ip_from_url(IPV6_URL1) or get_ip_from_url(IPV6_URL2)
 
     # the server can return ipv4 address instead of ipv6
     if my_ip_info["ipv6"] and ":" not in my_ip_info["ipv6"]:

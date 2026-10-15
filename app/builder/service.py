@@ -7,6 +7,7 @@ method is synchronous — routers run the service via ``asyncio.to_thread``.
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable
 from typing import Any, BinaryIO
 
@@ -538,8 +539,59 @@ class BuildService:
     # ---------------------------------------------------------- #
     # admin: workers + credentials (thin pass-throughs)
     # ---------------------------------------------------------- #
+    LOCAL_WORKER_ID = "local-pool-01"
+    REGISTER_TOKEN_REFRESH_SECONDS = 12 * 3600
+
     def create_worker(self, **kwargs) -> dict[str, Any]:
         return self._repo.create_worker(**kwargs)
+
+    def ensure_local_worker_bootstrap(self, data_dir: str = "/var/lib/zagros",
+                                      *, now=None) -> dict[str, Any] | None:
+        """f-buildzero-1: keep the zero-touch local build worker enrollable.
+
+        A fresh install ships a compose-managed worker container that has no
+        operator to click "issue register token". This best-effort bootstrap
+        (called at runtime startup; NEVER raises) makes sure that
+
+        * the fixed local worker ``local-pool-01`` (labels: linux) exists,
+        * ``<data_dir>/build-worker/register-token`` holds a fresh one-time
+          register token (refreshed when missing or older than half a day),
+          readable only by the worker container that mounts this directory.
+
+        Re-registering an existing worker rotates its API token, so the
+        container can simply re-enroll whenever its token file is gone.
+        """
+        try:
+            workers = {w["worker_id"] for w in self._repo.list_workers()}
+            if self.LOCAL_WORKER_ID not in workers:
+                try:
+                    self._repo.create_worker(
+                        worker_id=self.LOCAL_WORKER_ID,
+                        display_name="local pool (auto)",
+                        platform_labels=["linux"])
+                except Exception:  # noqa: BLE001 — duplicate race is fine
+                    pass
+            token_dir = os.path.join(data_dir, "build-worker")
+            os.makedirs(token_dir, mode=0o700, exist_ok=True)
+            token_path = os.path.join(token_dir, "register-token")
+            stale = True
+            try:
+                age = time.time() - os.stat(token_path).st_mtime
+                stale = age > self.REGISTER_TOKEN_REFRESH_SECONDS
+            except OSError:
+                stale = True
+            if stale:
+                issued = self._repo.issue_register_token(
+                    self.LOCAL_WORKER_ID, ttl_seconds=86400, now=now)
+                tmp = token_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    fh.write(issued["register_token"])
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, token_path)
+            return {"worker_id": self.LOCAL_WORKER_ID,
+                    "register_token_file": token_path}
+        except Exception:  # noqa: BLE001 — bootstrap must never break boot
+            return None
 
     def get_worker(self, worker_id: str) -> dict[str, Any]:
         return self._repo.get_worker(worker_id)

@@ -209,6 +209,9 @@ class PlatformRuntime:
             self.build_store, self.build_queue, self.build_artifacts,
             signing_seed_resolver=(
                 self.application_auth_repository.active_signing_seed))
+        # f-buildzero-1: keep the zero-touch local build worker enrollable —
+        # the compose-managed worker container enrolls from this token file.
+        self.build_service.ensure_local_worker_bootstrap("/var/lib/zagros")
         self.studio = ConfigStudioService(self.studio_store)
         self.dashboard = DashboardService(
             self.core_manager,

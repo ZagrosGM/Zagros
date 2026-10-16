@@ -2734,6 +2734,40 @@ async def _reconcile_panel_network_transaction(runtime) -> dict[str, Any] | None
     return result
 
 
+# --------------------------------------------------------------------- #
+# f-branding-1: operator white-labeling of the dashboard
+# --------------------------------------------------------------------- #
+
+@zagros_admin_router.get("/settings/branding")
+async def branding_get(runtime=Depends(get_runtime)):
+    from app.platform import branding as _branding
+
+    return _branding.load(runtime.session_factory).public_dict()
+
+
+@zagros_admin_router.put("/settings/branding")
+async def branding_put(
+    body: dict[str, Any],
+    runtime=Depends(get_runtime),
+    request: Request = None,
+):
+    from app.platform import branding as _branding
+
+    try:
+        current = _branding.load(runtime.session_factory)
+        merged = {**current.model_dump(),
+                  **{k: v for k, v in body.items()}}
+        branding = _branding.Branding.model_validate(merged)
+    except Exception as exc:
+        raise HTTPException(422, f"invalid branding: {exc}") from exc
+    _branding.save(runtime.session_factory, branding)
+    _audit(runtime, "branding.update", target="settings",
+           detail={"panel_name": branding.panel_name,
+                   "accent_color": branding.accent_color},
+           request=request)
+    return branding.public_dict()
+
+
 class UsageCoefficientsBody(BaseModel):
     master: float = Field(default=1.0, gt=0, le=1000)
     quota_multiplier: float = Field(default=1.0, gt=0, le=1000)

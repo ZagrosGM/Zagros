@@ -13,6 +13,7 @@ import { CommandPalette, useCommands } from "../components/CommandPalette";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Toaster, toast } from "../components/feedback";
 import { auth, getToken } from "../lib/api";
+import { brandLogo, brandName, brandTagline, useBranding } from "../lib/branding";
 import { useAdminPerms } from "../lib/perms";
 import { useT } from "../lib/i18n";
 import { applyUiState, useUI } from "../stores/ui";
@@ -65,6 +66,11 @@ export default function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const { theme, locale, sidebarCollapsed, setTheme, setLocale, toggleSidebar, advancedMode } = useUI();
+  // f-branding-1: operator white-labeling (name/logo/tagline/accent/title)
+  const branding = useBranding();
+  useEffect(() => {
+    document.title = `${brandName(branding, locale)} — ${t("app.tagline")}`;
+  }, [branding.panel_name, branding.name_fa, branding.name_en, locale]);  // eslint-disable-line react-hooks/exhaustive-deps
   const perms = useAdminPerms();
   const visibleNav = useMemo(() => NAV
     .map((group) => ({
@@ -115,11 +121,11 @@ export default function AppLayout() {
   const sidebar = (
     <div className="flex h-full flex-col">
       <div className={clsx("flex h-16 items-center gap-3 border-b border-border px-4", sidebarCollapsed && "justify-center px-2")}>
-        <img src="./statics/zagros.svg" alt="Zagros" className="h-9 w-9 shrink-0 rounded-xl" />
+        <img src={brandLogo(branding)} alt={brandName(branding, locale)} className="h-9 w-9 shrink-0 rounded-xl object-contain" />
         {!sidebarCollapsed && (
           <div className="min-w-0">
-            <p className="truncate text-[15px] font-bold tracking-tight">Zagros</p>
-            <p className="truncate text-[11px] text-content-3">{t("app.tagline")}</p>
+            <p className="truncate text-[15px] font-bold tracking-tight">{brandName(branding, locale)}</p>
+            <p className="truncate text-[11px] text-content-3">{brandTagline(branding, locale) ?? t("app.tagline")}</p>
           </div>
         )}
       </div>

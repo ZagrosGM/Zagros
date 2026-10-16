@@ -68,6 +68,22 @@ logger = logging.getLogger(__name__)
 zagros_router = APIRouter(tags=["Zagros"])
 
 
+@zagros_router.get("/branding", tags=["Zagros"])
+async def public_branding(request: Request):
+    """f-branding-1: dashboard white-labeling, UNAUTHENTICATED on purpose —
+    the login screen renders it before any token exists. Serves defaults
+    (stock Zagros) when unset; leaks nothing operational."""
+    runtime = getattr(request.app.state, "zagros", None)
+    if runtime is None:
+        return {}
+    from app.platform import branding as _branding
+
+    try:
+        return _branding.load(runtime.session_factory).public_dict()
+    except Exception:  # noqa: BLE001 — branding must never block login
+        return {}
+
+
 # ---------------------------------------------------------------------- #
 # auth plumbing: admin endpoints ride the legacy OAuth2/JWT stack and are
 # restricted to sudo admins. If the legacy stack is not importable (bare

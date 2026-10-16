@@ -6,10 +6,16 @@ import { motion } from "framer-motion";
 import { Loader2, Mountain } from "lucide-react";
 import { ApiError, auth } from "../lib/api";
 import { useT, useTDynamic } from "../lib/i18n";
+import { brandLogo, brandName, brandTagline, useBranding } from "../lib/branding";
+import { useUI } from "../stores/ui";
 import { Button, Input } from "../components/ui";
 
 export default function Login() {
   const t = useT();
+
+  // f-branding-1: the operator's brand on the login screen (public endpoint)
+  const branding = useBranding();
+  const bLocale = useUI((st) => st.locale);
   const tDyn = useTDynamic();
   const navigate = useNavigate();
   const qc = useQueryClient();
@@ -53,10 +59,10 @@ export default function Login() {
         className="card w-full max-w-sm p-8"
       >
         <div className="mb-8 flex flex-col items-center gap-3 text-center">
-          <img src="./statics/zagros.svg" alt="" className="h-14 w-14 rounded-2xl shadow-pop" />
+          <img src={brandLogo(branding)} alt="" className="h-14 w-14 rounded-2xl object-contain shadow-pop" />
           <div>
-            <h1 className="text-lg font-bold tracking-tight">{t("login.title")}</h1>
-            <p className="mt-1 text-xs text-content-3">{t("login.subtitle")}</p>
+            <h1 className="text-lg font-bold tracking-tight">{branding.panel_name || branding.name_fa || branding.name_en ? `${t("login.signInTo")} ${brandName(branding, bLocale)}` : t("login.title")}</h1>
+            <p className="mt-1 text-xs text-content-3">{brandTagline(branding, bLocale) ?? t("login.subtitle")}</p>
           </div>
         </div>
         <form onSubmit={submit} className="space-y-4" autoComplete="off">

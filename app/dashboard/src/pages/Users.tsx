@@ -99,6 +99,16 @@ interface CanonicalSubscriptionURL {
 /** Per-row one-click subscription link copy with a tooltip (α7.1, item 7):
  *  visible without opening the overflow menu, disabled when the user has no
  *  link instead of failing late. */
+// f-templdate-1: format a timestamp as the LOCAL calendar date. The old
+// `toISOString().slice(0, 10)` rendered the UTC date, so for an admin east
+// of UTC a 30-day template chosen after midnight local produced the previous
+// (UTC) day — one day less than intended.
+const localDate = (ms: number): string => {
+  const d = new Date(ms);
+  const p2 = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+};
+
 function CopySubButton({ u, copySub }: { u: User; copySub: (u: User) => void }) {
   const t = useT();
   const [done, setDone] = useState(false);
@@ -567,7 +577,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
         deviceLimit: user.device_limit ? String(user.device_limit) : "",
         downloadLimitMbps: String(user.download_limit_mbps ?? 0),
         uploadLimitMbps: String(user.upload_limit_mbps ?? 0),
-        expireDate: user.expire ? new Date(user.expire * 1000).toISOString().slice(0, 10) : "",
+        expireDate: user.expire ? localDate(user.expire * 1000) : "",
         inbounds: user.proxies
           ? Object.fromEntries(Object.keys(user.proxies).map((p) => [p, user.inbounds?.[p] ?? []]))
           : {},
@@ -739,10 +749,15 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
         // A template is a complete creation source. Honour its username
         // policy when the admin has not already entered an explicit name.
         username: current.username.trim() || generated,
-        dataLimitGB: tp.data_limit ? String(tp.data_limit / 1024 ** 3) : "",
+        // f-templdate-1: a template's "no limit"/"no expiry" is NO OPINION —
+        // it must not wipe what the admin already typed above it (the dialog
+        // lays Expiry above Template, so top-to-bottom filling lost the date).
+        // A value the template DOES carry still wins: that is what
+        // "from template" means.
+        dataLimitGB: tp.data_limit ? String(tp.data_limit / 1024 ** 3) : current.dataLimitGB,
         expireDate: tp.expire_duration
-          ? new Date(Date.now() + tp.expire_duration * 1000).toISOString().slice(0, 10)
-          : "",
+          ? localDate(Date.now() + tp.expire_duration * 1000)
+          : current.expireDate,
         inbounds: structuredClone(tp.inbounds ?? {}),
         // Do not merge with the manual "select all" prefill: that silently
         // granted cores the selected template never contained.

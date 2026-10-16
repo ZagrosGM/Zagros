@@ -637,7 +637,11 @@ def update_user(db: Session, dbuser: User, modify: UserModify) -> User:
         User: The updated user object.
     """
     added_proxies: Dict[ProxyTypes, Proxy] = {}
-    if modify.proxies:
+    # f-xrayclear-1: None = field omitted (no change); {} = remove every
+    # protocol. The old truthiness test made an explicit empty mapping mean
+    # "no change", so the dashboard could never take the last Xray protocol
+    # off a user.
+    if modify.proxies is not None:
         for proxy_type, settings in modify.proxies.items():
             dbproxy = db.query(Proxy) \
                 .where(Proxy.user == dbuser, Proxy.type == proxy_type) \
@@ -663,7 +667,7 @@ def update_user(db: Session, dbuser: User, modify: UserModify) -> User:
         for proxy in dbuser.proxies:
             if proxy.type not in modify.proxies:
                 db.delete(proxy)
-    if modify.inbounds:
+    if modify.inbounds is not None:
         for proxy_type, tags in modify.excluded_inbounds.items():
             dbproxy = db.query(Proxy) \
                 .where(Proxy.user == dbuser, Proxy.type == proxy_type) \

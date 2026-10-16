@@ -297,6 +297,13 @@ class UserCreate(User):
 class UserModify(User):
     status: UserStatusModify = None
     data_limit_reset_strategy: UserDataLimitResetStrategy = None
+    # f-xrayclear-1: PATCH semantics for the protocol maps. The parent User
+    # defaults both to {} — indistinguishable from an explicit empty mapping,
+    # so an admin who removed every Xray protocol in the dashboard was
+    # silently ignored ("no change") and the protocols stayed applied.
+    # None (field omitted) = no change; {} = remove every protocol/inbound.
+    proxies: Optional[Dict[ProxyTypes, ProxySettings]] = None
+    inbounds: Optional[Dict[ProxyTypes, List[str]]] = None
     # PATCH semantics: omitted keeps current; explicit 0 removes the limit.
     download_limit_mbps: Optional[int] = Field(
         None, strict=True, ge=0, le=100_000)

@@ -186,7 +186,16 @@ export default function Users() {
     onSuccess: () => { toast.ok("usage reset"); invalidate(); },
   });
   const users = useMemo(() => data?.users ?? [], [data]);
-  const owners = useMemo(() => [...new Set(users.map((u) => u.admin).filter(Boolean))] as string[], [users]);
+  // f-ownername-1: the legacy API returns `admin` either as the username or
+  // as the full admin object. The owner filter used to put the raw values
+  // into <option> children — an object child crashes React (#31) and took
+  // the whole Users page down. Normalize once, render strings everywhere.
+  const ownerName = (u: User): string =>
+    u.admin == null ? "—" : typeof u.admin === "string" ? u.admin
+      : u.admin.username || "—";
+  const owners = useMemo(
+    () => [...new Set(users.map(ownerName).filter((o) => o !== "—"))],
+    [users]);
   const catalogQ = useQuery({
     queryKey: ["zagros", "inbounds-catalog"],
     queryFn: () => api.get<{ groups: InboundCatalogGroup[] }>("/zagros/inbounds"),
@@ -353,7 +362,7 @@ export default function Users() {
     },
     { id: "expire", header: t("users.expire"), width: "130px", cell: (u) => <span className="text-[12px] tabular-nums text-content-2">{formatDate(u.expire, digits)}</span> },
     { id: "owner", header: t("users.admin"), width: "110px", cell: (u) => {
-        const owner = u.admin == null ? "—" : typeof u.admin === "string" ? u.admin : u.admin.username ?? "—";
+        const owner = ownerName(u);
         return <span className="text-[12px] text-content-2">{owner}</span>;
       } },
     { id: "online", header: t("users.lastOnline"), width: "120px", cell: (u) => <span className="text-[12px] text-content-3">{formatRelative(u.online_at, digits)}</span> },
@@ -789,7 +798,13 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
         // user's dialog echoes status='expired' back, and a future expire
         // date alone must reactivate the user server-side (f-panel-9).
         if (form.status !== user.status) body.status = form.status;
-        if (chosen.length) { body.proxies = proxySettings; body.inbounds = inboundSel; }
+        // f-xrayclear-1: an explicit EMPTY mapping now removes every Xray
+        // protocol server-side (omitted = no change). The old guard skipped
+        // the key when the admin unchecked the last protocol, so the removal
+        // silently never happened. Send it whenever the user had xray config.
+        if (chosen.length || (user.proxies && Object.keys(user.proxies).length)) {
+          body.proxies = proxySettings; body.inbounds = inboundSel;
+        }
         if (Object.keys(form.coreAccess).length || Object.keys(user.core_access ?? {}).length) {
           body.core_access = form.coreAccess;
         }

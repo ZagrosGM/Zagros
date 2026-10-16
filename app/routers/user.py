@@ -316,8 +316,8 @@ def modify_user(
     - **expire**: UTC timestamp for new account expiration. Set to `0` for unlimited, `null` for no change.
     - **data_limit**: New max data usage in bytes (e.g., `1073741824` for 1GB). Set to `0` for unlimited, `null` for no change.
     - **data_limit_reset_strategy**: New strategy for data limit reset. Options include 'daily', 'weekly', 'monthly', or 'no_reset'.
-    - **proxies**: Dictionary of new protocol settings (e.g., `vmess`, `vless`). Empty dictionary means no change.
-    - **inbounds**: Dictionary of new protocol tags to specify inbound connections. Empty dictionary means no change.
+    - **proxies**: Dictionary of new protocol settings (e.g., `vmess`, `vless`). Omitted/null keeps the current protocols; an EMPTY dictionary removes every protocol (f-xrayclear-1).
+    - **inbounds**: Dictionary of new protocol tags to specify inbound connections. Omitted/null means no change.
     - **note**: New optional text for additional user information or notes. `null` means no change.
     - **on_hold_timeout**: New UTC timestamp for when `on_hold` status should start or end. Only applicable if status is changed to 'on_hold'.
     - **on_hold_expire_duration**: New duration (in seconds) for how long the user should stay in `on_hold` status. Only applicable if status is changed to 'on_hold'.
@@ -326,7 +326,7 @@ def modify_user(
     Note: Fields set to `null` or omitted will not be modified.
     """
 
-    for proxy_type in modified_user.proxies:
+    for proxy_type in (modified_user.proxies or {}):
         if not xray.config.inbounds_by_protocol.get(proxy_type):
             raise HTTPException(
                 status_code=400,

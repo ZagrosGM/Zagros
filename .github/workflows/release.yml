@@ -63,6 +63,21 @@ jobs:
         if: steps.devkit.outputs.available == 'true'
         run: python -m pytest tests -q
 
+      # f-verguard-1: the tag and the shipped version string must agree.
+      # The panel version regressed unnoticed before (v1.1.2 release carried
+      # `__version__ = "1.1.0"`), so a tagged release now hard-fails when
+      # app/__init__.py does not announce the same version.
+      - name: Tag must match app/__init__.py __version__
+        run: |
+          declared="$(python -c 'from app import __version__; print(__version__)')"
+          # channel suffixes (v1.2.3-alpha.1) compare against the bare version
+          tag="${GITHUB_REF_NAME#v}"; tag="${tag%%-*}"
+          if [ "$declared" != "$tag" ]; then
+            echo "::error title=Version mismatch::tag v$tag vs app/__init__.py __version__ $declared"
+            exit 1
+          fi
+          echo "release $tag == __version__ $declared ✓"
+
   docker:
     name: Docker build → GHCR (amd64)
     needs: [test]

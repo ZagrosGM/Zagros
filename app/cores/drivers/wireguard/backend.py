@@ -471,6 +471,38 @@ class LocalWireGuardBackend:
         except CoreError:
             # interface not up yet (or just died) — bring it back with full config
             self._run_up()
+            return
+        # f-wgpeer-1: verify the LIVE peer set actually matches the rendered
+        # config. Installer report: after an account was re-granted with a
+        # NEW keypair, the interface kept the OLD peer for the same tunnel
+        # address — WireGuard drops unknown keys silently, so the user's
+        # fresh config could never connect and nothing showed an error.
+        # syncconf is diff-based; whatever path missed an update, this check
+        # converges the interface to the desired state or fails loudly.
+        wanted = set(re.findall(r"^\s*PublicKey\s*=\s*(\S+)", stripped, flags=re.M))
+        live = self._live_peer_keys()
+        stale = live - wanted
+        missing = wanted - live
+        if not stale and not missing:
+            return
+        for key in sorted(stale):
+            self._run([self.executable, "set", self.interface,
+                       "peer", key, "remove"])
+        if missing:
+            self._run([self.executable, "syncconf", self.interface, self.stripped_path])
+        still_missing = wanted - self._live_peer_keys()
+        if still_missing:
+            raise CoreError(
+                f"{len(still_missing)} WireGuard peer(s) failed to apply on "
+                f"'{self.interface}' — the interface does not match the "
+                f"stored accounts")
+
+    def _live_peer_keys(self) -> set[str]:
+        """Public keys currently registered on the kernel interface."""
+        return set(self._run(
+            [self.executable, "show", self.interface, "peers"],
+            timeout=15,
+        ).split())
 
     def down(self) -> None:
         try:
@@ -479,10 +511,20 @@ class LocalWireGuardBackend:
             # "already down" is success only when the interface is actually
             # absent. Never hide a teardown/firewall failure with a live link.
             if self.is_running():
-                raise CoreError(
-                    f"WireGuard cleanup failed and interface '{self.interface}' "
-                    f"is still present: {exc}"
-                ) from exc
+                # f-wgleftover-1: the conf file may no longer exist — an
+                # uninstall wipes /var/lib/zagros while the kernel interface
+                # (host networking) survives, and wg-quick can never run
+                # without its config. The interface is Zagros-owned by name:
+                # delete it directly instead of aborting the start ("cleanup
+                # failed and interface is still present" locked reinstalling
+                # installs out with no recovery except a panel restart).
+                self._run([shutil.which("ip") or "ip", "link",
+                           "delete", self.interface], timeout=20)
+                if self.is_running():
+                    raise CoreError(
+                        f"WireGuard cleanup failed and interface '{self.interface}' "
+                        f"is still present: {exc}"
+                    ) from exc
 
     def is_running(self) -> bool:
         if not self.is_installed():

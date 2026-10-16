@@ -52,6 +52,21 @@ class RuleMatcher(BaseModel):
         return not self.used_fields()
 
 
+class RuleScope(BaseModel):
+    """f-routingscope-1 (installer FR groundwork): WHERE a rule applies.
+
+    ``everywhere`` (default) reproduces today's behaviour exactly. ``master``
+    pins a rule to the master's own policy plane. ``{"nodes": [ids]}`` targets
+    specific node ids — such rules are EXCLUDED from the master's deploy and
+    reported as ``skipped_by_scope`` until node-side routing deployment
+    lands; the panel never pretends a node-only rule is live on the master.
+    """
+    nodes: list[int] = Field(default_factory=list)
+
+    def applies_on_master(self) -> bool:
+        return bool(self.nodes)
+
+
 class RoutingRule(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     matcher: RuleMatcher = Field(default_factory=RuleMatcher)
@@ -61,6 +76,7 @@ class RoutingRule(BaseModel):
     dns_server: str | None = None          # optional DNS target for DNS/DNS_OVERRIDE
     priority: int = 100                    # lower evaluates first
     enabled: bool = True
+    scope: RuleScope = Field(default_factory=RuleScope)
 
     @model_validator(mode="after")
     def _validate(self) -> "RoutingRule":
@@ -111,6 +127,9 @@ class RouteDeploymentReport(BaseModel):
     deployed_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+    # f-routingscope-1: node-scoped rules excluded from THIS host's deploy,
+    # with the reason — the operator sees what is stored but not applied.
+    skipped_by_scope: list[dict[str, str]] = Field(default_factory=list)
 
     @property
     def gaps(self) -> dict[str, list[UnsupportedRule]]:

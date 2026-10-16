@@ -19,7 +19,7 @@ const PROTOCOL_HINT = ["http", "tls", "quic", "bittorrent"];
 const NETWORKS = ["tcp", "udp", "tcp,udp"];
 
 function emptyRule(priority: number): RoutingRule {
-  return { name: "", matcher: {}, action: "block", outbound: null, redirect_to: null, dns_server: null, priority, enabled: true };
+  return { name: "", matcher: {}, action: "block", outbound: null, redirect_to: null, dns_server: null, priority, enabled: true, scope: { nodes: [] } };
 }
 
 export default function Routing() {
@@ -198,6 +198,9 @@ function RuleCard({ rule, onEdit, onToggle, onDelete }: {
         <GripVertical size={15} />
       </button>
       <Badge tone="muted">priority {rule.priority}</Badge>
+      {(rule.scope?.nodes?.length ?? 0) > 0 && (
+        <span title={t("routing.scopeNodeHint")}><Badge tone="warn">node-scoped</Badge></span>
+      )}
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-semibold">{rule.name || "(unnamed)"}</span>
@@ -504,6 +507,11 @@ function RuleDialog({ rule, targets, inboundGroups, existingNames, onClose, onSa
             <Field label={t("dns server")} required>
               <Input value={r.dns_server ?? ""} onChange={(e) => setR({ ...r, dns_server: e.target.value || null })} placeholder="https://dns.google/dns-query" dir="ltr" />
             </Field>
+          )}
+          {(r.scope?.nodes?.length ?? 0) > 0 && (
+            <p className="rounded-xl bg-warn-soft p-3 text-[11.5px] leading-5 text-warn sm:col-span-2">
+              {t("routing.scopeNodeHint")} (nodes: {r.scope!.nodes!.join(", ")})
+            </p>
           )}
           <label className="flex items-center gap-2.5 text-sm text-content-2">
             <Switch checked={r.enabled} onChange={(v) => setR({ ...r, enabled: v })} label={t("enabled")} />

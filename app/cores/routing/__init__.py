@@ -6,6 +6,7 @@ from app.cores.routing.model import (
     RoutingRule,
     RuleAction,
     RuleMatcher,
+    RuleScope,
     TranslatedRoute,
     UnsupportedRule,
 )
@@ -15,6 +16,7 @@ __all__ = [
     "RoutingRule",
     "RuleAction",
     "RuleMatcher",
+    "RuleScope",
     "RouteContext",
     "RouteDeploymentReport",
     "TranslatedRoute",

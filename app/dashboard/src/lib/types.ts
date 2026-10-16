@@ -277,11 +277,15 @@ export interface RoutingRule {
   dns_server?: string | null;
   priority: number;
   enabled: boolean;
+  /** f-routingscope-1: where the rule applies (absent/empty = everywhere) */
+  scope?: { nodes?: number[] } | null;
 }
 
 export interface RuleGap { rule: string; reason: string }
 export interface RoutePreview {
   results: Record<string, { applied: string[]; unsupported: RuleGap[]; payload?: unknown }>;
+  /** node-scoped rules excluded from THIS host's deploy, with reasons */
+  skipped_by_scope?: Array<{ name: string; reason: string }>;
 }
 
 export interface Outbound {

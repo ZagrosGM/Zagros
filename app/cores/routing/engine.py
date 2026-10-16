@@ -75,7 +75,18 @@ class RoutingEngine:
         Same report shape as :meth:`deploy` (per-core applied/unsupported
         matrix), so the UI can show coverage before the operator commits.
         """
-        normalized = [r for r in self.validate(rules) if r.enabled]
+        all_rules = self.validate(rules)
+        # f-routingscope-1: node-scoped rules belong to the node policy
+        # plane. They are excluded here AND reported, so a rule can never
+        # pretend to be live on a master it does not target.
+        normalized = [r for r in all_rules
+                      if r.enabled and not r.scope.applies_on_master()]
+        skipped_by_scope = [
+            {"name": r.name, "reason": "scope targets node(s) "
+             f"{r.scope.nodes} — node routing deployment is not available "
+             "yet; the rule is stored but NOT applied on this host"}
+            for r in all_rules if r.enabled and r.scope.applies_on_master()
+        ]
         ctx = RouteContext(
             available_outbounds=[o.name for o in (outbounds or [])],
         )
@@ -118,7 +129,8 @@ class RoutingEngine:
                 continue
             results[core_id] = await driver.translate_routing_rules(normalized, ctx)
 
-        return RouteDeploymentReport(results=results)
+        return RouteDeploymentReport(results=results,
+                                     skipped_by_scope=skipped_by_scope)
 
     # ------------------------------------------------------------------ #
     # deployment
@@ -135,7 +147,18 @@ class RoutingEngine:
         Every rule is accounted for on every core — either in ``applied`` or
         in ``unsupported`` with a reason. Nothing is dropped silently.
         """
-        normalized = [r for r in self.validate(rules) if r.enabled]
+        all_rules = self.validate(rules)
+        # f-routingscope-1: node-scoped rules belong to the node policy
+        # plane. They are excluded here AND reported, so a rule can never
+        # pretend to be live on a master it does not target.
+        normalized = [r for r in all_rules
+                      if r.enabled and not r.scope.applies_on_master()]
+        skipped_by_scope = [
+            {"name": r.name, "reason": "scope targets node(s) "
+             f"{r.scope.nodes} — node routing deployment is not available "
+             "yet; the rule is stored but NOT applied on this host"}
+            for r in all_rules if r.enabled and r.scope.applies_on_master()
+        ]
         ctx = RouteContext(
             available_outbounds=[o.name for o in (outbounds or [])],
         )
@@ -181,7 +204,8 @@ class RoutingEngine:
 
             results[core_id] = await driver.deploy_routing_rules(normalized, ctx)
 
-        report = RouteDeploymentReport(results=results)
+        report = RouteDeploymentReport(results=results,
+                                       skipped_by_scope=skipped_by_scope)
         self._last_report = report
         await self._bus.emit(
             Event.ROUTE_DEPLOYED,

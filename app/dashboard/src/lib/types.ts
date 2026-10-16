@@ -16,6 +16,10 @@ export interface AdminUser {
   expire_at?: string | null;
   traffic_alloc_limit?: number | null;
   traffic_consume_limit?: number | null;
+  /** f-reseller-policy-1: creation-side policy (null = disabled) */
+  allowed_template_ids?: number[] | null;
+  max_user_duration_days?: number | null;
+  clamp_user_expiry?: boolean | null;
   /** aggregates attached by the list endpoint */
   users_count?: number | null;
   users_lifetime_usage?: number | null;

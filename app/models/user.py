@@ -192,6 +192,11 @@ class UserCreate(User):
     # both per-user columns NULL so the user follows the panel-wide
     # Subscriptions setting.
     access_mode: str | None = None
+    # f-reseller-policy-1: the template a user is created from. Optional for
+    # API compatibility — REQUIRED server-side when the creating admin has
+    # enforced templates (allowed_template_ids), where the template's quota,
+    # expiry and access are re-applied here regardless of the sent values.
+    template_id: int | None = None
     # Marzban parity fix (pydantic-v2 migration regression): in v1 the
     # inbounds validator ran with ``always=True``, so an omitted ``inbounds``
     # meant "include every inbound of the selected protocols". In v2

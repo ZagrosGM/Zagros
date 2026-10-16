@@ -318,3 +318,121 @@ def test_modify_admin_core_sync_failure_stays_200(monkeypatch) -> None:
         row = db.query(User).filter(User.username == uname).one()
         assert row.status == UserStatus.disabled
         assert row.admin_limit_disabled is True
+
+
+# --------------------------------------------------------------------- #
+# f-reseller-policy-1: enforced templates / max duration / expiry clamp
+# --------------------------------------------------------------------- #
+
+def _mk_template(db, *, name, data_limit=0, expire_duration=0, core_access=None):
+    global _counter
+    _counter += 1
+    from app.db.models import UserTemplate
+    tpl = UserTemplate(name=f"{name}-{_counter}", data_limit=data_limit,
+                       expire_duration=expire_duration,
+                       core_access=core_access)
+    db.add(tpl)
+    db.commit()
+    db.refresh(tpl)
+    return tpl
+
+
+def test_enforced_templates_require_template_id() -> None:
+    with GetDB() as db:
+        tpl = _mk_template(db, name="std", data_limit=5 * 1024 ** 3,
+                           expire_duration=30 * 86400,
+                           core_access={"wireguard": ["wg0"]})
+        admin = _mk_admin(db, allowed_template_ids=[tpl.id])
+        with pytest.raises(crud.AdminLimitError) as err:
+            _mk_user(db, admin, limit=1024)
+        assert err.value.code == "enforced_templates"
+        # a foreign template is refused too
+        other = _mk_template(db, name="other")
+        with pytest.raises(crud.AdminLimitError):
+            crud.create_user(
+                db, UserCreate(username="tpl-x1", proxies={"vless": {}},
+                               template_id=other.id), admin=admin)
+
+
+def test_enforced_template_locks_quota_expiry_access() -> None:
+    with GetDB() as db:
+        tpl = _mk_template(db, name="locked", data_limit=7 * 1024 ** 3,
+                           expire_duration=10 * 86400,
+                           core_access={"wireguard": ["wg0"]})
+        admin = _mk_admin(db, allowed_template_ids=[tpl.id])
+        before = datetime.utcnow()
+        req = UserCreate(username="locked-1", proxies={"vless": {}},
+                         data_limit=99 * 1024 ** 3,      # client lies big
+                         expire=0,                        # client says unlimited
+                         core_access={},                  # client empties access
+                         template_id=tpl.id)              # from the template
+        u = crud.create_user(db, req, admin=admin)
+        assert u.data_limit == 7 * 1024 ** 3, "template quota wins"
+        # access lock: the router provisions from the MUTATED request model
+        assert req.core_access == {"wireguard": ["wg0"]}, "template access wins"
+        assert u.expire, "template duration applied"
+        got = datetime.utcfromtimestamp(u.expire)
+        days = (got - before).total_seconds() / 86400
+        assert 9.9 < days <= 10.1, f"expiry from template, got {days:.2f}d"
+
+
+def test_max_user_duration_rejects_long_expiry() -> None:
+    with GetDB() as db:
+        admin = _mk_admin(db, max_user_duration_days=90)
+        ok = crud.create_user(
+            db, UserCreate(username="dur-ok", proxies={"vless": {}},
+                           expire=int((datetime.utcnow() +
+                                       timedelta(days=30)).timestamp())),
+            admin=admin)
+        assert ok.expire
+        with pytest.raises(crud.AdminLimitError) as err:
+            crud.create_user(
+                db, UserCreate(username="dur-long", proxies={"vless": {}},
+                               expire=int((datetime.utcnow() +
+                                           timedelta(days=365)).timestamp())),
+                admin=admin)
+        assert err.value.code == "max_user_duration"
+        # on-hold durations are capped by the same rule
+        with pytest.raises(crud.AdminLimitError):
+            crud.create_user(
+                db, UserCreate(username="dur-hold", proxies={"vless": {}},
+                               on_hold_expire_duration=200 * 86400),
+                admin=admin)
+        # and EDITS cannot smuggle a longer expiry in
+        with pytest.raises(crud.AdminLimitError):
+            crud.update_user(db, ok, UserModify(
+                expire=int((datetime.utcnow() + timedelta(days=3650)).timestamp())))
+
+
+def test_clamp_user_expiry_pulls_to_admin_expiry() -> None:
+    with GetDB() as db:
+        admin_exp = datetime.utcnow() + timedelta(days=100)
+        admin = _mk_admin(db, clamp_user_expiry=True, expire_at=admin_exp)
+        u = crud.create_user(
+            db, UserCreate(username="clamp-1", proxies={"vless": {}},
+                           expire=int((datetime.utcnow() +
+                                       timedelta(days=3650)).timestamp())),
+            admin=admin)
+        got = datetime.utcfromtimestamp(u.expire)
+        delta = abs((got - admin_exp).total_seconds())
+        assert delta < 5, f"expiry clamped to the admin's own, delta={delta}s"
+
+
+def test_reseller_policy_roundtrip_on_admin_crud() -> None:
+    with GetDB() as db:
+        tpl = _mk_template(db, name="rt")
+        admin = _mk_admin(db, allowed_template_ids=[tpl.id],
+                          max_user_duration_days=60, clamp_user_expiry=True)
+        db.refresh(admin)
+        assert crud._load_template_ids(admin.allowed_template_ids) == [tpl.id]
+        assert admin.max_user_duration_days == 60
+        assert admin.clamp_user_expiry is True
+        # update: replace the list, clear the clamp
+        crud.update_admin(db, admin, AdminModify(
+            is_sudo=False,
+            allowed_template_ids=[],
+            max_user_duration_days=30))
+        db.refresh(admin)
+        assert admin.allowed_template_ids is None, "empty list clears"
+        assert admin.max_user_duration_days == 30
+        assert admin.clamp_user_expiry is True, "absent = keep"

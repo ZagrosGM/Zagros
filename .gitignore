@@ -181,3 +181,4 @@ support-bot/
 # Local credentials & tokens (never commit real secrets)
 .env.local
 *.local.env
+*.tsbuildinfo

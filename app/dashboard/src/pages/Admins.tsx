@@ -28,6 +28,10 @@ interface AdminForm {
   expire_at: string;
   traffic_alloc_limit_gb: string;
   traffic_consume_limit_gb: string;
+  /** f-reseller-policy-1: creation-side policy for resellers */
+  max_duration_days: string;
+  clamp_expiry: boolean;
+  allowedTemplateIds: number[];
   /** f-panel-5 permission matrix (non-sudo only) */
   permSections: Record<string, PermLevel>;
   permInboundMode: "all" | "pick";
@@ -37,6 +41,7 @@ interface AdminForm {
 const emptyForm: AdminForm = {
   username: "", password: "", is_sudo: false, telegram_id: "", discord_webhook: "",
   max_users: "", expire_at: "", traffic_alloc_limit_gb: "", traffic_consume_limit_gb: "",
+  max_duration_days: "", clamp_expiry: false, allowedTemplateIds: [],
   permSections: {}, permInboundMode: "all", permInbounds: [],
 };
 
@@ -257,6 +262,9 @@ function AdminDialog({ mode, admin, onClose, onSaved }: {
         expire_at: admin.expire_at ? admin.expire_at.slice(0, 10) : "",
         traffic_alloc_limit_gb: bytesToGb(admin.traffic_alloc_limit),
         traffic_consume_limit_gb: bytesToGb(admin.traffic_consume_limit),
+        max_duration_days: admin.max_user_duration_days ? String(admin.max_user_duration_days) : "",
+        clamp_expiry: admin.clamp_user_expiry === true,
+        allowedTemplateIds: admin.allowed_template_ids ?? [],
         permSections: (admin.permissions?.sections ?? {}) as Record<string, PermLevel>,
         permInboundMode: admin.permissions?.inbounds?.length ? "pick" : "all",
         permInbounds: admin.permissions?.inbounds ?? [],
@@ -266,6 +274,12 @@ function AdminDialog({ mode, admin, onClose, onSaved }: {
   });
   // f-panel-5: the inbound picker source (sudo loads the same catalog the
   // Users dialog uses; the backend already filters it for restricted admins).
+  // f-reseller-policy-1: the templates a reseller can be locked down to.
+  const templatesQ = useQuery({
+    queryKey: ["user_template"],
+    queryFn: () => api.get<Array<{ id: number; name: string }>>("/user_templates"),
+    enabled: !form.is_sudo,
+  });
   const permCatalogQ = useQuery({
     queryKey: ["zagros", "inbounds-catalog"],
     queryFn: () => api.get<{ groups: Array<{ core_id: string; name: string; inbounds: Array<{ tag: string }> }> }>("/zagros/inbounds"),
@@ -287,6 +301,11 @@ function AdminDialog({ mode, admin, onClose, onSaved }: {
       expire_at: form.expire_at ? new Date(`${form.expire_at}T23:59:59`).toISOString() : null,
       traffic_alloc_limit: gbToBytes(form.traffic_alloc_limit_gb),
       traffic_consume_limit: gbToBytes(form.traffic_consume_limit_gb),
+      // f-reseller-policy-1: creation-side policy. Always present so the
+      // backend's explicit-presence semantics replace/clear exactly.
+      allowed_template_ids: form.allowedTemplateIds.length ? form.allowedTemplateIds : [],
+      max_user_duration_days: form.max_duration_days ? Number(form.max_duration_days) : null,
+      clamp_user_expiry: form.clamp_expiry,
     };
     const permissions = form.is_sudo ? null : {
       v: 1,
@@ -379,6 +398,42 @@ function AdminDialog({ mode, admin, onClose, onSaved }: {
               <Input type="number" min="0" step="0.1" value={form.traffic_consume_limit_gb}
                 onChange={(e) => setForm({ ...form, traffic_consume_limit_gb: e.target.value })} />
             </Field>
+            <Field label={t("admins.maxDuration")}
+              hint={t("admins.maxDurationHint")}>
+              <Input type="number" min="0" value={form.max_duration_days}
+                onChange={(e) => setForm({ ...form, max_duration_days: e.target.value })} />
+            </Field>
+            <label className="mt-1 flex items-center gap-2.5 text-[12px] text-content-2">
+              <Switch checked={form.clamp_expiry} onChange={(v) => setForm({ ...form, clamp_expiry: v })}
+                label="clamp" />
+              {t("admins.clampExpiry")}
+            </label>
+          </div>
+          <div className="mt-3">
+            <p className="mb-1.5 text-[11px] font-semibold text-content-3">{t("admins.enforcedTemplates")}</p>
+            <p className="mb-2 text-[11px] text-content-3">{t("admins.enforcedTemplatesHint")}</p>
+            <div className="flex flex-wrap gap-1.5">
+              {(templatesQ.data ?? []).map((tp) => {
+                const on = form.allowedTemplateIds.includes(tp.id);
+                return (
+                  <button key={tp.id} type="button"
+                    onClick={() => setForm({
+                      ...form,
+                      allowedTemplateIds: on
+                        ? form.allowedTemplateIds.filter((x) => x !== tp.id)
+                        : [...form.allowedTemplateIds, tp.id],
+                    })}
+                    className={`rounded-full border px-2.5 py-1 text-[11px] ${on
+                      ? "border-brand bg-brand/10 text-brand"
+                      : "border-line text-content-3 hover:border-brand/50"}`}>
+                    {tp.name}
+                  </button>
+                );
+              })}
+              {!(templatesQ.data ?? []).length && (
+                <span className="text-[11px] text-content-3">{t("admins.noTemplatesYet")}</span>
+              )}
+            </div>
           </div>
         </div>
 

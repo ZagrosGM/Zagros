@@ -86,6 +86,18 @@ class Admin(Base):
     expire_at = Column(DateTime, nullable=True, default=None)
     traffic_alloc_limit = Column(BigInteger, nullable=True, default=None)
     traffic_consume_limit = Column(BigInteger, nullable=True, default=None)
+    # f-reseller-policy-1 (installer FR): creation-side policy for resellers.
+    #   * allowed_template_ids — JSON list of user_template ids; when set the
+    #     admin may ONLY create users from these templates and the template's
+    #     quota/expiry/access are applied SERVER-side (the dialog prefill is
+    #     no longer the enforcement).
+    #   * max_user_duration_days — no user may expire further than this many
+    #     days from now (on-hold durations capped the same way).
+    #   * clamp_user_expiry — clamp a user's expiry to the admin's own
+    #     expire_at instead of rejecting it.
+    allowed_template_ids = Column(Text, nullable=True, default=None)
+    max_user_duration_days = Column(BigInteger, nullable=True, default=None)
+    clamp_user_expiry = Column(Boolean, nullable=True, default=None)
 
 
 class AdminUsageLogs(Base):

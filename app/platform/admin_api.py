@@ -3444,6 +3444,14 @@ async def users_bulk_create(
     expire = int((datetime.utcnow() + timedelta(days=body.expire_days)).timestamp()) if body.expire_days and body.expire_days > 0 else None
 
     with GetDB() as db:
+        # f-reseller-policy-1: bulk creation used to bypass EVERY governance
+        # cap (admin=None). The router guard already authenticated the
+        # caller — resolve the DB row so max_users / allocation budget /
+        # enforced-template policy apply to bulk batches exactly like the
+        # single-user endpoint.
+        from app.platform.routers import _current_admin
+        _ctx = _current_admin.get()
+        gov_admin = crud.get_admin(db, _ctx) if _ctx else None
         tpl = crud.get_user_template(db, body.template_id) if body.template_id else None
         if tpl:
             if not data_limit and tpl.data_limit:
@@ -3482,8 +3490,12 @@ async def users_bulk_create(
                     core_access=core_access,
                     proxies=proxies_val,
                     inbounds=inbounds_val,
+                    # f-reseller-policy-1: enforced-template admins must
+                    # create FROM a template — pass it through so the
+                    # server-side lock applies (rejected otherwise).
+                    template_id=body.template_id,
                 )
-                dbuser = crud.create_user(db, user_create)
+                dbuser = crud.create_user(db, user_create, admin=gov_admin)
                 try:
                     from app.platform import provisioning
                     await provisioning.sync_user(runtime, dbuser, core_access if core_access else None)

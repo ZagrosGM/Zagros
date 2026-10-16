@@ -1,5 +1,5 @@
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -38,6 +38,10 @@ class Admin(BaseModel):
     expire_at: Optional[datetime] = None
     traffic_alloc_limit: Optional[int] = None
     traffic_consume_limit: Optional[int] = None
+    # f-reseller-policy-1: creation-side policy (see db/models.py Admin).
+    allowed_template_ids: Optional[List[int]] = None
+    max_user_duration_days: Optional[int] = None
+    clamp_user_expiry: Optional[bool] = None
     users_count: Optional[int] = None
     users_lifetime_usage: Optional[int] = None
     users_allocated_traffic: Optional[int] = None
@@ -51,6 +55,22 @@ class Admin(BaseModel):
         if expiry.tzinfo is None:
             expiry = expiry.replace(tzinfo=timezone.utc)
         return expiry <= datetime.now(timezone.utc)
+
+    @field_validator("allowed_template_ids", mode="before")
+    @classmethod
+    def _template_ids_from_json(cls, v):
+        """The column is TEXT — decode/encode the id list transparently."""
+        import json as _json
+        if v is None or v == "":
+            return None
+        if isinstance(v, str):
+            try:
+                v = _json.loads(v)
+            except ValueError:
+                return None
+        if isinstance(v, (list, tuple)):
+            return [int(i) for i in v if str(i).strip().lstrip("-").isdigit()]
+        return None
 
     @field_validator("permissions", mode="before")
     @classmethod
@@ -174,6 +194,10 @@ class AdminModify(BaseModel):
     expire_at: Optional[datetime] = None
     traffic_alloc_limit: Optional[int] = None
     traffic_consume_limit: Optional[int] = None
+    # f-reseller-policy-1: same presence semantics as the other caps.
+    allowed_template_ids: Optional[List[int]] = None
+    max_user_duration_days: Optional[int] = None
+    clamp_user_expiry: Optional[bool] = None
 
     @property
     def hashed_password(self):
@@ -203,6 +227,9 @@ class AdminPartialModify(AdminModify):
     expire_at: Optional[datetime] = None
     traffic_alloc_limit: Optional[int] = None
     traffic_consume_limit: Optional[int] = None
+    allowed_template_ids: Optional[List[int]] = None
+    max_user_duration_days: Optional[int] = None
+    clamp_user_expiry: Optional[bool] = None
 
 
 class AdminInDB(Admin):

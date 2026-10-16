@@ -804,6 +804,10 @@ function UserDialog({ mode, user, catalog, restricted, templates, onClose, onSav
           // admin's choice — omitting the key would hand the user the
           // panel's API defaults (meant for Marzban-style bots).
           core_access: Object.fromEntries(Object.entries(form.coreAccess).filter(([, tags]) => tags.length)),
+          // f-reseller-policy-1: required when the creating admin has
+          // enforced templates — the server re-applies the template's
+          // quota/expiry/access regardless of the values above.
+          template_id: form.templateId ?? null,
         });
         toast.ok(`${form.username} created`);
       } else if (user) {

@@ -2,7 +2,7 @@
 Functions for managing proxy hosts, users, user templates, nodes, and administrative tasks.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -466,6 +466,154 @@ def _lock_admin_row(db: Session, admin_id: int) -> None:
         db.query(Admin.id).filter(Admin.id == admin_id).with_for_update().first()
 
 
+def _dump_template_ids(ids) -> Optional[str]:
+    """f-reseller-policy-1: JSON-encode the enforced-template id list.
+
+    None/empty -> NULL (unrestricted); the dashboard sends [1, 2] lists."""
+    if not ids:
+        return None
+    import json as _json
+    try:
+        clean = sorted({int(i) for i in ids})
+    except (TypeError, ValueError):
+        return None
+    return _json.dumps(clean) if clean else None
+
+
+def _load_template_ids(raw) -> List[int]:
+    import json as _json
+    if not raw:
+        return []
+    try:
+        val = _json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return [int(i) for i in val] if isinstance(val, (list, tuple)) else []
+
+
+def _enforce_reseller_user_policy(db: Session, admin: Optional[Admin],
+                                  user: "UserCreate") -> None:
+    """f-reseller-policy-1 — creation-side policy for resellers (FR).
+
+    Mutates ``user`` so the stored user ALWAYS matches the admin's policy:
+      * enforced templates: the user must come from one of the admin's
+        templates; quota, expiry and access are re-applied from the template
+        row server-side, whatever the API request claimed;
+      * max_user_duration_days: expiry (or on-hold duration) beyond the cap
+        is REJECTED with a clear governance error;
+      * clamp_user_expiry: instead of rejecting, expiry is pulled back to
+        the admin's own expire_at.
+
+    Runs BEFORE _check_user_create_limits so the budget sees the FINAL
+    (template-locked) data_limit, never the client-sent one.
+    """
+    if admin is None:
+        return
+
+    # -- expiry guards ------------------------------------------------
+    max_days = admin.max_user_duration_days
+    if max_days:
+        horizon = datetime.utcnow() + timedelta(days=int(max_days))
+        horizon_ts = int(horizon.replace(tzinfo=timezone.utc).timestamp())
+        expire = getattr(user, "expire", None)
+        if expire and int(expire) > horizon_ts:
+            raise AdminLimitError(
+                "max_user_duration",
+                f"admin '{admin.username}' allows user durations of at most "
+                f"{int(max_days)} days — this expiry exceeds that cap.")
+        hold = getattr(user, "on_hold_expire_duration", None)
+        if hold and int(hold) > int(max_days) * 86400:
+            raise AdminLimitError(
+                "max_user_duration",
+                f"admin '{admin.username}' allows user durations of at most "
+                f"{int(max_days)} days — this on-hold duration exceeds it.")
+
+    clamp_on = bool(admin.clamp_user_expiry) and admin.expire_at is not None
+    if clamp_on:
+        admin_exp = admin.expire_at
+        if admin_exp.tzinfo is None:
+            admin_exp = admin_exp.replace(tzinfo=timezone.utc)
+        admin_ts = int(admin_exp.timestamp())
+        expire = getattr(user, "expire", None)
+        if expire and int(expire) > admin_ts:
+            user.expire = admin_ts
+
+    # -- enforced templates --------------------------------------------
+    enforced = _load_template_ids(admin.allowed_template_ids)
+    if not enforced:
+        return
+    template_id = getattr(user, "template_id", None)
+    if not template_id:
+        names = ", ".join(str(i) for i in enforced)
+        raise AdminLimitError(
+            "enforced_templates",
+            f"admin '{admin.username}' may only create users from the "
+            f"assigned templates (ids: {names}) — template_id is required.")
+    if int(template_id) not in enforced:
+        raise AdminLimitError(
+            "enforced_templates",
+            f"template {int(template_id)} is not assigned to admin "
+            f"'{admin.username}'.")
+    tpl = db.query(UserTemplate).get(int(template_id))
+    if tpl is None:
+        raise AdminLimitError(
+            "enforced_templates",
+            f"template {int(template_id)} no longer exists.")
+    # LOCKED fields: server wins over the request, always.
+    user.data_limit = (tpl.data_limit or None)
+    if tpl.expire_duration:
+        user.expire = int((datetime.utcnow() +
+                           timedelta(seconds=int(tpl.expire_duration)))
+                          .replace(tzinfo=timezone.utc).timestamp())
+    else:
+        user.expire = None
+    if tpl.core_access:
+        user.core_access = dict(tpl.core_access)
+    else:
+        user.core_access = {}
+    # Xray legacy grants: map the template's inbound rows through the live
+    # xray config exactly like UserTemplateResponse does for the UI.
+    try:
+        from app.models.proxy import ProxyTypes
+        tags = {i.tag for i in (tpl.inbounds or [])}
+        mapping: dict = {}
+        if tags:
+            from app import xray as _xray
+            for protocol, inbounds in (_xray.config.inbounds_by_protocol or {}).items():
+                hit = [i["tag"] for i in inbounds if i.get("tag") in tags]
+                if hit:
+                    mapping[ProxyTypes(protocol)] = hit
+        user.inbounds = mapping or {}
+    except Exception:
+        user.inbounds = {}
+
+
+def _enforce_reseller_update_policy(db: Session, dbuser: User,
+                                    modify: "UserModify") -> None:
+    """f-reseller-policy-1 — the same duration cap / clamp on EDITS."""
+    if dbuser.admin_id is None:
+        return
+    admin = db.query(Admin).get(dbuser.admin_id)
+    if admin is None:
+        return
+    max_days = admin.max_user_duration_days
+    new_expire = getattr(modify, "expire", None)  # None = unchanged
+    if new_expire:
+        if max_days:
+            horizon = datetime.utcnow() + timedelta(days=int(max_days))
+            if int(new_expire) > int(horizon.replace(tzinfo=timezone.utc).timestamp()):
+                raise AdminLimitError(
+                    "max_user_duration",
+                    f"admin '{admin.username}' allows user durations of at "
+                    f"most {int(max_days)} days.")
+        if bool(admin.clamp_user_expiry) and admin.expire_at is not None:
+            admin_exp = admin.expire_at
+            if admin_exp.tzinfo is None:
+                admin_exp = admin_exp.replace(tzinfo=timezone.utc)
+            if int(new_expire) > int(admin_exp.timestamp()):
+                modify.expire = int(admin_exp.timestamp())
+
+
 def _admin_user_count(db: Session, admin_id: int) -> int:
     return int(db.query(func.count(User.id)).filter(User.admin_id == admin_id).scalar() or 0)
 
@@ -574,6 +722,10 @@ def create_user(db: Session, user: UserCreate, admin: Admin = None) -> User:
     Returns:
         User: The created user object.
     """
+    # f-reseller-policy-1: template lock / duration cap / expiry clamp run
+    # first — they may MUTATE the request (template's quota wins), and the
+    # budget below must validate the final values.
+    _enforce_reseller_user_policy(db, admin, user)
     # Governance gate FIRST (under the admin row lock) — never insert a
     # user that violates the admin's caps, never partially apply one.
     _check_user_create_limits(db, admin, user.data_limit or None)
@@ -733,6 +885,9 @@ def update_user(db: Session, dbuser: User, modify: UserModify) -> User:
                 dbuser.status = UserStatus.limited
 
     if modify.expire is not None:
+        # f-reseller-policy-1: duration cap / admin-expiry clamp on edits
+        # (may rewrite modify.expire before it lands).
+        _enforce_reseller_update_policy(db, dbuser, modify)
         dbuser.expire = (modify.expire or None)
         if dbuser.status in (UserStatus.active, UserStatus.expired):
             if not dbuser.expire or dbuser.expire > datetime.utcnow().timestamp():
@@ -1195,6 +1350,12 @@ def create_admin(db: Session, admin: AdminCreate) -> Admin:
         expire_at=admin.expire_at,
         traffic_alloc_limit=(admin.traffic_alloc_limit or None),
         traffic_consume_limit=(admin.traffic_consume_limit or None),
+        allowed_template_ids=_dump_template_ids(
+            getattr(admin, "allowed_template_ids", None)),
+        max_user_duration_days=(
+            int(admin.max_user_duration_days)
+            if getattr(admin, "max_user_duration_days", None) else None),
+        clamp_user_expiry=getattr(admin, "clamp_user_expiry", None),
     )
     db.add(dbadmin)
     db.commit()
@@ -1212,6 +1373,7 @@ def _apply_governance_fields(dbadmin: Admin, modified_admin) -> None:
         ("expire_at", "expire_at"),
         ("traffic_alloc_limit", "traffic_alloc_limit"),
         ("traffic_consume_limit", "traffic_consume_limit"),
+        ("max_user_duration_days", "max_user_duration_days"),
     ):
         if field not in fields_set:
             continue
@@ -1220,6 +1382,14 @@ def _apply_governance_fields(dbadmin: Admin, modified_admin) -> None:
             setattr(dbadmin, column, value or None)
         else:
             setattr(dbadmin, column, (int(value) if value and value > 0 else None))
+    # f-reseller-policy-1: list/bool policy fields — present = replace.
+    if "allowed_template_ids" in fields_set:
+        dbadmin.allowed_template_ids = _dump_template_ids(
+            getattr(modified_admin, "allowed_template_ids", None))
+    if "clamp_user_expiry" in fields_set:
+        dbadmin.clamp_user_expiry = (
+            bool(modified_admin.clamp_user_expiry)
+            if modified_admin.clamp_user_expiry is not None else None)
 
 
 def update_admin(db: Session, dbadmin: Admin, modified_admin: AdminModify) -> Admin:

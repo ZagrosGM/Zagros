@@ -350,7 +350,7 @@ def test_enforced_templates_require_template_id() -> None:
         other = _mk_template(db, name="other")
         with pytest.raises(crud.AdminLimitError):
             crud.create_user(
-                db, UserCreate(username="tpl-x1", proxies={"vless": {}},
+                db, UserCreate(username="tpl_x1", proxies={"vless": {}},
                                template_id=other.id), admin=admin)
 
 
@@ -361,7 +361,7 @@ def test_enforced_template_locks_quota_expiry_access() -> None:
                            core_access={"wireguard": ["wg0"]})
         admin = _mk_admin(db, allowed_template_ids=[tpl.id])
         before = datetime.utcnow()
-        req = UserCreate(username="locked-1", proxies={"vless": {}},
+        req = UserCreate(username="locked_1", proxies={"vless": {}},
                          data_limit=99 * 1024 ** 3,      # client lies big
                          expire=0,                        # client says unlimited
                          core_access={},                  # client empties access
@@ -380,14 +380,14 @@ def test_max_user_duration_rejects_long_expiry() -> None:
     with GetDB() as db:
         admin = _mk_admin(db, max_user_duration_days=90)
         ok = crud.create_user(
-            db, UserCreate(username="dur-ok", proxies={"vless": {}},
+            db, UserCreate(username="dur_ok", proxies={"vless": {}},
                            expire=int((datetime.utcnow() +
                                        timedelta(days=30)).timestamp())),
             admin=admin)
         assert ok.expire
         with pytest.raises(crud.AdminLimitError) as err:
             crud.create_user(
-                db, UserCreate(username="dur-long", proxies={"vless": {}},
+                db, UserCreate(username="dur_long", proxies={"vless": {}},
                                expire=int((datetime.utcnow() +
                                            timedelta(days=365)).timestamp())),
                 admin=admin)
@@ -395,7 +395,7 @@ def test_max_user_duration_rejects_long_expiry() -> None:
         # on-hold durations are capped by the same rule
         with pytest.raises(crud.AdminLimitError):
             crud.create_user(
-                db, UserCreate(username="dur-hold", proxies={"vless": {}},
+                db, UserCreate(username="dur_hold", proxies={"vless": {}},
                                on_hold_expire_duration=200 * 86400),
                 admin=admin)
         # and EDITS cannot smuggle a longer expiry in
@@ -409,7 +409,7 @@ def test_clamp_user_expiry_pulls_to_admin_expiry() -> None:
         admin_exp = datetime.utcnow() + timedelta(days=100)
         admin = _mk_admin(db, clamp_user_expiry=True, expire_at=admin_exp)
         u = crud.create_user(
-            db, UserCreate(username="clamp-1", proxies={"vless": {}},
+            db, UserCreate(username="clamp_1", proxies={"vless": {}},
                            expire=int((datetime.utcnow() +
                                        timedelta(days=3650)).timestamp())),
             admin=admin)
@@ -436,3 +436,159 @@ def test_reseller_policy_roundtrip_on_admin_crud() -> None:
         assert admin.allowed_template_ids is None, "empty list clears"
         assert admin.max_user_duration_days == 30
         assert admin.clamp_user_expiry is True, "absent = keep"
+
+
+# --------------------------------------------------------------------- #
+# f-templink-1: template link + bulk apply / bulk inbound (HTTP level)
+# --------------------------------------------------------------------- #
+
+def _seed_jwt() -> None:
+    """HTTP tests need a signing secret; seed once, idempotent."""
+    from app.db.models import JWT
+    with GetDB() as db:
+        if db.query(JWT).first() is None:
+            db.add(JWT(id=1, secret_key="ab" * 32))
+            db.commit()
+
+
+def test_template_link_persists_and_filters(monkeypatch) -> None:
+    with GetDB() as db:
+        tpl = _mk_template(db, name="linked", data_limit=2 * 1024 ** 3,
+                           expire_duration=0, core_access={"wireguard": ["wg0"]})
+        admin = _mk_admin(db)
+        u = crud.create_user(
+            db, UserCreate(username="linked_1", proxies={"vless": {}},
+                           template_id=tpl.id), admin=admin)
+        assert u.template_id == tpl.id
+        # template filter on get_users
+        hit = crud.get_users(db, template_id=tpl.id)
+        assert [x.username for x in hit] == ["linked_1"]
+        assert crud.get_users(db, template_id=tpl.id + 999) == []
+        # unlinked users are invisible to the filter
+        _mk_user(db, admin)
+        assert [x.username for x in crud.get_users(db, template_id=tpl.id)] == ["linked_1"]
+
+
+def test_apply_template_endpoint_updates_batch(monkeypatch) -> None:
+    """HTTP: sudo applies a template to two users; grants converge."""
+    from datetime import datetime, timedelta
+    from fastapi.testclient import TestClient
+    from types import SimpleNamespace
+
+    from app.db.models import User as LegacyUser
+
+    applied_calls: list[tuple] = []
+
+    async def _fake_apply_grants(runtime, user, platform_id, grants, *,
+                                 repair=False, revoke_missing=False):
+        applied_calls.append((user.username, dict(grants), revoke_missing))
+
+    async def _fake_sync_platform_user(runtime, user):
+        return 4000 + abs(hash(user.username)) % 1000
+
+    import app.platform.admin_api as zapi
+    import app.platform.provisioning as prov
+    monkeypatch.setattr(prov, "apply_grants", _fake_apply_grants)
+    monkeypatch.setattr(prov, "sync_platform_user", _fake_sync_platform_user)
+    async def _noop_fanout(runtime, force=False):
+        return None
+    monkeypatch.setattr(zapi, "fanout_accounts", _noop_fanout)
+
+    with GetDB() as db:
+        tpl = _mk_template(db, name="batch", data_limit=3 * 1024 ** 3,
+                           expire_duration=14 * 86400,
+                           core_access={"wireguard": ["wg0"]})
+        admin = _mk_admin(db, username="tpl-boss")
+        ua = crud.create_user(db, UserCreate(username="tpl_ua",
+                                             proxies={"vless": {}}), admin=admin)
+        ub = crud.create_user(db, UserCreate(username="tpl_ub",
+                                             proxies={"vless": {}}), admin=admin)
+        del ua, ub
+        tpl_id = tpl.id  # capture while attached
+    _seed_jwt()
+    _current_admin_token = create_admin_token("tpl-boss", is_sudo=True)
+
+    # /api/zagros needs the platform runtime — stub the dependency; the
+    # provisioning layer is monkeypatched anyway. The router guard still
+    # runs for real (JWT auth + permission matrix + contextvar publish).
+    from app.platform.routers import get_runtime as _get_runtime
+    _app_warm.app.dependency_overrides[_get_runtime] = lambda: SimpleNamespace()
+    try:
+        client = TestClient(_app_warm.app)
+        resp = client.post(
+            "/api/zagros/users/apply-template",
+            json={"template_id": tpl_id, "usernames": ["tpl_ua", "tpl_ub",
+                                                       "tpl_ghost"]},
+            headers={"Authorization": f"Bearer {_current_admin_token}"},
+        )
+    finally:
+        _app_warm.app.dependency_overrides.pop(_get_runtime, None)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert sorted(body["applied"]) == ["tpl_ua", "tpl_ub"]
+    assert body["errors"] == [{"username": "tpl_ghost", "error": "not found"}]
+    with GetDB() as db:
+        ua = crud.get_user(db, "tpl_ua")
+        assert ua.template_id == tpl_id
+        assert ua.data_limit == 3 * 1024 ** 3
+        expected = datetime.utcnow() + timedelta(days=14)
+        assert abs(datetime.utcfromtimestamp(ua.expire) - expected) < timedelta(minutes=2)
+    # grants converged full-state from the template's core_access
+    by_user = {u: g for u, g, _ in applied_calls}
+    assert by_user["tpl_ua"] == {"wireguard": ["wg0"]}
+    assert all(rv is True for _, _, rv in applied_calls)
+
+
+def test_bulk_inbound_adds_tag_and_blocks_xray(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+    from types import SimpleNamespace
+
+    import app.platform.admin_api as zapi
+    import app.platform.provisioning as prov
+
+    fake_grants = {"wireguard": ["wg0"]}
+
+    async def _fake_grants_of(runtime, username):
+        return {k: list(v) for k, v in fake_grants.items()}
+
+    async def _fake_apply_grants(runtime, user, platform_id, grants, *,
+                                 repair=False, revoke_missing=False):
+        fake_grants.clear()
+        fake_grants.update(grants)
+
+    async def _fake_sync_platform_user(runtime, user):
+        return 4100
+
+    monkeypatch.setattr(prov, "grants_of", _fake_grants_of)
+    monkeypatch.setattr(prov, "apply_grants", _fake_apply_grants)
+    monkeypatch.setattr(prov, "sync_platform_user", _fake_sync_platform_user)
+    async def _noop_fanout(runtime, force=False):
+        return None
+    monkeypatch.setattr(zapi, "fanout_accounts", _noop_fanout)
+
+    with GetDB() as db:
+        admin = _mk_admin(db, username="bi-boss")
+        crud.create_user(db, UserCreate(username="bi_u1",
+                                        proxies={"vless": {}}), admin=admin)
+    _seed_jwt()
+    token = create_admin_token("bi-boss", is_sudo=True)
+
+    from app.platform.routers import get_runtime as _get_runtime
+    _app_warm.app.dependency_overrides[_get_runtime] = lambda: SimpleNamespace()
+    client = TestClient(_app_warm.app)
+    try:
+        # xray is rejected with a clear 400 (per-protocol proxy sets)
+        r = client.post("/api/zagros/users/bulk-inbound",
+                        json={"action": "add", "core_id": "xray",
+                              "tag": "VLESS_IN", "usernames": ["bi_u1"]},
+                        headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 400, r.text
+        r = client.post("/api/zagros/users/bulk-inbound",
+                        json={"action": "add", "core_id": "wireguard",
+                              "tag": "wg-nl", "usernames": ["bi_u1"]},
+                        headers={"Authorization": f"Bearer {token}"})
+    finally:
+        _app_warm.app.dependency_overrides.pop(_get_runtime, None)
+    assert r.status_code == 200, r.text
+    assert r.json()["changed"] == ["bi_u1"]
+    assert fake_grants == {"wireguard": sorted(["wg0", "wg-nl"])}

@@ -3,8 +3,9 @@
 // application login), per-user quick actions. No JSON anywhere.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Ban, BarChart3, Check, ChevronDown, Copy, Dices, ExternalLink, Filter, KeyRound, Link2,
-  MoreHorizontal, Plus, RefreshCcw, Search, Trash2, UserPlus, Users as UsersIcon, X,
+  Ban, BarChart3, Check, ChevronDown, Copy, Dices, ExternalLink, Filter, KeyRound, Layers,
+  Link2, MoreHorizontal, Network, Plus, RefreshCcw, Search, Trash2, UserPlus,
+  Users as UsersIcon, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
@@ -138,6 +139,7 @@ export default function Users() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [ownerFilter, setOwnerFilter] = useState<string>("all");
+  const [templateFilter, setTemplateFilter] = useState<string>("all");
   const [showFilters, setShowFilters] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dialog, setDialog] = useState<{ mode: "create" } | { mode: "edit"; user: User } | null>(null);
@@ -147,17 +149,21 @@ export default function Users() {
   const [confirmDelete, setConfirmDelete] = useState<{ type: "single"; username: string } | { type: "bulk"; usernames: string[] } | null>(null);
   const [moreAnchor, setMoreAnchor] = useState<HTMLElement | null>(null);
   const [bulkDialog, setBulkDialog] = useState(false);
+  const [bulkTemplateDialog, setBulkTemplateDialog] = useState(false);
+  const [bulkInboundDialog, setBulkInboundDialog] = useState(false);
   const [statusDeleteDialog, setStatusDeleteDialog] = useState(false);
   // α7.2: the row menu is portal-mounted (RowMenu) → track the anchor element
   const [menu, setMenu] = useState<{ user: User; anchor: HTMLElement } | null>(null);
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ["users", search, statusFilter, ownerFilter],
+    queryKey: ["users", search, statusFilter, ownerFilter, templateFilter],
     queryFn: () => {
       const p = new URLSearchParams();
       if (search) p.set("search", search);
       if (statusFilter !== "all") p.set("status", statusFilter);
       if (ownerFilter !== "all") p.set("admin", ownerFilter);
+      // f-templink-1: template membership filter
+      if (templateFilter !== "all") p.set("template", templateFilter);
       const qs = p.toString();
       return api.get<UsersResponse>(`/users${qs ? `?${qs}` : ""}`);
     },
@@ -460,8 +466,14 @@ export default function Users() {
               {owners.map((o) => <option key={o} value={o}>{o}</option>)}
             </Select>
           </Field>
-          {(statusFilter !== "all" || ownerFilter !== "all") && (
-            <Button variant="ghost" size="sm" onClick={() => { setStatusFilter("all"); setOwnerFilter("all"); }}>reset</Button>
+          <Field label={t("users.filter.template")}>
+            <Select value={templateFilter} onChange={(e) => setTemplateFilter(e.target.value)} className="w-40">
+              <option value="all">{t("common.all")}</option>
+              {(templatesQ.data ?? []).map((tp) => <option key={tp.id} value={String(tp.id)}>{tp.name}</option>)}
+            </Select>
+          </Field>
+          {(statusFilter !== "all" || ownerFilter !== "all" || templateFilter !== "all") && (
+            <Button variant="ghost" size="sm" onClick={() => { setStatusFilter("all"); setOwnerFilter("all"); setTemplateFilter("all"); }}>reset</Button>
           )}
         </Card>
       )}
@@ -472,6 +484,8 @@ export default function Users() {
           <div className="ms-auto flex gap-1.5">
             <Button size="sm" variant="secondary" onClick={() => bulk("activate")}><Check size={13} />{t("users.enableSelected")}</Button>
             <Button size="sm" variant="secondary" onClick={() => bulk("disable")}><Ban size={13} />{t("users.disableSelected")}</Button>
+            <Button size="sm" variant="secondary" onClick={() => setBulkTemplateDialog(true)}><Layers size={13} />{t("users.applyTemplate")}</Button>
+            <Button size="sm" variant="secondary" onClick={() => setBulkInboundDialog(true)}><Network size={13} />{t("users.bulkInbound")}</Button>
             <Button size="sm" variant="danger" onClick={() => bulk("delete")}><Trash2 size={13} />{t("users.deleteSelected")}</Button>
           </div>
         </Card>
@@ -532,6 +546,22 @@ export default function Users() {
           restricted={catalogRestricted}
           templates={templates}
           onSaved={invalidate}
+        />
+      )}
+      {bulkTemplateDialog && (
+        <BulkTemplateDialog
+          usernames={[...selected]}
+          templates={templates}
+          onClose={() => setBulkTemplateDialog(false)}
+          onDone={() => { setBulkTemplateDialog(false); setSelected(new Set()); invalidate(); }}
+        />
+      )}
+      {bulkInboundDialog && (
+        <BulkInboundDialog
+          usernames={[...selected]}
+          catalog={catalogQ.data?.groups ?? []}
+          onClose={() => setBulkInboundDialog(false)}
+          onDone={() => { setBulkInboundDialog(false); setSelected(new Set()); invalidate(); }}
         />
       )}
 
@@ -1161,6 +1191,130 @@ function UserDialog({ mode, user, catalog, restricted, templates, onClose, onSav
 
       </div>
       {error && <p role="alert" className="mt-3 rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
+    </Dialog>
+  );
+}
+
+// ------------------------------------------------------------------------ //
+// f-templink-1: bulk template apply + bulk single-inbound grant/revoke.
+// ------------------------------------------------------------------------ //
+
+function BulkTemplateDialog({ usernames, templates, onClose, onDone }: {
+  usernames: string[];
+  templates: UserTemplate[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const t = useT();
+  const digits = useDigits();
+  const [templateId, setTemplateId] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const run = async () => {
+    if (!templateId) return;
+    setBusy(true); setError("");
+    try {
+      const res = await api.post<{ applied: string[]; errors: Array<{ username: string; error: string }> }>(
+        "/zagros/users/apply-template",
+        { template_id: Number(templateId), usernames });
+      if (res.errors.length) {
+        toast.info(`${res.applied.length} applied, ${res.errors.length} failed — first: ${res.errors[0].username}: ${res.errors[0].error}`);
+      } else {
+        toast.ok(`${res.applied.length} ${t("users.templateApplied")}`);
+      }
+      onDone();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : t("common.error"));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open onClose={onClose} title={t("users.applyTemplateTitle")}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
+          <Button onClick={run} loading={busy} disabled={!templateId}>{t("common.apply")}</Button>
+        </>
+      }>
+      <p className="mb-3 text-[12px] leading-5 text-content-3">{t("users.applyTemplateHint")}</p>
+      <Field label={t("users.template")}>
+        <Select value={templateId} onChange={(e) => setTemplateId(e.target.value)}>
+          <option value="">{t("users.templatePick")}</option>
+          {templates.map((tp) => <option key={tp.id} value={String(tp.id)}>{tp.name}</option>)}
+        </Select>
+      </Field>
+      <p className="mt-2 text-[11.5px] text-content-3">{digits(String(usernames.length))} {t("users.bulkSelected")}</p>
+      {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
+    </Dialog>
+  );
+}
+
+function BulkInboundDialog({ usernames, catalog, onClose, onDone }: {
+  usernames: string[];
+  catalog: InboundCatalogGroup[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const t = useT();
+  const digits = useDigits();
+  const [coreId, setCoreId] = useState<string>("");
+  const [tag, setTag] = useState<string>("");
+  const [mode, setMode] = useState<"add" | "remove">("add");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const cores = catalog.filter((g) => g.core_id !== XRAY_CORE_ID && g.inbounds.length);
+  const tagsOf = (cid: string) => cores.find((g) => g.core_id === cid)?.inbounds ?? [];
+  const run = async () => {
+    if (!coreId || !tag) return;
+    setBusy(true); setError("");
+    try {
+      const res = await api.post<{ changed: string[]; errors: Array<{ username: string; error: string }> }>(
+        "/zagros/users/bulk-inbound",
+        { action: mode, core_id: coreId, tag, usernames });
+      if (res.errors.length) {
+        toast.info(`${res.changed.length} changed, ${res.errors.length} failed — first: ${res.errors[0].username}: ${res.errors[0].error}`);
+      } else {
+        toast.ok(`${res.changed.length} ${t("users.inboundChanged")}`);
+      }
+      onDone();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : t("common.error"));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open onClose={onClose} title={t("users.bulkInboundTitle")}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
+          <Button onClick={run} loading={busy} disabled={!coreId || !tag}>{t("common.apply")}</Button>
+        </>
+      }>
+      <p className="mb-3 text-[12px] leading-5 text-content-3">{t("users.bulkInboundHint")}</p>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Field label={t("users.action")}>
+          <Select value={mode} onChange={(e) => setMode(e.target.value as "add" | "remove")}>
+            <option value="add">{t("users.grant")}</option>
+            <option value="remove">{t("users.revoke")}</option>
+          </Select>
+        </Field>
+        <Field label={t("users.core")}>
+          <Select value={coreId} onChange={(e) => { setCoreId(e.target.value); setTag(""); }}>
+            <option value="">{t("users.corePick")}</option>
+            {cores.map((g) => <option key={g.core_id} value={g.core_id}>{g.name}</option>)}
+          </Select>
+        </Field>
+        <Field label={t("users.inbound")}>
+          <Select value={tag} onChange={(e) => setTag(e.target.value)} disabled={!coreId}>
+            <option value="">{t("users.inboundPick")}</option>
+            {tagsOf(coreId).map((i) => <option key={i.tag} value={i.tag}>{i.tag}</option>)}
+          </Select>
+        </Field>
+      </div>
+      <p className="mt-2 text-[11.5px] text-content-3">{digits(String(usernames.length))} {t("users.bulkSelected")}</p>
+      {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
     </Dialog>
   );
 }

@@ -3451,7 +3451,9 @@ async def users_bulk_create(
         # single-user endpoint.
         from app.platform.routers import _current_admin
         _ctx = _current_admin.get()
-        gov_admin = crud.get_admin(db, _ctx) if _ctx else None
+        # the guard publishes the resolved PYDANTIC admin — take its username
+        gov_admin = (crud.get_admin(db, getattr(_ctx, "username", ""))
+                     if _ctx else None)
         tpl = crud.get_user_template(db, body.template_id) if body.template_id else None
         if tpl:
             if not data_limit and tpl.data_limit:
@@ -3517,6 +3519,146 @@ async def users_bulk_create(
         # whole batch of new users would connect nowhere until the next sweep.
         asyncio.create_task(fanout_accounts(runtime, force=True))
     return {"ok": True, "created_count": len(created_usernames), "usernames": created_usernames}
+
+
+class ApplyTemplateBody(BaseModel):
+    template_id: int
+    usernames: list[str] = Field(min_length=1, max_length=500)
+
+
+@zagros_admin_router.post("/users/apply-template")
+async def users_apply_template(
+    body: ApplyTemplateBody,
+    runtime=Depends(get_runtime),
+):
+    """f-templink-1: re-apply a template to a batch of users.
+
+    Applies the template's quota, expiry duration and core access in one
+    pass (full-state grants: cores the template does not mention are
+    revoked). Xray-only templates report skipped — the legacy proxy sets
+    are per-user credentials, silently rewriting them would drop keys.
+    Non-sudo admins may only touch their own users.
+    """
+    from datetime import datetime, timedelta
+    from app.db import GetDB, crud
+    from app.platform import provisioning
+    from app.platform.routers import _current_admin
+
+    _ctx = _current_admin.get()
+    with GetDB() as db:
+        tpl = crud.get_user_template(db, body.template_id)
+        if tpl is None:
+            raise HTTPException(404, f"template {body.template_id} not found")
+        # the guard publishes the resolved PYDANTIC admin — take its username
+        caller = (crud.get_admin(db, getattr(_ctx, "username", ""))
+                  if _ctx else None)
+
+        applied, skipped, errors = [], [], []
+        expire = None
+        if tpl.expire_duration:
+            expire = int((datetime.utcnow() +
+                          timedelta(seconds=int(tpl.expire_duration)))
+                         .replace(tzinfo=timezone.utc).timestamp())
+        for username in body.usernames[:500]:
+            try:
+                dbuser = crud.get_user(db, username)
+                if dbuser is None:
+                    errors.append({"username": username, "error": "not found"})
+                    continue
+                if caller is not None and not caller.is_sudo and                         (dbuser.admin is None or
+                         dbuser.admin.username != caller.username):
+                    errors.append({"username": username,
+                                   "error": "not your user"})
+                    continue
+                dbuser.data_limit = (tpl.data_limit or None)
+                if expire:
+                    dbuser.expire = expire
+                dbuser.template_id = tpl.id
+                db.commit()
+
+                platform_id = await provisioning.sync_platform_user(
+                    runtime, dbuser)
+                grants = dict(tpl.core_access or {})
+                if grants:
+                    from app.db.models import User as LegacyUser
+                    lu = db.query(LegacyUser).get(dbuser.id)
+                    await provisioning.apply_grants(
+                        runtime, lu, platform_id, grants, revoke_missing=True)
+                applied.append(username)
+            except Exception as exc:  # noqa: BLE001 — per-user isolation
+                db.rollback()
+                logger.error("apply-template failed for %s: %s", username, exc)
+                errors.append({"username": username, "error": str(exc)[:200]})
+
+    if applied:
+        asyncio.create_task(fanout_accounts(runtime, force=True))
+    return {"ok": not errors, "applied": applied, "errors": errors,
+            "template_id": body.template_id}
+
+
+class BulkInboundBody(BaseModel):
+    action: str  # "add" | "remove"
+    core_id: str
+    tag: str
+    usernames: list[str] = Field(min_length=1, max_length=500)
+
+
+@zagros_admin_router.post("/users/bulk-inbound")
+async def users_bulk_inbound(
+    body: BulkInboundBody,
+    runtime=Depends(get_runtime),
+):
+    """f-templink-1: bulk grant/revoke ONE inbound for a batch of users —
+    useful without templates (e.g. a new location reaches existing users)."""
+    from app.db import GetDB, crud
+    from app.platform import provisioning
+    from app.platform.routers import _current_admin
+
+    action = body.action.strip().lower()
+    if action not in ("add", "remove"):
+        raise HTTPException(400, "action must be 'add' or 'remove'")
+    if body.core_id == provisioning.LEGACY_CORE_ID:
+        raise HTTPException(
+            400, "xray inbounds are per-protocol proxy sets — edit users "
+                 "individually or via a template, not bulk-inbound.")
+
+    _ctx = _current_admin.get()
+    changed, errors = [], []
+    with GetDB() as db:
+        caller = (crud.get_admin(db, getattr(_ctx, "username", ""))
+                  if _ctx else None)
+        for username in body.usernames[:500]:
+            try:
+                dbuser = crud.get_user(db, username)
+                if dbuser is None:
+                    errors.append({"username": username, "error": "not found"})
+                    continue
+                if caller is not None and not caller.is_sudo and                         (dbuser.admin is None or
+                         dbuser.admin.username != caller.username):
+                    errors.append({"username": username,
+                                   "error": "not your user"})
+                    continue
+                platform_id = await provisioning.sync_platform_user(
+                    runtime, dbuser)
+                grants = await provisioning.grants_of(runtime, username)
+                tags = set(grants.get(body.core_id) or [])
+                if action == "add":
+                    tags.add(body.tag)
+                else:
+                    tags.discard(body.tag)
+                grants[body.core_id] = sorted(tags)
+                from app.db.models import User as LegacyUser
+                lu = db.query(LegacyUser).get(dbuser.id)
+                await provisioning.apply_grants(
+                    runtime, lu, platform_id, grants, revoke_missing=False)
+                changed.append(username)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("bulk-inbound failed for %s: %s", username, exc)
+                errors.append({"username": username, "error": str(exc)[:200]})
+
+    if changed:
+        asyncio.create_task(fanout_accounts(runtime, force=True))
+    return {"ok": not errors, "changed": changed, "errors": errors}
 
 
 class DeleteByStatusBody(BaseModel):

@@ -151,6 +151,10 @@ class User(Base):
     # re-activated automatically — users an operator disabled by hand are
     # never touched by the reconciler.
     admin_limit_disabled = Column(Boolean, nullable=False, default=False)
+    # f-templink-1 (installer FR): the template a user was created from.
+    # Plain integer (no FK) on purpose — deleting a template must never
+    # cascade into users; a stale id simply means "template was removed".
+    template_id = Column(Integer, nullable=True, default=None, index=True)
     # Independent access controls:
     # * ip_limit caps simultaneously observed source IPs across every core;
     #   overflow IPs are temporarily firewalled (the account stays active).

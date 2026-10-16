@@ -559,6 +559,7 @@ def get_users(
     owner: Union[List[str], None] = Query(None, alias="admin"),
     status: UserStatus = None,
     sort: str = None,
+    template: Union[int, None] = Query(None, alias="template"),
     db: Session = Depends(get_db),
     admin: Admin = Depends(fastapi_dep("users", "view")),
 ):
@@ -583,6 +584,7 @@ def get_users(
         status=status,
         sort=sort,
         admins=owner if admin.is_sudo else [admin.username],
+        template_id=template,
         return_with_count=True,
     )
 

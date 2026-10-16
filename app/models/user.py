@@ -401,6 +401,8 @@ class UserModify(User):
 
 
 class UserResponse(User):
+    # f-templink-1: creation template link (null = created without one)
+    template_id: Optional[int] = None
     username: str
     status: UserStatus
     used_traffic: int

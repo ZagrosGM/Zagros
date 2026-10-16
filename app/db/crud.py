@@ -262,6 +262,7 @@ def get_users(db: Session,
               sort: Optional[List[UsersSortingOptions]] = None,
               admin: Optional[Admin] = None,
               admins: Optional[List[str]] = None,
+              template_id: Optional[int] = None,
               reset_strategy: Optional[Union[UserDataLimitResetStrategy, list]] = None,
               return_with_count: bool = False) -> Union[List[User], Tuple[List[User], int]]:
     """
@@ -308,6 +309,9 @@ def get_users(db: Session,
 
     if admins:
         query = query.filter(User.admin.has(Admin.username.in_(admins)))
+    # f-templink-1: template membership filter (Users page column/filter).
+    if template_id:
+        query = query.filter(User.template_id == int(template_id))
 
     if return_with_count:
         count = query.count()
@@ -758,6 +762,8 @@ def create_user(db: Session, user: UserCreate, admin: Admin = None) -> User:
         on_hold_expire_duration=(user.on_hold_expire_duration or None),
         on_hold_timeout=(user.on_hold_timeout or None),
         auto_delete_in_days=user.auto_delete_in_days,
+        # f-templink-1: remember the creation template (enforced or not)
+        template_id=(getattr(user, "template_id", None) or None),
         next_plan=NextPlan(
             data_limit=user.next_plan.data_limit,
             expire=user.next_plan.expire,

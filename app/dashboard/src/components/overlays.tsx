@@ -18,7 +18,7 @@
 //     scrollbar-width compensation so the shell doesn't jump).
 import { AnimatePresence, motion } from "framer-motion";
 import { X } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { cn, Button } from "./ui";
 
@@ -84,9 +84,14 @@ function useBodyScrollLock(active: boolean) {
 
 function Backdrop({ onClose }: { onClose: () => void }) {
   return (
-    <div
+    <motion.div
       // FULL-viewport sibling layer — impervious to container scrolling.
+      // f-dialogflicker-1: fades in/out on its OWN subtree (never an
+      // ancestor of the panel), so the blur no longer pops on/off while
+      // the panel animates.
       className="fixed inset-0 z-[70] bg-black/60 backdrop-blur-md"
+      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+      transition={{ duration: 0.18, ease: "easeOut" }}
       onClick={onClose}
       aria-hidden
     />
@@ -108,13 +113,27 @@ export function Dialog({ open, onClose, title, subtitle, headerActions, children
   useEffect(() => {
     if (open) setTimeout(() => panelRef.current?.querySelector<HTMLElement>("input,select,textarea,button:not([aria-label=Close])")?.focus(), 60);
   }, [open]);
+  // f-dialogflicker-1: an INLINE ref callback has a new identity on every
+  // render, so React detached (null) and reattached (el) it each time the
+  // PARENT re-rendered — and that ran an el->null->el state churn through
+  // useDialogBlur, toggling the page blur class several times in a row:
+  // popups visibly flickered for the first few hundred ms (the Users page
+  // re-renders constantly while its queries poll — exactly when the
+  // create-user dialog is open). A stable callback updates state only on
+  // a REAL element change.
+  const attachPanel = useCallback((el: HTMLDivElement | null) => {
+    panelRef.current = el;
+    setPanelEl((prev) => (el === prev ? prev : el));
+  }, []);
   if (!mounted) return null;
   // The backdrop intentionally lives OUTSIDE the framer-motion subtree:
   // an animating ancestor (opacity/transform) scopes backdrop-filter to
   // that subtree, so the page behind never blurred.
   return createPortal(
     <>
-      {open && <Backdrop onClose={onClose} />}
+      <AnimatePresence>
+        {open && <Backdrop onClose={onClose} />}
+      </AnimatePresence>
       <AnimatePresence>
         {open && (
           <motion.div
@@ -123,10 +142,14 @@ export function Dialog({ open, onClose, title, subtitle, headerActions, children
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
           >
             <motion.div
-              ref={(el) => { panelRef.current = el; setPanelEl(el); }}
+              ref={attachPanel}
               role="dialog" aria-modal="true"
               initial={{ opacity: 0, y: 18, scale: 0.97 }}
-              animate={{ opacity: 1, y: 0, scale: 1, transition: { type: "spring", stiffness: 380, damping: 30 } }}
+              // f-dialogflicker-1: critically damped ease-out — the old
+              // underdamped spring (ratio ~0.77) overshot and trembled for
+              // a few hundred ms on every open.
+              animate={{ opacity: 1, y: 0, scale: 1,
+                         transition: { duration: 0.18, ease: [0.16, 1, 0.3, 1] } }}
               exit={{ opacity: 0, y: 10, scale: 0.97, transition: { duration: 0.15 } }}
               className={cn(
                 "card relative my-auto flex max-h-[calc(100dvh-2rem)] w-full flex-col p-5 shadow-pop",
@@ -171,7 +194,9 @@ export function Drawer({ open, onClose, title, children, footer }: {
   // that subtree, so the page behind never blurred.
   return createPortal(
     <>
-      {open && <Backdrop onClose={onClose} />}
+      <AnimatePresence>
+        {open && <Backdrop onClose={onClose} />}
+      </AnimatePresence>
       <AnimatePresence>
         {open && (
           <motion.div
@@ -183,7 +208,7 @@ export function Drawer({ open, onClose, title, children, footer }: {
             <motion.div
               ref={setPanelEl}
               initial={{ x: "100%" }} animate={{ x: 0 }} exit={{ x: "100%" }}
-              transition={{ type: "spring", stiffness: 320, damping: 34 }}
+              transition={{ type: "spring", stiffness: 320, damping: 38 }}
               className="pointer-events-auto absolute inset-y-0 end-0 flex h-[100dvh] w-full max-w-xl flex-col border-s border-border bg-surface-1 shadow-pop"
             >
               <div className="flex shrink-0 items-center justify-between border-b border-border p-4">

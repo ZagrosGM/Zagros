@@ -312,8 +312,14 @@ def get_users(db: Session,
     if return_with_count:
         count = query.count()
 
+    # f-usersort-1: deterministic ordering. Without a default ORDER BY,
+    # PostgreSQL returns heap order — rows jump between pages after any
+    # UPDATE, so pagination repeats/loses users. An explicit sort still gets
+    # a unique tie-breaker (id) so pages are stable when sort keys tie.
     if sort:
-        query = query.order_by(*(opt.value for opt in sort))
+        query = query.order_by(*(opt.value for opt in sort), User.id)
+    else:
+        query = query.order_by(User.id)
 
     if offset:
         query = query.offset(offset)

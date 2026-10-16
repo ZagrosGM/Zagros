@@ -327,23 +327,35 @@ class PlatformRuntime:
         pending: set[str],
         *,
         label: str,
-        attempts: int = 30,
+        attempts: int = 60,
         delay_seconds: float = 2.0,
     ) -> set[str]:
-        """Bounded warm-up retries for live-control-plane cores.
+        """Bounded warm-up retries with backoff for live-control-plane cores.
 
         SoftEther can answer the first reachability probe while vpncmd user
         mutation still returns protocol error 2 for several seconds. A single
         immediate post-start replay left encrypted accounts deferred until an
         operator edited/reinstalled them. Retry only the already-deferred core
         set; successful engines are never touched twice.
+
+        f-softsync-1: a fixed 30×2s (60s) window still gave up while a fresh
+        SoftEther server was still creating its primary hub — the installer
+        report "hub loses all users after restart" came from exactly that gap
+        (the retry DID run, exhausted inside a minute, and locked every L2TP
+        user out until a manual ``zagros sync``). The delay now backs off
+        2s → 8s and the window is ~7 minutes: slow first-boot hub recovery
+        completes on its own, while a truly dead core still stops retrying.
         """
         remaining = set(pending)
         for attempt in range(1, attempts + 1):
             if not remaining:
                 break
             if attempt > 1 and delay_seconds > 0:
-                await asyncio.sleep(delay_seconds)
+                # linear ramp 2s→8s, capped: keeps early attempts snappy
+                # (typical daemon lag is seconds) without burning 60 spins
+                # against a dead vpncmd channel.
+                delay = min(2.0 + (attempt - 1) * 0.5, 8.0)
+                await asyncio.sleep(delay)
             remaining = await operation(remaining)
             if remaining:
                 logger.warning(

@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import time
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
@@ -351,6 +352,9 @@ class SoftEtherDriver(BaseCoreDriver):
         # state.  Credentials never live here or in persisted core settings.
         self._policy_source: dict[str, str] | None = None
         self._policy_sources: dict[str, dict[str, str]] = {}
+        # f-softsync-1: monotonic timestamp of the last drift self-heal, so a
+        # vanished-hub condition re-syncs at most every _HEAL_MIN_INTERVAL s.
+        self._last_account_heal = 0.0
 
     async def listener_claims(self) -> list[ListenerClaim]:
         """Describe configured TCP listeners for host-level collision checks."""
@@ -1419,6 +1423,50 @@ class SoftEtherDriver(BaseCoreDriver):
     # ------------------------------------------------------------------ #
     # statistics — native per-user counters + live sessions
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # f-softsync-1: drift self-heal
+    # ------------------------------------------------------------------ #
+    _HEAL_MIN_INTERVAL = 180.0
+
+    def _heal_missing_accounts(self, exc: CoreError) -> None:
+        """Schedule one throttled reconcile when the hub lost our users.
+
+        Installer report: after a panel restart the reconciliation retry
+        window can expire while SoftEther is still recovering its hub, and
+        from then on EVERY ``UserGet`` answers error 29 (object not found)
+        forever — no usage, no suspend/resume, every L2TP login rejected,
+        while the core reports healthy. When the batch fails because a user
+        object is missing, replay the stored accounts once (throttled to one
+        attempt per _HEAL_MIN_INTERVAL) so the panel converges on its own
+        instead of waiting for a manual ``zagros sync``. Login/channel
+        failures (no error-29 signature) are NOT heal triggers — they are
+        retried on the next tick as before.
+        """
+        message = str(exc)
+        if ("error code 29" not in message
+                and "object not found" not in message.lower()):
+            return
+        now = time.monotonic()
+        if now - self._last_account_heal < self._HEAL_MIN_INTERVAL:
+            return
+        self._last_account_heal = now
+        if not self._accounts:
+            return
+        accounts = list(self._accounts.values())
+
+        async def _replay() -> None:
+            try:
+                await self.sync_accounts(accounts)
+                logger.info(
+                    "SoftEther self-heal: %d account(s) re-applied after the "
+                    "hub lost them (error 29)", len(accounts))
+            except Exception as heal_exc:  # noqa: BLE001 — next tick retries
+                logger.warning(
+                    "SoftEther self-heal reconcile failed (will retry after "
+                    "the throttle window): %s", heal_exc)
+
+        asyncio.get_running_loop().create_task(_replay())
+
     async def get_usage(
         self, account_ids: list[str] | None = None, since: Any | None = None
     ) -> list[UsageRecord]:
@@ -1457,6 +1505,7 @@ class SoftEtherDriver(BaseCoreDriver):
             except CoreError as exc:
                 # Cumulative source: an incomplete batch is safely retried on
                 # the next tick. Never fall back to N rapid management logins.
+                self._heal_missing_accounts(exc)
                 logger.warning("SoftEther usage batch skipped: %s", exc)
                 return []
 

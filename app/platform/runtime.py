@@ -828,8 +828,24 @@ class _RuntimeUsageByCore:
 
         from app.persistence.models import UsageRecordModel
 
+        # f-usagesum-1: the dashboard snapshot polls every 8s per open tab;
+        # a full-journal SUM grows forever. usage_aggregates carries the same
+        # totals (same-transaction fold) in one row per core — read those,
+        # falling back to the journal only when the aggregate writer has not
+        # run for any core yet.
         def _sync() -> dict[str, tuple[int, int]]:
+            from app.persistence.models import UsageAggregateModel
+
             with self._sf() as s:
+                rows = s.execute(
+                    select(UsageAggregateModel.dimension,
+                           UsageAggregateModel.uplink_bytes,
+                           UsageAggregateModel.downlink_bytes)
+                    .where(UsageAggregateModel.dimension.like("core:%"))
+                ).all()
+                if rows:
+                    return {dim[len("core:"):]: (int(up), int(down))
+                            for dim, up, down in rows}
                 rows = s.execute(
                     select(UsageRecordModel.core_id,
                            func.sum(UsageRecordModel.uplink_bytes),

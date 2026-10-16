@@ -673,9 +673,13 @@ class UsageRecordModel(Base):
     seq: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
     )
-    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"),
-                                                nullable=True, index=True)
-    core_id: Mapped[str] = mapped_column(String(32), index=True)
+    # f-usageretain-1: no single-column user_id/core_id index — the
+    # composite (user_id, recorded_at) / (core_id, recorded_at) indexes
+    # serve every real query, and the extra indexes taxed the hottest
+    # insert path (one row per account per 30s sweep).
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    core_id: Mapped[str] = mapped_column(String(32))
     account_id: Mapped[str] = mapped_column(String(190))
     node_id: Mapped[int | None] = mapped_column(ForeignKey("nodes.id", ondelete="SET NULL"),
                                                 nullable=True)

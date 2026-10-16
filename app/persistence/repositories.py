@@ -369,18 +369,30 @@ class SQLUsageJournal:
         return await asyncio.to_thread(_sync)
 
     async def totals_by_core(self) -> dict[str, tuple[int, int]]:
-        """All-time per-core usage totals from the journal (item 17).
+        """All-time per-core usage totals (item 17).
 
-        The journal only ever receives recorder DELTAS (exactly-once), so a
-        plain GROUP-BY sum is the real per-core total — immune to core
-        restarts/reinstalls and free of the host-interface byte counts the
-        old Cores page mistakenly displayed (backend metrics' network_rx/tx
-        is the PROCESS/host NIC, not user traffic).
+        The journal only ever receives recorder DELTAS (exactly-once), and
+        the SAME transaction folds every delta into ``usage_aggregates``
+        (dimension ``core:<id>``). f-usagesum-1: the Cores page polled a
+        full-table ``SUM ... GROUP BY`` over the raw journal every 30s —
+        O(entire journal) per open tab, forever growing. The rollup rows are
+        equivalent by construction and tiny, so totals read from there; the
+        journal scan stays only as a fallback for databases predating the
+        aggregate writer (no core:* row at all).
         """
         from sqlalchemy import func
 
         def _sync() -> dict[str, tuple[int, int]]:
             with self._sf() as s:
+                rows = s.execute(
+                    select(UsageAggregateModel.dimension,
+                           UsageAggregateModel.uplink_bytes,
+                           UsageAggregateModel.downlink_bytes)
+                    .where(UsageAggregateModel.dimension.like("core:%"))
+                ).all()
+                if rows:
+                    return {dim[len("core:"):]: (int(up), int(down))
+                            for dim, up, down in rows}
                 rows = s.execute(
                     select(
                         UsageRecordModel.core_id,

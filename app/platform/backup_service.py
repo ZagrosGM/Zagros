@@ -431,6 +431,16 @@ def run_once(runtime) -> dict[str, Any]:
     state.last_archive = artifact.name
     state.last_error = ""
 
+    # f-backprune-1: prune BEFORE any delivery outcome. The old code returned
+    # early for archives above Telegram's 50 MB limit, so from the day the
+    # journal grew the archive past 50 MB every backup was kept forever and
+    # the disk filled. Retention is an invariant of the archive directory,
+    # not a side effect of a successful push.
+    if settings.keep:
+        removed = backup_store.prune(settings.keep, data_dir)
+        if removed:
+            logger.info(f"backup service: pruned {len(removed)} old archive(s)")
+
     if path.stat().st_size > TELEGRAM_MAX_BYTES:
         state.delivered = False
         state.last_error = (
@@ -453,10 +463,6 @@ def run_once(runtime) -> dict[str, Any]:
         state.last_error = f"telegram: {exc}"
         logger.error(f"backup service: delivery failed — {exc}")
 
-    if settings.keep:
-        removed = backup_store.prune(settings.keep, data_dir)
-        if removed:
-            logger.info(f"backup service: pruned {len(removed)} old archive(s)")
     store.save_state(state)
     return {"ok": True, "archive": artifact.name, "bytes": artifact.size_bytes,
             "delivered": state.delivered, "error": state.last_error}

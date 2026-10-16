@@ -306,6 +306,7 @@ class SoftEtherDriver(BaseCoreDriver):
             "policy_routing_scope": "shared_hub",
             "policy_hubs": [],
             "feature_tags": {},
+            "factory_listeners_pruned": [],
             "feature_softether": False,
             "feature_l2tp": False,
             "feature_l2tp_raw": False,
@@ -886,6 +887,15 @@ class SoftEtherDriver(BaseCoreDriver):
         l2tp_raw = "l2tp_raw" in wanted
         etherip = "etherip" in wanted
         supplied_psk = str(wanted.get("l2tp", {}).get("ipsec_psk") or "").strip()
+        # f-softpsk-1: a NEWLY supplied PSK below 24 characters is rejected —
+        # the key is shared by every L2TP user and embedded in their links,
+        # so offline-guessing resistance is a floor, not a nicety. Existing
+        # stored values are carried as-is (never silently replaced).
+        if supplied_psk and len(supplied_psk) < 24:
+            raise CoreError(
+                "ipsec_psk is too weak: use at least 24 random characters "
+                "(the wizard default is 24). Existing keys are never "
+                "replaced silently.")
         stored_psk = str(s.get("ipsec_psk") or "").strip()
         current_psk = current.psk if current else ""
         # Enabling L2TP honours the wizard/stored admin choice. Disabling the
@@ -1030,6 +1040,74 @@ class SoftEtherDriver(BaseCoreDriver):
             return
         s = self.settings
         want_ovpn = bool(s.get("feature_ovpn"))
+        # f-softconv-1: converge INSTALL-TIME feature flags the same way the
+        # Studio wizard path does. `install-core softether --settings
+        # '{"feature_l2tp": true, "ipsec_psk": "…"}'` used to store the flag
+        # and leave `bool L2TP_IPsec false` live until a wizard save.
+        want_l2tp = bool(s.get("feature_l2tp"))
+        want_l2tp_raw = bool(s.get("feature_l2tp_raw"))
+        want_etherip = bool(s.get("feature_etherip"))
+        ipsec_set = getattr(self._backend, "ipsec_services_set", None)
+        if callable(ipsec_set) and (want_l2tp or want_l2tp_raw or want_etherip):
+            stored_psk = str(s.get("ipsec_psk") or "").strip()
+            if stored_psk:
+                try:
+                    current = await asyncio.to_thread(self._backend.ipsec_get)
+                except Exception:  # noqa: BLE001 — converge best-effort
+                    current = None
+                if current is None or current.l2tp != want_l2tp \
+                        or current.l2tp_raw != want_l2tp_raw \
+                        or current.etherip != want_etherip:
+                    try:
+                        await asyncio.to_thread(
+                            ipsec_set,
+                            l2tp=want_l2tp, l2tp_raw=want_l2tp_raw,
+                            etherip=want_etherip, psk=stored_psk,
+                            default_hub=(current.default_hub if current else "")
+                            or str(s.get("hub") or "DEFAULT"),
+                        )
+                        logger.info(
+                            "softether start: IPsec feature flags converged "
+                            "from install settings (l2tp=%s raw=%s etherip=%s)",
+                            want_l2tp, want_l2tp_raw, want_etherip)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "softether start: IPsec convergence failed (%s) — "
+                            "save the inbound in the Studio wizard to retry",
+                            exc)
+            else:
+                logger.warning(
+                    "softether start: feature_l2tp is enabled in settings "
+                    "but ipsec_psk is empty — IPsec left off; reinstall with "
+                    "a PSK (one is minted automatically on install) or save "
+                    "the inbound through the wizard.")
+        # f-softlisteners-1: the factory ListenerList (992/5555/1194/443)
+        # must not keep ports hostage when no feature needs them. 5555 stays:
+        # it is the panel's own vpncmd management endpoint (fallback
+        # 992/1194/443 remains for upgrades mid-flight).
+        delete_listener = getattr(self._backend, "listener_delete", None)
+        if callable(delete_listener):
+            # Prune ONCE and remember: a converged server must not be
+            # re-commanded on every start (idempotency contract). 1194's
+            # marker is dropped when the OpenVPN clone is granted so a later
+            # disable prunes the port it re-created.
+            pruned = [int(p) for p in (s.get("factory_listeners_pruned") or [])
+                      if str(p).isdigit()]
+            targets: list[int] = []
+            if 992 not in pruned:
+                targets.append(992)
+            if not want_ovpn and 1194 not in pruned:
+                targets.append(1194)
+            if want_ovpn and 1194 in pruned:
+                pruned.remove(1194)
+                s["factory_listeners_pruned"] = pruned
+            for port in targets:
+                try:
+                    await asyncio.to_thread(delete_listener, port)
+                    pruned.append(port)
+                    s["factory_listeners_pruned"] = pruned
+                except Exception:  # noqa: BLE001 — absent = fine
+                    pass
         want_sstp = bool(s.get("feature_sstp"))
         ports = [int(p) for p in str(s.get("ovpn_ports") or "1194").split(",")
                  if p.strip().isdigit()] or [1194]
@@ -1229,6 +1307,25 @@ class SoftEtherDriver(BaseCoreDriver):
         run the same bounded bootstrap used by Start so Install cannot return
         green and leave the immediately-following convergence doomed.
         """
+        # f-softpsk-1 / f-softconv-1: honour install-time feature settings.
+        # A weak explicit PSK is rejected; an absent one is minted (24+) so
+        # `install-core softether --settings '{"feature_l2tp":true}'` lands
+        # in a secure, working state instead of the factory "vpn".
+        if self.settings.get("feature_l2tp"):
+            psk = str(self.settings.get("ipsec_psk") or "").strip()
+            if psk and len(psk) < 24:
+                raise CoreError(
+                    "install settings rejected: ipsec_psk is "
+                    f"{len(psk)} characters — L2TP/IPsec needs at least 24 "
+                    "random characters.")
+            if not psk:
+                alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+                psk = "".join(secrets.choice(alphabet) for _ in range(24))
+                self.settings["ipsec_psk"] = psk
+                logger.info(
+                    "softether install: feature_l2tp without ipsec_psk — "
+                    "minted a 24-character key (visible in the inbound "
+                    "export, never logged)")
         detail = await asyncio.to_thread(self._backend.install_packages)
         logger.info("softether %s", detail)
         await self.start()

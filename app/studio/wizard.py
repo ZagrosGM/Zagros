@@ -615,7 +615,11 @@ def _softether_blueprint() -> list[Protocol]:
     # client compatibility. Choice is CSPRNG-backed; ~53 bits from this
     # unambiguous 64-symbol alphabet, visible/copyable/editable in the UI.
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_"
-    psk = "".join(secrets.choice(alphabet) for _ in range(9))
+    # f-softpsk-1: the L2TP/IPsec PSK is shared by every L2TP user and sits
+    # inside each subscription link — offline guessing once an IKE exchange
+    # is captured is the threat model, so 9 random characters is not enough.
+    # 24+ alphanumeric (~143 bits) per the installer report's floor.
+    psk = "".join(secrets.choice(alphabet) for _ in range(24))
     return [
         _proto("softether", "Native SoftEther VPN", 5555, [
             _tr("tcp", "SoftEther VPN over HTTPS/TCP", [_none()]),
@@ -624,7 +628,7 @@ def _softether_blueprint() -> list[Protocol]:
             _tr("udp", "UDP 500/4500/1701", [_none([
                 _f("ipsec_psk", "IPsec pre-shared key", required=True,
                    default=psk, section="general",
-                   help="secure random 9-character default; visible, copyable and editable"),
+                   help="secure random 24-character default; visible, copyable and editable"),
             ])]),
         ], fixed_port=True),
         _proto("l2tp_raw", "L2TP RAW (no IPsec)", 1701, [

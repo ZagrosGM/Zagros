@@ -497,6 +497,7 @@ export default function Users() {
           mode={dialog.mode}
           user={"user" in dialog ? dialog.user : undefined}
           catalog={catalogQ.data?.groups ?? []}
+          restricted={catalogRestricted}
           templates={templates}
           onClose={() => setDialog(null)}
           onSaved={() => { setDialog(null); invalidate(); }}
@@ -528,6 +529,7 @@ export default function Users() {
           open={bulkDialog}
           onClose={() => setBulkDialog(false)}
           catalog={catalogQ.data?.groups ?? []}
+          restricted={catalogRestricted}
           templates={templates}
           onSaved={invalidate}
         />
@@ -567,9 +569,10 @@ function CreateUserButton({ onClick }: { onClick: () => void }) {
   );
 }
 
-function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
+function UserDialog({ mode, user, catalog, restricted, templates, onClose, onSaved }: {
   mode: "create" | "edit"; user?: User;
-  catalog: InboundCatalogGroup[]; templates: UserTemplate[];
+  catalog: InboundCatalogGroup[];
+  restricted?: boolean; templates: UserTemplate[];
   onClose: () => void; onSaved: () => void;
 }) {
   const t = useT();
@@ -1116,7 +1119,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
               ? "select at least one inbound on any core"
               : `${chosen.length} xray protocol${chosen.length === 1 ? "" : "s"} · ${Object.values(form.coreAccess).filter((tags) => tags.length).length} additional core${Object.values(form.coreAccess).filter((tags) => tags.length).length === 1 ? "" : "s"}`}>
             <CoreAccessPicker
-            restricted={catalogRestricted}
+            restricted={restricted}
               groups={catalog}
               value={form.coreAccess}
               onChange={(next) => setForm({ ...form, coreAccess: next })}
@@ -1162,12 +1165,14 @@ function BulkUserDialog({
   open,
   onClose,
   catalog,
+  restricted,
   templates,
   onSaved,
 }: {
   open: boolean;
   onClose: () => void;
   catalog: InboundCatalogGroup[];
+  restricted?: boolean;
   templates: UserTemplate[];
   onSaved: () => void;
 }) {
@@ -1278,7 +1283,7 @@ function BulkUserDialog({
         <div className="sm:col-span-2">
           <Field label={t("Core Access & Inbounds")}>
             <CoreAccessPicker
-            restricted={catalogRestricted}
+            restricted={restricted}
               groups={catalog}
               value={coreAccess}
               onChange={setCoreAccess}

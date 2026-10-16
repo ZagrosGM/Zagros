@@ -91,7 +91,7 @@ export default function CoreAccessPicker({ groups, value, onChange, xrayValue, o
         {totalInbounds > 0 && <Badge tone="brand">{totalSelected}/{totalInbounds} selected</Badge>}
       </div>
       {!groups.length && (restricted ? (
-          <p className="rounded-xl bg-surface-2 p-3 text-[11.5px] leading-5 text-content-3">{t("You do not have permission to view inbounds — ask the panel owner which protocols you may grant, or use a template.")}</p>
+          <p className="rounded-xl bg-surface-2 p-3 text-[11.5px] leading-5 text-content-3">{t("picker.restricted")}</p>
         ) : (
           <p className="rounded-xl bg-surface-2 p-3 text-[11.5px] leading-5 text-content-3">{t("no cores are installed yet — install cores (sing-box, WireGuard, OpenVPN, SoftEther, SSH…) from")}<b>{t("Cores → catalog")}</b>{t("and their inbounds appear here.")}</p>
         ))}

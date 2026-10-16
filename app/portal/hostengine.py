@@ -465,6 +465,15 @@ class HostSettingsEngine:
         *,
         section_proto: str | None = None,
     ) -> list[DeliveryArtifact]:
+        scheme = artifact.content.split(":", 1)[0].lower() if artifact.content else ""
+        if scheme in ("l2tp", "l2tp+ipsec"):
+            # f-l2tplink-1: SoftEther dial links, not proxy outbounds —
+            # parse_share_url has no OutboundKind for them (rightly), so the
+            # generic path rejected them and the ORIGINAL link was kept,
+            # leaking the panel's request domain into every subscriber link
+            # even when Host Settings defined an address.
+            return self._expand_l2tp_link(artifact, entries, variables,
+                                          inapplicable)
         try:
             parsed = _parse(artifact.content)
         except Exception as exc:  # noqa: BLE001 — honest: not expandable, keep as-is
@@ -610,6 +619,75 @@ class HostSettingsEngine:
                 inapplicable.append(
                     f"entry '{remark}': re-emitting the link failed ({exc})")
                 continue
+            out.append(DeliveryArtifact(kind=ArtifactKind.LINK, label=remark,
+                                        content=link, qr=artifact.qr))
+        return out
+
+    # ------------------------------------------------------------------ #
+    # f-l2tplink-1: l2tp:// and l2tp+ipsec:// authority rewrite
+    # ------------------------------------------------------------------ #
+    def _expand_l2tp_link(
+        self,
+        artifact: DeliveryArtifact,
+        entries: list[HostEntry],
+        variables: Mapping[str, Any],
+        inapplicable: list[str],
+    ) -> list[DeliveryArtifact]:
+        """Rewrite ONLY the authority (host:port) of a SoftEther dial link.
+
+        The query (hub, psk, ...) and credentials are preserved
+        byte-for-byte; the fragment becomes the per-entry remark like every
+        other link. A dial link has no TLS/transport knobs — overrides for
+        those are reported as inapplicable instead of being dropped
+        silently.
+        """
+        from urllib.parse import unquote, urlsplit
+
+        parts = urlsplit(artifact.content)
+        if not parts.hostname:
+            inapplicable.append(
+                f"link '{artifact.label}' is missing a server address; "
+                "original kept")
+            return [artifact]
+        userinfo = ""
+        if parts.username is not None:
+            userinfo = unquote(parts.username)
+            if parts.password is not None:
+                userinfo += f":{unquote(parts.password)}"
+            userinfo += "@"
+        query = f"?{parts.query}" if parts.query else ""
+        out: list[DeliveryArtifact] = []
+        for entry in entries:
+            local = defaultdict(lambda: "<missing>", variables)
+            local["SERVER_IP"] = parts.hostname or ""
+            local.setdefault("PROTOCOL", "l2tp")
+            local["TRANSPORT"] = "udp"
+            name = entry.remark or entry.address or "host"
+            host = None
+            if entry.address:
+                host = render_host_value(entry.address, local)
+            host = host or parts.hostname
+            port = entry.port if entry.port is not None else parts.port
+            if not host or port is None:
+                inapplicable.append(
+                    f"entry '{name}': an l2tp dial link needs an address "
+                    "and a port; original kept")
+                continue
+            for attr, label in (("security", "security"), ("sni", "SNI"),
+                                ("alpn", "ALPN"),
+                                ("fingerprint", "fingerprint"),
+                                ("host", "an HTTP host header"),
+                                ("path", "a path"),
+                                ("fragment_setting", "fragment"),
+                                ("noise_setting", "noise")):
+                if getattr(entry, attr, None):
+                    inapplicable.append(
+                        f"entry '{name}': {label} has no meaning on an "
+                        "l2tp dial link")
+            remark = render_host_remark(entry.remark or DEFAULT_REMARK, local) \
+                or artifact.label
+            link = (f"{parts.scheme}://{userinfo}{host}:{int(port)}"
+                    f"{query}#{quote(remark)}")
             out.append(DeliveryArtifact(kind=ArtifactKind.LINK, label=remark,
                                         content=link, qr=artifact.qr))
         return out

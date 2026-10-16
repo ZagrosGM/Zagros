@@ -64,6 +64,7 @@ def downgrade() -> None:
     from sqlalchemy import create_engine, text
 
     engine = create_engine(_legacy_url())
+    tname = "users"
     try:
         with engine.begin() as conn:
             from app.persistence.alembic._legacy import table as _t

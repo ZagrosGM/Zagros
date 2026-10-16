@@ -42,6 +42,10 @@ _PATH_SECTIONS = (
     ("/build-credentials", "applications"),
     ("/builder", "applications"),
     ("/builds", "applications"),
+    # f-reseller-1: the access-picker catalog feeds the user dialog's
+    # protocol tree — it must follow the USERS permission (minimal fields,
+    # allow-list filtered), never require the full Inbounds section.
+    ("/access-catalog", "users"),
     ("/inbounds", "inbounds"),
     ("/studio", "inbounds"),
     ("/monitoring", "monitoring"),

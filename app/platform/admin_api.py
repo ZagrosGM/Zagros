@@ -827,6 +827,40 @@ async def unified_inbound_catalog(runtime=Depends(get_runtime),
     return {"groups": [g.as_dict() for g in groups]}
 
 
+@zagros_admin_router.get("/access-catalog")
+async def access_picker_catalog(runtime=Depends(get_runtime),
+                                admin: Admin = Depends(
+                                    _ap.fastapi_dep("users", "view"))):
+    """f-reseller-1: the user-dialog protocol tree under the USERS permission.
+
+    A reseller without the Inbounds/Cores sections used to get 403 on
+    /inbounds + /cores and could not grant ANY protocol (while a template
+    silently still could). This catalog returns ONLY what a grant picker
+    needs — core id/name/enabled plus tag/protocol/security_class — already
+    filtered by the admin's inbounds allow-list. ``restricted`` tells the UI
+    to say "no permission to view inbounds" instead of the misleading
+    "no cores installed".
+    """
+    from app.platform.inbounds import catalog as _catalog
+
+    groups = await _catalog(runtime)
+    allowed = None if admin.is_sudo else _ap.allowed_inbounds(admin.permissions)
+    restricted = allowed is not None
+    keep = ("tag", "protocol", "security_class")
+    out = []
+    for g in groups:
+        d = g.as_dict()
+        entries = []
+        for i in (d.get("inbounds") or []):
+            if restricted and i.get("tag") not in (allowed or set()):
+                continue
+            entries.append({k: i[k] for k in keep if k in i})
+        d["inbounds"] = entries
+        if entries:
+            out.append(d)
+    return {"groups": out, "restricted": bool(restricted)}
+
+
 @zagros_admin_router.get("/routing/sources")
 async def routing_sources(runtime=Depends(get_runtime)):
     """Inbound inventory for rules, including routing-only managed hubs.

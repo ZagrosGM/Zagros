@@ -484,7 +484,18 @@ def _check_user_create_limits(db: Session, admin: Optional[Admin], new_data_limi
             "max_users",
             f"admin '{admin.username}' reached the user cap "
             f"({admin.max_users}); delete a user or raise the cap first.")
-    if admin.traffic_alloc_limit is not None and new_data_limit:
+    if admin.traffic_alloc_limit is not None:
+        # f-allocgap-1: a falsy data_limit (None/0 = UNLIMITED) used to skip
+        # the budget entirely — a reseller with a 100 GB cap could mint any
+        # number of unlimited users. An allocation-capped admin simply
+        # cannot grant unlimited users; the cap owner must raise the budget
+        # or grant explicit finite limits instead.
+        if not new_data_limit:
+            raise AdminLimitError(
+                "traffic_alloc_limit",
+                f"admin '{admin.username}' has an allocation budget "
+                f"({admin.traffic_alloc_limit} bytes): unlimited users are "
+                "not possible — set a finite data_limit.")
         projected = admin_allocated_traffic(db, admin.id) + int(new_data_limit)
         if projected > admin.traffic_alloc_limit:
             raise AdminLimitError(
@@ -502,6 +513,14 @@ def _check_user_update_limits(db: Session, dbuser: User, new_data_limit: Optiona
     admin = db.query(Admin).get(dbuser.admin_id)
     if admin is None or admin.traffic_alloc_limit is None:
         return
+    # f-allocgap-1: same rule as creation — an allocation-capped admin
+    # cannot EDIT a user into unlimitedness (0/None) either.
+    if not new_data_limit:
+        raise AdminLimitError(
+            "traffic_alloc_limit",
+            f"admin '{admin.username}' has an allocation budget "
+            f"({admin.traffic_alloc_limit} bytes): users cannot be made "
+            "unlimited — set a finite data_limit.")
     _lock_admin_row(db, admin.id)
     others = db.query(func.coalesce(func.sum(User.data_limit), 0)) \
         .filter(User.admin_id == admin.id, User.id != dbuser.id).scalar()

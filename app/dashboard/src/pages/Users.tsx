@@ -206,10 +206,16 @@ export default function Users() {
   const owners = useMemo(
     () => [...new Set(users.map(ownerName).filter((o) => o !== "—"))],
     [users]);
+  // f-reseller-1: the access picker uses the USERS-scoped catalog — a
+  // reseller without the Inbounds/Cores sections still can grant protocols
+  // (minimal fields, allow-list filtered) instead of hitting 403 on the
+  // full inbounds/cores APIs.
   const catalogQ = useQuery({
-    queryKey: ["zagros", "inbounds-catalog"],
-    queryFn: () => api.get<{ groups: InboundCatalogGroup[] }>("/zagros/inbounds"),
+    queryKey: ["zagros", "access-catalog"],
+    queryFn: () => api.get<{ groups: InboundCatalogGroup[]; restricted?: boolean }>(
+      "/zagros/access-catalog"),
   });
+  const catalogRestricted = catalogQ.data?.restricted === true;
   const templates = useMemo(() => templatesQ.data ?? [], [templatesQ.data]);
 
   const bulk = async (action: "activate" | "disable" | "delete") => {
@@ -1110,6 +1116,7 @@ function UserDialog({ mode, user, catalog, templates, onClose, onSaved }: {
               ? "select at least one inbound on any core"
               : `${chosen.length} xray protocol${chosen.length === 1 ? "" : "s"} · ${Object.values(form.coreAccess).filter((tags) => tags.length).length} additional core${Object.values(form.coreAccess).filter((tags) => tags.length).length === 1 ? "" : "s"}`}>
             <CoreAccessPicker
+            restricted={catalogRestricted}
               groups={catalog}
               value={form.coreAccess}
               onChange={(next) => setForm({ ...form, coreAccess: next })}
@@ -1271,6 +1278,7 @@ function BulkUserDialog({
         <div className="sm:col-span-2">
           <Field label={t("Core Access & Inbounds")}>
             <CoreAccessPicker
+            restricted={catalogRestricted}
               groups={catalog}
               value={coreAccess}
               onChange={setCoreAccess}

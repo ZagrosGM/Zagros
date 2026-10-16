@@ -14,7 +14,9 @@ when the platform runtime is available):
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import (
@@ -103,6 +105,11 @@ def _resolve_sudo_deps():
         paths stay authenticated-only (fail-open for forward compat, every
         current route IS mapped).
         """
+        # f-reseller-2: publish the resolved admin for the ONE endpoint that
+        # must scope its response per-admin (dashboard snapshot). The guard
+        # already authenticated every /api/zagros request — reading the
+        # context here costs nothing extra and never re-validates the token.
+        _current_admin.set(admin)
         if admin.is_sudo:
             return admin
         section, need = _perms.classify_request(request.url.path, request.method)
@@ -114,6 +121,10 @@ def _resolve_sudo_deps():
 
     return [Depends(_admin_guard)]
 
+
+# f-reseller-2: the admin resolved by the router guard, per request.
+_current_admin: "contextvars.ContextVar[object]" = contextvars.ContextVar(
+    "zagros_current_admin", default=None)
 
 try:
     _SUDO_DEPS = _resolve_sudo_deps()
@@ -828,8 +839,59 @@ async def canonical_subscription_url_by_username(
 
 @zagros_admin_router.get("/dashboard/snapshot")
 async def dashboard_snapshot(runtime=Depends(get_runtime)):
+    admin = _current_admin.get()
     snapshot = await runtime.dashboard.snapshot()
-    return snapshot
+    if admin is None or getattr(admin, "is_sudo", True):
+        return snapshot
+    # f-reseller-2: the overview snapshot is PANEL-WIDE — user totals of all
+    # admins, per-core gauges, core/session tables, node names + PUBLIC IPs
+    # and routing/outbound deployment state. A reseller (overview: view)
+    # received all of it. Non-sudo admins get their OWN slice: their user
+    # counts, their users' usage, and their own quota alerts; everything
+    # infrastructure-shaped is dropped.
+    from datetime import timedelta, timezone
+    from sqlalchemy import func, select
+    from app.adminapi.dashboard import DeploymentStatusView
+    from app.persistence.models import UserModel, UserUsageModel
+
+    def _scoped():
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=90)
+        with runtime.session_factory() as s:
+            own = UserModel.admin_id == admin.id
+            total = s.scalar(select(func.count(UserModel.id)).where(own)) or 0
+            active = s.scalar(select(func.count(UserModel.id)).where(
+                own, UserModel.status == "active")) or 0
+            online = s.scalar(select(func.count(UserModel.id)).where(
+                own, UserModel.online_at >= cutoff)) or 0
+            used = 0
+            own_names: set[str] = set()
+            if total:
+                ids = list(s.execute(
+                    select(UserModel.id).where(own)).scalars())
+                row = s.execute(select(
+                    func.coalesce(func.sum(UserUsageModel.uplink_bytes), 0),
+                    func.coalesce(func.sum(UserUsageModel.downlink_bytes), 0),
+                ).where(UserUsageModel.user_id.in_(ids))).one()
+                used = int(row[0] or 0) + int(row[1] or 0)
+                own_names = set(s.execute(
+                    select(UserModel.username).where(own)).scalars())
+            return int(total), int(active), int(online), used, own_names
+
+    total, active, online, used, own_names = await asyncio.to_thread(_scoped)
+    return snapshot.model_copy(update={
+        "users_total": total,
+        "users_active": active,
+        "users_online": online,
+        "usage_total_bytes": used,
+        "usage_by_core": [],
+        "cores": [],
+        "nodes": [],
+        "routing_status": DeploymentStatusView(),
+        "outbound_status": DeploymentStatusView(),
+        # core/node health alerts leak infrastructure state; quota alerts
+        # name other admins' users — keep only the reseller's own
+        "alerts": [a for a in snapshot.alerts if a.target in own_names],
+    })
 
 
 @zagros_admin_router.get("/studio/{core_id}/raw")

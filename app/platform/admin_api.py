@@ -2734,6 +2734,73 @@ async def _reconcile_panel_network_transaction(runtime) -> dict[str, Any] | None
     return result
 
 
+class UsageCoefficientsBody(BaseModel):
+    master: float = Field(default=1.0, gt=0, le=1000)
+    quota_multiplier: float = Field(default=1.0, gt=0, le=1000)
+    billing_multiplier: float = Field(default=1.0, gt=0, le=1000)
+    inbounds: dict[str, float] = Field(default_factory=dict)
+
+
+@zagros_admin_router.get("/settings/usage-coefficients")
+async def usage_coefficients_get(runtime=Depends(get_runtime)):
+    """f-usagecoeff-1: master + per-inbound factors and the quota/billing
+    split. Defaults (1.0 everywhere) reproduce legacy behaviour exactly."""
+    from app.platform import settings_kv
+    from app.platform.usage_coeffs import (
+        K_BILLING, K_INBOUNDS, K_MASTER, K_QUOTA)
+
+    sf = runtime.session_factory
+    raw_inbounds = settings_kv.load(sf, K_INBOUNDS, {}) or {}
+    return {
+        "master": float(settings_kv.load(sf, K_MASTER, 1.0) or 1.0),
+        "quota_multiplier": float(settings_kv.load(sf, K_QUOTA, 1.0) or 1.0),
+        "billing_multiplier": float(settings_kv.load(sf, K_BILLING, 1.0) or 1.0),
+        "inbounds": {str(k): float(v) for k, v in raw_inbounds.items()
+                     if isinstance(v, (int, float))},
+    }
+
+
+@zagros_admin_router.put("/settings/usage-coefficients")
+async def usage_coefficients_put(
+    body: UsageCoefficientsBody,
+    runtime=Depends(get_runtime),
+    request: Request = None,
+):
+    """Persist coefficient factors. Coefficients change money — every save
+    lands in the audit log with the previous values for comparison."""
+    from app.platform import settings_kv
+    from app.platform.usage_coeffs import (
+        K_BILLING, K_INBOUNDS, K_MASTER, K_QUOTA)
+
+    sf = runtime.session_factory
+    before = {
+        "master": settings_kv.load(sf, K_MASTER, 1.0),
+        "quota_multiplier": settings_kv.load(sf, K_QUOTA, 1.0),
+        "billing_multiplier": settings_kv.load(sf, K_BILLING, 1.0),
+        "inbounds": settings_kv.load(sf, K_INBOUNDS, {}),
+    }
+    clean_inbounds = {}
+    for tag, factor in body.inbounds.items():
+        tag = str(tag).strip()
+        try:
+            factor = float(factor)
+        except (TypeError, ValueError):
+            continue
+        if tag and factor > 0:
+            clean_inbounds[tag] = round(factor, 4)
+    settings_kv.save(sf, K_MASTER, float(body.master))
+    settings_kv.save(sf, K_QUOTA, float(body.quota_multiplier))
+    settings_kv.save(sf, K_BILLING, float(body.billing_multiplier))
+    settings_kv.save(sf, K_INBOUNDS, clean_inbounds)
+    _audit(runtime, "usage_coefficients.update", target="settings",
+           detail={"before": before, "after": body.model_dump()},
+           request=request)
+    return {"ok": True, "master": float(body.master),
+            "quota_multiplier": float(body.quota_multiplier),
+            "billing_multiplier": float(body.billing_multiplier),
+            "inbounds": clean_inbounds}
+
+
 @zagros_admin_router.get("/settings/panel-network")
 async def panel_network_get(runtime=Depends(get_runtime)):
     await _reconcile_panel_network_transaction(runtime)

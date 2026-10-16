@@ -115,6 +115,24 @@ async def restore_baselines(runtime) -> None:
             logger.warning("baseline restore failed for core %s: %s", core_id, exc)
 
 
+async def _tags_for(runtime, cache: dict, core_id: str, account_id: str,
+                    owner: int) -> list[str]:
+    """Inbound tags of one account (cached per recorder tick)."""
+    key = (core_id, str(account_id))
+    if key in cache:
+        return cache[key]
+    tags: list[str] = []
+    try:
+        for acc in await asyncio.to_thread(runtime.users.accounts_of, owner):
+            if acc["core_id"] == core_id and                     str(acc["account_id"]) == str(account_id):
+                tags = list((acc.get("settings") or {}).get("inbound_tags") or [])
+                break
+    except Exception:  # noqa: BLE001 — coefficients degrade to 1.0
+        tags = []
+    cache[key] = tags
+    return tags
+
+
 async def record_once(runtime) -> int:
     """One recorder pass across all enabled cores; returns applied delta rows.
 
@@ -133,6 +151,15 @@ async def record_once(runtime) -> int:
     applied: list = []
     per_user: dict[int, list[int]] = {}
     pending_baselines: dict[str, tuple[int, int]] = {}
+    # f-usagecoeff-1: coefficient sources load ONCE per tick; the account →
+    # inbound-tags map resolves per-inbound pricing (service cores are 1:1).
+    from app.platform.usage_coeffs import load as _load_coeffs
+    coeffs = _load_coeffs(runtime)
+    acc_tags: dict[tuple[str, str], list[str]] = {}
+    # f-usagecoeff-1: QUOTA side vs BILLING side (admin users_usage) may
+    # carry different factors — accumulated separately, journal stays raw.
+    per_user_billing: dict[int, int] = {}
+    node_per_user_billing: dict[int, int] = {}
 
     for core_id in manager.list_cores():
         if not manager.is_enabled(core_id):
@@ -169,9 +196,13 @@ async def record_once(runtime) -> int:
             owner = owners.get((r.core_id, r.account_id))
             if owner is None:
                 continue  # account revoked after the read — honest drop + log
+            tags = await _tags_for(runtime, acc_tags, r.core_id, r.account_id, owner)
+            qf, bf = coeffs.factors_for_tags(tags)
             totals = per_user.setdefault(owner, [0, 0])
-            totals[0] += r.uplink_bytes
-            totals[1] += r.downlink_bytes
+            totals[0] += int(r.uplink_bytes * qf)
+            totals[1] += int(r.downlink_bytes * qf)
+            per_user_billing[owner] = per_user_billing.get(owner, 0) + int(
+                (r.uplink_bytes + r.downlink_bytes) * bf)
             applied.append(r)
 
     # Nodes hold their own cumulative counters and their own baselines, so
@@ -189,9 +220,13 @@ async def record_once(runtime) -> int:
             owner = owners.get((r.core_id, r.account_id))
             if owner is None:
                 continue
+            tags = await _tags_for(runtime, acc_tags, r.core_id, r.account_id, owner)
+            qf, bf = coeffs.factors_for_tags(tags)
             totals = node_per_user.setdefault(owner, [0, 0])
-            totals[0] += r.uplink_bytes
-            totals[1] += r.downlink_bytes
+            totals[0] += int(r.uplink_bytes * qf)
+            totals[1] += int(r.downlink_bytes * qf)
+            node_per_user_billing[owner] = node_per_user_billing.get(owner, 0) + int(
+                (r.uplink_bytes + r.downlink_bytes) * bf)
             node_applied.append(r)
     except Exception as exc:  # noqa: BLE001 — never break the local fold
         logger.warning("node usage collection failed (tick continues): %s", exc)
@@ -220,6 +255,9 @@ async def record_once(runtime) -> int:
                 totals = per_user.setdefault(user_id, [0, 0])
                 totals[0] += up
                 totals[1] += down
+            for user_id, amount in node_per_user_billing.items():
+                per_user_billing[user_id] = (
+                    per_user_billing.get(user_id, 0) + amount)
             applied.extend(node_applied)
 
     # Fold into the legacy master/admin counters in one transaction.  This is
@@ -232,17 +270,25 @@ async def record_once(runtime) -> int:
         from app.db.models import Admin as LegacyAdmin
         from app.db.models import User as LegacyUser
 
+        # f-usagecoeff-1: the QUOTA side and the BILLING side may carry
+        # different factors (used_traffic follows the user's data limit;
+        # users_usage is what a reseller is invoiced for). The per-user
+        # quota factors were resolved above; recompute the billing factor
+        # from the same tag map so the two can diverge safely.
+        # f-usagecoeff-1: used_traffic follows the QUOTA factor (it gates
+        # the user's data limit); users_usage follows the BILLING factor —
+        # the number a reseller is actually invoiced for.
         with GetDB() as db:
             for user_id, (up, down) in per_user.items():
                 row = await asyncio.to_thread(runtime.users.get_user, user_id)
                 if row is None:
                     continue
-                amount = int(up) + int(down)
                 legacy = db.query(LegacyUser).filter(
                     LegacyUser.username == row.username
                 ).one_or_none()
                 if legacy is None:
                     continue
+                amount = int(up) + int(down)  # quota-scaled above
                 db.execute(
                     update(LegacyUser)
                     .where(LegacyUser.id == legacy.id)
@@ -252,10 +298,11 @@ async def record_once(runtime) -> int:
                     )
                 )
                 if legacy.admin_id is not None:
+                    billed = per_user_billing.get(user_id, amount)
                     db.execute(
                         update(LegacyAdmin)
                         .where(LegacyAdmin.id == legacy.admin_id)
-                        .values(users_usage=LegacyAdmin.users_usage + amount)
+                        .values(users_usage=LegacyAdmin.users_usage + billed)
                     )
             db.commit()
     except Exception as exc:  # noqa: BLE001 — legacy side is optional in tests

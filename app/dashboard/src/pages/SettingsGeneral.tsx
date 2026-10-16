@@ -3,7 +3,7 @@
 // operator already knows.)
 // (: admins and user templates are no longer second-class Settings
 // widgets — both moved to first-class sidebar pages under "Management".)
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Save, Settings as SettingsIcon, TerminalSquare } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "../components/feedback";
@@ -147,6 +147,8 @@ export default function SettingsGeneral() {
           )}
         </Card>
 
+        <UsageCoefficientsCard />
+
         <Card>
           <CardHeader title={<span className="inline-flex items-center gap-2"><TerminalSquare size={16} className="text-brand" /> Advanced Mode</span>} />
           <p className="text-[12.5px] leading-6 text-content-2">{t("Advanced Mode unlocks the in-panel")}<b>{t("Config Studio")}</b>{t("raw document editor (schema validation + diff preview) and shows the")}<b>{t("nav.advanced")}</b>{t("entry in the sidebar. Everything outside it stays graphical — regular operators never touch JSON.")}</p>
@@ -168,5 +170,111 @@ function Meta({ k, v }: { k: string; v: React.ReactNode }) {
       <dt className="text-[11px] uppercase tracking-wide text-content-3">{k}</dt>
       <dd className="mt-0.5 truncate text-content">{v}</dd>
     </div>
+  );
+}
+
+
+// --------------------------------------------------------------------------- //
+// f-usagecoeff-1: master coefficient + quota/billing split + per-inbound map.
+// Defaults (1.0 everywhere) reproduce legacy behaviour exactly; every save is
+// audited server-side because coefficients change money.
+// --------------------------------------------------------------------------- //
+
+interface UsageCoeffs {
+  master: number;
+  quota_multiplier: number;
+  billing_multiplier: number;
+  inbounds: Record<string, number>;
+}
+
+function UsageCoefficientsCard() {
+  const t = useT();
+  const qc = useQueryClient();
+  const [form, setForm] = useState<UsageCoeffs | null>(null);
+  const coeffsQ = useQuery({
+    queryKey: ["zagros", "usage-coefficients"],
+    queryFn: () => api.get<UsageCoeffs>("/zagros/settings/usage-coefficients"),
+  });
+  useEffect(() => {
+    if (coeffsQ.data && form === null) setForm(coeffsQ.data);
+  }, [coeffsQ.data, form]);
+  const catalogQ = useQuery({
+    queryKey: ["zagros", "access-catalog"],
+    queryFn: () => api.get<{ groups: Array<{ core_id: string; name: string; inbounds: Array<{ tag: string }> }> }>("/zagros/access-catalog"),
+  });
+  const tagOrigin = new Map<string, string>();
+  for (const g of catalogQ.data?.groups ?? [])
+    for (const i of g.inbounds ?? []) tagOrigin.set(i.tag, g.name);
+  const save = useMutation({
+    mutationFn: () => api.put("/zagros/settings/usage-coefficients", form),
+    onSuccess: () => {
+      toast.ok(t("common.saved"));
+      qc.invalidateQueries({ queryKey: ["zagros", "usage-coefficients"] });
+    },
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("common.error")),
+  });
+  const setTagFactor = (tag: string, raw: string) => {
+    if (!form) return;
+    const next = { ...form.inbounds };
+    const v = parseFloat(raw);
+    if (raw.trim() === "" || isNaN(v) || v <= 0) delete next[tag];
+    else next[tag] = v;
+    setForm({ ...form, inbounds: next });
+  };
+  const extraTags = form
+    ? Object.keys(form.inbounds).filter((tg) => !tagOrigin.has(tg))
+    : [];
+  return (
+    <Card>
+      <CardHeader title={t("settings.usageCoeffs")}
+        subtitle={t("settings.usageCoeffsHint")} />
+      {form && (
+        <>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Field label={t("settings.masterCoeff")}
+              hint={t("settings.masterCoeffHint")}>
+              <Input type="number" min="0" step="0.1" value={String(form.master)}
+                onChange={(e) => setForm({ ...form, master: parseFloat(e.target.value) || 1 })} />
+            </Field>
+            <Field label={t("settings.quotaMult")}
+              hint={t("settings.quotaMultHint")}>
+              <Input type="number" min="0" step="0.1" value={String(form.quota_multiplier)}
+                onChange={(e) => setForm({ ...form, quota_multiplier: parseFloat(e.target.value) || 1 })} />
+            </Field>
+            <Field label={t("settings.billingMult")}
+              hint={t("settings.billingMultHint")}>
+              <Input type="number" min="0" step="0.1" value={String(form.billing_multiplier)}
+                onChange={(e) => setForm({ ...form, billing_multiplier: parseFloat(e.target.value) || 1 })} />
+            </Field>
+          </div>
+          <p className="mt-4 mb-2 text-[11px] font-semibold uppercase tracking-wide text-content-3">{t("settings.inboundCoeffs")}</p>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {[...tagOrigin.keys()].map((tg) => (
+              <div key={tg} className="flex items-center justify-between gap-2 rounded-lg border border-line/60 px-2.5 py-1.5">
+                <span className="min-w-0 truncate text-[11.5px]" title={tg}>
+                  {tg}
+                  <span className="ms-1 text-[10px] text-content-3">{tagOrigin.get(tg)}</span>
+                </span>
+                <Input type="number" min="0" step="0.1" className="w-20 text-end"
+                  value={form.inbounds[tg] != null ? String(form.inbounds[tg]) : ""}
+                  placeholder="1.0"
+                  onChange={(e) => setTagFactor(tg, e.target.value)} />
+              </div>
+            ))}
+            {extraTags.map((tg) => (
+              <div key={tg} className="flex items-center justify-between gap-2 rounded-lg border border-dashed border-line/60 px-2.5 py-1.5">
+                <span className="min-w-0 truncate text-[11.5px] text-content-3" title={tg}>{tg}</span>
+                <Input type="number" min="0" step="0.1" className="w-20 text-end"
+                  value={String(form.inbounds[tg])}
+                  onChange={(e) => setTagFactor(tg, e.target.value)} />
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 flex justify-end">
+            <Button onClick={() => save.mutate()} loading={save.isPending}><Save size={14} />{t("common.save")}</Button>
+          </div>
+        </>
+      )}
+    </Card>
   );
 }

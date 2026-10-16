@@ -299,7 +299,10 @@ async def create_node(runtime, body: NodeCreate) -> tuple[NodeView, InstallerCom
             name=body.name, address=body.address, port=body.port,
             api_port=body.api_port, status="pending",
             usage_coefficient=body.usage_coefficient,
-            add_as_new_host=body.add_as_new_host,
+            # f-nodehosts-1: a compat-API client omitting the field gets the
+            # documented default (True), not the DB column's False.
+            add_as_new_host=True if body.add_as_new_host is None
+            else bool(body.add_as_new_host),
             agent_type="zagros_native",
             panel_id=panel_id(runtime),
             registration_token_hash=token_hash,
@@ -327,7 +330,20 @@ async def installer_command(runtime, node_id: int, *,
         raise KeyError(node_id)
     if not rotate:
         ref = await asyncio.to_thread(installer_scripts_ref)
-        return _installer_command(row, _row_token(runtime, row), ref=ref)
+        token = _row_token(runtime, row)
+        if row.status == "connected" and token is not None:
+            # f-nodetoken-1: the dialog promises "sealed only until pairing
+            # completes". A paired node's token was consumed at pairing —
+            # handing it out again (and rendering it in the dashboard) kept
+            # a live credential on screen forever. Paired nodes get the
+            # command shape only; a re-pair requires delete + re-add or an
+            # explicit rotate (which a paired node refuses).
+            command = _installer_command(row, None, ref=ref)
+            command.notes.insert(0, "This node is already paired — its "
+                                 "one-time token is consumed and is no "
+                                 "longer shown.")
+            return command
+        return _installer_command(row, token, ref=ref)
 
     if row.status == "connected":
         raise PermissionError(
@@ -1155,6 +1171,12 @@ async def sync_node(runtime, node_id: int, *,
             result.hosts = await _add_node_hosts(runtime, row, wanted)
         except Exception as exc:  # noqa: BLE001 — config push already succeeded
             result.errors.append(f"hosts: {exc}")
+    else:
+        # f-nodehosts-1: an empty hosts list must never look like a silent
+        # failure — say why nothing was added.
+        result.notes.append(
+            "add-as-new-host is off for this node — the node address was "
+            "not registered as a Host (enable it in edit node)")
 
     if _pending_digests:
         _store_accounts_digests(runtime, node_id, _pending_digests)

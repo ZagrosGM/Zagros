@@ -145,3 +145,7 @@ class SyncResult(BaseModel):
     skipped: list[dict[str, Any]] = Field(default_factory=list)
     hosts: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+    # f-nodehosts-1: "hosts": [] used to be ambiguous — a silent no-op. When
+    # the node was created without add_as_new_host (or a compat-API client
+    # omitted the field), the dashboard now SAYS why nothing was added.
+    notes: list[str] = Field(default_factory=list)

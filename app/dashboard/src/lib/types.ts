@@ -156,6 +156,7 @@ export interface SyncResult {
   skipped: { core_id: string; reason: string }[];
   hosts: string[];
   errors: string[];
+  notes?: string[];
 }
 
 export interface NodesUsage { usages: { node_id: number; node_name: string; uplink: number; downlink: number }[] }

@@ -89,6 +89,8 @@ export default function Nodes() {
       const pushed = data.pushed?.length ?? 0;
       const hosts = data.hosts?.length ?? 0;
       toast.ok(`synced ${pushed} core(s), ${hosts} host entr(y/ies)`);
+      // f-nodehosts-1: an empty hosts list must explain itself
+      if (data.notes?.length) toast.ok(data.notes.join(" · "));
       if (data.errors?.length) toast.error(data.errors.join(" · "));
       invalidate();
     },

@@ -1,3 +1,4 @@
+import json
 import os
 
 from sqlalchemy import create_engine, text
@@ -12,25 +13,33 @@ from config import (
 # serves the MAIN database (the durable decision lives in a marker row of
 # the main database). Until that marker exists — fresh panels, or an
 # operator who never merged — the configured URL is used unchanged.
+#
+# f-dbmerge-7: the read is dialect-first and transaction-safe (the old
+# guess-loop aborted PostgreSQL transactions and never saw the marker),
+# and a marker only counts when it carries the CURRENT version: a v1
+# marker means v1.1.1 wrote it without ever honouring it on PostgreSQL,
+# so the main copy may be a stale snapshot and the engine must stay on
+# the legacy database until dbmerge's healing merge runs (same boot, the
+# CMD runs dbmerge before the application starts).
 def _marker_present(main_url: str) -> bool:
     engine = None
     try:
+        from app.dbmerge import MARKER_VERSION, read_marker_value
+
         engine = create_engine(main_url)
         with engine.connect() as conn:
-            for expr in ("`key`", '"key"'):
-                try:
-                    row = conn.execute(text(
-                        "SELECT value_json FROM settings "
-                        f"WHERE {expr} = 'dbmerge'")).scalar()
-                    return row is not None
-                except Exception:  # noqa: BLE001 — next quoting style
-                    continue
+            payload = read_marker_value(conn)
+            if payload is None:
+                return False
+            try:
+                return int((json.loads(payload) or {}).get("v", 1)) >= MARKER_VERSION
+            except (ValueError, TypeError):
+                return False
     except Exception:  # noqa: BLE001 — unreachable DB: stay configured
         return False
     finally:
         if engine is not None:
             engine.dispose()
-    return False
 
 
 _CONFIGURED_LEGACY_URL = SQLALCHEMY_DATABASE_URL

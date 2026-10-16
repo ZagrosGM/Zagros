@@ -34,6 +34,14 @@ from sqlalchemy import MetaData, Table, create_engine, inspect, text
 from app.bootwait import probe
 
 MARKER_KEY = "dbmerge"
+# f-dbmerge-7: v1.1.1 wrote "v": 1 markers, but on PostgreSQL the marker
+# reader aborted its transaction on the MySQL-quoted first attempt and never
+# saw it — installs stayed on the live legacy database while the main copy
+# became a stale snapshot. v2 markers are only written AFTER a read that
+# works on every dialect; a v1 marker therefore means "the engine may still
+# be living in the legacy database" and triggers one final healing merge
+# (fresh rows win) before the engine is allowed to switch.
+MARKER_VERSION = 2
 RENAMES = {
     "users": "legacy_users",
     "admins": "legacy_admins",
@@ -53,26 +61,61 @@ def _load_env() -> None:
         pass
 
 
-def _read_marker(conn):
-    for expr in ("`key`", '"key"'):
+def _marker_quote_expr(conn) -> tuple[str, ...]:
+    """Quoting styles for the settings key, DIALECT-FIRST (f-dbmerge-7).
+
+    Guessing loops poison PostgreSQL: the first (MySQL) attempt aborts the
+    transaction and the second, correct attempt dies with
+    InFailedSqlTransaction. The dialect decides the first (and on real
+    deployments, only) attempt; the legacy order is kept purely as a
+    fallback, with a rollback before every retry.
+    """
+    if conn.dialect.name in ("mysql", "mariadb"):
+        return ("`key`", '"key"')
+    return ('"key"', "`key`")
+
+
+def read_marker_value(conn) -> str | None:
+    """The raw marker JSON, or None — safe on every dialect (f-dbmerge-7)."""
+    for expr in _marker_quote_expr(conn):
         try:
             return conn.execute(text(
                 f"SELECT value_json FROM settings WHERE {expr} = '{MARKER_KEY}'"
             )).scalar()
-        except Exception:  # noqa: BLE001 — try the next quoting style
+        except Exception:  # noqa: BLE001 — roll back and try the next quoting
+            conn.rollback()
             continue
     return None
 
 
+def _marker_version(payload: str | None) -> int:
+    if not payload:
+        return 0
+    try:
+        return int((json.loads(payload) or {}).get("v", 1))
+    except (ValueError, TypeError):
+        return 1  # a present but unreadable marker behaves like v1
+
+
+def _read_marker(conn):
+    return read_marker_value(conn)
+
+
 def merged(main_url: str) -> bool:
-    """True when the main database carries the merge marker."""
+    """True when the main database carries a CURRENT-version merge marker.
+
+    A v1 marker (v1.1.1) is deliberately NOT trusted (f-dbmerge-7): on
+    PostgreSQL the writing boot never actually honoured it, so the legacy
+    database may hold fresher data than the main copy — the caller must
+    run the healing merge once before treating the layout as merged.
+    """
     if not main_url:
         return False
     try:
         engine = create_engine(main_url)
         try:
             with engine.connect() as conn:
-                return _read_marker(conn) is not None
+                return _marker_version(_read_marker(conn)) >= MARKER_VERSION
         finally:
             engine.dispose()
     except Exception:  # noqa: BLE001 — unreachable DB: behave un-merged
@@ -134,8 +177,16 @@ def remove_legacy_source(url: str) -> str:
         with engine.begin() as conn:
             if conn.dialect.name in ("mysql", "mariadb"):
                 conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
-            for table in reversed(tables):
-                table.drop(bind=conn, checkfirst=True)
+            if conn.dialect.name == "postgresql":
+                # f-dbmerge-7: FK dependency order is not worth reconstructing
+                # here (association tables reference users/inbounds) — CASCADE
+                # drops dependents along with the referenced tables.
+                for table in tables:
+                    conn.execute(text(
+                        f'DROP TABLE IF EXISTS "{table.name}" CASCADE'))
+            else:
+                for table in reversed(tables):
+                    table.drop(bind=conn, checkfirst=True)
             if conn.dialect.name in ("mysql", "mariadb"):
                 conn.execute(text("SET FOREIGN_KEY_CHECKS=1"))
         return f"dropped {len(tables)} legacy table(s) in place"
@@ -201,7 +252,7 @@ def _set_marker(conn, counts: dict) -> None:
             '"key" VARCHAR(128) NOT NULL PRIMARY KEY, '
             'value_json JSON, updated_at DATETIME)'))
     payload = json.dumps({
-        "v": 1,
+        "v": MARKER_VERSION,
         "merged_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "tables": counts,
     })

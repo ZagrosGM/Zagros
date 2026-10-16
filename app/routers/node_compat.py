@@ -52,7 +52,7 @@ class CompatNodeModify(BaseModel):
     port: int | None = Field(default=None, ge=1, le=65535)
     api_port: int | None = Field(default=None, ge=1, le=65535)
     usage_coefficient: float | None = Field(default=None, gt=0)
-    add_as_new_host: bool | None = True
+    add_as_new_host: bool | None = None
     # Present in Marzban's model but not writable in the native pairing state
     # machine. Accepting it in the schema gives a precise 422 instead of an
     # unexplained extra-field drop.

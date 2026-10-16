@@ -583,6 +583,125 @@ async def cores_install(core_id: str, body: CoreInstallBody, runtime=Depends(get
     return {"ok": True, "core": core_id, "state": state.value, "enabled": enabled}
 
 
+# --------------------------------------------------------------------- #
+# f-coresettings-1: edit an INSTALLED master core's settings in place
+# --------------------------------------------------------------------- #
+
+_SECRET_MARKER = "set ("
+
+
+def _core_settings_view(runtime, core_id: str) -> dict:
+    from app.cores.registry import get_driver_class
+
+    manager = runtime.core_manager
+    if core_id not in manager.list_cores():
+        raise HTTPException(404, f"core '{core_id}' is not installed")
+    driver = manager.get(core_id)
+    cls = get_driver_class(core_id)
+    meta = cls.metadata
+    return {
+        "core": core_id,
+        "settings": _mask_settings(dict(driver.settings or {})),
+        "schema": meta.config_schema,
+        "default_settings": _mask_settings(dict(meta.default_settings or {})),
+    }
+
+
+def _validate_settings_against_schema(schema: dict, supplied: dict) -> dict:
+    """Type-check a settings patch against the driver's own config schema.
+
+    Unknown keys and wrong types are refused (a typo must not silently
+    create a dead setting); arrays/objects pass through untouched because
+    the DRIVER is the authority on their internal shape.
+    """
+    props = (schema or {}).get("properties") or {}
+    clean: dict = {}
+    for key, value in supplied.items():
+        if key not in props:
+            raise HTTPException(422, f"unknown setting '{key}' for this core")
+        spec = props[key] or {}
+        if "enum" in spec and value is not None and str(value) not in                 [str(o) for o in spec["enum"]]:
+            raise HTTPException(
+                422, f"setting '{key}' must be one of {spec['enum']}")
+        vtype = spec.get("type")
+        if value is None or vtype in (None, "object", "array"):
+            clean[key] = value
+            continue
+        if vtype in ("integer", "number"):
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    422, f"setting '{key}' must be a number") from None
+            clean[key] = int(num) if vtype == "integer" else num
+        elif vtype == "boolean":
+            if not isinstance(value, bool):
+                raise HTTPException(
+                    422, f"setting '{key}' must be true or false")
+            clean[key] = value
+        else:  # string and friends
+            clean[key] = str(value)
+    return clean
+
+
+@zagros_admin_router.get("/cores/{core_id}/settings")
+async def cores_settings_get(core_id: str, runtime=Depends(get_runtime)):
+    """f-coresettings-1: a master core's effective settings + its own
+    schema, so the dashboard can render a real editor (secrets masked)."""
+    return _core_settings_view(runtime, core_id)
+
+
+class CoreSettingsBody(BaseModel):
+    settings: dict[str, Any]
+
+
+@zagros_admin_router.put("/cores/{core_id}/settings")
+async def cores_settings_put(core_id: str, body: CoreSettingsBody,
+                             runtime=Depends(get_runtime),
+                             request: Request = None):
+    """Patch an installed core's settings (validated against the driver's
+    own schema), persist them, and restart the core so they take effect.
+
+    Masked placeholder values ("set (N chars)") are dropped — a client that
+    round-trips the GET output never clobbers a secret by accident.
+    """
+    from app.cores.registry import get_driver_class
+    from app.cores.types import CoreState
+
+    manager = runtime.core_manager
+    if core_id not in manager.list_cores():
+        raise HTTPException(404, f"core '{core_id}' is not installed")
+    driver = manager.get(core_id)
+    cls = get_driver_class(core_id)
+    supplied = {k: v for k, v in (body.settings or {}).items()
+                if not (isinstance(v, str) and v.startswith(_SECRET_MARKER))}
+    clean = _validate_settings_against_schema(cls.metadata.config_schema,
+                                              supplied)
+    if not clean:
+        raise HTTPException(422, "no settings supplied")
+    before = {k: driver.settings.get(k) for k in clean}
+    driver.settings.update(clean)
+    await runtime.core_manager.persist_settings(core_id)
+    _audit(runtime, "core.settings.update", target=core_id,
+           detail={"before": before, "after": clean}, request=request)
+    # restart so the running process picks the values up (honour the core's
+    # lifecycle: a stopped core stays stopped)
+    was_running = manager.state_of(core_id) == CoreState.RUNNING
+    if was_running:
+        await manager.stop_core(core_id)
+        try:
+            status = await manager.start_core(core_id)
+        except Exception as exc:
+            raise HTTPException(
+                502, f"settings saved, but the core failed to restart: {exc}"
+            ) from exc
+        return {"ok": True, "core": core_id, "applied": clean,
+                "restarted": True, "state": status.state.value}
+    return {"ok": True, "core": core_id, "applied": clean,
+            "restarted": False,
+            "state": manager.state_of(core_id).value}
+
+
 @zagros_admin_router.post("/cores/{core_id}/uninstall")
 async def cores_uninstall(core_id: str, body: CoreUninstallBody,
                           runtime=Depends(get_runtime)):

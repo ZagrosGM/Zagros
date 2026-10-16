@@ -5,7 +5,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpDown, Cpu, Download, FileText, HardDriveDownload, Loader2, Play,
-  PowerOff, RefreshCcw, RotateCw, Server, Square, Trash2,
+  PowerOff, RefreshCcw, RotateCw, Save, Server, Settings2, Square, Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -646,6 +646,7 @@ function MasterCores() {
   const [uninstallFor, setUninstallFor] = useState<CoreView | null>(null);
   const [reinstallFor, setReinstallFor] = useState<CoreView | null>(null);
   const [versionFor, setVersionFor] = useState<string | null>(null);
+  const [settingsFor, setSettingsFor] = useState<string | null>(null);
   const [purge, setPurge] = useState(false);
 
   const registry = useQuery({
@@ -794,6 +795,8 @@ function MasterCores() {
                       other core's, and the backend updates it in place. */}
                   <Button size="sm" variant="ghost" onClick={() => setVersionFor(c.id)}>
                     <ArrowUpDown size={13} />{t("change version")}</Button>
+                  <Button size="sm" variant="ghost" onClick={() => setSettingsFor(c.id)}>
+                    <Settings2 size={13} />{t("cores.settings")}</Button>
                   {!c.builtin && (
                     <>
                       <Button size="sm" variant="ghost" loading={false}
@@ -857,6 +860,11 @@ function MasterCores() {
         body="The binary is fetched fresh; settings, data directory and the running state are preserved server-side (secrets never leave the panel)."
         loading={reinstall.isPending}
       />
+        {settingsFor && (
+          <CoreSettingsDialog coreId={settingsFor}
+            onClose={() => setSettingsFor(null)}
+            onSaved={() => { setSettingsFor(null); invalidate(); }} />
+        )}
 
       <LogsDrawer coreId={logsFor} onClose={() => setLogsFor(null)} />
 
@@ -1118,5 +1126,103 @@ function LogsDrawer({ coreId, onClose }: { coreId: string | null; onClose: () =>
         </pre>
       )}
     </Drawer>
+  );
+}
+
+
+// --------------------------------------------------------------------------- //
+// f-coresettings-1: edit an INSTALLED core's settings in place — schema-driven
+// form, secrets masked server-side, save persists + restarts the core.
+// --------------------------------------------------------------------------- //
+
+function CoreSettingsDialog({ coreId, onClose, onSaved }: {
+  coreId: string;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const t = useT();
+  const td = useTDynamic();
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const q = useQuery({
+    queryKey: ["zagros", "core-settings", coreId],
+    queryFn: () => api.get<{ core: string; settings: Record<string, unknown>; schema: { properties?: SchemaProps } | null }>("/zagros/cores/" + coreId + "/settings"),
+    retry: false,
+  });
+  useEffect(() => {
+    if (!q.data || Object.keys(values).length) return;
+    const init: Record<string, string> = {};
+    for (const [k, v] of Object.entries(q.data.settings ?? {}))
+      init[k] = v == null ? "" : String(v);
+    setValues(init);
+  }, [q.data]);  // eslint-disable-line react-hooks/exhaustive-deps
+  const schema = q.data?.schema ?? null;
+  const props = schema?.properties ?? {};
+  const fields = Object.entries(props);
+
+  const save = async () => {
+    setBusy(true); setError("");
+    const patch: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(values)) {
+      if (!(k in props)) continue;          // unknown (masked leftovers) skipped
+      if (String(v) === String(q.data?.settings?.[k] ?? "")) continue; // unchanged
+      const type = props[k]?.type;
+      if (v === "") { patch[k] = null; continue; }
+      patch[k] = type === "integer" || type === "number" ? Number(v)
+        : type === "boolean" ? v === "true" || v === "yes" : v;
+    }
+    if (!Object.keys(patch).length) { onClose(); return; }
+    try {
+      const res = await api.put<{ restarted: boolean; applied: Record<string, unknown> }>(
+        "/zagros/cores/" + coreId + "/settings", { settings: patch });
+      toast.ok(`${coreId}: ${t("cores.settingsSaved")}${res.restarted ? "" : ` (${t("cores.settingsSavedNoRestart")})`}`);
+      onSaved();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : t("common.error"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open wide onClose={onClose} title={`${t("cores.settings")} — ${coreId}`}
+      subtitle={t("cores.settingsHint")}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
+          <Button onClick={save} loading={busy}><Save size={14} />{t("common.save")}</Button>
+        </>
+      }>
+      {q.isLoading && <Skeleton className="h-24" />}
+      {q.isError && <p className="rounded-xl bg-warn-soft p-3 text-[12px] text-warn">{(q.error as Error).message}</p>}
+      {q.data && fields.length === 0 && (
+        <p className="rounded-xl bg-surface-2 p-3 text-[12px] text-content-2">{t("This core needs no settings — the official binary is downloaded and verified automatically.")}</p>
+      )}
+      <div className="space-y-3.5">
+        {fields.map(([key, meta]) => (
+          <Field key={key} label={td(meta?.title ?? key)} hint={td(meta?.description)}>
+            {meta?.enum ? (
+              <Select value={values[key] ?? ""} onChange={(e) => setValues({ ...values, [key]: e.target.value })}>
+                {(meta.enum as unknown[]).map((o) => <option key={String(o)} value={String(o)}>{String(o)}</option>)}
+              </Select>
+            ) : meta?.type === "boolean" ? (
+              <Select value={values[key] ?? "false"} onChange={(e) => setValues({ ...values, [key]: e.target.value })}>
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </Select>
+            ) : (
+              <Input
+                type={meta?.type === "integer" || meta?.type === "number" ? "number" : "text"}
+                value={values[key] ?? ""}
+                onChange={(e) => setValues({ ...values, [key]: e.target.value })}
+                dir={meta?.type === "integer" || meta?.type === "number" ? "ltr" : undefined}
+              />
+            )}
+          </Field>
+        ))}
+      </div>
+      {error && <p className="mt-3 rounded-xl bg-warn-soft p-3 text-[12px] text-warn">{error}</p>}
+    </Dialog>
   );
 }

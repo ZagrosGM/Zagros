@@ -68,7 +68,11 @@ logger = logging.getLogger(__name__)
 zagros_router = APIRouter(tags=["Zagros"])
 
 
+# The bundle's api client prefixes every call with "/api" (see dashboard
+# src/lib/api.ts), so the dashboard fetches "/api/zagros/branding"; the bare
+# "/branding" path is kept for any hand-written / portal-side consumers.
 @zagros_router.get("/branding", tags=["Zagros"])
+@zagros_router.get("/api/zagros/branding", tags=["Zagros"])
 async def public_branding(request: Request):
     """f-branding-1: dashboard white-labeling, UNAUTHENTICATED on purpose —
     the login screen renders it before any token exists. Serves defaults

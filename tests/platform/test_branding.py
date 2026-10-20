@@ -92,3 +92,21 @@ def test_branding_invalid_row_serves_defaults(monkeypatch):
     sf.store["branding"] = _Row("branding", "not-a-dict")
     out = branding.load(sf)
     assert out.panel_name is None, "bad storage must never break the UI"
+
+
+def test_public_branding_served_on_both_paths():
+    """rc4 regression — the dashboard api client prefixes "/api", so the public
+    view must answer on /api/zagros/branding (not only on /branding)."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.platform.routers import zagros_router
+
+    app = FastAPI()
+    app.include_router(zagros_router)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    for path in ("/branding", "/api/zagros/branding"):
+        r = client.get(path)
+        assert r.status_code == 200, path
+        assert r.json() == {}  # no runtime attached -> stock, no crash

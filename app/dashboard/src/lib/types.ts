@@ -161,6 +161,8 @@ export interface SyncResult {
   hosts: string[];
   errors: string[];
   notes?: string[];
+  /** f-noderouting-2: policy-plane push outcome (null = agent too old) */
+  policy?: { pushed: boolean; rules?: number; outbounds?: number; reason?: string; notes?: string[] } | null;
 }
 
 export interface NodesUsage { usages: { node_id: number; node_name: string; uplink: number; downlink: number }[] }
@@ -193,6 +195,8 @@ export interface UserTemplate {
   inbounds: Record<string, string[]>;
   /** multi-core grants: core_id → inbound tags */
   core_access?: Record<string, string[]> | null;
+  /** f-tplsync-1: users created from this template (drives the sync ask) */
+  users_count?: number;
 }
 
 /** Unified inbound catalog — one selectable tree across ALL cores. */

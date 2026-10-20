@@ -149,3 +149,6 @@ class SyncResult(BaseModel):
     # the node was created without add_as_new_host (or a compat-API client
     # omitted the field), the dashboard now SAYS why nothing was added.
     notes: list[str] = Field(default_factory=list)
+    # f-noderouting-2 (phase A): the outcome of the policy push — applied /
+    # unsupported per rule, or the honest reason nothing was pushed.
+    policy: dict[str, Any] | None = None

@@ -794,12 +794,27 @@ def read_snapshot(source: str, db_path: Path) -> tuple[LegacySnapshot, dict[str,
 # Zagros platform database
 # --------------------------------------------------------------------------- #
 def read_zagros_platform(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]:
-    """Read a Zagros *platform* database (``db/zagros.sqlite3``).
+    """Read a Zagros database (``zagros.db`` / ``db/database.sqlite3``).
 
     Used when the archive's database cannot simply be copied into place —
     a panel running MySQL, most of all. The rows are read out and pushed
-    through the same migration pipeline a foreign panel goes through, so the
-    result is a working panel on whatever engine it happens to run.
+    through the same migration pipeline a foreign panel goes through, so
+    the result is a working panel on whatever engine it happens to run.
+
+    f-backlimit-1 (v1.1.3 bugfix 4): the reader used to treat the ``users``
+    table as PLATFORM rows unconditionally. Two very common files broke:
+    * a pre-dbmerge ``zagros.db`` (or an archive taken before the merge) —
+      its ``users`` table is the LEGACY Marzban schema, so reading
+      ``data_limit_bytes``/``expire_at`` columns that do not exist returned
+      NULL for every row and the import re-created EVERY USER UNLIMITED;
+    * a merged single-file database — the platform rows imported fine, but
+      the legacy layer (``legacy_users`` + ``proxies``, the actual panel
+      user list with credentials) was ignored.
+    The reader is now schema-aware: a legacy-shaped ``users`` table reads
+    the whole file through the legacy reader; a platform-shaped table
+    prefers the ``legacy_users``/``proxies``/``legacy_admins`` layer (the
+    quota/expiry/credential source of truth) and falls back to the platform
+    rows for users that only exist there.
     """
     from app.persistence.migration import is_verifiable_hash
 
@@ -815,6 +830,27 @@ def read_zagros_platform(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]
             raise RestoreSourceError(
                 "this is not a Zagros platform database (no users/admins table)")
 
+        cur = con.execute("SELECT * FROM users LIMIT 0")
+        users_cols = {d[0] for d in cur.description}
+
+        # --- pre-merge legacy single-file database --------------------------
+        if "data_limit" in users_cols and "data_limit_bytes" not in users_cols:
+            from app.persistence import legacy_reader
+
+            con.close()
+            snapshot = legacy_reader.read_legacy_sqlite(db_path)
+            for admin in snapshot.admins:
+                if not is_verifiable_hash(admin.get("hashed_password")):
+                    password = _generated_password()
+                    admin["generated_password"] = password
+                    notes["generated_admin_passwords"][admin.get("username", "")] = password
+            notes["schema"] = "legacy (pre-merge)"
+            return snapshot, notes
+
+        # --- platform-shaped table (merged single file or platform only) ----
+        merged = "legacy_users" in tables
+        notes["schema"] = "merged" if merged else "platform"
+
         usage = {}
         if "user_usage" in tables:
             for row in _rows(con, "user_usage"):
@@ -822,32 +858,115 @@ def read_zagros_platform(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]
                     int(row.get("uplink_bytes") or 0)
                     + int(row.get("downlink_bytes") or 0))
 
+        platform_rows: dict[str, dict[str, Any]] = {}
+        for row in _rows(con, "users"):
+            name = str(row.get("username") or "").strip().lower()
+            if name:
+                platform_rows[name] = row
+
         taken: set[str] = set()
-        for row in (_rows(con, "users") if "users" in tables else []):
+        entries: list[dict[str, Any]] = []
+        legacy_ids: list[int] = []
+        if merged:
+            # The legacy layer is the panel user list: quota, expiry and the
+            # per-user proxy credentials all live there.
+            for row in _rows(con, "legacy_users"):
+                username, note = sanitize_username(row.get("username") or "", taken)
+                if note:
+                    notes["skipped"].append(f"{username}: {note}")
+                try:
+                    legacy_ids.append(int(row.get("id")))
+                except (TypeError, ValueError):
+                    pass
+                platform_twin = platform_rows.get(
+                    str(row.get("username") or "").strip().lower())
+                twin = platform_twin or {}
+                twin_used = usage.get(int(twin.get("id") or 0), 0)
+                entry = {
+                    "id": row.get("id"),
+                    "username": username,
+                    "status": row.get("status") or "active",
+                    "note": row.get("note") or twin.get("note")
+                            or "restored from a Zagros database",
+                    "data_limit": row.get("data_limit"),
+                    "download_limit_mbps": row.get("download_limit_mbps")
+                                           if row.get("download_limit_mbps") is not None
+                                           else twin.get("download_limit_mbps") or 0,
+                    "upload_limit_mbps": row.get("upload_limit_mbps")
+                                         if row.get("upload_limit_mbps") is not None
+                                         else twin.get("upload_limit_mbps") or 0,
+                    "expire": row.get("expire"),
+                    "created_at": row.get("created_at"),
+                    "used_traffic": row.get("used_traffic")
+                                    if row.get("used_traffic") is not None
+                                    else twin_used,
+                    "data_limit_reset_strategy": row.get("data_limit_reset_strategy")
+                                                 or "no_reset",
+                    "ip_limit": row.get("ip_limit"),
+                    "device_limit": row.get("device_limit"),
+                }
+                entries.append(entry)
+            if "proxies" in tables and legacy_ids:
+                placeholders = ",".join("?" for _ in legacy_ids)
+                cur = con.execute(
+                    f"SELECT * FROM proxies WHERE user_id IN ({placeholders})",
+                    legacy_ids)  # noqa: S608 - fixed table name
+                cols = [d[0] for d in cur.description]
+                snapshot.proxies = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+        seen = {str(e.get("username") or "").strip().lower() for e in entries}
+        for name_lower, row in platform_rows.items():
+            if name_lower in seen:
+                continue  # already carried by its legacy twin (with proxies)
             username, note = sanitize_username(row.get("username") or "", taken)
             if note:
                 notes["skipped"].append(f"{username}: {note}")
-            expire = row.get("expire_at")
-            snapshot.users.append({
+            entries.append({
                 "id": row.get("id"),
                 "username": username,
                 "status": row.get("status") or "active",
-                "note": row.get("note") or f"imported from a Zagros archive",
+                "note": row.get("note") or "restored from a Zagros database",
                 "data_limit": row.get("data_limit_bytes"),
                 "download_limit_mbps": row.get("download_limit_mbps") or 0,
                 "upload_limit_mbps": row.get("upload_limit_mbps") or 0,
-                "expire": expire,
+                "expire": row.get("expire_at"),
                 "created_at": row.get("created_at"),
                 "used_traffic": usage.get(int(row.get("id") or 0), 0),
                 "data_limit_reset_strategy": row.get("data_limit_reset_strategy")
-                                            or "no_reset",
+                                             or "no_reset",
                 "ip_limit": row.get("ip_limit"),
                 "device_limit": row.get("device_limit"),
             })
+        snapshot.users = entries
 
-        for row in (_rows(con, "admins") if "admins" in tables else []):
+        # admins — the legacy layer keeps the REAL password hashes; platform
+        # rows cover admins that only exist there.
+        admin_entries: list[dict[str, Any]] = []
+        admin_seen: set[str] = set()
+        if merged and "legacy_admins" in tables:
+            legacy_admins = _rows(con, "legacy_admins")
+        else:
+            legacy_admins = []
+        platform_admins = _rows(con, "admins") if "admins" in tables else []
+        for row in legacy_admins:
             username = (row.get("username") or "").strip()
             if not username:
+                continue
+            admin_seen.add(username.lower())
+            entry = {
+                "username": username,
+                "hashed_password": row.get("hashed_password") or "",
+                "is_sudo": bool(row.get("is_sudo")),
+                "telegram_id": row.get("telegram_id"),
+            }
+            if not is_verifiable_hash(entry["hashed_password"]):
+                password = _generated_password()
+                entry["generated_password"] = password
+                notes["generated_admin_passwords"][username] = password
+            admin_entries.append(entry)
+        for row in platform_admins:
+            username = (row.get("username") or "").strip()
+            if not username or username.lower() in admin_seen:
                 continue
             entry = {
                 "username": username,
@@ -859,7 +978,8 @@ def read_zagros_platform(db_path: Path) -> tuple[LegacySnapshot, dict[str, Any]]
                 password = _generated_password()
                 entry["generated_password"] = password
                 notes["generated_admin_passwords"][username] = password
-            snapshot.admins.append(entry)
+            admin_entries.append(entry)
+        snapshot.admins = admin_entries
 
         if "core_hosts" in tables:
             for row in _rows(con, "core_hosts"):

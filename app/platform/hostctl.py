@@ -375,6 +375,59 @@ async def cmd_nodes_list(_args) -> dict:
     return {"nodes": [s.model_dump(mode="json") for s in states]}
 
 
+async def cmd_cores_settings_get(args) -> dict:
+    """l2tp §2 (`zagros cores settings <core>`): masked settings + schema."""
+    from app.platform.admin_api import _core_settings_view, _SECRET_MARKER
+
+    rt = await _runtime()
+    view = _core_settings_view(rt, args.core)
+    view.pop("default_settings", None)  # CLI noise — schema + current only
+    view["secret_marker"] = _SECRET_MARKER
+    return view
+
+
+async def cmd_cores_settings_set(args) -> dict:
+    """l2tp §2 (`zagros cores set <core> KEY VALUE [--json]`): validated
+    settings patch + persist + panel-aware restart. Mirrors the PUT
+    /cores/{id}/settings contract (masked markers dropped, schema-checked).
+    """
+    import json as _json
+
+    from app.cores.registry import get_driver_class
+    from app.cores.types import CoreState
+    from app.platform.admin_api import (_SECRET_MARKER,
+                                        _validate_settings_against_schema)
+
+    rt = await _runtime()
+    manager = rt.core_manager
+    if args.core not in manager.list_cores():
+        raise KeyError(f"Core '{args.core}' is not installed.")
+    driver = manager.get(args.core)
+    cls = get_driver_class(args.core)
+    value = args.value
+    if args.json:
+        try:
+            value = _json.loads(value)
+        except _json.JSONDecodeError as exc:
+            raise ValueError(f"--json value is not valid JSON: {exc}") from exc
+    clean = _validate_settings_against_schema(
+        cls.metadata.config_schema, {args.key: value})
+    before = {args.key: driver.settings.get(args.key)}
+    driver.settings.update(clean)
+    await manager.persist_settings(args.core)
+    was_running = manager.state_of(args.core) == CoreState.RUNNING
+    restarted = False
+    if was_running:
+        await manager.stop_core(args.core)
+        await manager.start_core(args.core)
+        restarted = True
+    return {"core": args.core, "applied": clean, "before": before,
+            "restarted": restarted,
+            "state": manager.state_of(args.core).value,
+            "secret_marker": _SECRET_MARKER}
+
+
+
 async def cmd_sync(args) -> dict:
     """Re-apply every stored core account through each driver's own
     ``sync_accounts`` reconciliation primitive (idempotent)."""
@@ -494,6 +547,17 @@ def _build_parser() -> argparse.ArgumentParser:
     c.add_argument("core")
     c.add_argument("--tail", type=int, default=200)
 
+    # l2tp section-2: settings of an INSTALLED core are editable from the
+    # host too (`zagros cores settings|set`), not only from the dashboard.
+    c = sub.add_parser("cores-settings-get")
+    c.add_argument("core")
+    c = sub.add_parser("cores-settings-set")
+    c.add_argument("core")
+    c.add_argument("key")
+    c.add_argument("value")
+    c.add_argument("--json", action="store_true",
+                   help="parse VALUE as JSON (numbers, booleans, objects)")
+
     sub.add_parser("nodes-list")
 
     c = sub.add_parser("sync")
@@ -532,6 +596,8 @@ def main(argv: list[str] | None = None) -> int:
         "cores_enable": cmd_cores_enable,
         "cores_disable": cmd_cores_disable,
         "cores_logs": cmd_cores_logs,
+        "cores_settings_get": cmd_cores_settings_get,
+        "cores_settings_set": cmd_cores_settings_set,
         "nodes_list": cmd_nodes_list,
         "sync": cmd_sync,
     }.get(name)

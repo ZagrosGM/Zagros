@@ -1075,6 +1075,79 @@ async def fanout_accounts(runtime, *, core_ids: list[str] | None = None,
     return {"pushed": pushed, "errors": errors}
 
 
+async def _push_policy(runtime, client, row, result: "SyncResult", *,
+                       features: dict) -> dict[str, Any] | None:
+    """Push the node's policy plane (f-noderouting-2, phase A).
+
+    The FULL desired state — every enabled rule whose scope reaches this
+    node plus every enabled outbound profile (credentials included; the
+    signed channel already carries identity secrets) — so apply == reconcile
+    and a rule deleted on the master disappears from the node on the next
+    sync. Agents without the ``policy_routing`` feature are skipped with a
+    note: the master stays the node's default egress, honest and direct.
+    """
+    if not features.get("policy_routing"):
+        result.notes.append(
+            "policy routing: node agent predates the feature — routing rules "
+            "are NOT enforced on this node; update the node agent")
+        return None
+    from app.cores.outbounds import OUTBOUNDS_KV_KEY
+    from app.cores.outbounds.repository import OutboundSecretCodec
+    from app.cores.routing import RULES_KV_KEY
+    from app.cores.routing.model import RoutingRule, effective_rules_for_node
+
+    raw_rules = await runtime.kv.get_value(RULES_KV_KEY) or []
+    rules = [RoutingRule.model_validate(item) for item in raw_rules]
+    node_rules = effective_rules_for_node(rules, int(row.id))
+    raw_outbounds = await runtime.kv.get_value(OUTBOUNDS_KV_KEY)
+    outbounds = OutboundSecretCodec(runtime.cipher).decode(raw_outbounds)
+    enabled = [o for o in outbounds if o.enabled]
+    referenced = {r.outbound for r in node_rules if r.outbound}
+    payload = {
+        "outbounds": [o.model_dump(mode="json") for o in enabled],
+        "rules": [r.model_dump(mode="json") for r in node_rules],
+    }
+    summary = await asyncio.to_thread(client.apply_policy, payload)
+    summary["pushed"] = True
+    summary["rules"] = len(node_rules)
+    summary["outbounds"] = len(enabled)
+    missing = sorted(referenced - {o.name for o in enabled})
+    if missing:
+        summary["notes"] = (summary.get("notes") or [])
+        summary["notes"].append(
+            f"rule(s) reference outbounds that are disabled or missing: "
+            f"{', '.join(missing)}")
+    return summary
+
+
+async def fanout_policy(runtime, node_ids: list[int] | None = None) -> dict[str, Any]:
+    """Push the current rule set to every paired node that supports it.
+
+    Called after a Routing-page deployment so a saved rule reaches nodes
+    immediately (not just on the next full sync). Per-node isolation: one
+    unreachable node never blocks the others.
+    """
+    summary: dict[str, Any] = {"pushed": [], "skipped": [], "errors": []}
+    for row in await asyncio.to_thread(paired_nodes, runtime):
+        if node_ids is not None and int(row.id) not in set(node_ids):
+            continue
+        try:
+            client = _client(runtime, row)
+            inventory = await asyncio.to_thread(client.cores)
+            result = SyncResult(node_id=int(row.id))
+            outcome = await _push_policy(runtime, client, row, result,
+                                         features=dict(inventory.get("features") or {}))
+            if outcome is None:
+                summary["skipped"].append({"node_id": int(row.id)})
+            else:
+                summary["pushed"].append({"node_id": int(row.id),
+                                          "rules": outcome.get("rules")})
+        except Exception as exc:  # noqa: BLE001 — isolation per node
+            summary["errors"].append({"node_id": int(row.id),
+                                      "error": str(exc)[:200]})
+    return summary
+
+
 async def sync_node(runtime, node_id: int, *,
                     core_ids: list[str] | None = None) -> SyncResult:
     """Push this panel's desired inbound state to every core on the node.
@@ -1177,6 +1250,17 @@ async def sync_node(runtime, node_id: int, *,
         result.notes.append(
             "add-as-new-host is off for this node — the node address was "
             "not registered as a Host (enable it in edit node)")
+
+    # f-noderouting-2 (phase A): after inbounds/accounts/hosts, push the
+    # policy plane — the rules and outbound profiles THIS node should
+    # enforce (default = every rule; node-scoped rules only when the scope
+    # lists this node). Old agents (no policy_routing feature) are skipped
+    # with a note, never an error: the master stays direct for them.
+    try:
+        result.policy = await _push_policy(runtime, client, row, result,
+                                           features=features)
+    except Exception as exc:  # noqa: BLE001 — routing must not break account sync
+        result.policy = {"pushed": False, "reason": str(exc)[:200]}
 
     if _pending_digests:
         _store_accounts_digests(runtime, node_id, _pending_digests)

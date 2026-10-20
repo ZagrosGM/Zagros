@@ -190,6 +190,11 @@ class UsageRecord(BaseModel):
     uplink_bytes: int = 0
     downlink_bytes: int = 0
     recorded_at: datetime = Field(default_factory=_utcnow)
+    # f-usagecoeff-2: factors APPLIED to this delta when it was folded into
+    # quota/billing — raw bytes stay raw (statistics stay physical); these
+    # make the money math auditable after the daily collapse.
+    quota_factor: float | None = None
+    billing_factor: float | None = None
 
 
 class DeviceSession(BaseModel):

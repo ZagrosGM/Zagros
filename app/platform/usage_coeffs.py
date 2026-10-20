@@ -4,9 +4,14 @@ Three sources multiply a raw traffic delta before it lands anywhere money-
 or quota-shaped:
 
   * master      — settings ``usage_coefficient_master`` (default 1.0).
-                  Applies to traffic served by the MASTER's own cores; nodes
-                  already scale their deltas with their own per-node
-                  coefficient before the recorder ever sees them.
+                  Applies ONLY to traffic served by the MASTER's own cores
+                  (f-usagecoeff-2 decision, v1.1.3). Node-served traffic
+                  already carries its server factor: every node row has its
+                  own ``usage_coefficient`` applied in collect_node_usage —
+                  multiplying node deltas by the master factor too made the
+                  commit message a lie and priced node traffic twice when an
+                  operator raised both. Nodes: raise the node's own
+                  coefficient on the Nodes page.
   * per inbound — settings ``usage_coefficient_inbounds`` ({tag: factor}).
                   Location/protocol pricing independent of the server.
                   An account that maps to exactly one inbound uses that
@@ -52,14 +57,21 @@ class Coeffs:
     billing_mult: float = 1.0
     inbounds: dict[str, float] = field(default_factory=dict)
 
-    def factors_for_tags(self, tags: list[str] | None) -> tuple[float, float]:
-        """(quota_factor, billing_factor) for one usage record."""
+    def factors_for_tags(self, tags: list[str] | None,
+                         *, with_master: bool = True) -> tuple[float, float]:
+        """(quota_factor, billing_factor) for one usage record.
+
+        ``with_master=False`` is the NODE path (f-usagecoeff-2): node deltas
+        were already scaled by the node's own ``usage_coefficient`` in
+        collect_node_usage, so the master server factor must not compound
+        on top of them.
+        """
         inbound = 1.0
         if tags:
             known = [self.inbounds[t] for t in tags if t in self.inbounds]
             if known:
                 inbound = max(known)
-        effective = self.master * inbound
+        effective = (self.master if with_master else 1.0) * inbound
         return effective * self.quota_mult, effective * self.billing_mult
 
 

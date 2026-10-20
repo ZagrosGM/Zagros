@@ -75,6 +75,10 @@ def run_usage_retention(session_factory=None) -> int:
                     func.count(),
                     func.min(UsageRecordModel.recorded_at),
                     func.max(UsageRecordModel.recorded_at),
+                    # f-usagecoeff-2: last factor pair seen in the group —
+                    # audit trail survives the collapse (raw sums stay raw)
+                    func.max(UsageRecordModel.quota_factor),
+                    func.max(UsageRecordModel.billing_factor),
                 )
                 .where(UsageRecordModel.recorded_at < cutoff)
                 .group_by(bucket, UsageRecordModel.user_id,
@@ -84,7 +88,7 @@ def run_usage_retention(session_factory=None) -> int:
             ).all()
             if not groups:
                 break
-            for _day, user_id, core_id, node_id, up, down, _n, first, last in groups:
+            for _day, user_id, core_id, node_id, up, down, _n, first, last, qf, bf in groups:
                 key = [UsageRecordModel.recorded_at >= first,
                        UsageRecordModel.recorded_at <= last,
                        UsageRecordModel.core_id == core_id]
@@ -98,6 +102,7 @@ def run_usage_retention(session_factory=None) -> int:
                     account_id="",  # collapsed marker: details folded per user
                     uplink_bytes=int(up or 0), downlink_bytes=int(down or 0),
                     recorded_at=first,
+                    quota_factor=qf, billing_factor=bf,
                 ))
                 collapsed += max(removed - 1, 0)
             s.commit()

@@ -1580,6 +1580,12 @@ def create_user_template(db: Session, user_template: UserTemplateCreate) -> User
     inbound_tags: List[str] = []
     for _, i in user_template.inbounds.items():
         inbound_tags.extend(i)
+    # f-tplsel-1: the operator's selection is stored VERBATIM (protocol →
+    # tags, [] = wildcard) — the association rows below stay best-effort for
+    # older readers, but querying them against the live xray registry on
+    # every read zeroed templates on panels whose xray core was not running.
+    from app.models.user_template import _normalize_inbounds
+
     dbuser_template = UserTemplate(
         name=user_template.name,
         data_limit=user_template.data_limit,
@@ -1587,6 +1593,7 @@ def create_user_template(db: Session, user_template: UserTemplateCreate) -> User
         username_prefix=user_template.username_prefix,
         username_suffix=user_template.username_suffix,
         core_access=user_template.core_access,
+        inbounds_json=_normalize_inbounds(user_template.inbounds),
         inbounds=db.query(ProxyInbound).filter(ProxyInbound.tag.in_(inbound_tags)).all()
     )
     db.add(dbuser_template)
@@ -1621,11 +1628,22 @@ def update_user_template(
     if modified_user_template.core_access is not None:
         dbuser_template.core_access = modified_user_template.core_access or None
 
+    # f-tplsel-1: ALWAYS overwrite the verbatim selection — an empty dict is
+    # the "all xray inbounds" wildcard and must replace a previous concrete
+    # selection (the old `if modified_user_template.inbounds:` guard made
+    # the wildcard unpersistable and kept stale tags alive).
+    from app.models.user_template import _normalize_inbounds
+
+    dbuser_template.inbounds_json = _normalize_inbounds(
+        modified_user_template.inbounds)
+
     if modified_user_template.inbounds:
         inbound_tags: List[str] = []
         for _, i in modified_user_template.inbounds.items():
             inbound_tags.extend(i)
         dbuser_template.inbounds = db.query(ProxyInbound).filter(ProxyInbound.tag.in_(inbound_tags)).all()
+    else:
+        dbuser_template.inbounds = []
 
     db.commit()
     db.refresh(dbuser_template)

@@ -47,6 +47,7 @@ from app.nodes.models import LifecycleBody, NodeCreate, NodeUpdate, PairBody
 from app.nodes.service import (
     core_lifecycle,
     fanout_accounts,
+    fanout_policy,
     core_logs,
     core_settings,
     core_versions,
@@ -102,8 +103,8 @@ _STARTED_MONO = time.monotonic()
 logger = logging.getLogger("zagros.admin")
 _TEST_LOG = logging.getLogger("zagros.admin.outbound_test")
 
-_RULES_KEY = "admin.routing.rules.v1"
-_OUTBOUNDS_KEY = "admin.outbounds.v1"
+from app.cores.outbounds import OUTBOUNDS_KV_KEY as _OUTBOUNDS_KEY
+from app.cores.routing import RULES_KV_KEY as _RULES_KEY
 _PANEL_NETWORK_KEY = "admin.panel.network.v1"
 _PANEL_NETWORK_APPLIED_KEY = "admin.panel.network.applied.v1"
 _PANEL_NETWORK_PENDING_KEY = "admin.panel.network.pending.v1"
@@ -1234,6 +1235,10 @@ async def routing_deploy(body: RoutingBody, runtime=Depends(get_runtime)):
     result = report.model_dump(mode="json")
     result["saved"] = True
     result["policy_domains"] = (policy_router.domain_views() if policy_router else [])
+    # f-noderouting-2: a saved rule set reaches paired nodes too — the
+    # fanout is asynchronous and per-node isolated; its outcome shows up in
+    # the node's next status/sync view, never as a UI error here.
+    asyncio.create_task(fanout_policy(runtime))
     return result
 
 
@@ -3743,7 +3748,12 @@ async def users_bulk_create(
 
 class ApplyTemplateBody(BaseModel):
     template_id: int
-    usernames: list[str] = Field(min_length=1, max_length=500)
+    usernames: list[str] = Field(default_factory=list, max_length=500)
+    # f-tplsync-1 (v1.1.3 bugfix 2): sync EVERY user created from the
+    # template — the Templates editor passes this after an edit when the
+    # operator accepts the sync prompt. Bound (user, template) rows win over
+    # any explicit usernames (capped at 500 like the batch endpoint).
+    bound_to_template: bool = False
 
 
 @zagros_admin_router.post("/users/apply-template")
@@ -3773,13 +3783,21 @@ async def users_apply_template(
         caller = (crud.get_admin(db, getattr(_ctx, "username", ""))
                   if _ctx else None)
 
+        usernames = list(body.usernames)[:500]
+        if body.bound_to_template:
+            from app.db.models import User as LegacyUser
+            bound = (db.query(LegacyUser.username)
+                     .filter(LegacyUser.template_id == body.template_id)
+                     .order_by(LegacyUser.id).limit(500).all())
+            usernames = [row[0] for row in bound]
+
         applied, skipped, errors = [], [], []
         expire = None
         if tpl.expire_duration:
             expire = int((datetime.utcnow() +
                           timedelta(seconds=int(tpl.expire_duration)))
                          .replace(tzinfo=timezone.utc).timestamp())
-        for username in body.usernames[:500]:
+        for username in usernames:
             try:
                 dbuser = crud.get_user(db, username)
                 if dbuser is None:
@@ -3884,6 +3902,121 @@ async def users_bulk_inbound(
 class DeleteByStatusBody(BaseModel):
     status: str
     confirm: bool = False
+
+
+class TransferUsersBody(BaseModel):
+    # f-transfer-1 (v1.1.3): move users to another admin — ownership only.
+    usernames: list[str] = Field(min_length=1, max_length=500)
+    target_admin: str = Field(min_length=1, max_length=64)
+
+
+@zagros_admin_router.post("/users/transfer")
+async def users_transfer(
+    body: TransferUsersBody,
+    request: Request,
+    runtime=Depends(get_runtime),
+):
+    """Move users from one admin to another (f-transfer-1).
+
+    SUDO-ONLY. Ownership only: the users keep their credentials, limits,
+    expiry, usage, grants, devices and subscription links — every row that
+    says "who owns this user" (legacy ``users.admin_id`` AND the platform
+    projection) is re-pointed at the target admin, by username, on both
+    engines. Per-user isolation: one unknown username never aborts the
+    batch; the report names every row that did not move.
+    """
+    from app.db import GetDB, crud
+    from app.platform.routers import _current_admin
+
+    _ctx = _current_admin.get()
+    with GetDB() as db:
+        caller = (crud.get_admin(db, getattr(_ctx, "username", ""))
+                  if _ctx else None)
+        if caller is None or not caller.is_sudo:
+            raise HTTPException(403, "only a sudo admin can transfer users")
+        target = crud.get_admin(db, body.target_admin.strip())
+        if target is None:
+            raise HTTPException(404, f"admin {body.target_admin!r} not found")
+        target_username = target.username  # ORM row detaches with the session
+        if target_username == caller.username:
+            raise HTTPException(400, "the users already belong to you — "
+                                     "pick a different target admin")
+
+        # platform admin row by username (ids are engine-local). Same rule
+        # as routers._owner_admin_id_or_current: the platform admins table
+        # mirrors the legacy one (username-keyed, hash copied) — an admin
+        # without a mirror yet gets one now, or ownership could never be
+        # expressed on this engine.
+        from sqlalchemy import select
+        from sqlalchemy.exc import IntegrityError as _SAIntegrityError
+        from app.persistence.models import AdminModel
+
+        platform_admin_id: int | None = None
+        try:
+            with runtime.session_factory() as s:
+                row = s.execute(select(AdminModel).where(
+                    AdminModel.username == target_username)).scalar_one_or_none()
+                if row is None:
+                    from app.persistence.models import AdminModel as _AM
+                    s.add(_AM(username=target_username,
+                              password_hash=target.hashed_password or "",
+                              is_sudo=bool(target.is_sudo),
+                              telegram_id=target.telegram_id))
+                    try:
+                        s.commit()
+                    except _SAIntegrityError:
+                        s.rollback()
+                    row = s.execute(select(AdminModel).where(
+                        AdminModel.username == target_username)).scalar_one_or_none()
+                platform_admin_id = row.id if row is not None else None
+        except Exception as exc:  # noqa: BLE001 — platform mirror best-effort
+            logger.warning("transfer: platform admin mirror failed: %s", exc)
+
+        transferred, errors = [], []
+        for username in body.usernames[:500]:
+            try:
+                dbuser = crud.get_user(db, username)
+                if dbuser is None:
+                    errors.append({"username": username, "error": "not found"})
+                    continue
+                current = (dbuser.admin.username
+                           if dbuser.admin is not None else None)
+                if current == target_username:
+                    errors.append({"username": username,
+                                   "error": f"already owned by {target.username}"})
+                    continue
+                dbuser.admin_id = target.id
+                db.commit()
+
+                # platform mirror — f-transfer-1: "کامل منتقل بشه" means the
+                # projection EXISTS and points at the new owner right now,
+                # not "whenever the next full sync runs". sync_platform_user
+                # upserts the row (creating it when the user never reached
+                # the platform layer) with every limit; set_owner then pins
+                # the owner even when the platform has no admin of that
+                # username yet.
+                try:
+                    from app.platform import provisioning
+                    await provisioning.sync_platform_user(runtime, dbuser)
+                    if platform_admin_id is not None:
+                        await asyncio.to_thread(
+                            runtime.users.set_owner,
+                            username=dbuser.username,
+                            admin_id=platform_admin_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("transfer: platform mirror failed for %s: %s",
+                                   username, exc)
+                transferred.append({"username": username,
+                                    "from": current or "—"})
+            except Exception as exc:  # noqa: BLE001 — per-user isolation
+                db.rollback()
+                logger.error("transfer failed for %s: %s", username, exc)
+                errors.append({"username": username, "error": str(exc)[:200]})
+
+    _audit(runtime, "users.transferred",
+           f"{len(transferred)} user(s) → {body.target_admin}", request=request)
+    return {"ok": not errors, "transferred": transferred, "errors": errors,
+            "target_admin": target_username}
 
 
 @zagros_admin_router.post("/users/delete-by-status")
@@ -4024,8 +4157,26 @@ async def create_backup(body: dict | None = None, runtime=Depends(get_runtime)):
         artifact = await asyncio.to_thread(_build)
     except backup_store.BackupError as exc:
         raise HTTPException(400, str(exc)) from exc
+    # f-backprune-2 (v1.1.3 bugfix 3): retention is an invariant of the
+    # archive directory, not a side effect of the scheduler. A manual
+    # "create now" used to bypass "archives kept" entirely — operators who
+    # only ever run manual backups watched the directory grow forever.
+    pruned: list[str] = []
+    store = getattr(runtime, "backup_service", None)
+    if store is not None:
+        try:
+            settings, _state = await asyncio.to_thread(store.load)
+            if settings.keep:
+                pruned = await asyncio.to_thread(
+                    backup_store.prune, settings.keep, data_dir)
+                if pruned:
+                    logger.info("backup: pruned %d archive(s) after manual create",
+                                len(pruned))
+        except Exception as exc:  # noqa: BLE001 — pruning must not fail the backup
+            logger.warning("backup: post-create prune failed: %s", exc)
     _audit(runtime, "backup.created", artifact.name)
     return {"artifact": artifact.to_dict(),
+            "pruned": pruned,
             "artifacts": [a.to_dict() for a in
                           await asyncio.to_thread(backup_store.list_artifacts, data_dir)]}
 

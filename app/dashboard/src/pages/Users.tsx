@@ -3,8 +3,8 @@
 // application login), per-user quick actions. No JSON anywhere.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Ban, BarChart3, Check, ChevronDown, Copy, Dices, ExternalLink, Filter, KeyRound, Layers,
-  Link2, MoreHorizontal, Network, Plus, RefreshCcw, Search, Trash2, UserPlus,
+  ArrowLeftRight, Ban, BarChart3, Check, ChevronDown, Copy, Dices, ExternalLink, Filter, KeyRound,
+  Layers, Link2, MoreHorizontal, Network, Plus, RefreshCcw, Search, Trash2, UserPlus,
   Users as UsersIcon, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -21,7 +21,7 @@ import { XRAY_CORE_ID, allCoreAccess, allLegacySelected } from "../lib/inboundTr
 import { randomUsername } from "../lib/username";
 import { useDigits, formatBytes, formatDate, formatRelative, usagePercent } from "../lib/format";
 import { useT , useTDynamic } from "../lib/i18n";
-import type { User, UsersResponse, UserStatus, UserTemplate , InboundCatalogGroup } from "../lib/types";
+import type { AdminUser, User, UsersResponse, UserStatus, UserTemplate , InboundCatalogGroup } from "../lib/types";
 import { useAdminPerms } from "../lib/perms";
 
 type CoreAccountCred = {
@@ -136,6 +136,8 @@ export default function Users() {
   const td = useTDynamic();
   const digits = useDigits();
   const qc = useQueryClient();
+  // f-transfer-1: moving users between admins is a sudo-only operation.
+  const { isSudo: canTransfer } = useAdminPerms();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [ownerFilter, setOwnerFilter] = useState<string>("all");
@@ -150,6 +152,7 @@ export default function Users() {
   const [moreAnchor, setMoreAnchor] = useState<HTMLElement | null>(null);
   const [bulkDialog, setBulkDialog] = useState(false);
   const [bulkTemplateDialog, setBulkTemplateDialog] = useState(false);
+  const [transferDialog, setTransferDialog] = useState(false);
   const [bulkInboundDialog, setBulkInboundDialog] = useState(false);
   const [statusDeleteDialog, setStatusDeleteDialog] = useState(false);
   // α7.2: the row menu is portal-mounted (RowMenu) → track the anchor element
@@ -486,6 +489,11 @@ export default function Users() {
             <Button size="sm" variant="secondary" onClick={() => bulk("disable")}><Ban size={13} />{t("users.disableSelected")}</Button>
             <Button size="sm" variant="secondary" onClick={() => setBulkTemplateDialog(true)}><Layers size={13} />{t("users.applyTemplate")}</Button>
             <Button size="sm" variant="secondary" onClick={() => setBulkInboundDialog(true)}><Network size={13} />{t("users.bulkInbound")}</Button>
+            {canTransfer && (
+              <Button size="sm" variant="secondary" onClick={() => setTransferDialog(true)}>
+                <ArrowLeftRight size={13} />{t("users.transferSelected")}
+              </Button>
+            )}
             <Button size="sm" variant="danger" onClick={() => bulk("delete")}><Trash2 size={13} />{t("users.deleteSelected")}</Button>
           </div>
         </Card>
@@ -562,6 +570,13 @@ export default function Users() {
           catalog={catalogQ.data?.groups ?? []}
           onClose={() => setBulkInboundDialog(false)}
           onDone={() => { setBulkInboundDialog(false); setSelected(new Set()); invalidate(); }}
+        />
+      )}
+      {transferDialog && (
+        <TransferUsersDialog
+          usernames={[...selected]}
+          onClose={() => setTransferDialog(false)}
+          onDone={() => { setTransferDialog(false); setSelected(new Set()); invalidate(); }}
         />
       )}
 
@@ -735,11 +750,14 @@ function UserDialog({ mode, user, catalog, restricted, templates, onClose, onSav
 
   // α7.2 (item 11): on CREATE everything is pre-selected once the catalog
   // arrives (without clobbering a template pre-fill or admin edits).
+  // f-tplsel-1: a template chosen before the catalog lands must NEVER be
+  // "helped" by this prefill — the template owns the selection.
   const prefilled = useRef(false);
   useEffect(() => {
     if (mode !== "create" || prefilled.current || !catalog.length) return;
     prefilled.current = true;
     setForm((f) => {
+      if (f.templateId != null) return f;
       const xg = catalog.find((g) => g.core_id === XRAY_CORE_ID);
       return {
         ...f,
@@ -777,9 +795,18 @@ function UserDialog({ mode, user, catalog, restricted, templates, onClose, onSav
 
   // Template pre-fill (mode 1): data limit, expiry, username affixes and
   // the template's inbound sets flow into the form in one click.
+  // f-tplsel-1: the template's xray wildcard ({} = "every inbound") is
+  // EXPANDED against the live catalog, exactly how the Templates editor
+  // displays it — an unexpanded {} rendered as zero checkboxes, which read
+  // as "the template selected nothing" and forced manual re-picking.
   const applyTemplate = (id: number | null) => {
     const tp = templates.find((x) => x.id === id);
     if (!tp) return setForm((current) => ({ ...current, templateId: id }));
+    const tplInbounds = structuredClone(tp.inbounds ?? {});
+    if (!Object.keys(tplInbounds).length) {
+      const xg = catalog.find((g) => g.core_id === XRAY_CORE_ID);
+      if (xg) Object.assign(tplInbounds, allLegacySelected(xg));
+    }
     setForm((current) => {
       const generated = templateUsername(tp);
       return {
@@ -797,7 +824,7 @@ function UserDialog({ mode, user, catalog, restricted, templates, onClose, onSav
         expireDate: tp.expire_duration
           ? localDate(Date.now() + tp.expire_duration * 1000)
           : current.expireDate,
-        inbounds: structuredClone(tp.inbounds ?? {}),
+        inbounds: tplInbounds,
         // Do not merge with the manual "select all" prefill: that silently
         // granted cores the selected template never contained.
         coreAccess: structuredClone(tp.core_access ?? {}),
@@ -1674,6 +1701,71 @@ function CredDialog({ user, onClose }: { user: User; onClose: () => void }) {
           {error && <p role="alert" className="rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger">{error}</p>}
         </div>
       )}
+    </Dialog>
+  );
+}
+
+// ------------------------------------------------------------------------ //
+// f-transfer-1: move selected users to another admin — sudo-only.
+// Ownership only: credentials, limits, grants and subscription links stay
+// with the user; both engines (legacy + platform) are re-pointed server-side.
+// ------------------------------------------------------------------------ //
+
+function TransferUsersDialog({ usernames, onClose, onDone }: {
+  usernames: string[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const t = useT();
+  const digits = useDigits();
+  const [target, setTarget] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const adminsQ = useQuery({
+    queryKey: ["admins"],
+    queryFn: () => api.get<AdminUser[]>("/admins"),
+  });
+  const run = async () => {
+    if (!target) return;
+    setBusy(true); setError("");
+    try {
+      const res = await api.post<{ transferred: Array<{ username: string; from: string }>; errors: Array<{ username: string; error: string }> }>(
+        "/zagros/users/transfer",
+        { usernames, target_admin: target });
+      if (res.errors.length) {
+        toast.info(`${res.transferred.length} ${t("users.transferred")} · ${res.errors.length} ${t("templates.syncFailed")} — ${res.errors[0].username}: ${res.errors[0].error}`);
+      } else {
+        toast.ok(`${res.transferred.length} ${t("users.transferred")} → ${target}`);
+      }
+      onDone();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : t("common.error"));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open onClose={onClose} title={t("users.transferTitle")}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
+          <Button onClick={run} loading={busy} disabled={!target}>{t("users.transferCta")}</Button>
+        </>
+      }>
+      <p className="mb-3 text-[12px] leading-5 text-content-3">{t("users.transferHint")}</p>
+      <Field label={t("users.transferTarget")} required>
+        <Select value={target} onChange={(e) => setTarget(e.target.value)}>
+          <option value="">{t("users.transferPick")}</option>
+          {(adminsQ.data ?? []).map((a) => (
+            <option key={a.username} value={a.username}>
+              {a.username}{a.is_sudo ? " · sudo" : ""}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <p className="mt-2 text-[11.5px] text-content-3">{digits(String(usernames.length))} {t("users.bulkSelected")}</p>
+      {adminsQ.isError && <p className="mt-2 text-[12px] text-danger">{t("common.error")}</p>}
+      {error && <p className="mt-2 text-[12px] text-danger">{error}</p>}
     </Dialog>
   );
 }

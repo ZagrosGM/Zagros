@@ -88,7 +88,10 @@ export default function Nodes() {
     onSuccess: (data) => {
       const pushed = data.pushed?.length ?? 0;
       const hosts = data.hosts?.length ?? 0;
-      toast.ok(`synced ${pushed} core(s), ${hosts} host entr(y/ies)`);
+      // f-noderouting-2: the policy outcome is part of every sync report
+      const pol = data.policy as { pushed?: boolean; rules?: number; reason?: string } | null | undefined;
+      const policyPart = pol?.pushed ? `, ${pol.rules ?? 0} routing rule(s)` : "";
+      toast.ok(`synced ${pushed} core(s), ${hosts} host entr(y/ies)${policyPart}`);
       // f-nodehosts-1: an empty hosts list must explain itself
       if (data.notes?.length) toast.ok(data.notes.join(" · "));
       if (data.errors?.length) toast.error(data.errors.join(" · "));

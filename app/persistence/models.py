@@ -686,6 +686,11 @@ class UsageRecordModel(Base):
     uplink_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     downlink_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     recorded_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utcnow)
+    # f-usagecoeff-2: the factors applied to THIS delta when it reached
+    # quota/billing (NULL on pre-0029 rows and driver-reported reads) —
+    # the daily collapse carries the last known values forward.
+    quota_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
+    billing_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class UsageAggregateModel(Base):

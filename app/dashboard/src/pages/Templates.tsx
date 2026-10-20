@@ -36,6 +36,11 @@ export default function Templates() {
   const [dialog, setDialog] = useState<{ mode: "create" } | { mode: "edit"; template: UserTemplate } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<UserTemplate | null>(null);
   const [menu, setMenu] = useState<{ template: UserTemplate; anchor: HTMLElement } | null>(null);
+  // f-tplsync-1 (v1.1.3 bugfix 2): after an edit the operator is asked
+  // whether users already created from this template should be synced to
+  // the new specs (quota/expiry/grants).
+  const [syncAsk, setSyncAsk] = useState<{ template: UserTemplate } | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
 
   const templates = useQuery({
     queryKey: ["user_templates"],
@@ -46,6 +51,26 @@ export default function Templates() {
     queryFn: () => api.get<{ groups: InboundCatalogGroup[] }>("/zagros/inbounds"),
   });
   const invalidate = () => qc.invalidateQueries({ queryKey: ["user_templates"] });
+
+  const syncBoundUsers = async (template: UserTemplate) => {
+    setSyncBusy(true);
+    try {
+      const res = await api.post<{ applied: string[]; errors: Array<{ username: string; error: string }> }>(
+        "/zagros/users/apply-template",
+        { template_id: template.id, bound_to_template: true });
+      if (res.errors.length) {
+        toast.info(`${res.applied.length} ${t("templates.syncApplied")} · ${res.errors.length} ${t("templates.syncFailed")}`);
+      } else {
+        toast.ok(`${res.applied.length} ${t("templates.syncApplied")}`);
+      }
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : t("common.error"));
+    } finally {
+      setSyncBusy(false);
+      setSyncAsk(null);
+      invalidate();
+    }
+  };
 
   const deleteTemplate = useMutation({
     mutationFn: (id: number) => api.delete(`/user_template/${id}`),
@@ -135,9 +160,27 @@ export default function Templates() {
           template={"template" in dialog ? dialog.template : undefined}
           catalog={catalogQ.data?.groups ?? []}
           onClose={() => setDialog(null)}
-          onSaved={() => { setDialog(null); invalidate(); }}
+          onSaved={(saved) => {
+            setDialog(null);
+            invalidate();
+            // f-tplsync-1: edits offer to sync users created from the
+            // template (creation has no bound users yet — skip the ask).
+            if (saved && (saved.users_count ?? 0) > 0) setSyncAsk({ template: saved });
+          }}
         />
       )}
+
+      <ConfirmDialog
+        open={!!syncAsk}
+        onClose={() => setSyncAsk(null)}
+        onConfirm={() => syncAsk && void syncBoundUsers(syncAsk.template)}
+        title={t("templates.syncTitle")}
+        body={t("templates.syncBody")
+          .replace("{name}", syncAsk?.template.name ?? "")
+          .replace("{count}", digits(String(syncAsk?.template.users_count ?? 0)))}
+        confirmLabel={t("templates.syncConfirm")}
+        loading={syncBusy}
+      />
 
       <ConfirmDialog
         open={!!confirmDelete}
@@ -167,7 +210,7 @@ function MenuBtn({ icon, label, onClick, danger }: { icon: React.ReactNode; labe
 function TemplateDialog({ mode, template, catalog, onClose, onSaved }: {
   mode: "create" | "edit"; template?: UserTemplate;
   catalog: InboundCatalogGroup[];
-  onClose: () => void; onSaved: () => void;
+  onClose: () => void; onSaved: (saved?: UserTemplate) => void;
 }) {
   const t = useT();
   const [form, setForm] = useState<TemplateForm>(() => {
@@ -205,11 +248,14 @@ function TemplateDialog({ mode, template, catalog, onClose, onSaved }: {
       if (mode === "create") {
         await api.post("/user_template", body);
         toast.ok(`${form.name} created`);
+        onSaved();
       } else if (template) {
-        await api.put(`/user_template/${template.id}`, body);
+        // f-tplsync-1: the response carries the fresh row incl. users_count,
+        // so the host can ask whether bound users should sync.
+        const saved = await api.put<UserTemplate>(`/user_template/${template.id}`, body);
         toast.ok(t("common.saved"));
+        onSaved(saved);
       }
-      onSaved();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : t("common.error"));
     } finally {

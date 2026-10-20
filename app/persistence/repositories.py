@@ -340,6 +340,7 @@ class SQLUsageJournal:
                     node_id=r.node_id,
                     uplink_bytes=up, downlink_bytes=down,
                     recorded_at=recorded,
+                    quota_factor=r.quota_factor, billing_factor=r.billing_factor,
                 ))
 
             with self._sf() as s:
@@ -809,6 +810,24 @@ class UserRepository:
             for row in rows:
                 s.expunge(row)
             return rows
+
+    def set_owner(self, *, username: str, admin_id: int | None) -> bool:
+        """Re-point one platform user's owning admin (f-transfer-1).
+
+        Ownership only — credentials, grants, devices and usage are the
+        user's and travel with them. Returns False when the username is
+        unknown (the caller reports it per-user, never as a whole-batch
+        failure).
+        """
+        with self._sf() as s:
+            row = s.execute(
+                select(UserModel).where(UserModel.username == username)
+            ).scalar_one_or_none()
+            if row is None:
+                return False
+            row.admin_id = admin_id
+            s.commit()
+            return True
 
     def set_access_mode(self, user_id: int, mode: str, *,
                         default_mode_hint: str | None = None) -> None:

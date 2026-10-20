@@ -251,6 +251,17 @@ class ZagrosNodeClient:
             "PUT", f"/v1/cores/{core_id}/leases/{lease_id}",
             payload=payload, timeout=120)
 
+    def apply_policy(self, payload: dict, *, timeout: float = 240) -> dict:
+        """f-noderouting-2: push the FULL desired policy state (phase A).
+
+        ``payload = {"outbounds": [...], "rules": [...]}`` — complete
+        replacement, so apply is reconcile and an empty body tears the
+        plane down. Credentials travel the signed channel like identity
+        material (the FR asks for this explicitly).
+        """
+        return self._request("PUT", "/v1/policy", payload=payload,
+                             timeout=timeout)
+
     def revoke_connection_lease(self, core_id: str, lease_id: str) -> dict:
         return self._request(
             "DELETE", f"/v1/cores/{core_id}/leases/{lease_id}", timeout=120)

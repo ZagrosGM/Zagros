@@ -198,6 +198,9 @@ async def record_once(runtime) -> int:
                 continue  # account revoked after the read — honest drop + log
             tags = await _tags_for(runtime, acc_tags, r.core_id, r.account_id, owner)
             qf, bf = coeffs.factors_for_tags(tags)
+            # f-usagecoeff-2: audit trail — the row keeps the factors its
+            # bytes were multiplied by for quota/billing (journal stays raw)
+            r.quota_factor, r.billing_factor = round(qf, 6), round(bf, 6)
             totals = per_user.setdefault(owner, [0, 0])
             totals[0] += int(r.uplink_bytes * qf)
             totals[1] += int(r.downlink_bytes * qf)
@@ -221,7 +224,14 @@ async def record_once(runtime) -> int:
             if owner is None:
                 continue
             tags = await _tags_for(runtime, acc_tags, r.core_id, r.account_id, owner)
-            qf, bf = coeffs.factors_for_tags(tags)
+            # f-usagecoeff-2: NO master factor here — node deltas were
+            # already scaled by the node's own usage_coefficient in
+            # collect_node_usage; per-inbound and the quota/billing split
+            # still apply.
+            qf, bf = coeffs.factors_for_tags(tags, with_master=False)
+            # f-usagecoeff-2: the recorded pair INCLUDES the node's own
+            # coefficient — it is already inside these bytes
+            r.quota_factor, r.billing_factor = round(qf, 6), round(bf, 6)
             totals = node_per_user.setdefault(owner, [0, 0])
             totals[0] += int(r.uplink_bytes * qf)
             totals[1] += int(r.downlink_bytes * qf)

@@ -260,6 +260,14 @@ class UserTemplate(Base):
     # Multi-core access grants (Zagros): {core_id: [inbound tags]} — templates
     # may span cores, exactly like a user's own grants.
     core_access = Column(JSON, nullable=True)
+    # f-tplsel-1: the operator's exact xray selection, stored VERBATIM —
+    # {protocol: [tags]} with [] = every inbound of the protocol. The
+    # template_inbounds_association rows stay best-effort (older readers),
+    # but the API response prefers this column: re-deriving the selection
+    # from the live xray registry zeroed every template on panels whose
+    # xray core was not running (v1.1.3 bugfix 1). NULL = pre-0028 row —
+    # the response falls back to the association derivation.
+    inbounds_json = Column(JSON, nullable=True)
 
     inbounds = relationship(
         "ProxyInbound", secondary=template_inbounds_association

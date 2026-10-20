@@ -76,16 +76,17 @@ class RoutingEngine:
         matrix), so the UI can show coverage before the operator commits.
         """
         all_rules = self.validate(rules)
-        # f-routingscope-1: node-scoped rules belong to the node policy
+        # f-routingscope-1: node-pinned rules belong to the node policy
         # plane. They are excluded here AND reported, so a rule can never
-        # pretend to be live on a master it does not target.
+        # pretend to be live on a master it does not target. Everything else
+        # (default "everywhere" scopes included) deploys on this host.
         normalized = [r for r in all_rules
-                      if r.enabled and not r.scope.applies_on_master()]
+                      if r.enabled and not r.scope.targets_nodes_only()]
         skipped_by_scope = [
             {"name": r.name, "reason": "scope targets node(s) "
-             f"{r.scope.nodes} — node routing deployment is not available "
-             "yet; the rule is stored but NOT applied on this host"}
-            for r in all_rules if r.enabled and r.scope.applies_on_master()
+             f"{r.scope.nodes} — the rule is enforced on those nodes via "
+             "the node policy plane, not on this host"}
+            for r in all_rules if r.enabled and r.scope.targets_nodes_only()
         ]
         ctx = RouteContext(
             available_outbounds=[o.name for o in (outbounds or [])],
@@ -148,16 +149,17 @@ class RoutingEngine:
         in ``unsupported`` with a reason. Nothing is dropped silently.
         """
         all_rules = self.validate(rules)
-        # f-routingscope-1: node-scoped rules belong to the node policy
+        # f-routingscope-1: node-pinned rules belong to the node policy
         # plane. They are excluded here AND reported, so a rule can never
-        # pretend to be live on a master it does not target.
+        # pretend to be live on a master it does not target. Everything else
+        # (default "everywhere" scopes included) deploys on this host.
         normalized = [r for r in all_rules
-                      if r.enabled and not r.scope.applies_on_master()]
+                      if r.enabled and not r.scope.targets_nodes_only()]
         skipped_by_scope = [
             {"name": r.name, "reason": "scope targets node(s) "
-             f"{r.scope.nodes} — node routing deployment is not available "
-             "yet; the rule is stored but NOT applied on this host"}
-            for r in all_rules if r.enabled and r.scope.applies_on_master()
+             f"{r.scope.nodes} — the rule is enforced on those nodes via "
+             "the node policy plane, not on this host"}
+            for r in all_rules if r.enabled and r.scope.targets_nodes_only()
         ]
         ctx = RouteContext(
             available_outbounds=[o.name for o in (outbounds or [])],

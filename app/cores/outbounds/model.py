@@ -102,6 +102,12 @@ class Outbound(BaseModel):
     kind: OutboundKind
     settings: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
+    # f-noderouting-2 phase B: node scoping for outbound profiles. Empty list
+    # = everywhere (historical behaviour): the profile is deployed on the
+    # master and pushed to EVERY node. Pinning node ids keeps the profile off
+    # other nodes' policy payloads; rules that reference it on another node
+    # fail validation, so a profile can never silently miss its node.
+    nodes: list[int] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate(self) -> "Outbound":

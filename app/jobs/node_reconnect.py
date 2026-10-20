@@ -25,7 +25,7 @@ import threading
 import time
 
 from app import logger, scheduler
-from app.nodes.service import native_nodes, reconnect
+from app.nodes.service import native_nodes, reconnect, sync_node
 
 # Short enough that a node finishing its install shows up while the operator is
 # still looking at the page; long enough to stay out of the way.
@@ -40,9 +40,34 @@ _lock = threading.Lock()
 _cycles = 0
 _next_due: dict[int, float] = {}
 _failures: dict[int, int] = {}
+_reconciled_at: dict[int, float] = {}
+
+# f-routingfix-4: a node that was unreachable missed accounts/policy pushes.
+# When it comes back it must converge BEFORE it serves stale routing — so a
+# transition to connected triggers a full sync (config + accounts + hosts +
+# policy). Cooldown keeps a flapping link from syncing in a tight loop.
+_RECONCILE_COOLDOWN = 600.0
 
 
-async def _sweep(runtime, *, force: bool = False) -> dict[str, int]:
+def _reconcile_node(runtime, node_id: int, name: str) -> None:
+    now = time.monotonic()
+    with _lock:
+        if now < _reconciled_at.get(node_id, 0.0):
+            return
+        _reconciled_at[node_id] = now
+
+    def _run() -> None:
+        try:
+            asyncio.run(sync_node(runtime, node_id))
+        except Exception as exc:  # noqa: BLE001 — never crash the sweep
+            logger.warning("node '%s' reconcile sync failed: %s", name, exc)
+
+    threading.Thread(target=_run, name=f"node-reconcile-{node_id}",
+                     daemon=True).start()
+
+
+async def _sweep(runtime, *, force: bool = False,
+                 reconcile_all: bool = False) -> dict[str, int]:
     global _cycles
     with _lock:
         _cycles += 1
@@ -92,8 +117,15 @@ async def _sweep(runtime, *, force: bool = False) -> dict[str, int]:
             _next_due.pop(node_id, None)
         if was_connected:
             stats["healthy"] += 1
+            if reconcile_all:
+                # Boot pass: the panel was down, so this "healthy" node may
+                # have missed pushes — converge it too.
+                _reconcile_node(runtime, node_id, row.name)
         else:
             stats["paired"] += 1
+            # f-routingfix-4: it just came back — reconcile everything it
+            # missed while unreachable (config, accounts, hosts, policy).
+            _reconcile_node(runtime, node_id, row.name)
             logger.info("node '%s' is now %s (%s)", view.name, view.status,
                         view.address)
     return stats
@@ -122,7 +154,7 @@ def node_reconnect() -> None:
 async def boot_reconnect(runtime) -> None:
     """One pass right after boot, so a restart never leaves nodes stale."""
     try:
-        stats = await _sweep(runtime, force=True)
+        stats = await _sweep(runtime, force=True, reconcile_all=True)
     except Exception as exc:  # noqa: BLE001 — boot must not fail over a node
         logger.warning("node reconnect at boot failed: %s", exc)
         return

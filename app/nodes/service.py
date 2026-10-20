@@ -1075,6 +1075,23 @@ async def fanout_accounts(runtime, *, core_ids: list[str] | None = None,
     return {"pushed": pushed, "errors": errors}
 
 
+def outbounds_for_node(outbounds: list, node_rules: list,
+                       node_id: int) -> list:
+    """f-noderouting-2 phase B: the outbound profiles ONE node receives.
+
+    Enabled profiles whose ``nodes`` scope reaches this node, plus every
+    enabled profile one of this node's rules references (a rule must never
+    arrive pointing at an absent outbound; gaps are reported by the caller).
+    """
+    referenced = {str(r.outbound) for r in node_rules if r.outbound}
+    return [
+        o for o in outbounds
+        if o.enabled and (not o.nodes
+                          or int(node_id) in {int(n) for n in o.nodes}
+                          or str(o.name) in referenced)
+    ]
+
+
 async def _push_policy(runtime, client, row, result: "SyncResult", *,
                        features: dict) -> dict[str, Any] | None:
     """Push the node's policy plane (f-noderouting-2, phase A).
@@ -1101,7 +1118,10 @@ async def _push_policy(runtime, client, row, result: "SyncResult", *,
     node_rules = effective_rules_for_node(rules, int(row.id))
     raw_outbounds = await runtime.kv.get_value(OUTBOUNDS_KV_KEY)
     outbounds = OutboundSecretCodec(runtime.cipher).decode(raw_outbounds)
-    enabled = [o for o in outbounds if o.enabled]
+    # f-noderouting-2 phase B: a profile pinned to OTHER nodes never lands
+    # here. Referenced profiles always travel (a rule must never arrive
+    # pointing at an absent outbound — the note below still reports gaps).
+    enabled = outbounds_for_node(outbounds, node_rules, int(row.id))
     referenced = {r.outbound for r in node_rules if r.outbound}
     payload = {
         "outbounds": [o.model_dump(mode="json") for o in enabled],

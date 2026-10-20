@@ -189,6 +189,7 @@ function NodeCoresPanel({ node }: { node: Node }) {
   const [installFor, setInstallFor] = useState<NodeCatalogEntry | null>(null);
   const [logsFor, setLogsFor] = useState<string | null>(null);
   const [versionFor, setVersionFor] = useState<string | null>(null);
+  const [settingsFor, setSettingsFor] = useState<string | null>(null);
   const [uninstallFor, setUninstallFor] = useState<NodeCoreStatus | null>(null);
   const [purge, setPurge] = useState(false);
 
@@ -333,6 +334,8 @@ function NodeCoresPanel({ node }: { node: Node }) {
                   )}
                   <Button size="sm" variant="ghost" onClick={() => setLogsFor(core.core_id)}>
                     <FileText size={13} />{t("logs")}</Button>
+                  <Button size="sm" variant="ghost" onClick={() => setSettingsFor(core.core_id)}>
+                    <Settings2 size={13} />{t("cores.settings")}</Button>
                   <Button size="sm" variant="ghost" disabled={act.isPending}
                     onClick={() => setVersionFor(core.core_id)}>
                     <ArrowUpDown size={13} />{t("change version")}</Button>
@@ -418,6 +421,10 @@ function NodeCoresPanel({ node }: { node: Node }) {
       </Dialog>
 
       <NodeLogsDrawer nodeId={node.id} coreId={logsFor} onClose={() => setLogsFor(null)} />
+      {settingsFor && (
+        <CoreSettingsDialog node={node} coreId={settingsFor}
+          onClose={() => setSettingsFor(null)} onSaved={invalidate} />
+      )}
       {versionFor && (
         <VersionDialog
           coreId={versionFor}
@@ -1135,11 +1142,14 @@ function LogsDrawer({ coreId, onClose }: { coreId: string | null; onClose: () =>
 // form, secrets masked server-side, save persists + restarts the core.
 // --------------------------------------------------------------------------- //
 
-function CoreSettingsDialog({ coreId, onClose, onSaved }: {
+function CoreSettingsDialog({ coreId, node, onClose, onSaved }: {
   coreId: string;
+  /** present -> edit THIS node's copy of the core (f-coresettings node UI) */
+  node?: Node;
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const base = node ? `/zagros/nodes/${node.id}/cores` : "/zagros/cores";
   const t = useT();
   const td = useTDynamic();
   const [values, setValues] = useState<Record<string, string>>({});
@@ -1147,7 +1157,7 @@ function CoreSettingsDialog({ coreId, onClose, onSaved }: {
   const [error, setError] = useState("");
   const q = useQuery({
     queryKey: ["zagros", "core-settings", coreId],
-    queryFn: () => api.get<{ core: string; settings: Record<string, unknown>; schema: { properties?: SchemaProps } | null }>("/zagros/cores/" + coreId + "/settings"),
+    queryFn: () => api.get<{ core: string; settings: Record<string, unknown>; schema: { properties?: SchemaProps } | null }>(base + "/" + coreId + "/settings"),
     retry: false,
   });
   useEffect(() => {
@@ -1175,8 +1185,8 @@ function CoreSettingsDialog({ coreId, onClose, onSaved }: {
     if (!Object.keys(patch).length) { onClose(); return; }
     try {
       const res = await api.put<{ restarted: boolean; applied: Record<string, unknown> }>(
-        "/zagros/cores/" + coreId + "/settings", { settings: patch });
-      toast.ok(`${coreId}: ${t("cores.settingsSaved")}${res.restarted ? "" : ` (${t("cores.settingsSavedNoRestart")})`}`);
+        base + "/" + coreId + "/settings", { settings: patch });
+      toast.ok(`${node ? node.name + ": " : ""}${coreId}: ${t("cores.settingsSaved")}${res.restarted ? "" : ` (${t("cores.settingsSavedNoRestart")})`}`);
       onSaved();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : t("common.error"));

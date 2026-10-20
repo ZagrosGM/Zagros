@@ -297,6 +297,8 @@ export interface Outbound {
   kind: "direct" | "block" | "blackhole" | "dns" | "socks" | "http" | "vless" | "vmess" | "trojan" | "shadowsocks" | "wireguard" | "hysteria2" | "tuic" | "openvpn" | "ssh" | "l2tp_ipsec" | "l2tp_raw" | "sstp" | "pptp" | "softether_l2tp" | "softether_l2tp_raw" | "softether_sstp" | "softether_pptp" | "softether_native" | "core";
   settings: Record<string, unknown>;
   enabled: boolean;
+  /** f-noderouting-2 phase B: node ids this profile is pinned to; empty = everywhere. */
+  nodes?: number[];
   /** Secret values are never returned; true means leave blank to retain it. */
   secret_state?: Record<string, boolean>;
   /** Explicit deletion channel; an empty password input otherwise preserves. */

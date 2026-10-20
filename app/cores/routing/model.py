@@ -63,8 +63,16 @@ class RuleScope(BaseModel):
     """
     nodes: list[int] = Field(default_factory=list)
 
-    def applies_on_master(self) -> bool:
+    def targets_nodes_only(self) -> bool:
+        """True when the rule is pinned to specific node ids and must stay
+        OFF the master's own deploy (it travels via the node policy plane)."""
         return bool(self.nodes)
+
+    def applies_on_master(self) -> bool:
+        """Historical name kept for call sites/tests: True when this rule is
+        NOT node-pinned, i.e. it deploys on the master like any default rule.
+        Prefer the explicit :meth:`targets_nodes_only` at new call sites."""
+        return not self.targets_nodes_only()
 
     def applies_on_node(self, node_id: int) -> bool:
         """f-noderouting-2: default scopes reach EVERY node; a scoped rule

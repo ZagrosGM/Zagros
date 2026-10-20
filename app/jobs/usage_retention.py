@@ -14,6 +14,11 @@ from ~2,880/account to 1. Growth becomes bounded by ACTIVE days, not by
 panel age.
 
 Env: ``USAGE_RECORDS_COLLAPSE_DAYS`` (default 7; ``0`` disables the job).
+
+f-usageretain-2: on top of the collapse, a HARD retention deletes rows older
+than ``USAGE_RECORDS_RETENTION_DAYS`` (default 90; ``0`` disables deletion)
+so the journal is bounded by policy, not by curiosity. Collapse runs first —
+a hard-deleted day is gone for good, a collapsed day keeps its daily sums.
 """
 from __future__ import annotations
 
@@ -24,6 +29,7 @@ from app import logger, scheduler
 from app.persistence.models import UsageRecordModel
 
 _COLLAPSE_DAYS_DEFAULT = 7
+_RETENTION_DAYS_DEFAULT = 90
 _BATCH_GROUPS = 400
 _MAX_BATCHES_PER_RUN = 100          # a run is bounded even on a huge backlog
 _SWEEP_SECONDS = 6 * 3600
@@ -35,6 +41,14 @@ def _collapse_days() -> int:
         return int(raw) if raw else _COLLAPSE_DAYS_DEFAULT
     except ValueError:
         return _COLLAPSE_DAYS_DEFAULT
+
+
+def _retention_days() -> int:
+    raw = str(os.environ.get("USAGE_RECORDS_RETENTION_DAYS", "") or "").strip()
+    try:
+        return int(raw) if raw else _RETENTION_DAYS_DEFAULT
+    except ValueError:
+        return _RETENTION_DAYS_DEFAULT
 
 
 def _day_bucket(column, dialect: str):
@@ -110,7 +124,48 @@ def run_usage_retention(session_factory=None) -> int:
         logger.info("usage retention: collapsed %d journal row(s) older "
                     "than %d day(s) into daily summaries (%.1fs)",
                     collapsed, days, time.monotonic() - started)
+
+    # ---- f-usageretain-2: hard retention (default 90 days) ---- #
+    deleted = _apply_hard_retention(session_factory)
     return collapsed
+
+
+def _apply_hard_retention(session_factory) -> int:
+    """DELETE journal rows past the hard horizon, batched; returns deleted."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import delete
+
+    days = _retention_days()
+    if days <= 0:
+        return 0
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    deleted = 0
+    started = time.monotonic()
+    batch = _BATCH_GROUPS * 8
+    with session_factory() as s:
+        # Batched by the seq PK (DELETE ... LIMIT is not portable across
+        # SQLite/MySQL/PostgreSQL) so a huge first run cannot hold one
+        # statement open forever; the sweep repeats until the backlog is gone.
+        for _batch in range(_MAX_BATCHES_PER_RUN):
+            seqs = [row[0] for row in (
+                s.query(UsageRecordModel.seq)
+                .filter(UsageRecordModel.recorded_at < cutoff)
+                .limit(batch).all())]
+            if not seqs:
+                break
+            removed = (s.query(UsageRecordModel)
+                       .filter(UsageRecordModel.seq.in_(seqs))
+                       .delete(synchronize_session=False))
+            s.commit()
+            deleted += removed
+            if removed < batch:
+                break
+    if deleted:
+        logger.info("usage retention: deleted %d journal row(s) older than "
+                    "%d day(s) (%.1fs)", deleted, days,
+                    time.monotonic() - started)
+    return deleted
 
 
 scheduler.add_job(run_usage_retention, 'interval',

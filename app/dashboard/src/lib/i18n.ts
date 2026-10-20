@@ -437,6 +437,9 @@ const en = {
   "cores.builtin": "built-in",
   "cores.builtinHint": "The panel's own engine — cannot be uninstalled, disabled or reinstalled from here; start/stop/restart are allowed.",
   "outbounds.importUrl": "Import URL",
+  "outbounds.nodeScope": "node scope",
+  "outbounds.nodeScopeHint": "Pin this profile to specific nodes — unchecked means every node (and the master). Rules referencing it on other nodes are rejected.",
+  "outbounds.noNodes": "no nodes are paired — this profile applies everywhere",
   "outbounds.importHint": "paste a vless/vmess/trojan/ss/hysteria2/tuic link",
   "outbounds.export": "Export .ovpn",
 
@@ -1418,6 +1421,9 @@ const fa: Record<Key, string> = {
   "cores.builtin": "داخلی",
   "cores.builtinHint": "موتور داخلی خود پنل — از اینجا قابل حذف، غیرفعال‌سازی یا نصب مجدد نیست؛ start/stop/restart مجاز است.",
   "outbounds.importUrl": "ورود از لینک",
+  "outbounds.nodeScope": "دامنه‌ی نود",
+  "outbounds.nodeScopeHint": "این پروفایل را به نودهای مشخص محدود کنید — بدون انتخاب یعنی همه‌ی نودها و مستر. قانونی که از نود دیگر به آن اشاره کند رد می‌شود.",
+  "outbounds.noNodes": "هیچ نودی جفت نشده — این پروفایل همه‌جا اعمال می‌شود",
   "outbounds.importHint": "لینک vless/vmess/trojan/ss/hysteria2/tuic را بچسبانید",
   "outbounds.export": "خروجی ‎.ovpn",
 

@@ -1140,6 +1140,21 @@ async def routing_save(body: RoutingSetBody, runtime=Depends(get_runtime)):
             if outbound is None:
                 raise ValueError(
                     f"rule '{rule.name}' references missing outbound '{rule.outbound}'")
+            # f-noderouting-2 phase B: a rule may only reference a profile
+            # whose own node scope reaches every node the rule targets.
+            if getattr(outbound, "nodes", None):
+                outbound_nodes = {int(n) for n in outbound.nodes}
+                if rule.scope.targets_nodes_only():
+                    if not {int(n) for n in rule.scope.nodes} <= outbound_nodes:
+                        raise ValueError(
+                            f"rule '{rule.name}': outbound '{outbound.name}' is "
+                            f"pinned to node(s) {sorted(outbound_nodes)}, which "
+                            f"does not cover the rule's node(s) {rule.scope.nodes}")
+                else:
+                    raise ValueError(
+                        f"rule '{rule.name}': outbound '{outbound.name}' is pinned "
+                        f"to node(s) {sorted(outbound_nodes)} — pin the rule to "
+                        "those nodes or remove the outbound's node scope")
             policy_router = getattr(runtime, "policy_router", None)
             mode = (policy_router._mode(outbound.kind, outbound.settings)  # noqa: SLF001
                     if policy_router is not None else None)

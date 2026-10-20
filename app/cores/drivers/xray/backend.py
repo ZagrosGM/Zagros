@@ -410,6 +410,11 @@ class LegacyXrayBackend:
         routing["rules"] = control + rules
         routing.setdefault("domainStrategy", "IPIfNonMatch")
         mod.config["routing"] = routing
+        # f-routingfix-3: persist the native rules so every later config
+        # rebuild (user edit, suspend, core restart — all rebuild from the
+        # DB) merges them back instead of silently dropping routing.
+        from app.xray import managed as _managed
+        _managed.save(rules=rules)
         self._persist_and_maybe_restart()
 
     def set_outbounds(self, outbounds: list[dict[str, Any]]) -> None:
@@ -425,6 +430,9 @@ class LegacyXrayBackend:
             raise CoreError("xray outbound deployment contains duplicate tags")
         mod.config["outbounds"] = existing + outbounds
         self._managed_outbound_tags = set(incoming_tags)
+        # f-routingfix-3: the managed outbound set survives rebuilds too.
+        from app.xray import managed as _managed
+        _managed.save(outbounds=outbounds)
         self._persist_and_maybe_restart()
 
     def ensure_listener(self, protocol: str, port: int) -> None:

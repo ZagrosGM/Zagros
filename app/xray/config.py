@@ -504,6 +504,52 @@ class XRayConfig(dict):
             config.bandwidth_identity_map = identity_map
             config.bandwidth_user_ids = set(identity_map.values())
 
+        # f-routingfix-3: re-apply panel-managed routing + outbounds. Every
+        # restart rebuilds the config from the DB, which used to silently
+        # drop whatever the Routing/Outbounds pages deployed (the rules only
+        # lived in the in-memory dict until LegacyXrayBackend mutated it).
+        # The persisted native form is merged back here, so a restart — or a
+        # panel reboot — keeps routing live with zero re-deploys.
+        try:
+            from app.xray import managed as _managed
+            managed_state = _managed.load()
+            managed_outbounds = managed_state.get("outbounds") or []
+            managed_rules = managed_state.get("rules") or []
+            if managed_outbounds or managed_rules:
+                def _fingerprint(item: dict) -> str:
+                    return json.dumps(item, sort_keys=True, ensure_ascii=False)
+
+                outbounds = config.setdefault("outbounds", [])
+                managed_tags = {str(ob.get("tag")) for ob in managed_outbounds}
+                # Replace previously-managed tags (a re-deploy changed them),
+                # keep everything else; never touch the first (default)
+                # outbound position, xray's default egress.
+                outbounds[:] = (
+                    [ob for ob in outbounds
+                     if str(ob.get("tag")) not in managed_tags
+                     and _fingerprint(ob) not in {_fingerprint(x) for x in managed_outbounds}]
+                    + [deepcopy(ob) for ob in managed_outbounds]
+                )
+                routing = config.setdefault("routing", {}).setdefault("rules", [])
+                managed_fps = {_fingerprint(r) for r in managed_rules}
+                # Drop stale copies of these exact rules, keep API + bandwidth
+                # + base-file rules, then re-insert managed rules right after
+                # the API control-plane rule (first-match-wins: admin rules
+                # must see traffic before generic base-file rules).
+                routing[:] = [r for r in routing
+                              if _fingerprint(r) not in managed_fps]
+                insert_at = 0
+                for index, rule in enumerate(routing):
+                    if ("API_INBOUND" in (rule.get("inboundTag") or [])
+                            and rule.get("outboundTag") == "API"):
+                        insert_at = index + 1
+                        break
+                routing[insert_at:insert_at] = deepcopy(managed_rules)
+        except Exception as exc:  # noqa: BLE001 - never break config rebuilds
+            import logging
+            logging.getLogger("uvicorn.error").warning(
+                "xray managed-state merge skipped (%s)", exc)
+
         if DEBUG:
             with open('generated_config-debug.json', 'w') as f:
                 f.write(config.to_json(indent=4))

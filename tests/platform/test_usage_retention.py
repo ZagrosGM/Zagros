@@ -139,3 +139,48 @@ class TestCollapse:
             sessionmaker(bind=db_session.get_bind()))
         out = asyncio.run(provider.usage_by_core())
         assert out.get("wg") == (5, 7)
+
+
+class TestHardRetention:
+    def test_rows_past_horizon_are_deleted(self, db_session, monkeypatch):
+        """f-usageretain-2: USAGE_RECORDS_RETENTION_DAYS (default 90) deletes
+        rows older than the horizon — collapse first, delete second."""
+        from sqlalchemy.orm import sessionmaker
+
+        from app.persistence.models import UsageRecordModel
+
+        from app.jobs.usage_retention import run_usage_retention
+
+        monkeypatch.setenv("USAGE_RECORDS_COLLAPSE_DAYS", "7")
+        monkeypatch.setenv("USAGE_RECORDS_RETENTION_DAYS", "90")
+        db_session.query(UsageRecordModel).delete()  # order-independent
+        db_session.commit()
+        _seed(db_session, 5, days_old=400)     # past the hard horizon
+        _seed(db_session, 5, days_old=30)      # collapsed, kept
+        _seed(db_session, 3, days_old=0.01)    # fresh
+
+        run_usage_retention(sessionmaker(bind=db_session.get_bind()))
+        db_session.expire_all()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=90)
+        remaining_old = db_session.query(UsageRecordModel).filter(
+            UsageRecordModel.recorded_at < cutoff).count()
+        assert remaining_old == 0, "rows past the hard horizon must be deleted"
+        fresh = db_session.query(UsageRecordModel).filter(
+            UsageRecordModel.account_id == "1.alice").count()
+        assert fresh == 3, "fresh rows must survive the hard delete"
+
+    def test_zero_disables_deletion(self, db_session, monkeypatch):
+        from sqlalchemy.orm import sessionmaker
+
+        from app.persistence.models import UsageRecordModel
+
+        from app.jobs.usage_retention import run_usage_retention
+
+        monkeypatch.setenv("USAGE_RECORDS_COLLAPSE_DAYS", "7")
+        monkeypatch.setenv("USAGE_RECORDS_RETENTION_DAYS", "0")
+        _seed(db_session, 5, days_old=400)
+
+        run_usage_retention(sessionmaker(bind=db_session.get_bind()))
+        db_session.expire_all()
+        assert db_session.query(UsageRecordModel).count() > 0, \
+            "retention=0 must disable the hard delete"

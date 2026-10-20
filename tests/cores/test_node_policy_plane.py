@@ -35,14 +35,14 @@ def test_scope_reaches_every_node_by_default():
                              action=RuleAction.ALLOW)
     assert everywhere.scope.applies_on_node(1)
     assert everywhere.scope.applies_on_node(42)
-    assert not everywhere.scope.applies_on_master()
+    assert not everywhere.scope.targets_nodes_only()
 
     pinned = RoutingRule(name="node2only", matcher=_matcher(),
                          action=RuleAction.ALLOW,
                          scope=RuleScope(nodes=[2]))
     assert pinned.scope.applies_on_node(2)
     assert not pinned.scope.applies_on_node(1)
-    assert pinned.scope.applies_on_master()  # excluded from the master deploy
+    assert pinned.scope.targets_nodes_only()  # excluded from the master deploy
 
 
 def _matcher():

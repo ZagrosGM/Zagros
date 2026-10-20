@@ -33,12 +33,45 @@ class StandaloneXrayBackend:
         self._assets = Path(str(settings["assets_path"]))
         self._config = Path(str(settings["config_path"]))
         self._runtime_config = self._config.with_suffix(".runtime.json")
+        # f-routingfix-3: routing rules / managed outbounds deployed through
+        # set_routing_rules/set_outbounds survive document replacements
+        # (every inbound sync rewrites the whole document) via this sidecar.
+        self._managed_state = self._config.with_suffix(".managed.json")
         self._process: subprocess.Popen[str] | None = None
         self._logs: deque[str] = deque(maxlen=2000)
         self._lock = threading.RLock()
         self._api_port = self._free_port()
         self._counters: dict[str, tuple[int, int]] = {}
         self._managed_outbound_tags: set[str] = set()
+
+    def _load_managed(self) -> dict[str, Any]:
+        try:
+            document = json.loads(self._managed_state.read_text())
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(document, dict):
+            return {}
+        return {
+            "rules": [r for r in (document.get("rules") or []) if isinstance(r, dict)],
+            "outbounds": [o for o in (document.get("outbounds") or [])
+                          if isinstance(o, dict)],
+        }
+
+    def _save_managed(self, *, rules: list[dict[str, Any]] | None = None,
+                      outbounds: list[dict[str, Any]] | None = None) -> None:
+        document = self._load_managed()
+        if rules is not None:
+            document["rules"] = list(rules)
+        if outbounds is not None:
+            document["outbounds"] = list(outbounds)
+        try:
+            self._managed_state.parent.mkdir(parents=True, exist_ok=True)
+            part = self._managed_state.with_suffix(".managed.part")
+            part.write_text(json.dumps(document, ensure_ascii=False, indent=1) + "\n")
+            os.chmod(part, 0o600)
+            os.replace(part, self._managed_state)
+        except OSError as exc:  # noqa: BLE001 - degrade, never block deploy
+            self._logs.append(f"managed-state persist failed: {exc}")
 
     @staticmethod
     def _free_port() -> int:
@@ -241,6 +274,24 @@ class StandaloneXrayBackend:
         with self._lock:
             candidate = copy.deepcopy(document)
             self._validate(candidate, require_inbound=True)
+            # f-routingfix-3: a fresh inbound document never carries the
+            # routing plane. Re-apply the persisted managed outbounds + rules
+            # on top, so the next sync cannot silently wipe routing.
+            managed = self._load_managed()
+            managed_outbounds = managed.get("outbounds") or []
+            managed_rules = managed.get("rules") or []
+            if managed_outbounds:
+                candidate_tags = {str(row.get("tag") or "")
+                                  for row in candidate.get("outbounds", [])}
+                candidate["outbounds"] = list(candidate.get("outbounds", [])) + [
+                    copy.deepcopy(row) for row in managed_outbounds
+                    if str(row.get("tag") or "") not in candidate_tags
+                ]
+            if managed_rules:
+                routing = candidate.setdefault("routing", {})
+                routing["rules"] = copy.deepcopy(managed_rules)
+                routing.setdefault("domainStrategy", "IPIfNonMatch")
+            self._validate(candidate, require_inbound=True)
             self._write(candidate)
             if self.is_running():
                 self.restart()
@@ -316,6 +367,7 @@ class StandaloneXrayBackend:
             routing["rules"] = copy.deepcopy(rules)
             routing.setdefault("domainStrategy", "IPIfNonMatch")
         self._mutate(update)
+        self._save_managed(rules=copy.deepcopy(rules))
 
     def set_outbounds(self, outbounds: list[dict[str, Any]]) -> None:
         tags = [str(row.get("tag") or "") for row in outbounds]
@@ -328,6 +380,7 @@ class StandaloneXrayBackend:
             document["outbounds"] = existing + copy.deepcopy(outbounds)
             self._managed_outbound_tags = set(tags)
         self._mutate(update)
+        self._save_managed(outbounds=copy.deepcopy(outbounds))
 
     def ensure_listener(self, protocol: str, port: int) -> None:
         tag = f"zg-chain-{protocol}-{port}"

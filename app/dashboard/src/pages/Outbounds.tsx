@@ -18,7 +18,7 @@ import { ConfirmDialog, Dialog } from "../components/overlays";
 import { Badge, Button, Card, EmptyState, Field, Input, Select, StatusDot, Switch, Textarea, cn } from "../components/ui";
 import { api, ApiError, getToken } from "../lib/api";
 import { useT , useTDynamic } from "../lib/i18n";
-import type { Outbound, OutboundKindSchema, OutboundSchemas, OutboundTest, ParsedShareURL } from "../lib/types";
+import type { NodeList, Outbound, OutboundKindSchema, OutboundSchemas, OutboundTest, ParsedShareURL } from "../lib/types";
 
 interface TestState { [name: string]: { loading: boolean; result?: OutboundTest } }
 
@@ -256,6 +256,11 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
     queryKey: ["zagros", "cores"],
     queryFn: () => api.get<{ cores: { id: string }[] }>("/zagros/cores"),
     enabled: ob.kind === "core",
+  });
+  // f-noderouting-2 phase B: pin a profile to specific nodes.
+  const nodesQ = useQuery({
+    queryKey: ["zagros", "nodes"],
+    queryFn: () => api.get<NodeList>("/zagros/nodes"),
   });
 
   const network = String(s.network ?? "tcp");
@@ -529,6 +534,29 @@ function OutboundDialog({ outbound, isNew, takenNames, schemas, onClose, onSave 
             </div>
           );
         })}
+
+        <div className="sm:col-span-2">
+          <Field label={t("outbounds.nodeScope")} hint={t("outbounds.nodeScopeHint")}>
+            <div data-testid="outbound-node-scope" className="flex flex-wrap gap-1.5 rounded-xl border border-border bg-surface-2 p-3">
+              {(nodesQ.data?.nodes ?? []).map((n) => {
+                const pinned = ob.nodes ?? [];
+                const checked = pinned.includes(n.id);
+                return (
+                  <label key={n.id}
+                    className={cn("flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs",
+                      checked ? "border-brand/50 bg-brand/10 text-content" : "border-border text-content-2")}>
+                    <input type="checkbox" className="accent-[var(--brand)]" checked={checked}
+                      onChange={(e) => setOb({ ...ob, nodes: e.target.checked ? [...pinned, n.id] : pinned.filter((x) => x !== n.id) })} />
+                    {n.name}
+                  </label>
+                );
+              })}
+              {!(nodesQ.data?.nodes ?? []).length && (
+                <span className="text-xs text-content-3">{t("outbounds.noNodes")}</span>
+              )}
+            </div>
+          </Field>
+        </div>
 
         <label className="flex items-center gap-2.5 text-sm text-content-2">
           <Switch checked={ob.enabled} onChange={(v) => setOb({ ...ob, enabled: v })} label={t("enabled")} />{t("enabled")}</label>

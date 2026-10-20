@@ -203,4 +203,5 @@ def test_node_scoped_rules_are_skipped_with_report() -> None:
 def test_scope_defaults_reproduce_legacy_behaviour() -> None:
     rule = RoutingRule(name="plain", matcher=RuleMatcher(geoips=["ir"]),
                        action=RuleAction.BLOCK)
-    assert rule.scope.applies_on_master() is False
+    assert rule.scope.targets_nodes_only() is False
+    assert rule.scope.applies_on_master() is True

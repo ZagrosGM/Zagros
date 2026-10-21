@@ -230,3 +230,93 @@ def test_routing_save_rejects_scope_mismatch():
     # blocks the guard composes (targets_nodes_only + coverage check)
     assert not everywhere_rule.scope.targets_nodes_only()
     assert node2_out.nodes == [2]
+
+
+# --------------------------------------------------------------------------- #
+# node-bound documents never carry master-local routing artifacts
+# --------------------------------------------------------------------------- #
+def test_node_document_strips_master_decorated_outbound(tmp_path, monkeypatch):
+    """The reported node failure: the master's runtime doc carries its own
+    policy-decorated lion (socks -> the MASTER's domain gateway port). On
+    the node that port points at nothing, so every routed connection died
+    after a sync. The node-bound payload must not contain it."""
+    from app.nodes.service import _xray_document_with_accounts  # noqa: F401  (import sanity)
+    from app.nodes.service import _strip_master_routing_artifacts
+
+    managed_state = {
+        "rules": [{"type": "field", "inboundTag": ["vless-42005"],
+                   "outboundTag": "lion"}],
+        "outbounds": [
+            # the master's TRANSLATED lion = socks into its own gateway
+            {"protocol": "socks", "tag": "lion",
+             "settings": {"servers": [{"address": "127.0.0.1",
+                                       "port": 30363, "udp": True}]}},
+            {"protocol": "freedom", "tag": "zg-direct"},
+        ],
+    }
+    p = tmp_path / "managed.json"
+    p.write_text(json.dumps(managed_state))
+    monkeypatch.setenv("ZAGROS_XRAY_MANAGED_STATE", str(p))
+
+    document = {
+        "inbounds": [{"tag": "vless-42005", "port": 42005,
+                      "protocol": "vless", "settings": {"clients": []}}],
+        "outbounds": [
+            {"protocol": "freedom", "tag": "DIRECT"},
+            {"protocol": "socks", "tag": "lion",
+             "settings": {"servers": [{"address": "127.0.0.1",
+                                       "port": 30363, "udp": True}]}},
+            {"tag": "zg-bw-u7", "protocol": "freedom", "settings": {},
+             "streamSettings": {"sockopt": {"mark": 7007}}},
+            {"protocol": "blackhole", "tag": "BLOCK"},
+        ],
+        "routing": {"rules": [
+            {"type": "field", "user": ["7.alice"], "outboundTag": "zg-bw-u7"},
+            {"inboundTag": ["API_INBOUND"], "outboundTag": "API",
+             "type": "field"},
+            {"type": "field", "inboundTag": ["vless-42005"],
+             "outboundTag": "lion"},
+        ]},
+    }
+    _strip_master_routing_artifacts(document)
+
+    tags = [o.get("tag") for o in document["outbounds"]]
+    assert "lion" not in tags, "master-local decorated outbound reached the node"
+    assert "zg-direct" not in tags, "managed base target must come via policy plane"
+    assert "zg-bw-u7" in tags, "per-user bandwidth marks are NOT managed artifacts"
+    outbound_tags = [r.get("outboundTag") for r in document["routing"]["rules"]]
+    assert "lion" not in outbound_tags, "managed rule reached the node"
+    assert "zg-bw-u7" in outbound_tags and "API" in outbound_tags
+
+
+def test_standalone_sync_prefers_managed_over_same_tag_candidate(tmp_path):
+    from app.cores.drivers.xray.standalone import StandaloneXrayBackend
+
+    settings = {
+        "executable_path": str(tmp_path / "bin" / "xray"),
+        "assets_path": str(tmp_path / "assets"),
+        "config_path": str(tmp_path / "xray.json"),
+    }
+    backend = StandaloneXrayBackend(settings)
+    backend.apply_config_document({
+        "inbounds": [{"tag": "in-1", "port": 1, "protocol": "vless",
+                      "settings": {"clients": []}}],
+        "outbounds": [{"protocol": "freedom", "tag": "DIRECT"}],
+    })
+    backend.set_outbounds([{"protocol": "vless", "tag": "relay",
+                            "settings": {"vnext": [{"address": "5.6.7.8",
+                                                    "port": 1}]}}])
+    # the next inbound doc carries the MASTER's own copy of the same tag
+    backend.apply_config_document({
+        "inbounds": [{"tag": "in-1", "port": 1, "protocol": "vless",
+                      "settings": {"clients": []}}],
+        "outbounds": [
+            {"protocol": "freedom", "tag": "DIRECT"},
+            {"protocol": "socks", "tag": "relay",
+             "settings": {"servers": [{"address": "127.0.0.1", "port": 9}]}},
+        ],
+    })
+    document = json.loads((tmp_path / "xray.json").read_text())
+    relays = [o for o in document["outbounds"] if o.get("tag") == "relay"]
+    assert len(relays) == 1 and relays[0]["protocol"] == "vless", \
+        "the node's managed outbound must beat the master's same-tag copy"

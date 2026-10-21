@@ -739,7 +739,60 @@ def _xray_document_with_accounts() -> dict | None:
         document = json.loads(config.to_json())
     except Exception:  # noqa: BLE001 — legacy stack unavailable: report honestly
         return None
+    if isinstance(document, dict):
+        _strip_master_routing_artifacts(document)
     return document if isinstance(document, dict) else None
+
+
+def _strip_master_routing_artifacts(document: dict) -> None:
+    """Remove master-LOCAL routing artifacts from a node-bound document.
+
+    ``include_db_users`` merges the master's deployed routing state (managed
+    rules + outbounds). Those artifacts are master-local BY CONSTRUCTION:
+    a policy-decorated outbound points at the master's own loopback domain
+    gateway, which does not exist on a node. Nodes build their routing
+    through the policy plane instead — shipping these copies made the node
+    route into a dead socks port (traffic silently blocked after a sync).
+    Per-user bandwidth marks (``zg-bw-*``) are NOT managed artifacts and
+    stay. The API control-plane rule is re-added by the node's runtime
+    wrapper, so dropping master copies here is safe.
+    """
+    try:
+        from app.xray import managed as xray_managed
+
+        state = xray_managed.load()
+    except Exception:  # noqa: BLE001 — degrade to an unfiltered document
+        state = {}
+
+    def _fp(item) -> str:
+        return json.dumps(item, sort_keys=True, ensure_ascii=False)
+
+    managed_rules = [r for r in (state.get("rules") or []) if isinstance(r, dict)]
+    managed_outbounds = [o for o in (state.get("outbounds") or [])
+                         if isinstance(o, dict)]
+    managed_rule_fps = {_fp(r) for r in managed_rules}
+    managed_tags = {str(o.get("tag")) for o in managed_outbounds}
+    managed_out_fps = {_fp(o) for o in managed_outbounds}
+
+    routing = document.get("routing") or {}
+    rules = routing.get("rules")
+    if isinstance(rules, list) and managed_rule_fps:
+        routing["rules"] = [r for r in rules if _fp(r) not in managed_rule_fps]
+
+    outbounds = document.get("outbounds")
+    if isinstance(outbounds, list):
+        cleaned = []
+        for ob in outbounds:
+            if not isinstance(ob, dict):
+                continue
+            tag = str(ob.get("tag") or "")
+            if any(str(key).startswith("_policy_") for key in ob):
+                continue                       # master-local domain gateway
+            if _fp(ob) in managed_out_fps or tag in managed_tags:
+                continue                       # travels via the policy plane
+            cleaned.append(ob)
+        document["outbounds"] = cleaned or [
+            {"protocol": "freedom", "tag": "DIRECT"}]
 
 
 _NODE_MATERIAL_PREFIX = "zagros-material://"

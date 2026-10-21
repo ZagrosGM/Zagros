@@ -276,17 +276,19 @@ class StandaloneXrayBackend:
             self._validate(candidate, require_inbound=True)
             # f-routingfix-3: a fresh inbound document never carries the
             # routing plane. Re-apply the persisted managed outbounds + rules
-            # on top, so the next sync cannot silently wipe routing.
+            # on top, so the next sync cannot silently wipe routing. A
+            # managed outbound REPLACES a same-tag candidate entry: the
+            # master's document may carry its own (decorated, master-local)
+            # copy of that tag — the node's policy-plane version must win.
             managed = self._load_managed()
             managed_outbounds = managed.get("outbounds") or []
             managed_rules = managed.get("rules") or []
             if managed_outbounds:
-                candidate_tags = {str(row.get("tag") or "")
-                                  for row in candidate.get("outbounds", [])}
-                candidate["outbounds"] = list(candidate.get("outbounds", [])) + [
-                    copy.deepcopy(row) for row in managed_outbounds
-                    if str(row.get("tag") or "") not in candidate_tags
-                ]
+                managed_tags = {str(row.get("tag") or "")
+                                for row in managed_outbounds}
+                kept = [row for row in candidate.get("outbounds", [])
+                        if str(row.get("tag") or "") not in managed_tags]
+                candidate["outbounds"] = kept + copy.deepcopy(managed_outbounds)
             if managed_rules:
                 routing = candidate.setdefault("routing", {})
                 routing["rules"] = copy.deepcopy(managed_rules)

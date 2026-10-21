@@ -111,6 +111,10 @@ class NodeCores(BaseModel):
     installed: dict[str, dict[str, Any]] = Field(default_factory=dict)
     available: list[str] = Field(default_factory=list)
     preview: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # Protocol flags the agent advertises (xray_tls_material, policy_routing,
+    # connection_leases...). Dropped here once, it made every diagnostic read
+    # of a node's inventory say the policy plane was unsupported.
+    features: dict[str, Any] = Field(default_factory=dict)
     stale: bool = False
     error: str | None = None
 

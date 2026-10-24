@@ -1,7 +1,12 @@
 ARG PYTHON_VERSION=3.12
 # Dashboard toolchain for the unified Zagros panel (React 18 + vite 5 +
-# Tailwind) — node 20 LTS. The release image is currently amd64-only because
-# the pinned PPP client package manifest below is amd64-specific.
+# Tailwind) — node 20 LTS.
+#
+# MULTI-ARCH (f-multiarch-1): the image is built for linux/amd64 AND
+# linux/arm64. Every binary it needs is either compiled from pinned source
+# (accel-ppp) or downloaded from the per-architecture pin table in
+# vendor/ppp-clients/manifest.json, so an arm64 VPS gets a NATIVE panel
+# instead of failing the install.
 ARG NODE_IMAGE=node:20.19.0-bookworm-slim
 
 # --------------------------------------------------------------------------
@@ -87,7 +92,7 @@ RUN python3 -m pip install --upgrade pip setuptools \
 # Final image
 # --------------------------------------------------------------------------
 FROM python:$PYTHON_VERSION-slim
-ARG ZAGROS_VERSION=1.0.5
+ARG ZAGROS_VERSION=1.1.4
 LABEL org.opencontainers.image.title="Zagros" \
       org.opencontainers.image.description="Zagros — Enterprise Multi-Core VPN Management Platform" \
       org.opencontainers.image.source="https://github.com/ZagrosGM/Zagros" \
@@ -108,25 +113,29 @@ LABEL org.opencontainers.image.title="Zagros" \
 # version-pinned and SHA-256 verified before dpkg/apt resolves their library
 # closure; provenance/licenses stay in the final image for audit.
 COPY vendor/ppp-clients/manifest.json /tmp/ppp-client-manifest.json
+COPY vendor/ppp-clients/verify.py /tmp/ppp-client-verify.py
+# Per-architecture pin table (amd64 + arm64). Packages are fetched straight
+# from the Debian pool URLs recorded in the manifest and verified by SHA-256
+# BEFORE dpkg touches them — no apt-get download, no foreign-architecture
+# chroot, so the same recipe works on buildx/QEMU for both platforms.
 RUN set -eux; \
-    test "$(dpkg --print-architecture)" = "amd64"; \
     apt-get update; \
+    apt-get install -y --no-install-recommends curl ca-certificates; \
+    python3 /tmp/ppp-client-verify.py --emit-urls "$(dpkg --print-architecture)" \
+      /tmp/ppp-client-manifest.json > /tmp/ppp-client-urls.txt; \
     mkdir -p /tmp/ppp-client-debs /usr/share/doc/zagros; \
     cd /tmp/ppp-client-debs; \
-    specs="$(python3 -c 'import json; d=json.load(open("/tmp/ppp-client-manifest.json")); print(" ".join(p["package"]+"="+p["version"] for p in d["packages"]))')"; \
-    apt-get download $specs; \
-    python3 -c 'import hashlib,json,pathlib; d=json.load(open("/tmp/ppp-client-manifest.json")); root=pathlib.Path("/tmp/ppp-client-debs"); [(lambda f,p: (_ for _ in ()).throw(SystemExit(f"sha256 mismatch: {f.name}")) if hashlib.sha256(f.read_bytes()).hexdigest()!=p["sha256"] else None)(root/p["filename"],p) for p in d["packages"]]'; \
+    while read -r url sha fname; do \
+        curl -fL --retry 3 --proto '=https' --tlsv1.2 -o "$fname" "$url"; \
+        echo "$sha  $fname" | sha256sum -c -; \
+    done < /tmp/ppp-client-urls.txt; \
     apt-get install -y --no-install-recommends \
        iptables nftables iproute2 conntrack openvpn wireguard-tools procps busybox-static \
        openssh-client openssh-server certbot libpcre2-8-0 ca-certificates \
        libncurses6 \
        /tmp/ppp-client-debs/*.deb; \
+    python3 /tmp/ppp-client-verify.py "$(dpkg --print-architecture)" /tmp/ppp-client-manifest.json; \
     cp /tmp/ppp-client-manifest.json /usr/share/doc/zagros/ppp-client-manifest.json; \
-    test "$(dpkg-query -W -f='${Version}' ppp)" = "2.5.2-1+1"; \
-    test "$(dpkg-query -W -f='${Version}' xl2tpd)" = "1.3.18-1+b1"; \
-    test "$(dpkg-query -W -f='${Version}' sstp-client)" = "1.0.20-1+b2"; \
-    test "$(dpkg-query -W -f='${Version}' pptp-linux)" = "1.10.0-2"; \
-    test "$(dpkg-query -W -f='${Version}' strongswan-charon)" = "6.0.1-6+deb13u7"; \
     test -x /usr/sbin/pppd; test -x /usr/sbin/xl2tpd; \
     test -x /usr/sbin/sstpc; \
     test -f /usr/lib/pppd/2.5.2/sstp-pppd-plugin.so; \

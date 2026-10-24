@@ -34,6 +34,11 @@ class XRayCore:
                 executable_path, exc)
         self.process = None
         self.restarting = False
+        self._running_config_json = None
+        # f-restart-coalesce-1: serialize restarts and never lose a newer
+        # configuration that lands while one is in flight.
+        self._restart_guard = threading.RLock()
+        self._pending_config = None
         # Canonical platform IDs whose running Xray document contains a
         # per-user SO_MARK outbound. Used by admission control for newly
         # created/changed limited users; never infer success from a restart
@@ -216,6 +221,12 @@ class XRayCore:
         self.process.stdin.flush()
         self.process.stdin.close()
         self.bandwidth_user_ids = self._bandwidth_ids(config)
+        # Exact document that is live; ``restart`` uses it to skip no-op
+        # restarts (f-restart-coalesce-1).
+        try:
+            self._running_config_json = config.to_json()
+        except Exception:  # noqa: BLE001 - identity is an optimisation only
+            self._running_config_json = None
         logger.warning(
             "Xray core %s started with %d canonical bandwidth identities",
             self.version, len(self.bandwidth_user_ids))
@@ -241,18 +252,66 @@ class XRayCore:
             threading.Thread(target=func, daemon=True).start()
 
     def restart(self, config: XRayConfig):
-        if self.restarting is True:
+        """Apply ``config`` to the running core, coalescing concurrent calls.
+
+        The previous "if self.restarting: return" guard silently DROPPED the
+        caller's document whenever a second change arrived while a restart was
+        in flight (the panel fans out subscription, outbound and user edits
+        from several request threads). That lost update is exactly why routing
+        "works only sometimes" until something else restarts the core. Now the
+        newest configuration is remembered and applied by the thread that owns
+        the restart, so no request is ever silently discarded.
+        """
+        # A no-op restart is expensive: stop() + start() drops every live
+        # connection and races the state recorder. Startup fans out the SAME
+        # document from several places, so compare first.
+        try:
+            rendered = config.to_json()
+        except Exception:  # noqa: BLE001
+            rendered = None
+        if rendered is not None and self.started and rendered == self._running_config_json:
+            logger.warning("Xray configuration unchanged — restart skipped")
             return
 
-        try:
+        with self._restart_guard:
+            if self.restarting:
+                self._pending_config = config
+                return
             self.restarting = True
-            logger.warning("Restarting Xray core...")
-            self._ensure_binary()
-            self._validate_config(config)  # keep the current process alive on rejection
-            self.stop()
-            self.start(config)
+
+        try:
+            while True:
+                try:
+                    rendered = config.to_json()
+                except Exception:  # noqa: BLE001
+                    rendered = None
+                logger.warning("Restarting Xray core...")
+                self._ensure_binary()
+                self._validate_config(config)  # keep the current process alive on rejection
+                self.stop()
+                self.start(config)
+                # start() records the live document; keep it in sync even if
+                # serialisation failed there.
+                with self._restart_guard:
+                    if self._pending_config is None:
+                        return
+                    config = self._pending_config
+                    self._pending_config = None
+                # A queued document identical to what we just applied needs
+                # no second stop/start cycle.
+                try:
+                    if config.to_json() == self._running_config_json and self.started:
+                        with self._restart_guard:
+                            if self._pending_config is None:
+                                return
+                            config = self._pending_config
+                            self._pending_config = None
+                except Exception:  # noqa: BLE001
+                    pass
         finally:
-            self.restarting = False
+            with self._restart_guard:
+                self.restarting = False
+                self._pending_config = None
 
     def on_start(self, func: callable):
         self._on_start_funcs.append(func)

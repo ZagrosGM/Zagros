@@ -79,7 +79,7 @@ jobs:
           echo "release $tag == __version__ $declared ✓"
 
   docker:
-    name: Docker build → GHCR (amd64)
+    name: Docker build → GHCR (multi-arch)
     needs: [test]
     runs-on: ubuntu-latest
     permissions:
@@ -115,9 +115,12 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          # The pinned PPP client manifest is currently amd64-specific.
-          # Do not claim an arm64 image until matching package manifests exist.
-          platforms: linux/amd64
+          # f-multiarch-1: every platform-specific artifact is pinned per
+          # architecture in vendor/ppp-clients/manifest.json (amd64 + arm64)
+          # and accel-ppp is compiled from pinned source, so the panel image
+          # is published as a real multi-arch index. arm64 VPSes therefore get
+          # a NATIVE panel instead of a failed install.
+          platforms: linux/amd64,linux/arm64
           push: true
           # deterministic manifest lists; attestation manifests are noise here
           provenance: false

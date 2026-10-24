@@ -42,6 +42,37 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field, SecretStr
 
 # native Zagros multi-core nodes (see the nodes section at the bottom)
+_BACKGROUND_TASKS: set["asyncio.Task[Any]"] = set()
+
+
+def spawn_background(coro, *, label: str) -> "asyncio.Task[Any]":
+    """Run ``coro`` as a task that cannot vanish before it finishes.
+
+    ``asyncio.create_task(coro)`` without keeping a reference is a documented
+    footgun: the event loop only holds a WEAK reference to the task, so a
+    node/account fan-out could be garbage-collected mid-flight. That is
+    exactly the field report "the rules reach the node sometimes, sometimes
+    not" — the push had simply been collected. Keep a strong reference until
+    the task completes, and surface its exception instead of losing it.
+    """
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+
+    def _done(finished: "asyncio.Task[Any]") -> None:
+        _BACKGROUND_TASKS.discard(finished)
+        try:
+            exc = finished.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception:  # noqa: BLE001 — never raise from a callback
+            return
+        if exc is not None:
+            logging.getLogger("zagros.background").error(
+                "%s failed: %s", label, exc, exc_info=exc)
+
+    task.add_done_callback(_done)
+    return task
+
 from app.nodes.client import NodeClientError
 from app.nodes.models import LifecycleBody, NodeCreate, NodeUpdate, PairBody
 from app.nodes.service import (
@@ -1201,6 +1232,35 @@ async def routing_preview(body: RoutingBody, runtime=Depends(get_runtime)):
     return report.model_dump(mode="json")
 
 
+async def _fanout_policy_logged(runtime, node_ids: list[int] | None = None):
+    """Push the rule set to paired nodes and REPORT the outcome.
+
+    ``fanout_policy`` isolates failures per node and hands them back in a
+    summary that no caller ever read, so a node that REJECTED the payload was
+    indistinguishable from one that applied it — the "it works on the master,
+    sometimes not on the node" half of the routing field report. Log every
+    per-node failure so it shows up in the panel log instead of vanishing.
+    """
+    log = logging.getLogger("zagros.nodes")
+    try:
+        summary = await fanout_policy(runtime, node_ids)
+    except Exception as exc:  # noqa: BLE001 - background task, never raise
+        log.error("node policy fan-out crashed: %s", exc, exc_info=exc)
+        return None
+    for item in summary.get("errors") or []:
+        log.error("node %s rejected the policy push: %s",
+                  item.get("node_id"), item.get("error"))
+    for item in summary.get("skipped") or []:
+        log.warning("node %s skipped the policy push: %s",
+                    item.get("node_id"), item)
+    if summary.get("pushed"):
+        log.info("node policy fan-out: %d node(s) updated%s",
+                 len(summary["pushed"]),
+                 (f", {len(summary['errors'])} failed"
+                  if summary.get("errors") else ""))
+    return summary
+
+
 @zagros_admin_router.post("/routing/deploy")
 async def routing_deploy(body: RoutingBody, runtime=Depends(get_runtime)):
     previous = await _load_rules(runtime)
@@ -1253,7 +1313,8 @@ async def routing_deploy(body: RoutingBody, runtime=Depends(get_runtime)):
     # f-noderouting-2: a saved rule set reaches paired nodes too — the
     # fanout is asynchronous and per-node isolated; its outcome shows up in
     # the node's next status/sync view, never as a UI error here.
-    asyncio.create_task(fanout_policy(runtime))
+    spawn_background(_fanout_policy_logged(runtime),
+                     label="node policy fan-out")
     return result
 
 
@@ -3757,7 +3818,8 @@ async def users_bulk_create(
     if created_usernames:
         # A node serves the accounts it was last told about; without this a
         # whole batch of new users would connect nowhere until the next sweep.
-        asyncio.create_task(fanout_accounts(runtime, force=True))
+        spawn_background(fanout_accounts(runtime, force=True),
+                         label="node account fan-out")
     return {"ok": True, "created_count": len(created_usernames), "usernames": created_usernames}
 
 
@@ -3844,7 +3906,8 @@ async def users_apply_template(
                 errors.append({"username": username, "error": str(exc)[:200]})
 
     if applied:
-        asyncio.create_task(fanout_accounts(runtime, force=True))
+        spawn_background(fanout_accounts(runtime, force=True),
+                         label="node account fan-out")
     return {"ok": not errors, "applied": applied, "errors": errors,
             "template_id": body.template_id}
 
@@ -3910,7 +3973,8 @@ async def users_bulk_inbound(
                 errors.append({"username": username, "error": str(exc)[:200]})
 
     if changed:
-        asyncio.create_task(fanout_accounts(runtime, force=True))
+        spawn_background(fanout_accounts(runtime, force=True),
+                         label="node account fan-out")
     return {"ok": not errors, "changed": changed, "errors": errors}
 
 
@@ -4076,7 +4140,8 @@ async def users_delete_by_status(
             except Exception as exc:
                 logger.error("Failed to delete user %s by status: %s", dbuser.username, exc)
 
-        asyncio.create_task(fanout_accounts(runtime, force=True))
+        spawn_background(fanout_accounts(runtime, force=True),
+                         label="node account fan-out")
         return {
             "ok": True,
             "status": status_val,

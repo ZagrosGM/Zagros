@@ -1005,8 +1005,15 @@ class SingBoxDriver(BaseCoreDriver):
             "route": {
                 # DNS interception without the deprecated legacy `dns` special
                 # outbound (removed upstream in 1.13): rule action hijack-dns
+                # f-policyfirst-1: the admin's Routing rules must be able to
+                # win over the per-user bandwidth outbounds. sing-box stops at
+                # the first matching rule, so putting the ``auth_user``
+                # accounting rules first silently discarded every explicit
+                # inbound -> outbound rule for authenticated users (the exact
+                # "routing only works sometimes" symptom). Accounting keeps
+                # working for traffic no policy rule claims.
                 "rules": [{"protocol": "dns", "action": "hijack-dns"},
-                          *bw_rules, *self._native_rules],
+                          *self._native_rules, *bw_rules],
                 "final": final,
                 "auto_detect_interface": True,
             },

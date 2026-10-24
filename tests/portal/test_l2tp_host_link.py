@@ -122,3 +122,54 @@ def test_generic_expand_link_routes_l2tp():
     link = expanded.sections[0].artifacts[0].content
     assert "@203.0.113.9:1701" in link
     assert "panel.example.com" not in link
+
+
+# --------------------------------------------------------------------- #
+# f-diallink-1 — PPTP and SSH links are dial links too
+# --------------------------------------------------------------------- #
+
+PPTP = ("pptp://2.testuser.pptp:PPTPPASS@panel.example.com:1723"
+        "#PPTP%20%E2%80%94%20Legacy%20%2F%20Insecure")
+SSH = "ssh://zg-2-test-user-ssh:SSHPASS@panel.example.com:2022#ssh%20%C2%B7%20SSH"
+
+
+@pytest.mark.parametrize(
+    ("content", "scheme", "port"),
+    [(PPTP, "pptp", 1723), (SSH, "ssh", 2022)],
+)
+def test_dial_links_are_expanded_instead_of_warned_about(content, scheme, port):
+    """A correct subscription must not carry a bogus parse warning.
+
+    The generic path called parse_share_url, which supports only proxy
+    protocols; PPTP and SSH links therefore survived with the panel's
+    request domain AND emitted "could not be parsed for host overrides"
+    next to a link that was perfectly fine.
+    """
+    engine = _engine()
+    inapplicable: list[str] = []
+    out = engine._expand_link(
+        _artifact(content), [_entry(port=port)], {}, inapplicable,
+        section_proto=scheme,
+    )
+    assert inapplicable == [], inapplicable
+    assert len(out) == 1
+    link = out[0].content
+    assert link.startswith(f"{scheme}://")
+    assert "panel.example.com" not in link
+    assert "203.0.113.9" in link
+    assert f":{port}" in link
+    # credentials are preserved verbatim
+    assert "@203.0.113.9" in link
+    assert "#relay-1" in link
+
+
+def test_ssh_link_keeps_userinfo_and_reports_tls_overrides():
+    engine = _engine()
+    inapplicable: list[str] = []
+    out = engine._expand_link(
+        _artifact(SSH), [_entry(port=2022, sni="example.org")], {},
+        inapplicable, section_proto="ssh",
+    )
+    assert out[0].content.startswith("ssh://zg-2-test-user-ssh:SSHPASS@203.0.113.9:2022")
+    assert any("SNI" in item and "ssh dial link" in item for item in inapplicable), \
+        inapplicable

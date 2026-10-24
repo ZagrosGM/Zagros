@@ -354,11 +354,17 @@ def share_url_for_outbound(outbound: dict[str, Any], remark: str) -> str:
 
     if otype == "naive":
         # NaïveProxy proxy URL: naive+https://user:pass@host:port#name
-        # (the TLS name IS the host; there is no separate SNI parameter)
+        # The URI has no SNI/query parameter: its authority IS both the dial
+        # target and the TLS name. Using tls.server_name here therefore
+        # produced an unreachable link whenever the inbound advertised a
+        # certificate name that does not resolve (self-signed installs:
+        # ``naive+https://user:pass@zagros-test.local:22453``). The address
+        # must stay the real endpoint — the client then dials what the panel
+        # actually publishes, exactly like every other link.
         username, password = outbound.get("username"), outbound.get("password")
         if not username or password is None:
             raise ShareLinkError("naive outbound lacks username/password")
-        host = (tls.get("server_name") or server) if tls.get("enabled") else server
+        host = server
         auth = quote(str(username), safe="") + ":" + quote(str(password), safe="")
         return f"naive+https://{auth}@{host}:{port}#{tag}"
 

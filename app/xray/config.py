@@ -500,7 +500,12 @@ class XRayConfig(dict):
                     "user": [f"{legacy_id}.{username}"],
                     "outboundTag": tag,
                 })
-            routing[0:0] = rules
+            # f-policyfirst-1: keep the per-user bandwidth identities in the
+            # tail of the rule list. Xray is first-match-wins, so hoisting
+            # these ``user`` rules to the front made every panel Routing
+            # rule unreachable for real users (they were sent to the
+            # freedom+SO_MARK outbound instead of the chosen outbound).
+            routing.extend(rules)
             config.bandwidth_identity_map = identity_map
             config.bandwidth_user_ids = set(identity_map.values())
 

@@ -15,6 +15,7 @@ import re
 import select
 import subprocess
 import termios
+import threading
 import time
 from collections.abc import Callable, Sequence
 
@@ -23,6 +24,25 @@ from app.cores.exceptions import CoreError
 _MAX_OUTPUT = 1024 * 1024
 _ERROR_CODE = re.compile(r"Error occurred\. \(Error code: (\d+)\)", re.I)
 _SECRET_SWITCH = re.compile(r"(/(?:PASSWORD|SECRET|PSK):)(?:\"[^\"]*\"|\S+)", re.I)
+_SERVER_UNREACHABLE = re.compile(
+    rb"Connection to the server failed|Cannot connect to the server", re.I)
+
+# SoftEther's management listener refuses logins that arrive in a burst: a
+# handful of vpncmd sessions started within the same second make the server
+# answer "Connection to the server failed" even though the socket is up. The
+# panel fans out feature edits, account reconciliation and the usage recorder
+# from several threads, so without serialisation a healthy server looked dead
+# ("inbound creation 422", "usage never recorded", 60 failed boot retries).
+_LOGIN_LOCK = threading.Lock()
+_MIN_LOGIN_INTERVAL = 0.6
+_TRANSIENT_ATTEMPTS = 6
+
+
+class SoftEtherTransientLoginError(CoreError):
+    """The management listener refused a login because it was overloaded.
+
+    Retryable: the same call succeeds once the login burst has drained.
+    """
 
 
 def _redact(text: str, secrets: Sequence[str]) -> str:
@@ -33,6 +53,55 @@ def _redact(text: str, secrets: Sequence[str]) -> str:
 
 
 def run_vpncmd_pty(
+    argv: Sequence[str],
+    *,
+    commands: Sequence[str],
+    administrator_password: str = "",
+    prompt: str = "VPN Client",
+    secrets: Sequence[str] = (),
+    timeout: float = 30.0,
+    followup_factory: Callable[[str], Sequence[str]] | None = None,
+) -> str:
+    """Serialised, retrying wrapper around one PTY-managed vpncmd session.
+
+    SoftEther drops rapid successive management logins (see
+    ``SoftEtherTransientLoginError``); every caller shares one lock and a
+    minimum inter-login interval, and a rejected login is retried with
+    backoff instead of surfacing as a bogus credential/endpoint failure.
+    """
+    last_error: Exception | None = None
+    with _LOGIN_LOCK:
+        for attempt in range(1, _TRANSIENT_ATTEMPTS + 1):
+            _throttle_login()
+            try:
+                return _run_vpncmd_pty_once(
+                    argv,
+                    commands=commands,
+                    administrator_password=administrator_password,
+                    prompt=prompt,
+                    secrets=secrets,
+                    timeout=timeout,
+                    followup_factory=followup_factory,
+                )
+            except SoftEtherTransientLoginError as exc:
+                last_error = exc
+                if attempt == _TRANSIENT_ATTEMPTS:
+                    raise
+                time.sleep(min(1.0 * attempt, 3.0))
+    raise CoreError(str(last_error) if last_error else "vpncmd did not run")
+
+
+_LOGIN_LAST = [0.0]
+
+
+def _throttle_login() -> None:
+    elapsed = time.monotonic() - _LOGIN_LAST[0]
+    if elapsed < _MIN_LOGIN_INTERVAL:
+        time.sleep(_MIN_LOGIN_INTERVAL - elapsed)
+    _LOGIN_LAST[0] = time.monotonic()
+
+
+def _run_vpncmd_pty_once(
     argv: Sequence[str],
     *,
     commands: Sequence[str],
@@ -119,6 +188,14 @@ def run_vpncmd_pty(
                     # semantic login failure so callers do not fall through to
                     # unrelated localhost ports (often the panel on TCP/443).
                     raise CoreError("vpncmd server or hub login rejected")
+                # ``Connection to the server failed`` here means the listener
+                # refused a login burst it is rate-limiting, not that the
+                # endpoint is wrong: mark it retryable so the wrapper can back
+                # off instead of reporting a bogus credential failure.
+                if _SERVER_UNREACHABLE.search(bytes(data)):
+                    raise SoftEtherTransientLoginError(
+                        "vpncmd management login was refused by the server "
+                        "(rate-limited connection attempt)")
                 raise CoreError("vpncmd exited during client login")
             if time.monotonic() >= deadline:
                 raise CoreError("vpncmd timed out during client login")

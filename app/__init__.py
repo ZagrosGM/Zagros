@@ -10,7 +10,7 @@ import asyncio
 import logging
 import time
 
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 
 
 _building = False
@@ -235,7 +235,9 @@ def _build_app_inner():
                         len(report["connected"]) + len(report["paired"]),
                         len(report["failed"]))
 
-                asyncio.create_task(_boot_nodes())
+                # keep a strong reference: a bare create_task can be
+                # garbage-collected before the reconnect finishes
+                app.state.zagros_boot_nodes_task = asyncio.create_task(_boot_nodes())
             except Exception as _exc:  # noqa: BLE001 - never block boot
                 logging.getLogger("uvicorn.error").warning(
                     "node reconnect at boot could not start: %s", _exc)

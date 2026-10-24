@@ -237,6 +237,12 @@ class PolicyRoutingManager:
         self._identity_provider = identity_provider
         self._softether_commander = softether_commander or run_vpncmd_pty
         self._domains: dict[str, PolicyDomain] = {}
+        # f-policyisolate-1: per-outbound convergence failures. One broken
+        # profile (expired OpenVPN account, unreachable WireGuard peer, missing
+        # client binary) used to abort the WHOLE policy prepare, which aborted
+        # the whole outbound+routing deployment — so unrelated Xray/sing-box
+        # routing "worked sometimes" depending on which other profile existed.
+        self._domain_errors: dict[str, str] = {}
         self._outbounds: dict[str, Outbound] = {}
         self._rules: list[RoutingRule] = []
         # Source ids, not one process-wide boolean: every isolated Virtual Hub
@@ -427,6 +433,55 @@ class PolicyRoutingManager:
             raise CoreError("policy_core must be 'xray' or 'sing-box'")
         return "proxy"
 
+    # Kinds Xray renders natively (see ``_mode``); only these may fall back
+    # to the Xray execution core when sing-box is absent.
+    _XRAY_POLICY_KINDS = frozenset({
+        OutboundKind.SOCKS, OutboundKind.HTTP, OutboundKind.VLESS,
+        OutboundKind.VMESS, OutboundKind.TROJAN, OutboundKind.SHADOWSOCKS,
+    })
+
+    def _core_present(self, core_id: str, fallback: str) -> bool:
+        try:
+            driver = self._cores.get(core_id)
+        except Exception:  # noqa: BLE001 - absent core is a normal condition
+            return shutil.which(fallback) is not None
+        backend = getattr(driver, "_backend", None)
+        for value in (getattr(backend, "executable", None),
+                      (getattr(driver, "settings", {}) or {}).get("executable_path")):
+            if value and (os.path.isfile(str(value)) or shutil.which(str(value))):
+                return True
+        return shutil.which(fallback) is not None
+
+    def _auto_policy_core(self, kind: OutboundKind) -> str:
+        """Execution core for a proxy profile that did not pin ``policy_core``.
+
+        Bug f-outboundcore-2 (report 3): an unpinned VLESS/VMess/Trojan profile
+        was hard-wired to the sing-box TUN adapter, so on an Xray-only host the
+        profile saved fine but every deployment refused it with "sing-box is
+        not installed". Xray carries those protocols natively, so pick the core
+        that actually exists instead of demanding a third-party package.
+        """
+        if kind not in self._XRAY_POLICY_KINDS:
+            return "sing-box"
+        cache = getattr(self, "_auto_policy_core_cache", None)
+        if cache is not None:
+            return cache
+        choice = "sing-box"
+        if not self._core_present("sing-box", "sing-box")                 and self._core_present("xray", "xray"):
+            choice = "xray"
+        self._auto_policy_core_cache = choice
+        logger.warning(
+            "policy plane: no explicit policy_core requested; using '%s' for "
+            "native proxy outbounds on this host", choice)
+        return choice
+
+    def _mode_of(self, outbound: Outbound) -> str | None:
+        """``_mode`` with the deployment's default execution core applied."""
+        settings = dict(outbound.settings or {})
+        if not str(settings.get("policy_core") or "").strip():
+            settings["policy_core"] = self._auto_policy_core(outbound.kind)
+        return self._mode(outbound.kind, settings)
+
     def validate_plan(
         self,
         rules: list[RoutingRule],
@@ -510,6 +565,14 @@ class PolicyRoutingManager:
             separators=(",", ":"), ensure_ascii=False,
         ).encode()
         return hashlib.sha256(raw).hexdigest()
+
+    def domain_failures(self) -> dict[str, str]:
+        """Outbound domains that could not be converged in the last prepare.
+
+        Surfaced by the deployment report and the runtime view so an operator
+        sees *which* profile is broken instead of an unrelated routing failure.
+        """
+        return dict(self._domain_errors)
 
     def domain_views(self) -> list[dict[str, Any]]:
         for domain in self._domains.values():
@@ -619,15 +682,46 @@ class PolicyRoutingManager:
     # ------------------------------------------------------------------ #
     # outbound materialization
     # ------------------------------------------------------------------ #
-    def prepare(self, outbounds: Iterable[Outbound]) -> dict[str, PolicyDomain]:
-        """Converge all enabled network outbounds before rules reference them."""
+    def validate_profile(self, outbound: Outbound) -> None:
+        """Reject a profile whose CONTENT is unusable, before any side effect.
+
+        Runtime failures (expired account, unreachable peer, binary missing)
+        are isolated by ``prepare``; a profile that asks for a forbidden
+        directive or is self-contradictory is still refused loudly, because
+        deploying it would be a security or correctness bug rather than an
+        environment condition.
+        """
+        mode = self._mode_of(outbound)
+        if mode == "openvpn":
+            self._openvpn_profile_lines(outbound)
+        elif mode == "softether":
+            settings = outbound.settings
+            if bool(settings.get("verify_server_certificate")) \
+                    and not str(settings.get("server_cert") or "").strip():
+                raise CoreError(
+                    "SoftEther server certificate verification requires server_cert PEM")
+
+    def prepare(self, outbounds: Iterable[Outbound], *,
+                strict: bool = False) -> dict[str, PolicyDomain]:
+        """Converge all enabled network outbounds before rules reference them.
+
+        ``strict=False`` (the default) isolates failures per outbound: a
+        profile whose client cannot come up is recorded in
+        :meth:`domain_failures` and skipped, while every other domain is
+        converged normally.  ``strict=True`` restores the old all-or-nothing
+        behaviour and is used by callers that must not partial-apply.
+        """
         with self._lock:
             if os.name != "posix" or not shutil.which("ip"):
                 raise CoreError("cross-core policy routing requires Linux iproute2")
             self._root.mkdir(parents=True, exist_ok=True)
             os.chmod(self._root, 0o700)
             wanted_obs = [o for o in outbounds
-                          if o.enabled and self._mode(o.kind, o.settings)]
+                          if o.enabled and self._mode_of(o)]
+            # Content validation first: nothing has been created yet, so an
+            # invalid profile aborts the whole prepare with no cleanup.
+            for outbound in wanted_obs:
+                self.validate_profile(outbound)
             identities = (self._identity_provider([o.name for o in wanted_obs])
                           if self._identity_provider else {})
             used: set[int] = {int(pair[0]) for pair in identities.values()}
@@ -640,7 +734,7 @@ class PolicyRoutingManager:
                     table_id = self._table_for(outbound.name, used)
                     fwmark = table_id
                 used.add(table_id)
-                mode = self._mode(outbound.kind, outbound.settings)
+                mode = self._mode_of(outbound)
                 assert mode is not None
                 digest = self._hash(outbound.name)
                 runtime_dir = str(self._root / digest[:20])
@@ -684,6 +778,7 @@ class PolicyRoutingManager:
 
             # Start replacements before removing former healthy domains.
             started: dict[str, PolicyDomain] = {}
+            errors: dict[str, str] = {}
             try:
                 for outbound in wanted_obs:
                     candidate = wanted[outbound.name]
@@ -705,8 +800,27 @@ class PolicyRoutingManager:
                         continue
                     if previous is not None:
                         self._stop_domain(previous)
-                    self._start_domain(candidate, outbound)
-                    self._install_table(candidate)
+                    try:
+                        self._start_domain(candidate, outbound)
+                        self._install_table(candidate)
+                    except Exception as exc:  # noqa: BLE001 — isolate this profile
+                        if strict:
+                            raise
+                        errors[outbound.name] = f"{type(exc).__name__}: {exc}"
+                        logger.error(
+                            "policy domain '%s' failed to converge: %s",
+                            outbound.name, exc)
+                        # A half-started domain must not keep owning fwmarks,
+                        # interfaces or child processes after its profile is
+                        # reported as failed (that leak survived restarts and
+                        # confused later deployments).
+                        try:
+                            self._stop_domain(candidate)
+                        except Exception:  # noqa: BLE001 — best-effort teardown
+                            logger.exception(
+                                "could not tear down failed domain '%s'",
+                                outbound.name)
+                        continue
                     candidate.ready = True
                     if candidate.mode == "ssh":
                         candidate.detail = (
@@ -739,7 +853,16 @@ class PolicyRoutingManager:
                 if name not in wanted:
                     self._stop_domain(old)
                     self._drop_outbound_counters(name)
+            # f-orphandomain-1: also reap what a PREVIOUS process owned and
+            # this one never saw in memory (panel/cored restart, crash, or an
+            # outbound deleted while the plane was down).
+            try:
+                self.reap_orphan_domains(wanted)
+            except Exception:  # noqa: BLE001 — reconciliation is best effort
+                logger.exception("orphan policy domain reaping failed")
             self._domains = started
+            self._save_ledger()
+            self._domain_errors = errors
             self._outbounds = {o.name: o for o in outbounds}
             self._run("ip", "route", "flush", "cache", check=False)
             return dict(self._domains)
@@ -1786,7 +1909,16 @@ done
                   "iptables", "-t", "nat", "-A", "POSTROUTING",
                   "-o", domain.client_adapter, "-j", "MASQUERADE")
 
-    def _render_openvpn_profile(self, outbound: Outbound, runtime: Path) -> str:
+    def _openvpn_profile_lines(self, outbound: Outbound) -> tuple[list[str], str]:
+        """Validate + normalize an OpenVPN profile (NO side effects).
+
+        f-profilereject-1: this is the security-relevant half of the renderer
+        (forbidden root-script/management directives, external key paths,
+        unclosed inline blocks, missing ``remote``). It is split out so
+        ``prepare`` can reject a hostile/broken profile BEFORE any interface,
+        namespace or process exists, and so that such a rejection stays fatal
+        instead of being isolated like an environment failure.
+        """
         settings = outbound.settings
         content = str(settings.get("ovpn_content") or "").lstrip("\ufeff").strip()
         if not content:
@@ -1841,7 +1973,11 @@ done
             raise CoreError(f"OpenVPN outbound '{outbound.name}' has an unclosed <{inline}> block")
         if not saw_remote:
             raise CoreError(f"OpenVPN outbound '{outbound.name}' has no remote directive")
+        return output, content
 
+    def _render_openvpn_profile(self, outbound: Outbound, runtime: Path) -> str:
+        settings = outbound.settings
+        output, content = self._openvpn_profile_lines(outbound)
         username = str(settings.get("username") or "")
         password = str(settings.get("password") or "")
         if username or password:
@@ -2342,6 +2478,112 @@ done
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+    # ------------------------------------------------------------------ #
+    # ownership ledger (f-orphandomain-1)
+    # ------------------------------------------------------------------ #
+    def _ledger_path(self) -> Path:
+        # Beside the persistent accounting ledger, NOT below the ephemeral
+        # runtime root: /run dies with the container, and surviving a restart
+        # is the whole point of this file.
+        return self._counter_path.parent / "policy-domains.json"
+
+    def _load_ledger(self) -> dict[str, dict[str, Any]]:
+        try:
+            raw = json.loads(self._ledger_path().read_text())
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        return {str(name): value for name, value in raw.items()
+                if isinstance(value, dict)}
+
+    def _save_ledger(self) -> None:
+        """Persist the domains this host currently owns.
+
+        The kernel plane (interfaces, ``ip rule`` priorities, routing tables
+        and the nft marks) outlives a panel/cored process, while
+        ``self._domains`` did not. After a container restart every orphaned
+        profile therefore kept its interface, its table and its fwmark rule,
+        and a *deleted* outbound kept hijacking marked traffic forever — the
+        literal "routing works only sometimes" field report.
+        """
+        document = {
+            name: {
+                "kind": domain.kind.value,
+                "table_id": domain.table_id,
+                "fwmark": domain.fwmark,
+                "bypass_mark": domain.bypass_mark,
+                "return_mark": domain.return_mark,
+                "interface": domain.interface,
+                "vrf_interface": domain.vrf_interface,
+                "tunnel_interface": domain.tunnel_interface,
+                "mode": domain.mode,
+                "proxy_port": domain.proxy_port,
+                "runtime_dir": domain.runtime_dir,
+                "namespace": domain.namespace,
+                "control_interface": domain.control_interface,
+                "data_peer": domain.data_peer,
+                "client_adapter": domain.client_adapter,
+                "client_account": domain.client_account,
+            }
+            for name, domain in self._domains.items()
+        }
+        path = self._ledger_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            part = path.with_suffix(".part")
+            part.write_text(json.dumps(document, indent=1, sort_keys=True))
+            os.chmod(part, 0o600)
+            os.replace(part, path)
+        except OSError as exc:  # noqa: BLE001 — never abort a deployment
+            logger.warning("cannot persist policy domain ledger: %s", exc)
+
+    @staticmethod
+    def _domain_from_ledger(name: str, entry: dict[str, Any]) -> PolicyDomain:
+        return PolicyDomain(
+            name=name,
+            kind=OutboundKind(entry.get("kind") or OutboundKind.DIRECT.value),
+            table_id=int(entry.get("table_id") or 0),
+            fwmark=int(entry.get("fwmark") or 0),
+            bypass_mark=int(entry.get("bypass_mark") or 0),
+            return_mark=int(entry.get("return_mark") or 0),
+            interface=str(entry.get("interface") or ""),
+            mode=str(entry.get("mode") or ""),
+            fingerprint="",
+            tunnel_interface=str(entry.get("tunnel_interface") or ""),
+            vrf_interface=entry.get("vrf_interface"),
+            proxy_port=int(entry.get("proxy_port") or 0),
+            runtime_dir=str(entry.get("runtime_dir") or ""),
+            namespace=entry.get("namespace"),
+            control_interface=entry.get("control_interface"),
+            data_peer=entry.get("data_peer"),
+            client_adapter=entry.get("client_adapter"),
+            client_account=entry.get("client_account"),
+        )
+
+    def reap_orphan_domains(self, wanted: Iterable[str]) -> list[str]:
+        """Tear down domains this host owns that nobody wants any more.
+
+        Returns the names that were reaped. Runs on every ``prepare`` so a
+        deleted/disabled outbound, a crashed deployment or a panel restart can
+        never leave an interface, table or fwmark rule behind.
+        """
+        keep = set(wanted)
+        reaped: list[str] = []
+        for name, entry in self._load_ledger().items():
+            if name in keep:
+                continue
+            domain = self._domain_from_ledger(name, entry)
+            logger.warning(
+                "reaping orphaned policy domain '%s' (%s, table %s, interface %s)",
+                name, domain.mode, domain.table_id, domain.interface)
+            try:
+                self._stop_domain(domain)
+                reaped.append(name)
+            except Exception as exc:  # noqa: BLE001 — best effort, keep going
+                logger.error("could not reap orphaned domain '%s': %s", name, exc)
+        return reaped
 
     def _stop_domain(self, domain: PolicyDomain) -> None:
         self._stop_process(domain.gateway_process)

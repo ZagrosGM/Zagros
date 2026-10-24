@@ -10,7 +10,10 @@ def get_cert_SANs(cert: bytes):
         if isinstance(extension.value, x509.SubjectAlternativeName):
             san = extension.value
             for name in san:
-                san_list.append(name.value)
+                # ``cryptography`` hands back ``ipaddress`` objects for
+                # IPAddress/DNSName SANs; callers (subscription links, host
+                # overrides) treat every SAN as text, so normalise here.
+                san_list.append(str(name.value))
     return san_list
 
 

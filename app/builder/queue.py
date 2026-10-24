@@ -8,6 +8,7 @@ answer 503.
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 from uuid import uuid4
@@ -15,8 +16,48 @@ from uuid import uuid4
 from app.builder import JOB_CONTRACT_VERSION, WORKER_JOB_FUNCTION
 from app.builder.errors import BuildQueueUnavailable
 
+logger = logging.getLogger("zagros.builder.queue")
+
 LOG_STREAM_PREFIX = "zagros:build:log:"
 LOG_STREAM_CAP = 5000  # worker trims streams to this many entries
+
+#: RQ serializer used for build jobs.
+#:
+#: RQ's default is :class:`rq.serializers.DefaultSerializer` — **pickle** —
+#: which turns the job hash into a code-execution surface: whoever can write
+#: to Redis can have the build worker (root, host network, worker token)
+#: unpickle arbitrary objects, and the panel unpickles job data too. The
+#: default stays pickle only because a deployed worker image must agree with
+#: the panel; an operator (or the installer, once the worker image ships the
+#: same setting) can switch both sides to JSON with::
+#:
+#:     ZAGROS_BUILD_QUEUE_SERIALIZER=json
+#:
+#: Reads are dual-mode in either direction, so a switch does not strand jobs
+#: that are already queued.
+_SERIALIZER_ENV = "ZAGROS_BUILD_QUEUE_SERIALIZER"
+_JSON = "json"
+
+
+def _serializer_name() -> str:
+    raw = (os.environ.get(_SERIALIZER_ENV) or "").strip().lower()
+    if raw in ("json", "1", "true", "yes"):
+        return _JSON
+    return "pickle"
+
+
+def _serializer_classes() -> tuple[type | None, type | None]:
+    """(selected, fallback) serializer classes; ``None`` means RQ default."""
+    if _serializer_name() != _JSON:
+        return None, None
+    try:
+        from rq.serializers import JSONSerializer
+    except Exception:  # pragma: no cover - very old rq
+        logger.warning(
+            "%s=json requested but rq has no JSONSerializer; using the default",
+            _SERIALIZER_ENV)
+        return None, None
+    return JSONSerializer, None
 
 
 def log_stream_key(build_public_id: str, platform: str, arch: str,
@@ -76,8 +117,11 @@ class BuildQueue:
                 "the 'rq' package is not installed") from exc
         connection = self._connection()
         body = {"v": JOB_CONTRACT_VERSION, **payload}
+        serializer, _ = _serializer_classes()
         try:
-            queue = Queue(queue_name, connection=connection)
+            queue = (Queue(queue_name, connection=connection, serializer=serializer)
+                     if serializer is not None
+                     else Queue(queue_name, connection=connection))
             job = queue.enqueue(
                 WORKER_JOB_FUNCTION, body,
                 job_id=job_id or f"build-{uuid4().hex}",
@@ -96,11 +140,8 @@ class BuildQueue:
             raise BuildQueueUnavailable(
                 "the 'rq' package is not installed") from exc
         connection = self._connection()
-        try:
-            job = Job.fetch(job_id, connection=connection)
-        except Exception:
-            return None
-        if job.origin != queue_name:
+        job = _fetch_job(Job, job_id, connection)
+        if job is None or job.origin != queue_name:
             return None
         args = job.args or []
         return dict(args[0]) if args and isinstance(args[0], dict) else None
@@ -115,11 +156,8 @@ class BuildQueue:
             raise BuildQueueUnavailable(
                 "the 'rq' package is not installed") from exc
         connection = self._connection()
-        try:
-            job = Job.fetch(job_id, connection=connection)
-        except Exception:
-            return False
-        if job.origin != queue_name:
+        job = _fetch_job(Job, job_id, connection)
+        if job is None or job.origin != queue_name:
             return False
         try:
             job.cancel()
@@ -164,3 +202,26 @@ class BuildQueue:
             entries.append({"id": entry_id, "text": str(text)})
             next_cursor = entry_id
         return {"entries": entries, "next_cursor": next_cursor}
+
+
+def _fetch_job(job_cls, job_id: str, connection):
+    """Fetch a job with the configured serializer, then the other one.
+
+    RQ stores the payload serialized but not *which* serializer produced it,
+    so a panel/worker that disagree would otherwise fail to read the job back
+    (the panel's "build status" page would silently go blank). The fallback
+    keeps older pickle jobs readable in JSON mode and vice-versa.
+    """
+    serializer, _ = _serializer_classes()
+    attempts = [serializer]
+    if serializer is not None:
+        attempts.append(None)  # rq default (pickle)
+    for candidate in attempts:
+        try:
+            if candidate is not None:
+                return job_cls.fetch(job_id, connection=connection,
+                                     serializer=candidate)
+            return job_cls.fetch(job_id, connection=connection)
+        except Exception:
+            continue
+    return None

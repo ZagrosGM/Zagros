@@ -220,9 +220,23 @@ class OutboundManager:
         active = self.list()
         targets = core_ids if core_ids is not None else self._cores.list_cores()
         domains = {}
+        domain_failures: dict[str, str] = {}
         policy_cores = {"xray", "sing-box", "openvpn", "wireguard", "softether", "ssh", "pptp"}
         if self._policy is not None and policy_cores.intersection(targets):
-            domains = await asyncio.to_thread(self._policy.prepare, active)
+            # f-policyisolate-1: the policy plane converges per outbound and
+            # reports the profiles it could not materialize. A single broken
+            # VPN account must never abort the native deployment of every
+            # other outbound/rule (that made routing fail only on hosts where
+            # one unrelated profile was unhealthy).
+            try:
+                domains = await asyncio.to_thread(self._policy.prepare, active)
+            except CoreError as exc:
+                logger.error("policy plane unavailable: %s", exc)
+                domain_failures = {"*": str(exc)}
+            else:
+                lookup = getattr(self._policy, "domain_failures", None)
+                if callable(lookup):
+                    domain_failures = dict(lookup())
         results: dict[str, TranslatedOutbound] = {}
         plan_edges: dict[str, set[str]] = {}
         for core_id in targets:
@@ -249,7 +263,9 @@ class OutboundManager:
                         ))
                 results[core_id] = TranslatedOutbound(
                     core_id=core_id, applied=applied, unsupported=unsupported,
-                    notes=["service traffic uses the shared Linux policy-routing plane"],
+                    notes=["service traffic uses the shared Linux policy-routing plane"]
+                    + [f"kernel policy domain for '{failed_name}' is not up: {detail}"
+                       for failed_name, detail in sorted(domain_failures.items())],
                 )
                 continue
             resolved: list[Outbound] = []
@@ -267,6 +283,10 @@ class OutboundManager:
                 resolved.append(materialized)
             report = await driver.deploy_outbounds(resolved)
             report.notes.extend(notes)
+            for failed_name, detail in sorted(domain_failures.items()):
+                if failed_name == "*" or failed_name in {ob.name for ob in active}:
+                    report.notes.append(
+                        f"kernel policy domain for '{failed_name}' is not up: {detail}")
             results[core_id] = report
         deployment = OutboundDeploymentReport(results=results)
         self._last_report = deployment

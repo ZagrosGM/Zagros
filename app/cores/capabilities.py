@@ -441,6 +441,31 @@ def _runtime_binary(runtime: Any | None, core_id: str, fallback: str) -> str | N
     return shutil.which(fallback)
 
 
+#: cores whose own rule engine can carry an outbound natively (application
+#: level). A profile that one of them can render never *requires* the shared
+#: kernel TUN adapter — that adapter only exists so service-core traffic
+#: (OpenVPN/WireGuard/SoftEther/PPP sources) can reach the same profile.
+_NATIVE_TRANSLATION_CORES = ("xray", "sing-box")
+
+
+def _native_application_runtime(runtime: Any | None,
+                                cap: OutboundCapability) -> str | None:
+    """First installed native core that can carry ``cap`` application-level.
+
+    Bug f-outboundcore-1: adding e.g. a VLESS outbound while Xray is installed
+    was refused with "sing-box is not installed", although Xray translates
+    that protocol natively and the panel is expected to work with either core
+    (or both). The sing-box TUN adapter is an *optional* kernel-plane aid, not
+    a prerequisite for a native-core deployment.
+    """
+    candidates = [core for core in cap.native_core_translation
+                  if core in _NATIVE_TRANSLATION_CORES]
+    for core in sorted(candidates):
+        if _runtime_binary(runtime, core, core) is not None:
+            return core
+    return None
+
+
 def outbound_product_capability(kind: OutboundKind | str) -> OutboundCapability:
     """Return implementation support without inspecting the current host."""
     return _base_capability(OutboundKind(kind))
@@ -511,7 +536,26 @@ def outbound_capability(kind: OutboundKind | str, runtime: Any | None = None) ->
         OutboundKind.OPENVPN, OutboundKind.WIREGUARD,
         OutboundKind.SOFTETHER_NATIVE,
     ) and _runtime_binary(runtime, "sing-box", "sing-box") is None:
-        missing = "sing-box is not installed; it is the host TUN adapter for this profile"
+        # f-outboundcore-1: the shared kernel TUN adapter is sing-box, but a
+        # profile that Xray can translate natively is fully deployable for
+        # xray/sing-box source inbounds through that core — do not demand an
+        # unrelated core from the operator. Only an entirely empty native
+        # inventory makes the profile undeployable.
+        native = _native_application_runtime(runtime, cap)
+        if native is None:
+            missing = (
+                "neither xray nor sing-box is installed: this profile needs a "
+                "native core (Xray or sing-box render it) or the sing-box TUN "
+                "adapter for service-core sources"
+            )
+        else:
+            cap = cap.model_copy(update={
+                "reason": (
+                    f"deployed natively by {native}; the sing-box TUN adapter "
+                    "is not installed, so OpenVPN/WireGuard/SSH/PPP source "
+                    "inbounds cannot reach this profile until it is"
+                ),
+            })
     elif kind is OutboundKind.SSH and not shutil.which("ssh"):
         missing = "the OpenSSH client is not installed"
 

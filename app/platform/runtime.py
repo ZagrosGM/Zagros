@@ -544,6 +544,14 @@ class PlatformRuntime:
                 continue
             if not doc:
                 continue
+            # A stored document with no inbounds is a truthful "nothing
+            # configured" state, not a failure: retrying it 60 times only
+            # produced a wall of errors for cores the operator never wired up.
+            if isinstance(doc, dict) and doc.get("inbounds") == []:
+                logger.info(
+                    "studio hydration: %s has no configured inbounds — nothing "
+                    "to restore", core_id)
+                continue
             try:
                 before = copy.deepcopy(doc)
                 normalizer = getattr(driver, "normalize_studio_document", None)

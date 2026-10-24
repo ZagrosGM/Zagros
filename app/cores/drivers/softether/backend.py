@@ -258,6 +258,7 @@ class LocalSoftEtherBackend:
         message = str(exc).lower()
         return any(marker in message for marker in (
             "during client login",
+            "rate-limited connection attempt",
             "before client prompt after authentication",
             "timed out during client login",
             "timed out waiting for client prompt",

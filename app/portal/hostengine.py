@@ -466,14 +466,16 @@ class HostSettingsEngine:
         section_proto: str | None = None,
     ) -> list[DeliveryArtifact]:
         scheme = artifact.content.split(":", 1)[0].lower() if artifact.content else ""
-        if scheme in ("l2tp", "l2tp+ipsec"):
-            # f-l2tplink-1: SoftEther dial links, not proxy outbounds —
-            # parse_share_url has no OutboundKind for them (rightly), so the
-            # generic path rejected them and the ORIGINAL link was kept,
-            # leaking the panel's request domain into every subscriber link
-            # even when Host Settings defined an address.
-            return self._expand_l2tp_link(artifact, entries, variables,
-                                          inapplicable)
+        if scheme in _DIAL_SCHEMES:
+            # f-l2tplink-1 / f-diallink-1: SoftEther/PPTP/SSH dial links are
+            # not proxy outbounds — parse_share_url has no OutboundKind for
+            # them (rightly), so the generic path rejected them and the
+            # ORIGINAL link was kept, leaking the panel's request domain into
+            # every subscriber link even when Host Settings defined an
+            # address, plus a misleading "could not be parsed" warning on a
+            # subscription that was in fact correct.
+            return self._expand_dial_link(artifact, entries, variables,
+                                          inapplicable, scheme=scheme)
         try:
             parsed = _parse(artifact.content)
         except Exception as exc:  # noqa: BLE001 — honest: not expandable, keep as-is
@@ -633,16 +635,32 @@ class HostSettingsEngine:
         variables: Mapping[str, Any],
         inapplicable: list[str],
     ) -> list[DeliveryArtifact]:
-        """Rewrite ONLY the authority (host:port) of a SoftEther dial link.
+        """Backwards-compatible entry point for the L2TP dial-link expander."""
+        return self._expand_dial_link(artifact, entries, variables,
+                                      inapplicable, scheme="l2tp")
 
-        The query (hub, psk, ...) and credentials are preserved
-        byte-for-byte; the fragment becomes the per-entry remark like every
-        other link. A dial link has no TLS/transport knobs — overrides for
-        those are reported as inapplicable instead of being dropped
-        silently.
+    def _expand_dial_link(
+        self,
+        artifact: DeliveryArtifact,
+        entries: list[HostEntry],
+        variables: Mapping[str, Any],
+        inapplicable: list[str],
+        *,
+        scheme: str = "l2tp",
+    ) -> list[DeliveryArtifact]:
+        """Rewrite ONLY the authority (host:port) of a dial link.
+
+        Covers every non-proxy scheme the panel emits — L2TP/IPsec,
+        SoftEther native, PPTP and SSH — where the only host-override knob
+        that has a meaning is the address (and optionally the port). The
+        query (hub, psk, ...) and credentials are preserved byte-for-byte;
+        the fragment becomes the per-entry remark like every other link. A
+        dial link has no TLS/transport knobs — overrides for those are
+        reported as inapplicable instead of being dropped silently.
         """
         from urllib.parse import unquote, urlsplit
 
+        dial = (scheme or "l2tp").replace("+ipsec", "")
         parts = urlsplit(artifact.content)
         if not parts.hostname:
             inapplicable.append(
@@ -660,8 +678,8 @@ class HostSettingsEngine:
         for entry in entries:
             local = defaultdict(lambda: "<missing>", variables)
             local["SERVER_IP"] = parts.hostname or ""
-            local.setdefault("PROTOCOL", "l2tp")
-            local["TRANSPORT"] = "udp"
+            local.setdefault("PROTOCOL", dial)
+            local["TRANSPORT"] = _PROTO_TRANSPORT.get(dial, "tcp")
             name = entry.remark or entry.address or "host"
             host = None
             if entry.address:
@@ -670,7 +688,7 @@ class HostSettingsEngine:
             port = entry.port if entry.port is not None else parts.port
             if not host or port is None:
                 inapplicable.append(
-                    f"entry '{name}': an l2tp dial link needs an address "
+                    f"entry '{name}': a {dial} dial link needs an address "
                     "and a port; original kept")
                 continue
             for attr, label in (("security", "security"), ("sni", "SNI"),
@@ -682,8 +700,8 @@ class HostSettingsEngine:
                                 ("noise_setting", "noise")):
                 if getattr(entry, attr, None):
                     inapplicable.append(
-                        f"entry '{name}': {label} has no meaning on an "
-                        "l2tp dial link")
+                        f"entry '{name}': {label} has no meaning on a "
+                        f"{dial} dial link")
             remark = render_host_remark(entry.remark or DEFAULT_REMARK, local) \
                 or artifact.label
             link = (f"{parts.scheme}://{userinfo}{host}:{int(port)}"
@@ -847,4 +865,14 @@ def host_field_matrix(protocol: str, *, engine: str | None = None) -> list[str]:
 _PROTO_TRANSPORT = {
     "wireguard": "udp", "tuic": "udp", "hysteria2": "udp", "hy2": "udp",
     "openvpn": "udp/tcp", "softether": "tcp/udp", "ssh": "tcp",
+    "l2tp": "udp", "l2tp_raw": "udp", "l2tp-raw": "udp", "sstp": "tcp",
+    "pptp": "tcp", "ovpn": "udp/tcp",
+}
+
+#: Schemes that dial a VPN server directly instead of describing a proxy
+#: outbound. They have no transport/TLS knobs, so host overrides rewrite only
+#: the authority and every richer setting is reported as inapplicable.
+_DIAL_SCHEMES = {
+    "l2tp", "l2tp+ipsec", "l2tp_raw", "l2tp-raw", "softether", "sstp",
+    "pptp", "ssh",
 }

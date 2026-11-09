@@ -92,6 +92,61 @@ def test_reseller_snapshot_is_scoped_to_own_data(tmp_path, monkeypatch):
     assert "203.0.113.77" not in out.model_dump_json()
 
 
+def _real_admin(username: str):
+    """The object the router guard really publishes: the Marzban-compat
+    ``app.models.admin.Admin`` — it has a username but NO ``id``."""
+    from app.models.admin import Admin
+    admin = Admin(username=username, is_sudo=False)
+    assert not hasattr(admin, "id")
+    return admin
+
+
+def test_reseller_snapshot_with_real_admin_model_does_not_crash(tmp_path,
+                                                                 monkeypatch):
+    """v1.1.4 field report: ``admin.id`` → AttributeError → 500 for every
+    non-sudo Overview. Ownership must resolve by username."""
+    from app.platform import routers
+    monkeypatch.setattr(routers, "_legacy_owned_usernames", lambda _u: set())
+    runtime = _runtime(tmp_path)
+    _current_admin.set(_real_admin("reseller-1"))   # platform mirror id=7
+    try:
+        out = asyncio.run(dashboard_snapshot(runtime=runtime))
+    finally:
+        _current_admin.set(None)
+    assert (out.users_total, out.users_active, out.users_online) == (1, 1, 1)
+    assert out.usage_total_bytes == 80
+    assert out.nodes == [] and out.cores == []
+
+
+def test_reseller_snapshot_uses_legacy_owner_link(tmp_path, monkeypatch):
+    """Platform ``users.admin_id`` is NULL until a mirror row exists; the
+    legacy owner link (what every user API writes) must still scope."""
+    from app.platform import routers
+    monkeypatch.setattr(routers, "_legacy_owned_usernames",
+                        lambda u: {"other-bob"} if u == "reseller-new" else set())
+    runtime = _runtime(tmp_path)
+    _current_admin.set(_real_admin("reseller-new"))  # no platform mirror row
+    try:
+        out = asyncio.run(dashboard_snapshot(runtime=runtime))
+    finally:
+        _current_admin.set(None)
+    assert out.users_total == 1
+    assert [a.target for a in out.alerts] == ["other-bob"]
+
+
+def test_reseller_snapshot_owning_nothing_is_empty_not_500(tmp_path, monkeypatch):
+    from app.platform import routers
+    monkeypatch.setattr(routers, "_legacy_owned_usernames", lambda _u: set())
+    runtime = _runtime(tmp_path)
+    _current_admin.set(_real_admin("nobody"))
+    try:
+        out = asyncio.run(dashboard_snapshot(runtime=runtime))
+    finally:
+        _current_admin.set(None)
+    assert (out.users_total, out.usage_total_bytes) == (0, 0)
+    assert out.alerts == []
+
+
 def test_sudo_snapshot_is_untouched(tmp_path):
     runtime = _runtime(tmp_path)
     _current_admin.set(SimpleNamespace(is_sudo=True, id=1))

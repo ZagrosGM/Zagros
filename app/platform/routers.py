@@ -857,6 +857,30 @@ async def canonical_subscription_url_by_username(
 # Admin: dashboard / studio / settings / migration
 # ---------------------------------------------------------------------- #
 
+def _legacy_owned_usernames(username: str) -> set[str]:
+    """Usernames whose legacy (Marzban-compat) owner is ``username``.
+
+    This is the owner link every user API writes; the platform projection's
+    ``users.admin_id`` is only set once a platform mirror row exists.
+    Never raises — an unreadable legacy engine scopes to nothing.
+    """
+    try:
+        from app.db import GetDB
+        from app.db.models import Admin as LegacyAdmin, User as LegacyUser
+
+        with GetDB() as db:
+            owner_id = db.query(LegacyAdmin.id).filter(
+                LegacyAdmin.username == username).scalar()
+            if owner_id is None:
+                return set()
+            return {name for (name,) in db.query(LegacyUser.username).filter(
+                LegacyUser.admin_id == owner_id)}
+    except Exception as exc:  # noqa: BLE001 — scoping must never 500
+        logger.warning("reseller snapshot: legacy owner lookup failed for "
+                       "%r: %s", username, exc)
+        return set()
+
+
 @zagros_admin_router.get("/dashboard/snapshot")
 async def dashboard_snapshot(runtime=Depends(get_runtime)):
     admin = _current_admin.get()
@@ -870,14 +894,32 @@ async def dashboard_snapshot(runtime=Depends(get_runtime)):
     # counts, their users' usage, and their own quota alerts; everything
     # infrastructure-shaped is dropped.
     from datetime import timedelta, timezone
-    from sqlalchemy import func, select
+    from sqlalchemy import false, func, or_, select
     from app.adminapi.dashboard import DeploymentStatusView
-    from app.persistence.models import UserModel, UserUsageModel
+    from app.persistence.models import AdminModel, UserModel, UserUsageModel
 
     def _scoped():
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=90)
+        # The guard publishes the Marzban-compat ``Admin`` model, which has
+        # NO ``id`` attribute: ``admin.id`` raised AttributeError and every
+        # non-sudo Overview answered 500 (v1.1.4 field report). Ownership is
+        # resolved by username instead — the platform mirror row when it
+        # exists, PLUS the legacy owner link, which is the authoritative one
+        # (platform ``users.admin_id`` stays NULL until a mirror row exists,
+        # so the platform link alone showed resellers 0 users).
+        username = getattr(admin, "username", None)
+        platform_id = getattr(admin, "id", None)
+        legacy_names = _legacy_owned_usernames(username) if username else set()
         with runtime.session_factory() as s:
-            own = UserModel.admin_id == admin.id
+            if platform_id is None and username:
+                platform_id = s.scalar(select(AdminModel.id).where(
+                    AdminModel.username == username))
+            clauses = []
+            if platform_id is not None:
+                clauses.append(UserModel.admin_id == platform_id)
+            if legacy_names:
+                clauses.append(UserModel.username.in_(sorted(legacy_names)))
+            own = or_(*clauses) if clauses else false()
             total = s.scalar(select(func.count(UserModel.id)).where(own)) or 0
             active = s.scalar(select(func.count(UserModel.id)).where(
                 own, UserModel.status == "active")) or 0

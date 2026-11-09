@@ -251,9 +251,11 @@ def test_softether_multi_protocol_grant_uses_one_batch_reconcile(runtime, monkey
             capabilities={Capability.USER_MANAGEMENT, Capability.SUSPEND_RESUME},
         )
         batches = []
+        prunes = []
 
-        async def sync_accounts(accounts):
+        async def sync_accounts(accounts, *, prune=None):
             batches.append([account.account_id for account in accounts])
+            prunes.append(prune)
             for account in accounts:
                 account.settings.setdefault("password", "batch-generated")
 
@@ -271,6 +273,9 @@ def test_softether_multi_protocol_grant_uses_one_batch_reconcile(runtime, monkey
         assert set(batches[0]) == {
             "81.batch-se.softether", "81.batch-se.sstp",
         }
+        # a single-user save must scope pruning to that user's own accounts
+        # (a new user owns none yet) — never the core-wide full replay
+        assert prunes == [[]]
         rows = [row for row in runtime.users.accounts_of(pid)
                 if row["core_id"] == "softether"]
         assert len(rows) == 2

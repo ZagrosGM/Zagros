@@ -354,7 +354,14 @@ async def apply_grants(runtime, user: Any, platform_id: int,
             try:
                 driver = runtime.core_manager.get(core_id)
                 leases = await _local_lease_accounts(runtime, core_id)
-                await driver.sync_accounts([*desired_accounts, *leases])
+                # Scoped: only THIS user's previous accounts may be pruned.
+                # The desired list holds one user (plus leases), so the
+                # default full-replay semantics would delete every other
+                # user's SoftEther account from the hub.
+                await driver.sync_accounts(
+                    [*desired_accounts, *leases],
+                    prune=[acc["account_id"] for acc in existing],
+                )
             except Exception as exc:  # noqa: BLE001
                 raise GrantError(
                     f"core '{core_id}' failed to batch-provision accounts: {exc}") from exc

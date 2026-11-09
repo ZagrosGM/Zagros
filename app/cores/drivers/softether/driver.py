@@ -31,7 +31,7 @@ import asyncio
 import logging
 import secrets
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from typing import Any, ClassVar
 
 logger = logging.getLogger("zagros.cores.drivers.softether")
@@ -1460,9 +1460,34 @@ class SoftEtherDriver(BaseCoreDriver):
         )
         return applied
 
-    async def sync_accounts(self, accounts: list[UserAccount]) -> None:
+    async def sync_accounts(
+        self,
+        accounts: list[UserAccount],
+        *,
+        prune: Iterable[str] | None = None,
+    ) -> None:
+        """Converge hub accounts in one vpncmd session.
+
+        ``prune=None`` (default) is the full-replay contract used by boot
+        hydration, ``zagros sync``, the error-29 self-heal and the bandwidth
+        fail-closed paths: ``accounts`` is the COMPLETE desired state of the
+        core and every other known account is stale.
+
+        A scoped caller (one user's Edit/Save in ``apply_grants``) passes the
+        account ids it owns in ``prune``: only those that are no longer in
+        ``accounts`` are deleted, and every other known account is kept.
+        Without this, saving one user computed every OTHER user's account as
+        stale and deleted it from the hub (and the driver forgot them, so the
+        error-29 self-heal could not bring them back).
+        """
         desired = {a.account_id: a for a in accounts}
-        stale = set(self._accounts) - set(desired)
+        if prune is None:
+            stale = set(self._accounts) - set(desired)
+            known = dict(desired)
+        else:
+            stale = set(prune) - set(desired)
+            known = {k: v for k, v in self._accounts.items() if k not in stale}
+            known.update(desired)
         reconcile = getattr(self._backend, "users_reconcile", None)
         if callable(reconcile):
             # One authenticated vpncmd session performs discovery + only the
@@ -1487,7 +1512,7 @@ class SoftEtherDriver(BaseCoreDriver):
             )
             for account_id in stale:
                 self._usage.forget(account_id)
-            self._accounts = dict(desired)
+            self._accounts = known
             for account_id in desired:
                 self._usage.register(account_id)
             return
@@ -1495,9 +1520,10 @@ class SoftEtherDriver(BaseCoreDriver):
         # Compatibility boundary for injected/older backends. Production uses
         # users_reconcile; this path retains the original driver protocol.
         current = set(await asyncio.to_thread(self._backend.user_list))
-        stale &= current
-        for account_id in stale:
+        for account_id in stale & current:
             await asyncio.to_thread(self._backend.user_delete, account_id)
+        for account_id in stale:
+            self._accounts.pop(account_id, None)
         for account in accounts:
             await self.create_account(account)
 

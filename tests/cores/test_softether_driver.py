@@ -1692,3 +1692,76 @@ def test_listener_pruning_is_recorded_once() -> None:
     driver.settings["feature_ovpn"] = True
     asyncio.run(driver.start())
     assert 1194 not in driver.settings["factory_listeners_pruned"]
+
+
+# --------------------------------------------------------------------- #
+# Scoped prune: saving ONE user must not delete the other users' hub
+# accounts (v1.1.4 field report: every user Edit/Save with SoftEther access
+# issued UserDelete for every other SoftEther user in the same RPC session)
+# --------------------------------------------------------------------- #
+
+class _ReconcilingBackend(FakeSEBackend):
+    """users_reconcile that really applies deletes, like the vpncmd PTY."""
+
+    def __init__(self):
+        super().__init__()
+        self.deleted: list[str] = []
+
+    def users_reconcile(self, accounts, stale):
+        for account_id in stale:
+            if account_id in self.users:
+                self.users.pop(account_id)
+                self.deleted.append(account_id)
+        for account_id, _username, password, _enabled in accounts:
+            self.users[account_id] = password
+
+
+def test_scoped_sync_keeps_other_users_accounts() -> None:
+    async def run() -> None:
+        driver, backend = _driver(backend=_ReconcilingBackend())
+        everyone = [_account(1, "alice"), _account(2, "bob"), _account(3, "carol")]
+        await driver.sync_accounts(everyone)          # boot hydration / zagros sync
+        assert set(backend.users) == {"1.alice", "2.bob", "3.carol"}
+
+        # Edit/Save of bob: apply_grants passes only bob's accounts
+        await driver.sync_accounts([_account(2, "bob", password="n3w")],
+                                   prune=["2.bob"])
+        assert set(backend.users) == {"1.alice", "2.bob", "3.carol"}
+        assert backend.deleted == []
+        assert backend.users["2.bob"] == "n3w"
+        # the driver still knows everyone, so the error-29 self-heal can
+        # restore all of them, not just the last saved user
+        assert set(driver._accounts) == {"1.alice", "2.bob", "3.carol"}
+
+        # a second scoped save (a new user) still deletes nobody else
+        await driver.sync_accounts([_account(4, "dave")], prune=[])
+        assert set(backend.users) == {"1.alice", "2.bob", "3.carol", "4.dave"}
+        assert backend.deleted == []
+
+    asyncio.run(run())
+
+
+def test_scoped_sync_prunes_only_the_users_own_dropped_accounts() -> None:
+    async def run() -> None:
+        driver, backend = _driver(backend=_ReconcilingBackend())
+        await driver.sync_accounts([_account(1, "alice"), _account(2, "bob"),
+                                    _account(3, "carol")])
+        # carol's SoftEther grant is revoked: only her account is pruned
+        await driver.sync_accounts([], prune=["3.carol"])
+        assert backend.deleted == ["3.carol"]
+        assert set(backend.users) == {"1.alice", "2.bob"}
+        assert set(driver._accounts) == {"1.alice", "2.bob"}
+
+    asyncio.run(run())
+
+
+def test_full_replay_still_prunes_unknown_accounts() -> None:
+    async def run() -> None:
+        driver, backend = _driver(backend=_ReconcilingBackend())
+        await driver.sync_accounts([_account(1, "alice"), _account(2, "bob")])
+        # default (prune=None) keeps the full-state contract
+        await driver.sync_accounts([_account(1, "alice")])
+        assert set(backend.users) == {"1.alice"}
+        assert backend.deleted == ["2.bob"]
+
+    asyncio.run(run())

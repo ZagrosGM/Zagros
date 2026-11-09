@@ -75,13 +75,32 @@ def _marker_quote_expr(conn) -> tuple[str, ...]:
     return ('"key"', "`key`")
 
 
+def _marker_text(value) -> str | None:
+    """Normalise a raw ``settings.value_json`` read to JSON *text*.
+
+    ``value_json`` is a JSON column. SQLite and MySQL hand the text back,
+    but psycopg decodes PostgreSQL ``json`` into a Python ``dict``. Every
+    caller ``json.loads`` the payload, so a decoded dict raised TypeError,
+    which was swallowed as "present but unreadable" (v1). On PostgreSQL
+    the v2 marker was therefore never honoured: dbmerge re-ran on every
+    boot, retired (dropped) the legacy tables, and the legacy engine kept
+    pointing at the now-empty legacy database (every Marzban-compat API
+    answered 500 on a fresh v1.1.4 PostgreSQL install).
+    """
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).decode("utf-8")
+    return json.dumps(value)
+
+
 def read_marker_value(conn) -> str | None:
-    """The raw marker JSON, or None — safe on every dialect (f-dbmerge-7)."""
+    """The raw marker JSON text, or None — safe on every dialect (f-dbmerge-7)."""
     for expr in _marker_quote_expr(conn):
         try:
-            return conn.execute(text(
+            return _marker_text(conn.execute(text(
                 f"SELECT value_json FROM settings WHERE {expr} = '{MARKER_KEY}'"
-            )).scalar()
+            )).scalar())
         except Exception:  # noqa: BLE001 — roll back and try the next quoting
             conn.rollback()
             continue
@@ -225,6 +244,47 @@ def _provision_legacy_into_main(main_url: str) -> None:
         meta.create_all(dst, tables=[meta.tables[t] for t in missing])
     finally:
         dst.dispose()
+
+
+def _reset_pg_sequences(conn, tables) -> None:
+    """Move every copied table's serial sequence past the copied ids.
+
+    The merge inserts rows WITH their original primary keys. PostgreSQL does
+    not advance a serial/identity sequence for explicit values, so after the
+    copy ``legacy_admins_id_seq`` (and friends) still pointed at 1: the next
+    INSERT collided with a copied row and the router reported a misleading
+    409 "Admin already exists" (v1.1.4 field report). On a panel with N
+    copied users every create would fail until the sequence caught up.
+    MySQL/MariaDB and SQLite advance their counters on explicit inserts.
+    """
+    if conn.dialect.name != "postgresql":
+        return
+    for table in tables:
+        pk = list(table.primary_key.columns)
+        if len(pk) != 1:
+            continue
+        column = pk[0]
+        try:
+            if column.type.python_type is not int:
+                continue
+        except NotImplementedError:
+            continue
+        sequence = conn.execute(
+            text("SELECT pg_get_serial_sequence(:t, :c)"),
+            {"t": table.name, "c": column.name},
+        ).scalar()
+        if not sequence:
+            continue
+        # is_called=false: the next nextval() returns exactly max(id)+1
+        # (or 1 for an empty table)
+        conn.execute(
+            text(
+                f'SELECT setval(CAST(:s AS regclass), '
+                f'COALESCE((SELECT MAX("{column.name}") FROM "{table.name}"), 0) + 1, '
+                f'false)'
+            ),
+            {"s": sequence},
+        )
 
 
 def _set_marker(conn, counts: dict) -> None:
@@ -385,6 +445,8 @@ def main() -> int:
                         total += len(payload)
                     counts[table.name] = total
                     copied += 1
+                _reset_pg_sequences(
+                    dconn, [t for t in meta.sorted_tables if t.name in counts])
                 _set_marker(dconn, counts)
                 dconn.commit()
             except Exception:
